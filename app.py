@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
@@ -44,7 +45,6 @@ available_locations = sorted(df_filtered['location'].unique())
 
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
-        # Bold Blue 32F line
         if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
         else: ax.axhline(y=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
     if custom_marks_input:
@@ -77,9 +77,9 @@ with tab_depth:
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 st.pyplot(fig1)
 
-# --- TAB 2: HOURLY TRENDS (With 6-Hour Gap Handling) ---
+# --- TAB 2: HOURLY TRENDS (With 6-Hour Break Logic) ---
 with tab_time:
-    st.subheader("Continuous Hourly Trends (6hr Gap Tolerance)")
+    st.subheader("Continuous Hourly Trends (6hr Gap Break)")
     for loc in available_locations:
         with st.expander(f"Trends: {loc}", expanded=True):
             df_loc_time = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
@@ -88,18 +88,26 @@ with tab_time:
                 fig2, ax2 = plt.subplots(figsize=(12, 5))
                 for d in sorted(df_loc_time['depth'].unique()):
                     subset = df_loc_time[df_loc_time['depth'] == d].copy()
-                    subset = subset.drop_duplicates('timestamp')
+                    subset = subset.drop_duplicates('timestamp').sort_values('timestamp')
                     
-                    # --- THE FIX: Break lines only if gap is > 6 hours ---
-                    # We create a full hourly index, then reindex. 
-                    # If we find a gap, the line breaks.
-                    full_range = pd.date_range(start=subset['timestamp'].min(), end=subset['timestamp'].max(), freq='1H')
-                    subset = subset.set_index('timestamp').reindex(full_range).reset_index().rename(columns={'index': 'timestamp'})
+                    # --- THE FIX: Insert NaNs where gap > 6 hours ---
+                    # Calculate time difference between consecutive rows
+                    diff = subset['timestamp'].diff() > pd.Timedelta(hours=6)
                     
-                    # Now we apply a trick: if more than 6 NaNs appear in a row, the line stays broken.
-                    # Matplotlib handles NaNs by not drawing.
+                    # Create a new dataframe with NaNs where the breaks are
+                    new_index = []
+                    for i, has_gap in enumerate(diff):
+                        if has_gap:
+                            # Insert a dummy timestamp 1 second after the previous point to break the line
+                            new_index.append(subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1))
+                    
+                    # Add the NaNs and re-sort
+                    if new_index:
+                        gap_df = pd.DataFrame({'timestamp': new_index})
+                        subset = pd.concat([subset, gap_df]).sort_values('timestamp')
+                    
                     ax2.plot(subset['timestamp'], subset['value'], 
-                             label=f"{d}ft", linewidth=1.2, marker='.', markersize=2, alpha=0.8)
+                             label=f"{d}ft", linewidth=1.5, marker='.', markersize=3, alpha=0.8)
                 
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
