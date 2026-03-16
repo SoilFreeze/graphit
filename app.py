@@ -57,27 +57,43 @@ tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Tempe
 
 # --- TAB: 24-HOUR INSIGHTS ---
 with tab_summary:
-    st.subheader("Last 24 Hours: Summary Stats")
-    last_24 = df_proj[df_proj['timestamp'] >= (pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=24))]
+    st.subheader("Last 24 Hours Summary")
+    # Filter for the last 24 hours
+    now = pd.Timestamp.now(tz='UTC')
+    last_24 = df_proj[df_proj['timestamp'] >= (now - pd.Timedelta(hours=24))].copy()
     
     if not last_24.empty:
-        # Calculate Delta, Min, Max per Pipe (Location) and Depth
-        stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max', lambda x: x.max() - x.min()]).reset_index()
-        stats.columns = ['Pipe', 'Node/Depth', 'Min Temp', 'Max Temp', '24h Change']
+        # Step 1: Calculate Delta for EVERY node
+        node_stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max']).reset_index()
+        node_stats['delta'] = node_stats['max'] - node_stats['min']
         
-        # Highlight Greatest Change
-        max_change_row = stats.loc[stats['24h Change'].idxmax()]
-        st.metric(label=f"🔥 Greatest Change: {max_change_row['Pipe']} (Node {max_change_row['Node/Depth']})", 
-                  value=f"{max_change_row['24h Change']:.2f}°F")
-        
-        st.dataframe(stats.sort_values('24h Change', ascending=False), use_container_width=True)
+        summary_rows = []
+        for loc in last_24['location'].unique():
+            pipe_data = node_stats[node_stats['location'] == loc]
+            
+            # Global min/max for the whole pipe
+            p_min = pipe_data['min'].min()
+            p_max = pipe_data['max'].max()
+            
+            # Find the node with the greatest change
+            top_node_row = pipe_data.loc[pipe_data['delta'].idxmax()]
+            
+            summary_rows.append({
+                "Pipe": loc,
+                "Min Temp (Pipe)": f"{p_min:.2f}°F",
+                "Max Temp (Pipe)": f"{p_max:.2f}°F",
+                "Greatest Change Node": top_node_row['depth'],
+                "Node Change Δ": f"{top_node_row['delta']:.2f}°F"
+            })
+            
+        summary_df = pd.DataFrame(summary_rows)
+        st.table(summary_df) # Using table for a cleaner, non-interactive look
     else:
-        st.info("No data found in the last 24 hours.")
+        st.info("No data recorded in the last 24 hours for this project.")
 
 # --- TAB: TEMPERATURE VS DEPTH ---
 with tab_depth:
     st.subheader("Temperature vs Depth (Mondays @ 6 AM)")
-    # Filter out "Bank" pipes as they don't have numeric depths for vertical profiles
     depth_locations = [loc for loc in df_filtered['location'].unique() if "bank" not in loc.lower()]
     
     for loc in depth_locations:
@@ -94,7 +110,7 @@ with tab_depth:
                 
                 ax1.invert_yaxis()
                 add_ref_lines(ax1, is_vertical=True)
-                ax1.set_title(f"Temperature vs Depth for {loc}") # PRINT TITLE
+                ax1.set_title(f"Temperature vs Depth for {loc}")
                 ax1.set_xlabel("Temp (°F)")
                 ax1.set_ylabel("Depth (ft)")
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
@@ -122,9 +138,9 @@ with tab_time:
                     if new_rows:
                         subset = pd.concat([subset, pd.DataFrame(new_rows)]).sort_values('timestamp')
                     
-                    ax2.plot(subset['timestamp'], subset['value'], label=f"Node {d}", linewidth=1.2, marker='.', markersize=2, alpha=0.8)
+                    label_name = f"Node {d}" if "bank" in loc.lower() else f"{d}ft"
+                    ax2.plot(subset['timestamp'], subset['value'], label=label_name, linewidth=1.5, marker='.', markersize=3, alpha=0.8)
                 
-                # Grid & Locators
                 ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0))
                 ax2.xaxis.set_minor_locator(mdates.DayLocator())
                 fmt = '%b %d' if num_weeks > 3 else '%a %m/%d'
@@ -132,7 +148,7 @@ with tab_time:
                 ax2.grid(which='major', color='#444444', linestyle='-', alpha=0.7)
                 ax2.grid(which='minor', color='#CCCCCC', linestyle=':', alpha=0.4)
                 
-                ax2.set_title(f"Temperature vs Time for {loc}") # PRINT TITLE
+                ax2.set_title(f"Temperature vs Time for {loc}")
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
                 ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
