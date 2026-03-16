@@ -27,7 +27,7 @@ selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 df_proj = df_raw[df_raw['Project'] == selected_project].copy()
 
 # 3. Sidebar - Time Filter
-num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8) # Increased range for weekly views
+num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
 df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date]
 
@@ -36,53 +36,53 @@ tab_depth, tab_time = st.tabs(["📊 Weekly Depth Profiles", "📈 Hourly Trends
 
 available_locations = sorted(df_filtered['Location'].unique())
 
-# --- TAB: DEPTH PROFILES (Mondays at 6:00 AM) ---
+# --- TAB 1: WEEKLY DEPTH PROFILES (Mondays @ 6 AM) ---
 with tab_depth:
     st.subheader("Vertical Temperature: Mondays at 6:00 AM")
     for loc in available_locations:
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered[df_filtered['Location'] == loc].copy()
             
-            # Filter for Monday (weekday 0) at Hour 6
-            # We use a 1-hour window (6:00 to 6:59) to be safe
+            # Filter for Monday (0) at the 6th hour
             df_monday = df_loc[(df_loc['timestamp'].dt.weekday == 0) & (df_loc['timestamp'].dt.hour == 6)]
             
             if not df_monday.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
-                # Sort unique timestamps so the legend is in order
-                unique_snaps = sorted(df_monday['timestamp'].unique())
                 
-                for ts in unique_snaps:
-                    subset = df_monday[df_monday['timestamp'] == ts]
+                # IMPORTANT: Loop through each specific timestamp to prevent the "return line"
+                for ts in sorted(df_monday['timestamp'].unique()):
+                    # Get exactly one snapshot (one vertical line's worth of sensors)
+                    snapshot = df_monday[df_monday['timestamp'] == ts].sort_values('Depth')
                     label_date = pd.to_datetime(ts).strftime('%Y-%m-%d')
                     ax1.plot(subset['temperature'], subset['Depth'], marker='o', label=label_date)
                 
                 ax1.invert_yaxis()
-                ax1.axvline(x=32, color='red', linestyle='--', alpha=0.7, label='Freezing')
+                ax1.axvline(x=32, color='red', linestyle='--', alpha=0.7)
                 ax1.set_xlabel("Temp (°F)")
                 ax1.set_ylabel("Depth (ft)")
-                ax1.legend(title="Monday Snapshots", bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
+                ax1.legend(title="Monday 6AM", bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 ax1.grid(True, alpha=0.2)
                 st.pyplot(fig1)
-            else:
-                st.info("No data found for Mondays at 6:00 AM. Check if your sensors were active then.")
 
-# --- TAB: TEMPERATURE TRENDS (Hourly) ---
+# --- TAB 2: HOURLY TRENDS (Continuous Data) ---
 with tab_time:
-    st.subheader("Continuous Temperature Trends")
+    st.subheader("Continuous Hourly Trends")
     for loc in available_locations:
-        with st.expander(f"Trends: {loc}", expanded=False): # Set to False so it's minimized by default
+        with st.expander(f"Trends: {loc}", expanded=True):
+            # No Monday filter here—pulls everything from the project
             df_loc_time = df_filtered[df_filtered['Location'] == loc].sort_values('timestamp')
             
             if not df_loc_time.empty:
                 fig2, ax2 = plt.subplots(figsize=(12, 5))
+                # Plot each sensor depth as its own line over time
                 for d in sorted(df_loc_time['Depth'].unique()):
                     subset = df_loc_time[df_loc_time['Depth'] == d]
-                    # 'marker' shows the actual data points so you can see the gaps
-                    ax2.plot(subset['timestamp'], subset['temperature'], label=f"{d}ft", linewidth=1, marker='.', markersize=4)
+                    # Markers added to see hourly density
+                    ax2.plot(subset['timestamp'], subset['temperature'], label=f"{d}ft", linewidth=1, marker='.', markersize=3)
                     
                 ax2.axhline(y=32, color='red', linestyle='--', alpha=0.8)
                 ax2.set_ylabel("Temp (°F)")
+                ax2.set_xlabel("Time")
                 ax2.grid(True, which='both', linestyle=':', alpha=0.4)
                 ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
                 plt.xticks(rotation=45)
