@@ -21,13 +21,17 @@ st.sidebar.header("Filter Data")
 num_weeks = st.sidebar.slider("Number of weeks to show", 1, 12, 4)
 
 # 3. Pull Data
-query = f"""
-SELECT timestamp, depth, temperature 
-FROM `your-project.your_dataset.monday_morning_depth_profile`
-WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {num_weeks} WEEK)
-ORDER BY timestamp DESC, depth ASC
-"""
-df = client.query(query).to_dataframe()
+try:
+    query = f"""
+    SELECT timestamp, depth, temperature 
+    FROM `sensorpush-export.your_dataset.monday_morning_depth_profile`
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {num_weeks} WEEK)
+    ORDER BY timestamp DESC, depth ASC
+    """
+    df = client.query(query).to_dataframe()
+except Exception as e:
+    st.error(f"Actual Error Message: {e}")
+    st.stop()
 
 # 4. Create the Chart
 if not df.empty:
