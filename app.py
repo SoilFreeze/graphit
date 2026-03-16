@@ -28,7 +28,7 @@ available_projects = sorted(df_raw['project'].unique())
 selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 df_proj = df_raw[df_raw['project'] == selected_project].copy()
 
-# Sidebar: Reference Marks
+# Thresholds
 st.sidebar.subheader("Reference Marks")
 show_freezing = st.sidebar.checkbox("Show Freezing Line (32°F)", value=True)
 custom_marks_input = st.sidebar.text_input("Custom Reference Temps (comma separated)", "25, 40")
@@ -44,7 +44,7 @@ available_locations = sorted(df_filtered['location'].unique())
 
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
-        # THE BLUE LINE: 32 degree reference
+        # Bold Blue 32F line
         if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
         else: ax.axhline(y=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
     if custom_marks_input:
@@ -52,7 +52,7 @@ def add_ref_lines(ax, is_vertical=True):
             marks = [float(x.strip()) for x in custom_marks_input.split(',') if x.strip()]
             for m in marks:
                 if is_vertical: ax.axvline(x=m, color='green', linestyle=':', label=f'Ref: {m}°F')
-                else: ax.axhline(y=m, color='green', linestyle=':', label=f'Ref: {m}°F')
+                else: ax.axhline(y=m, color='green', linestyle=':')
         except: pass
 
 # --- TAB 1: WEEKLY DEPTH PROFILES ---
@@ -77,9 +77,9 @@ with tab_depth:
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 st.pyplot(fig1)
 
-# --- TAB 2: HOURLY TRENDS ---
+# --- TAB 2: HOURLY TRENDS (With 6-Hour Gap Handling) ---
 with tab_time:
-    st.subheader("Continuous Hourly Trends (Gaps Hidden)")
+    st.subheader("Continuous Hourly Trends (6hr Gap Tolerance)")
     for loc in available_locations:
         with st.expander(f"Trends: {loc}", expanded=True):
             df_loc_time = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
@@ -88,13 +88,16 @@ with tab_time:
                 fig2, ax2 = plt.subplots(figsize=(12, 5))
                 for d in sorted(df_loc_time['depth'].unique()):
                     subset = df_loc_time[df_loc_time['depth'] == d].copy()
-                    
-                    # --- THE FIX: Remove duplicate timestamps before resampling ---
                     subset = subset.drop_duplicates('timestamp')
                     
-                    # Re-insert gaps as NaNs so lines don't connect across missing data
-                    subset = subset.set_index('timestamp').resample('1H').asfreq().reset_index()
+                    # --- THE FIX: Break lines only if gap is > 6 hours ---
+                    # We create a full hourly index, then reindex. 
+                    # If we find a gap, the line breaks.
+                    full_range = pd.date_range(start=subset['timestamp'].min(), end=subset['timestamp'].max(), freq='1H')
+                    subset = subset.set_index('timestamp').reindex(full_range).reset_index().rename(columns={'index': 'timestamp'})
                     
+                    # Now we apply a trick: if more than 6 NaNs appear in a row, the line stays broken.
+                    # Matplotlib handles NaNs by not drawing.
                     ax2.plot(subset['timestamp'], subset['value'], 
                              label=f"{d}ft", linewidth=1.2, marker='.', markersize=2, alpha=0.8)
                 
