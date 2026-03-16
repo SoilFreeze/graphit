@@ -102,25 +102,21 @@ with tab_time:
                     if new_rows:
                         subset = pd.concat([subset, pd.DataFrame(new_rows)]).sort_values('timestamp')
                     
-                    ax2.plot(subset['timestamp'], subset['value'], label=f"{d}ft", linewidth=1.2, marker='.', markersize=2, alpha=0.8)
+                    ax2.plot(subset['timestamp'], subset['value'], label=f"{d}ft", linewidth=1.5, marker='.', markersize=2, alpha=0.8)
                 
-                # --- FIXED LOCATOR LOGIC ---
-                # Major Locator: Monday at Midnight (Note the list [0])
-                ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MONDAY, byhour=[0]))
-                # Minor Locator: Every Day at Midnight
-                ax2.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+                # --- ALTERNATIVE LOCATOR LOGIC (More Robust) ---
+                # Major: Every Monday
+                ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)) # 0 is Monday
+                # Minor: Every Day
+                ax2.xaxis.set_minor_locator(mdates.DayLocator())
                 
-                # Date Formatting based on time range
-                if num_weeks > 3:
-                    date_fmt = mdates.DateFormatter('%b %d')
-                else:
-                    date_fmt = mdates.DateFormatter('%a %m/%d')
-                
-                ax2.xaxis.set_major_formatter(date_fmt)
+                # Date Formatting
+                fmt = '%b %d' if num_weeks > 3 else '%a %m/%d'
+                ax2.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
 
-                # Grid Styling
-                ax2.grid(which='major', color='#444444', linestyle='-', alpha=0.6, linewidth=1) 
-                ax2.grid(which='minor', color='#999999', linestyle=':', alpha=0.4) 
+                # Visual Grid Styling
+                ax2.grid(which='major', color='#444444', linestyle='-', alpha=0.7, linewidth=1.2) 
+                ax2.grid(which='minor', color='#CCCCCC', linestyle=':', alpha=0.4) 
                 
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
