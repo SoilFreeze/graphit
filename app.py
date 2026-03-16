@@ -5,101 +5,83 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 # 1. Setup Page and Auth
-st.set_page_config(page_title="Soil Temperature Dashboard", layout="wide")
-st.title("🌡️ Ground Temperature Monitoring")
+st.set_page_config(page_title="Geotechnical Temp Dashboard", layout="wide")
 
-scopes = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/bigquery",
-    "https://www.googleapis.com/auth/cloud-platform"
-]
+scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
 
 try:
-    creds = service_account.Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"], 
-        scopes=scopes
-    )
+    creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     client = bigquery.Client(credentials=creds, project="sensorpush-export")
 except Exception as e:
     st.error(f"Authentication Error: {e}")
     st.stop()
 
-# 2. Sidebar Filters
-st.sidebar.header("Global Settings")
-num_weeks = st.sidebar.slider("Number of weeks to show", 1, 12, 4)
-num_days = num_weeks * 7
+# 2. Sidebar - Project Selection
+st.sidebar.title("📁 Project Management")
 
-# 3. Pull Data (All locations at once to save on query costs)
-@st.cache_data(ttl=600) # Refresh every 10 minutes
-def get_data(days):
-    query = f"""
-    SELECT timestamp, depth, temperature, Location 
-    FROM `sensorpush-export.sensor_data.monday_morning_depth_profile`
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    ORDER BY timestamp DESC, depth ASC
-    """
+# Pull all data to identify available projects
+@st.cache_data(ttl=600)
+def get_full_dataset():
+    query = "SELECT * FROM `sensorpush-export.sensor_data.monday_morning_depth_profile` ORDER BY timestamp DESC"
     return client.query(query).to_dataframe()
 
-df_all = get_data(num_days)
+df_raw = get_full_dataset()
 
-# 4. Create Navigation Tabs
-tab1, tab2, tab3 = st.tabs(["OfficeTP1 Profile", "Second Pipe", "Trends Over Time"])
+# Get unique list of Projects from your 'Project' column
+available_projects = sorted(df_raw['Project'].unique())
+selected_project = st.sidebar.selectbox("Select Project", available_projects)
 
-# --- TAB 1: OfficeTP1 ---
-with tab1:
-    st.header("Vertical Depth Profile - OfficeTP1")
-    df_tp1 = df_all[df_all['Location'] == 'OfficeTP1']
-    
-    if not df_tp1.empty:
-        fig1, ax1 = plt.subplots(figsize=(7, 9))
-        for date in df_tp1['timestamp'].dt.date.unique():
-            subset = df_tp1[df_tp1['timestamp'].dt.date == date]
-            ax1.plot(subset['temperature'], subset['depth'], marker='o', label=str(date))
+# Filter global data frame to ONLY the selected project
+df_proj = df_raw[df_raw['Project'] == selected_project]
+
+# 3. Sidebar - Time Filter
+num_weeks = st.sidebar.slider("Weeks of History", 1, 12, 4)
+cutoff_date = pd.Timestamp.now() - pd.Timedelta(weeks=num_weeks)
+df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date]
+
+st.title(f"Project: {selected_project}")
+
+# 4. Create Tabs based on your Locations (Pipes) within that project
+available_pipes = sorted(df_filtered['Location'].unique())
+tabs = st.tabs(available_pipes + ["📈 Overall Trends"])
+
+# Loop through each pipe and create a Profile Plot
+for i, pipe_name in enumerate(available_pipes):
+    with tabs[i]:
+        st.header(f"Depth Profile: {pipe_name}")
+        df_pipe = df_filtered[df_filtered['Location'] == pipe_name]
         
-        ax1.invert_yaxis()
-        ax1.axvline(x=32, color='red', linestyle='--', label='Freezing (32°F)')
-        ax1.set_xlabel('Temperature (°F)')
-        ax1.set_ylabel('Depth (ft)')
-        ax1.legend(title="Date", bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax1.grid(True, alpha=0.3)
-        st.pyplot(fig1)
-    else:
-        st.info("No data found for OfficeTP1.")
+        if not df_pipe.empty:
+            fig, ax = plt.subplots(figsize=(6, 8))
+            # Plot each unique timestamp as a separate line
+            for ts in df_pipe['timestamp'].unique():
+                subset = df_pipe[df_pipe['timestamp'] == ts]
+                ax.plot(subset['temperature'], subset['depth'], marker='o', label=pd.to_datetime(ts).strftime('%m/%d %H:%M'))
+            
+            ax.invert_yaxis()
+            ax.axvline(x=32, color='red', linestyle='--', alpha=0.5, label='Freezing')
+            ax.set_xlabel('Temperature (°F)')
+            ax.set_ylabel('Depth (ft)')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small')
+            ax.grid(True, alpha=0.2)
+            st.pyplot(fig)
+        else:
+            st.info("No data for this timeframe.")
 
-# --- TAB 2: SECOND PIPE ---
-with tab2:
-    # Find other locations in your data automatically
-    other_locations = [loc for loc in df_all['Location'].unique() if loc != 'OfficeTP1']
-    
-    if other_locations:
-        selected_loc = st.selectbox("Select a second pipe to view:", other_locations)
-        df_tp2 = df_all[df_all['Location'] == selected_loc]
+# --- Final Tab: Trends ---
+with tabs[-1]:
+    st.header(f"{selected_project} - Historical Trends")
+    if not df_filtered.empty:
+        fig_trend, ax_trend = plt.subplots(figsize=(10, 5))
+        # Group by Location and Depth to show how specific points change over time
+        for pipe in available_pipes:
+            df_trend_pipe = df_filtered[df_filtered['Location'] == pipe]
+            for d in sorted(df_trend_pipe['depth'].unique()):
+                subset = df_trend_pipe[df_trend_pipe['depth'] == d].sort_values('timestamp')
+                ax_trend.plot(subset['timestamp'], subset['temperature'], label=f"{pipe} @ {d}ft")
         
-        fig2, ax2 = plt.subplots(figsize=(7, 9))
-        for date in df_tp2['timestamp'].dt.date.unique():
-            subset = df_tp2[df_tp2['timestamp'].dt.date == date]
-            ax2.plot(subset['temperature'], subset['depth'], marker='o', label=str(date))
-        ax2.invert_yaxis()
-        ax2.axvline(x=32, color='red', linestyle='--', label='Freezing (32°F)')
-        st.pyplot(fig2)
-    else:
-        st.info("Only one location (OfficeTP1) found in the current dataset.")
-
-# --- TAB 3: TRENDS OVER TIME ---
-with tab3:
-    st.header("Temperature Trends")
-    # Let user choose which pipe to see trends for
-    trend_loc = st.selectbox("Show trends for:", df_all['Location'].unique(), key="trend_sel")
-    df_trend = df_all[df_all['Location'] == trend_loc].sort_values('timestamp')
-
-    if not df_trend.empty:
-        fig3, ax3 = plt.subplots(figsize=(10, 5))
-        for d in sorted(df_trend['depth'].unique()):
-            subset = df_trend[df_trend['depth'] == d]
-            ax3.plot(subset['timestamp'], subset['temperature'], label=f"{d} ft")
-        
-        ax3.axhline(y=32, color='red', linestyle='--', label='Freezing')
-        ax3.set_ylabel("Temp (°F)")
-        ax3.legend(loc='upper left', bbox_to_anchor=(1, 1))
+        ax_trend.axhline(y=32, color='red', linestyle='--')
+        ax_trend.set_ylabel("Temp (°F)")
+        ax_trend.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
         plt.xticks(rotation=45)
-        st.pyplot(fig3)
+        st.pyplot(fig_trend)
