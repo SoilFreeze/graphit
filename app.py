@@ -4,79 +4,83 @@ import matplotlib.pyplot as plt
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-# 1. Setup Page and Auth
-st.set_page_config(page_title="Geotechnical Temp Dashboard", layout="wide")
+# 1. Setup
+st.set_page_config(page_title="Geotechnical Dashboard", layout="wide")
 
 scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
-
-try:
-    creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-    client = bigquery.Client(credentials=creds, project="sensorpush-export")
-except Exception as e:
-    st.error(f"Authentication Error: {e}")
-    st.stop()
+creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+client = bigquery.Client(credentials=creds, project="sensorpush-export")
 
 # 2. Sidebar - Project Selection
-st.sidebar.title("📁 Project Management")
+st.sidebar.title("📁 Project Select")
 
-# Pull all data to identify available projects
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)
 def get_full_dataset():
+    # We pull everything, then filter in Pandas to keep the app snappy
     query = "SELECT * FROM `sensorpush-export.sensor_data.monday_morning_depth_profile` ORDER BY timestamp DESC"
     return client.query(query).to_dataframe()
 
 df_raw = get_full_dataset()
+df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 
-# Get unique list of Projects from your 'Project' column
 available_projects = sorted(df_raw['Project'].unique())
-selected_project = st.sidebar.selectbox("Select Project", available_projects)
+selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 
-# Filter global data frame to ONLY the selected project
-df_proj = df_raw[df_raw['Project'] == selected_project]
+# Filter by Project
+df_proj = df_raw[df_raw['Project'] == selected_project].copy()
 
-# --- 3. Sidebar - Time Filter ---
-num_weeks = st.sidebar.slider("Weeks of History", 1, 12, 4)
-
-# Force the timestamp column to datetime objects
-df_proj['timestamp'] = pd.to_datetime(df_proj['timestamp'])
-
-# Create a timezone-aware cutoff (UTC)
+# 3. Sidebar - Time Filter (Hourly)
+num_weeks = st.sidebar.slider("Weeks of History", 1, 12, 2)
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
+df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].sort_values('timestamp')
 
-# Filter the data
-df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date]
-
-# --- THE FIX: Match your actual column names ---
-# Using 'Depth' (Capital D) and 'Location' (Capital L) 
-# to match your shared header map.
-try:
-    df_filtered = df_filtered.sort_values(['Location', 'Depth', 'timestamp'])
-except KeyError:
-    # If BigQuery made them lowercase, this fallback will catch it
-    df_filtered = df_filtered.sort_values(['location', 'depth', 'timestamp'])
-
+# 4. Main UI Layout
 st.title(f"Project: {selected_project}")
+tab_depth, tab_time = st.tabs(["📊 Depth Profiles", "📈 Temperature Trends"])
 
-# --- 4. Create Tabs based on your Locations ---
-# Update 'Location' here too
-available_pipes = sorted(df_filtered['Location'].unique()) 
-tabs = st.tabs(available_pipes + ["📈 Overall Trends"])
+available_locations = sorted(df_filtered['Location'].unique())
 
-for i, pipe_name in enumerate(available_pipes):
-    with tabs[i]:
-        st.header(f"Depth Profile: {pipe_name}")
-        df_pipe = df_filtered[df_filtered['Location'] == pipe_name]
-        
-        if not df_pipe.empty:
-            fig, ax = plt.subplots(figsize=(6, 8))
-            for ts in df_pipe['timestamp'].unique():
-                subset = df_pipe[df_pipe['timestamp'] == ts]
-                # Update 'Depth' and 'temperature' (check if T is capital!)
-                ax.plot(subset['temperature'], subset['Depth'], marker='o', label=pd.to_datetime(ts).strftime('%m/%d %H:%M'))
+# --- TAB: DEPTH PROFILES ---
+with tab_depth:
+    st.subheader("Vertical Temperature Distribution")
+    # If multiple locations, let user toggle or show all
+    for loc in available_locations:
+        with st.expander(f"Location: {loc}", expanded=True):
+            df_loc = df_filtered[df_filtered['Location'] == loc]
+            fig1, ax1 = plt.subplots(figsize=(8, 6))
             
-            ax.invert_yaxis()
-            ax.axvline(x=32, color='red', linestyle='--', alpha=0.5)
-            ax.set_xlabel('Temperature (°F)')
-            ax.set_ylabel('Depth (ft)')
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small')
-            st.pyplot(fig)
+            # To keep it hourly/clean, we plot unique snapshots
+            for ts in df_loc['timestamp'].unique():
+                subset = df_loc[df_loc['timestamp'] == ts]
+                # Format legend to show Date and Hour
+                label_time = pd.to_datetime(ts).strftime('%m/%d %H:00')
+                ax1.plot(subset['temperature'], subset['Depth'], marker='o', label=label_time)
+            
+            ax1.invert_yaxis()
+            ax1.axvline(x=32, color='red', linestyle='--', alpha=0.7)
+            ax1.set_xlabel("Temp (°F)")
+            ax1.set_ylabel("Depth (ft)")
+            ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
+            st.pyplot(fig1)
+
+# --- TAB: TEMPERATURE TRENDS (Hourly) ---
+with tab_time:
+    st.subheader("Hourly Temperature Trends by Depth")
+    for loc in available_locations:
+        st.write(f"### Location: {loc}")
+        df_loc_time = df_filtered[df_filtered['Location'] == loc]
+        
+        fig2, ax2 = plt.subplots(figsize=(12, 5))
+        
+        # Plot a line for every unique depth in this pipe
+        for d in sorted(df_loc_time['Depth'].unique()):
+            subset = df_loc_time[df_loc_time['Depth'] == d].sort_values('timestamp')
+            ax2.plot(subset['timestamp'], subset['temperature'], label=f"Depth: {d}ft", linewidth=1.5)
+            
+        ax2.axhline(y=32, color='red', linestyle='--', alpha=0.8)
+        ax2.set_ylabel("Temperature (°F)")
+        ax2.set_xlabel("Time (Hourly Data)")
+        ax2.grid(True, which='both', linestyle=':', alpha=0.5)
+        ax2.legend(loc='upper left', bbox_to_anchor=(1, 1))
+        plt.xticks(rotation=45)
+        st.pyplot(fig2)
