@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import numpy as np
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
@@ -29,7 +28,7 @@ available_projects = sorted(df_raw['project'].unique())
 selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 df_proj = df_raw[df_raw['project'] == selected_project].copy()
 
-# Thresholds
+# Sidebar: Reference Marks
 st.sidebar.subheader("Reference Marks")
 show_freezing = st.sidebar.checkbox("Show Freezing Line (32°F)", value=True)
 custom_marks_input = st.sidebar.text_input("Custom Reference Temps (comma separated)", "25, 40")
@@ -45,6 +44,7 @@ available_locations = sorted(df_filtered['location'].unique())
 
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
+        # THE BLUE LINE: 32 degree reference
         if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
         else: ax.axhline(y=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
     if custom_marks_input:
@@ -52,7 +52,7 @@ def add_ref_lines(ax, is_vertical=True):
             marks = [float(x.strip()) for x in custom_marks_input.split(',') if x.strip()]
             for m in marks:
                 if is_vertical: ax.axvline(x=m, color='green', linestyle=':', label=f'Ref: {m}°F')
-                else: ax.axhline(y=m, color='green', linestyle=':')
+                else: ax.axhline(y=m, color='green', linestyle=':', label=f'Ref: {m}°F')
         except: pass
 
 # --- TAB 1: WEEKLY DEPTH PROFILES ---
@@ -66,7 +66,7 @@ with tab_depth:
             if not df_monday.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
                 for ts in sorted(df_monday['timestamp'].unique()):
-                    snapshot = df_monday[df_monday['timestamp'] == ts].sort_values('depth')
+                    snapshot = df_monday[df_monday['timestamp'] == ts].drop_duplicates('depth').sort_values('depth')
                     label_date = pd.to_datetime(ts).strftime('%Y-%m-%d')
                     ax1.plot(snapshot['value'], snapshot['depth'], marker='o', label=label_date)
                 
@@ -77,9 +77,9 @@ with tab_depth:
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 st.pyplot(fig1)
 
-# --- TAB 2: HOURLY TRENDS (With Gap Handling) ---
+# --- TAB 2: HOURLY TRENDS ---
 with tab_time:
-    st.subheader("Continuous Hourly Trends")
+    st.subheader("Continuous Hourly Trends (Gaps Hidden)")
     for loc in available_locations:
         with st.expander(f"Trends: {loc}", expanded=True):
             df_loc_time = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
@@ -89,8 +89,10 @@ with tab_time:
                 for d in sorted(df_loc_time['depth'].unique()):
                     subset = df_loc_time[df_loc_time['depth'] == d].copy()
                     
-                    # --- THE FIX: Insert NaNs where there is a time gap > 2 hours ---
-                    # This breaks the line so it doesn't "stretch" across missing data
+                    # --- THE FIX: Remove duplicate timestamps before resampling ---
+                    subset = subset.drop_duplicates('timestamp')
+                    
+                    # Re-insert gaps as NaNs so lines don't connect across missing data
                     subset = subset.set_index('timestamp').resample('1H').asfreq().reset_index()
                     
                     ax2.plot(subset['timestamp'], subset['value'], 
