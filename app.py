@@ -11,16 +11,27 @@ scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/a
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
 
-# 2. Sidebar - Project & Thresholds
+# --- 2. Sidebar - Project & Thresholds ---
 st.sidebar.title("📁 Project Controls")
 
 @st.cache_data(ttl=300)
 def get_full_dataset():
-    # SWITCHED: Now pulling from the master hourly dataset
     query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
     return client.query(query).to_dataframe()
 
 df_raw = get_full_dataset()
+
+# CLEANING STEP: Handle missing/mixed data types in 'Project'
+# 1. Fill empty (NaN) projects with 'Unnamed'
+df_raw['Project'] = df_raw['Project'].fillna('Unnamed')
+# 2. Force everything to be a string so sorted() works
+df_raw['Project'] = df_raw['Project'].astype(str)
+# 3. Ensure timestamp is correct
+df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
+
+available_projects = sorted(df_raw['Project'].unique())
+selected_project = st.sidebar.selectbox("Choose Project", available_projects)
+df_proj = df_raw[df_raw['Project'] == selected_project].copy()
 
 # --- THE FIX FOR THE TYPEERROR ---
 # 1. Ensure the timestamp is datetime
