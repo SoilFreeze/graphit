@@ -16,6 +16,12 @@ st.title("🧪 Ground Temperature Depth Profile")
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
 
+# Force the project_id inside the client call
+client = bigquery.Client(
+    credentials=creds, 
+    project="sensorpush-export"
+)
+
 # 2. Sidebar Filters
 st.sidebar.header("Filter Data")
 num_weeks = st.sidebar.slider("Number of weeks to show", 1, 12, 4)
