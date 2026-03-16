@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import numpy as np
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -39,7 +40,8 @@ cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
 df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 
 st.title(f"Project: {selected_project}")
-tab_depth, tab_time = st.tabs(["📊 Weekly Depth Profiles", "📈 Hourly Trends"])
+# Updated Tab Names
+tab_depth, tab_time = st.tabs(["📊 Temperature vs Depth", "📈 Temperature vs Time"])
 
 available_locations = sorted(df_filtered['location'].unique())
 
@@ -55,25 +57,18 @@ def add_ref_lines(ax, is_vertical=True):
                 else: ax.axhline(y=m, color='green', linestyle=':')
         except: pass
 
-# --- TAB 1: WEEKLY DEPTH PROFILES ---
+# --- TAB 1: TEMPERATURE VS DEPTH ---
 with tab_depth:
-    st.subheader("Vertical Temperature: Mondays at 6:00 AM")
+    st.subheader("Temperature vs Depth (Mondays at 6:00 AM)")
     for loc in available_locations:
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered[df_filtered['location'] == loc].copy()
-            
-            # THE FIX: Round timestamps to the nearest hour so sensors "sync" up
             df_loc['timestamp_round'] = df_loc['timestamp'].dt.round('1h')
-            
-            # Filter for Mondays at 6 AM on the rounded time
             df_monday = df_loc[(df_loc['timestamp_round'].dt.weekday == 0) & (df_loc['timestamp_round'].dt.hour == 6)].copy()
             
             if not df_monday.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
-                
-                # Now group by the ROUNDED timestamp
                 for ts, group in df_monday.groupby('timestamp_round'):
-                    # Sort by depth so the line goes from top to bottom
                     snapshot = group.sort_values('depth')
                     label_date = ts.strftime('%Y-%m-%d')
                     ax1.plot(snapshot['value'], snapshot['depth'], marker='o', label=label_date)
@@ -85,12 +80,10 @@ with tab_depth:
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 ax1.grid(True, alpha=0.2)
                 st.pyplot(fig1)
-            else:
-                st.info(f"No Monday 6:00 AM data found for {loc}.")
 
-# --- TAB 2: HOURLY TRENDS ---
+# --- TAB 2: TEMPERATURE VS TIME ---
 with tab_time:
-    st.subheader("Continuous Hourly Trends (6hr Gap Break)")
+    st.subheader("Temperature vs Time")
     for loc in available_locations:
         with st.expander(f"Trends: {loc}", expanded=True):
             df_loc_time = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
@@ -101,21 +94,35 @@ with tab_time:
                     subset = df_loc_time[df_loc_time['depth'] == d].copy()
                     subset = subset.drop_duplicates('timestamp').sort_values('timestamp')
                     
-                    # Logic to break the line if gap > 6 hours
+                    # 6hr gap break logic
                     diff = subset['timestamp'].diff() > pd.Timedelta(hours=6)
                     new_rows = []
                     for i, has_gap in enumerate(diff):
                         if has_gap:
                             new_rows.append({'timestamp': subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1), 'value': np.nan})
-                    
                     if new_rows:
                         subset = pd.concat([subset, pd.DataFrame(new_rows)]).sort_values('timestamp')
                     
-                    ax2.plot(subset['timestamp'], subset['value'], label=f"{d}ft", linewidth=1.5, marker='.', markersize=3, alpha=0.8)
+                    ax2.plot(subset['timestamp'], subset['value'], label=f"{d}ft", linewidth=1.2, marker='.', markersize=2, alpha=0.8)
+                
+                # --- NEW GRID & LABEL LOGIC ---
+                # Major Line = Monday Midnight
+                ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MONDAY, byhour=0))
+                # Minor Line = Every Day Midnight
+                ax2.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+                
+                # Dynamic Label Formatting
+                if num_weeks > 3:
+                    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d')) # Monthly/Day labels
+                else:
+                    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%a %m/%d')) # Day of week labels
+
+                # Apply styling to lines
+                ax2.grid(which='major', color='#666666', linestyle='-', alpha=0.5) # Stronger Monday lines
+                ax2.grid(which='minor', color='#999999', linestyle=':', alpha=0.3) # Fainter daily lines
                 
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
-                ax2.grid(True, which='both', linestyle=':', alpha=0.4)
                 ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
                 plt.xticks(rotation=45)
                 st.pyplot(fig2)
