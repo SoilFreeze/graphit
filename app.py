@@ -21,6 +21,28 @@ def get_full_dataset():
     return client.query(query).to_dataframe()
 
 df_raw = get_full_dataset()
+
+# --- THE FIX FOR THE TYPEERROR ---
+# 1. Ensure the timestamp is datetime
+df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
+
+# 2. Handle missing project names by filling them with 'Unknown'
+df_raw['Project'] = df_raw['Project'].fillna('Unknown').astype(str)
+
+# 3. Now we can safely sort
+available_projects = sorted(df_raw['Project'].unique())
+# ---------------------------------
+
+selected_project = st.sidebar.selectbox("Choose Project", available_projects)
+df_proj = df_raw[df_raw['Project'] == selected_project].copy()
+
+@st.cache_data(ttl=300)
+def get_full_dataset():
+    # SWITCHED: Now pulling from the master hourly dataset
+    query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
+    return client.query(query).to_dataframe()
+
+df_raw = get_full_dataset()
 df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 
 available_projects = sorted(df_raw['Project'].unique())
