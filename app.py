@@ -45,7 +45,6 @@ available_locations = sorted(df_filtered['location'].unique())
 
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
-        # Bold Blue 32°F Line
         if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
         else: ax.axhline(y=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
     if custom_marks_input:
@@ -56,32 +55,27 @@ def add_ref_lines(ax, is_vertical=True):
                 else: ax.axhline(y=m, color='green', linestyle=':')
         except: pass
 
-# --- TAB 1: WEEKLY DEPTH PROFILES (Office Fix Applied) ---
+# --- TAB 1: WEEKLY DEPTH PROFILES ---
 with tab_depth:
     st.subheader("Vertical Temperature: Mondays at 6:00 AM")
     for loc in available_locations:
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered[df_filtered['location'] == loc].copy()
             
-            # Office Fix: Ensure depth is numeric to prevent sorting issues
-            df_loc['depth'] = pd.to_numeric(df_loc['depth'], errors='coerce')
-            df_loc = df_loc.dropna(subset=['depth'])
-
-            # Filter for Mondays
-            df_monday_all = df_loc[df_loc['timestamp'].dt.weekday == 0]
+            # THE FIX: Round timestamps to the nearest hour so sensors "sync" up
+            df_loc['timestamp_round'] = df_loc['timestamp'].dt.round('1h')
             
-            # Find the actual hours available on those Mondays (Office might not have exactly 6:00:00)
-            available_hours = df_monday_all['timestamp'].dt.hour.unique()
-            target_hour = 6 if 6 in available_hours else (available_hours[0] if len(available_hours) > 0 else None)
-            
-            df_monday = df_monday_all[df_monday_all['timestamp'].dt.hour == target_hour]
+            # Filter for Mondays at 6 AM on the rounded time
+            df_monday = df_loc[(df_loc['timestamp_round'].dt.weekday == 0) & (df_loc['timestamp_round'].dt.hour == 6)].copy()
             
             if not df_monday.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
-                # Group by timestamp to ensure we don't connect points from different times
-                for ts, group in df_monday.groupby('timestamp'):
-                    snapshot = group.drop_duplicates('depth').sort_values('depth')
-                    label_date = ts.strftime('%Y-%m-%d %H:%M')
+                
+                # Now group by the ROUNDED timestamp
+                for ts, group in df_monday.groupby('timestamp_round'):
+                    # Sort by depth so the line goes from top to bottom
+                    snapshot = group.sort_values('depth')
+                    label_date = ts.strftime('%Y-%m-%d')
                     ax1.plot(snapshot['value'], snapshot['depth'], marker='o', label=label_date)
                 
                 ax1.invert_yaxis()
@@ -92,9 +86,9 @@ with tab_depth:
                 ax1.grid(True, alpha=0.2)
                 st.pyplot(fig1)
             else:
-                st.info(f"No Monday data found for {loc}. Available hours: {list(available_hours)}")
+                st.info(f"No Monday 6:00 AM data found for {loc}.")
 
-# --- TAB 2: HOURLY TRENDS (6hr Gap Break Logic) ---
+# --- TAB 2: HOURLY TRENDS ---
 with tab_time:
     st.subheader("Continuous Hourly Trends (6hr Gap Break)")
     for loc in available_locations:
