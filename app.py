@@ -14,7 +14,7 @@ st.title("🧪 Ground Temperature Depth Profile")
 
 # For the live app, we use Streamlit's secret manager:
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
-client = bigquery.Client(credentials=creds, project=creds.project_id)
+client = bigquery.Client(credentials=creds, project="sensorpush-export")
 
 # 2. Sidebar Filters
 st.sidebar.header("Filter Data")
