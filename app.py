@@ -8,42 +8,43 @@ from google.oauth2 import service_account
 st.set_page_config(page_title="Soil Temperature Profile", layout="wide")
 st.title("🧪 Ground Temperature Depth Profile")
 
-# 1. Setup Authentication (For the cloud, we use a 'Secrets' file)
-# In your local test, you can use your json key file path
-# client = bigquery.Client.from_service_account_json('path_to_your_key.json')
-
-# For the live app, we use Streamlit's secret manager:
-creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
-client = bigquery.Client(credentials=creds, project="sensorpush-export")
-
-# Force the project_id inside the client call
-client = bigquery.Client(
-    credentials=creds, 
-    project="sensorpush-export"
-)
+# 1. Setup Authentication
+try:
+    creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    client = bigquery.Client(credentials=creds, project="sensorpush-export")
+except Exception as e:
+    st.error(f"Authentication Error: {e}")
+    st.stop()
 
 # 2. Sidebar Filters
 st.sidebar.header("Filter Data")
 num_weeks = st.sidebar.slider("Number of weeks to show", 1, 12, 4)
 
 # 3. Pull Data
-query = f"""
-SELECT timestamp, depth, temperature 
-FROM `sensorpush-export.sensor_data.monday_morning_depth_profile`
-WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {num_weeks} WEEK)
-ORDER BY timestamp DESC, depth ASC
-"""
+# Note: I am initializing df as empty first to prevent the NameError
+df = pd.DataFrame() 
+
+try:
+    query = f"""
+    SELECT timestamp, depth, temperature 
+    FROM `sensorpush-export.sensor_data.monday_morning_depth_profile`
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {num_weeks} WEEK)
+    ORDER BY timestamp DESC, depth ASC
+    """
+    df = client.query(query).to_dataframe()
+except Exception as e:
+    st.error(f"Query Error: {e}")
+    st.stop()
 
 # 4. Create the Chart
 if not df.empty:
     fig, ax = plt.subplots(figsize=(8, 10))
     
-    # Plot each date as a unique line
     for date in df['timestamp'].dt.date.unique():
         subset = df[df['timestamp'].dt.date == date]
         ax.plot(subset['temperature'], subset['depth'], marker='o', label=str(date))
 
-    # Formatting
+    # Reverse axis so 0 is surface, 4 is deep
     ax.invert_yaxis()
     ax.axvline(x=32, color='red', linestyle='--', label='Freezing (32°F)')
     ax.set_xlabel('Temperature (°F)')
@@ -53,4 +54,4 @@ if not df.empty:
 
     st.pyplot(fig)
 else:
-    st.warning("No data found for the selected range.")
+    st.info("The query ran successfully, but no data was returned. Check your date filters.")
