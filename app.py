@@ -40,7 +40,6 @@ cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
 df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 
 st.title(f"Project: {selected_project}")
-# Updated Tab Names
 tab_depth, tab_time = st.tabs(["📊 Temperature vs Depth", "📈 Temperature vs Time"])
 
 available_locations = sorted(df_filtered['location'].unique())
@@ -105,24 +104,26 @@ with tab_time:
                     
                     ax2.plot(subset['timestamp'], subset['value'], label=f"{d}ft", linewidth=1.2, marker='.', markersize=2, alpha=0.8)
                 
-                # --- NEW GRID & LABEL LOGIC ---
-                # Major Line = Monday Midnight
-                ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MONDAY, byhour=0))
-                # Minor Line = Every Day Midnight
+                # --- FIXED LOCATOR LOGIC ---
+                # Major Locator: Monday at Midnight (Note the list [0])
+                ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MONDAY, byhour=[0]))
+                # Minor Locator: Every Day at Midnight
                 ax2.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
                 
-                # Dynamic Label Formatting
+                # Date Formatting based on time range
                 if num_weeks > 3:
-                    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d')) # Monthly/Day labels
+                    date_fmt = mdates.DateFormatter('%b %d')
                 else:
-                    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%a %m/%d')) # Day of week labels
+                    date_fmt = mdates.DateFormatter('%a %m/%d')
+                
+                ax2.xaxis.set_major_formatter(date_fmt)
 
-                # Apply styling to lines
-                ax2.grid(which='major', color='#666666', linestyle='-', alpha=0.5) # Stronger Monday lines
-                ax2.grid(which='minor', color='#999999', linestyle=':', alpha=0.3) # Fainter daily lines
+                # Grid Styling
+                ax2.grid(which='major', color='#444444', linestyle='-', alpha=0.6, linewidth=1) 
+                ax2.grid(which='minor', color='#999999', linestyle=':', alpha=0.4) 
                 
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
                 ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
-                plt.xticks(rotation=45)
+                plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
                 st.pyplot(fig2)
