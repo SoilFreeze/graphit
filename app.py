@@ -13,7 +13,7 @@ scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/a
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
 
-# 2. Sidebar
+# 2. Sidebar & Data Loading
 st.sidebar.title("📁 Project Controls")
 
 @st.cache_data(ttl=300)
@@ -30,20 +30,16 @@ available_projects = sorted(df_raw['project'].unique())
 selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 df_proj = df_raw[df_raw['project'] == selected_project].copy()
 
-# Thresholds
+# Sidebar: Controls
 st.sidebar.subheader("Reference Marks")
 show_freezing = st.sidebar.checkbox("Show Freezing Line (32°F)", value=True)
-custom_marks_input = st.sidebar.text_input("Custom Reference Temps (comma separated)", "25, 40")
-
+custom_marks_input = st.sidebar.text_input("Custom Reference Temps", "25, 40")
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
+
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
 df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 
-st.title(f"Project: {selected_project}")
-tab_depth, tab_time = st.tabs(["📊 Temperature vs Depth", "📈 Temperature vs Time"])
-
-available_locations = sorted(df_filtered['location'].unique())
-
+# 3. Helpers
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
         if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
@@ -56,10 +52,35 @@ def add_ref_lines(ax, is_vertical=True):
                 else: ax.axhline(y=m, color='green', linestyle=':')
         except: pass
 
-# --- TAB 1: TEMPERATURE VS DEPTH ---
+# 4. Tabs
+tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temperature vs Depth", "📈 Temperature vs Time"])
+
+# --- TAB: 24-HOUR INSIGHTS ---
+with tab_summary:
+    st.subheader("Last 24 Hours: Summary Stats")
+    last_24 = df_proj[df_proj['timestamp'] >= (pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=24))]
+    
+    if not last_24.empty:
+        # Calculate Delta, Min, Max per Pipe (Location) and Depth
+        stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max', lambda x: x.max() - x.min()]).reset_index()
+        stats.columns = ['Pipe', 'Node/Depth', 'Min Temp', 'Max Temp', '24h Change']
+        
+        # Highlight Greatest Change
+        max_change_row = stats.loc[stats['24h Change'].idxmax()]
+        st.metric(label=f"🔥 Greatest Change: {max_change_row['Pipe']} (Node {max_change_row['Node/Depth']})", 
+                  value=f"{max_change_row['24h Change']:.2f}°F")
+        
+        st.dataframe(stats.sort_values('24h Change', ascending=False), use_container_width=True)
+    else:
+        st.info("No data found in the last 24 hours.")
+
+# --- TAB: TEMPERATURE VS DEPTH ---
 with tab_depth:
-    st.subheader("Temperature vs Depth (Mondays at 6:00 AM)")
-    for loc in available_locations:
+    st.subheader("Temperature vs Depth (Mondays @ 6 AM)")
+    # Filter out "Bank" pipes as they don't have numeric depths for vertical profiles
+    depth_locations = [loc for loc in df_filtered['location'].unique() if "bank" not in loc.lower()]
+    
+    for loc in depth_locations:
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered[df_filtered['location'] == loc].copy()
             df_loc['timestamp_round'] = df_loc['timestamp'].dt.round('1h')
@@ -69,22 +90,23 @@ with tab_depth:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
                 for ts, group in df_monday.groupby('timestamp_round'):
                     snapshot = group.sort_values('depth')
-                    label_date = ts.strftime('%Y-%m-%d')
-                    ax1.plot(snapshot['value'], snapshot['depth'], marker='o', label=label_date)
+                    ax1.plot(snapshot['value'], snapshot['depth'], marker='o', label=ts.strftime('%Y-%m-%d'))
                 
                 ax1.invert_yaxis()
                 add_ref_lines(ax1, is_vertical=True)
+                ax1.set_title(f"Temperature vs Depth for {loc}") # PRINT TITLE
                 ax1.set_xlabel("Temp (°F)")
                 ax1.set_ylabel("Depth (ft)")
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
-                ax1.grid(True, alpha=0.2)
                 st.pyplot(fig1)
 
-# --- TAB 2: TEMPERATURE VS TIME ---
+# --- TAB: TEMPERATURE VS TIME ---
 with tab_time:
     st.subheader("Temperature vs Time")
-    for loc in available_locations:
-        with st.expander(f"Trends: {loc}", expanded=True):
+    all_locations = sorted(df_filtered['location'].unique())
+    
+    for loc in all_locations:
+        with st.expander(f"Location: {loc}", expanded=True):
             df_loc_time = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
             
             if not df_loc_time.empty:
@@ -93,31 +115,24 @@ with tab_time:
                     subset = df_loc_time[df_loc_time['depth'] == d].copy()
                     subset = subset.drop_duplicates('timestamp').sort_values('timestamp')
                     
-                    # 6hr gap break logic
+                    # 6hr gap break
                     diff = subset['timestamp'].diff() > pd.Timedelta(hours=6)
-                    new_rows = []
-                    for i, has_gap in enumerate(diff):
-                        if has_gap:
-                            new_rows.append({'timestamp': subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1), 'value': np.nan})
+                    new_rows = [{'timestamp': subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1), 'value': np.nan} 
+                                for i, has_gap in enumerate(diff) if has_gap]
                     if new_rows:
                         subset = pd.concat([subset, pd.DataFrame(new_rows)]).sort_values('timestamp')
                     
-                    ax2.plot(subset['timestamp'], subset['value'], label=f"{d}ft", linewidth=1.5, marker='.', markersize=2, alpha=0.8)
+                    ax2.plot(subset['timestamp'], subset['value'], label=f"Node {d}", linewidth=1.2, marker='.', markersize=2, alpha=0.8)
                 
-                # --- ALTERNATIVE LOCATOR LOGIC (More Robust) ---
-                # Major: Every Monday
-                ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)) # 0 is Monday
-                # Minor: Every Day
+                # Grid & Locators
+                ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0))
                 ax2.xaxis.set_minor_locator(mdates.DayLocator())
-                
-                # Date Formatting
                 fmt = '%b %d' if num_weeks > 3 else '%a %m/%d'
                 ax2.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
-
-                # Visual Grid Styling
-                ax2.grid(which='major', color='#444444', linestyle='-', alpha=0.7, linewidth=1.2) 
-                ax2.grid(which='minor', color='#CCCCCC', linestyle=':', alpha=0.4) 
+                ax2.grid(which='major', color='#444444', linestyle='-', alpha=0.7)
+                ax2.grid(which='minor', color='#CCCCCC', linestyle=':', alpha=0.4)
                 
+                ax2.set_title(f"Temperature vs Time for {loc}") # PRINT TITLE
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
                 ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
