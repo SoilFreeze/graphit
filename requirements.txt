@@ -1,8 +1,4 @@
 pandas
-streamlit
-google-cloud-bigquery
-google-auth
 matplotlib
-numpy
-scipy
+google-cloud-bigquery
 db-dtypes
