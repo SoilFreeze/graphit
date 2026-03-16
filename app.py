@@ -16,8 +16,8 @@ st.sidebar.title("📁 Project Controls")
 
 @st.cache_data(ttl=300)
 def get_full_dataset():
-    # Ensure we pull EVERY row to get that hourly "wiggle"
-    query = "SELECT * FROM `sensorpush-export.sensor_data.monday_morning_depth_profile` ORDER BY timestamp ASC"
+    # SWITCHED: Now pulling from the master hourly dataset
+    query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
     return client.query(query).to_dataframe()
 
 df_raw = get_full_dataset()
@@ -30,7 +30,8 @@ df_proj = df_raw[df_raw['Project'] == selected_project].copy()
 # Sidebar: Reference Marks
 st.sidebar.subheader("Reference Marks")
 show_freezing = st.sidebar.checkbox("Show Freezing Line (32°F)", value=True)
-custom_mark = st.sidebar.number_input("Add Custom Reference Temp (°F)", value=0.0)
+# Allow multiple reference marks separated by commas
+custom_marks_input = st.sidebar.text_input("Custom Reference Temps (e.g. 25, 40)", "")
 
 # Sidebar: Time Filter
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
@@ -42,12 +43,30 @@ tab_depth, tab_time = st.tabs(["📊 Weekly Depth Profiles", "📈 Hourly Trends
 
 available_locations = sorted(df_filtered['Location'].unique())
 
+# Helper function to plot reference marks
+def add_ref_lines(ax, is_vertical=True):
+    if show_freezing:
+        if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
+        else: ax.axhline(y=32, color='blue', linestyle='--', linewidth=2)
+    
+    if custom_marks_input:
+        try:
+            marks = [float(x.strip()) for x in custom_marks_input.split(',')]
+            colors = ['green', 'orange', 'purple', 'brown']
+            for idx, m in enumerate(marks):
+                c = colors[idx % len(colors)]
+                if is_vertical: ax.axvline(x=m, color=c, linestyle=':', label=f'Ref: {m}°F')
+                else: ax.axhline(y=m, color=c, linestyle=':', label=f'Ref: {m}°F')
+        except ValueError:
+            st.sidebar.error("Please enter numbers separated by commas")
+
 # --- TAB 1: WEEKLY DEPTH PROFILES ---
 with tab_depth:
     st.subheader("Vertical Temperature: Mondays at 6:00 AM")
     for loc in available_locations:
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered[df_filtered['Location'] == loc].copy()
+            # Still filter for Monday at 6 AM for this specific view
             df_monday = df_loc[(df_loc['timestamp'].dt.weekday == 0) & (df_loc['timestamp'].dt.hour == 6)]
             
             if not df_monday.empty:
@@ -58,11 +77,7 @@ with tab_depth:
                     ax1.plot(snapshot['temperature'], snapshot['Depth'], marker='o', label=label_date)
                 
                 ax1.invert_yaxis()
-                if show_freezing:
-                    ax1.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='Freezing')
-                if custom_mark != 0:
-                    ax1.axvline(x=custom_mark, color='green', linestyle=':', label=f'Ref: {custom_mark}°F')
-                
+                add_ref_lines(ax1, is_vertical=True)
                 ax1.set_xlabel("Temp (°F)")
                 ax1.set_ylabel("Depth (ft)")
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
@@ -79,15 +94,10 @@ with tab_time:
                 fig2, ax2 = plt.subplots(figsize=(12, 5))
                 for d in sorted(df_loc_time['Depth'].unique()):
                     subset_depth = df_loc_time[df_loc_time['Depth'] == d]
-                    # This plot uses both a line AND a marker to highlight data density
                     ax2.plot(subset_depth['timestamp'], subset_depth['temperature'], 
-                             label=f"{d}ft", linewidth=1, marker='.', markersize=4, alpha=0.7)
-                    
-                if show_freezing:
-                    ax2.axhline(y=32, color='blue', linestyle='--', linewidth=2)
-                if custom_mark != 0:
-                    ax2.axhline(y=custom_mark, color='green', linestyle=':')
+                             label=f"{d}ft", linewidth=1, marker='.', markersize=3, alpha=0.8)
                 
+                add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
                 ax2.grid(True, which='both', linestyle=':', alpha=0.4)
                 ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
