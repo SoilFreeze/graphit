@@ -21,23 +21,25 @@ st.sidebar.title("📁 Project Controls")
 
 @st.cache_data(ttl=300)
 def get_full_dataset():
+    # Pulling from your master continuous dataset
     query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
     return client.query(query).to_dataframe()
 
 df_raw = get_full_dataset()
 
-# --- DATA CLEANING & CASE SENSITIVITY FIX ---
+# --- STANDARDIZATION STEP ---
+# This makes all columns lowercase and removes spaces so 'Value' becomes 'value'
+df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
+
+# Convert timestamp to datetime objects
 df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
-df_raw['Project'] = df_raw['Project'].fillna('Unnamed').astype(str)
 
-# Fail-safe: Ensure we know the exact name of the temperature column
-# If 'Temperature' exists, use it. If 'temperature' exists, rename it to 'Temperature'.
-if 'temperature' in df_raw.columns:
-    df_raw = df_raw.rename(columns={'temperature': 'Temperature'})
+# Handle missing Project names
+df_raw['project'] = df_raw['project'].fillna('Unnamed').astype(str)
 
-available_projects = sorted(df_raw['Project'].unique())
+available_projects = sorted(df_raw['project'].unique())
 selected_project = st.sidebar.selectbox("Choose Project", available_projects)
-df_proj = df_raw[df_raw['Project'] == selected_project].copy()
+df_proj = df_raw[df_raw['project'] == selected_project].copy()
 
 # Sidebar: Reference Marks
 st.sidebar.subheader("Reference Marks")
@@ -52,10 +54,12 @@ df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 st.title(f"Project: {selected_project}")
 tab_depth, tab_time = st.tabs(["📊 Weekly Depth Profiles", "📈 Hourly Trends"])
 
-available_locations = sorted(df_filtered['Location'].unique())
+# Use lowercase 'location'
+available_locations = sorted(df_filtered['location'].unique())
 
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
+        # THE BLUE LINE: Requested 32 degree reference
         if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
         else: ax.axhline(y=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
     if custom_marks_input:
@@ -73,16 +77,16 @@ with tab_depth:
     st.subheader("Vertical Temperature: Mondays at 6:00 AM")
     for loc in available_locations:
         with st.expander(f"Location: {loc}", expanded=True):
-            df_loc = df_filtered[df_filtered['Location'] == loc].copy()
+            df_loc = df_filtered[df_filtered['location'] == loc].copy()
             df_monday = df_loc[(df_loc['timestamp'].dt.weekday == 0) & (df_loc['timestamp'].dt.hour == 6)]
             
             if not df_monday.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
                 for ts in sorted(df_monday['timestamp'].unique()):
-                    snapshot = df_monday[df_monday['timestamp'] == ts].sort_values('Depth')
+                    # UPDATED: Using 'value' instead of 'temperature'
+                    snapshot = df_monday[df_monday['timestamp'] == ts].sort_values('depth')
                     label_date = pd.to_datetime(ts).strftime('%Y-%m-%d')
-                    # FIXED: Using 'Temperature' (Capital T)
-                    ax1.plot(snapshot['Temperature'], snapshot['Depth'], marker='o', label=label_date)
+                    ax1.plot(snapshot['value'], snapshot['depth'], marker='o', label=label_date)
                 
                 ax1.invert_yaxis()
                 add_ref_lines(ax1, is_vertical=True)
@@ -96,14 +100,14 @@ with tab_time:
     st.subheader("Continuous Hourly Trends")
     for loc in available_locations:
         with st.expander(f"Trends: {loc}", expanded=True):
-            df_loc_time = df_filtered[df_filtered['Location'] == loc].sort_values('timestamp')
+            df_loc_time = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
             
             if not df_loc_time.empty:
                 fig2, ax2 = plt.subplots(figsize=(12, 5))
-                for d in sorted(df_loc_time['Depth'].unique()):
-                    subset_depth = df_loc_time[df_loc_time['Depth'] == d]
-                    # FIXED: Using 'Temperature' (Capital T)
-                    ax2.plot(subset_depth['timestamp'], subset_depth['Temperature'], 
+                for d in sorted(df_loc_time['depth'].unique()):
+                    subset_depth = df_loc_time[df_loc_time['depth'] == d]
+                    # UPDATED: Using 'value' for the hourly wiggles
+                    ax2.plot(subset_depth['timestamp'], subset_depth['value'], 
                              label=f"{d}ft", linewidth=1, marker='.', markersize=3, alpha=0.7)
                 
                 add_ref_lines(ax2, is_vertical=False)
