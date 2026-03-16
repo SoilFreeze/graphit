@@ -9,7 +9,6 @@ from google.oauth2 import service_account
 # 1. Setup
 st.set_page_config(page_title="Geotechnical Temp Dashboard", layout="wide")
 
-# Credential logic
 scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
@@ -34,7 +33,6 @@ df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
 df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 df_raw['project'] = df_raw['project'].fillna('Unnamed').astype(str)
 
-# Apply Conversion
 if is_celsius:
     df_raw['value'] = (df_raw['value'] - 32) * 5/9
 
@@ -45,7 +43,7 @@ df_proj = df_raw[df_raw['project'] == selected_project].copy()
 # Sidebar: Controls
 freeze_val = 0 if is_celsius else 32
 show_freezing = st.sidebar.checkbox(f"Show Freezing Line ({freeze_val}{u_label})", value=True)
-custom_marks_input = st.sidebar.text_input(f"Custom Reference Temps ({u_label})", "25, 40" if not is_celsius else "-4, 4")
+custom_marks_input = st.sidebar.text_input(f"Custom Reference Temps ({u_label})", "25.0, 40.0" if not is_celsius else "-4.0, 4.0")
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
 
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
@@ -60,7 +58,7 @@ def add_ref_lines(ax, is_vertical=True):
         try:
             marks = [float(x.strip()) for x in custom_marks_input.split(',') if x.strip()]
             for m in marks:
-                if is_vertical: ax.axvline(x=m, color='green', linestyle=':', label=f'Ref: {m}{u_label}')
+                if is_vertical: ax.axvline(x=m, color='green', linestyle=':', label=f'Ref: {round(m, 1)}{u_label}')
                 else: ax.axhline(y=m, color='green', linestyle=':')
         except: pass
 
@@ -76,7 +74,6 @@ with tab_summary:
     with col1:
         st.subheader(f"All Pipes: 24h Thermal Activity")
         if not last_24.empty:
-            # Group by pipe and node to find individual deltas
             node_stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max']).reset_index()
             node_stats['delta'] = node_stats['max'] - node_stats['min']
             
@@ -86,23 +83,26 @@ with tab_summary:
                 p_min, p_max = pipe_data['min'].min(), pipe_data['max'].max()
                 top_node_row = pipe_data.loc[pipe_data['delta'].idxmax()]
                 
+                # Apply 1-decimal rounding here
                 summary_rows.append({
                     "Pipe": loc,
-                    f"Min ({u_label})": round(p_min, 2),
-                    f"Max ({u_label})": round(p_max, 2),
+                    f"Min ({u_label})": round(p_min, 1),
+                    f"Max ({u_label})": round(p_max, 1),
                     "Max Delta Node": top_node_row['depth'],
-                    "24h Change": round(top_node_row['delta'], 2)
+                    "24h Change": round(top_node_row['delta'], 1)
                 })
             
             res_df = pd.DataFrame(summary_rows)
             
-            # --- STYLE: Red rows if 24h Change >= threshold ---
             def highlight_delta(row):
                 color = 'red' if row['24h Change'] >= alert_threshold else None
                 return [f'color: {color}' if color else '' for _ in row]
 
-            st.table(res_df.style.apply(highlight_delta, axis=1))
-            st.caption(f"Note: Rows in red indicate a change of {alert_threshold}{u_label} or more in 24 hours.")
+            st.table(res_df.style.apply(highlight_delta, axis=1).format({
+                f"Min ({u_label})": "{:.1f}",
+                f"Max ({u_label})": "{:.1f}",
+                "24h Change": "{:.1f}"
+            }))
         else:
             st.info("No active data in the last 24 hours.")
 
@@ -117,7 +117,7 @@ with tab_summary:
             st.warning(f"{len(offline)} nodes offline (24h+)")
             st.dataframe(offline.rename(columns={'location': 'Pipe', 'depth': 'Node'}), hide_index=True)
         else:
-            st.success("All project sensors are online.")
+            st.success("All sensors online.")
 
 # --- TAB: TEMPERATURE VS DEPTH ---
 with tab_depth:
@@ -158,7 +158,7 @@ with tab_time:
                     new_rows = [{'timestamp': subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1), 'value': np.nan} for i, has_gap in enumerate(diff) if has_gap]
                     if new_rows: subset = pd.concat([subset, pd.DataFrame(new_rows)]).sort_values('timestamp')
                     
-                    label_name = f"Node {d}" if "bank" in loc.lower() else f"{d}ft"
+                    label_name = f"Node {d}" if "bank" in loc.lower() else f"{round(float(d), 1) if str(d).replace('.','').isdigit() else d}ft"
                     ax2.plot(subset['timestamp'], subset['value'], label=label_name, linewidth=1.5, marker='.', markersize=3, alpha=0.8)
                 
                 ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0))
