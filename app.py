@@ -21,14 +21,16 @@ st.sidebar.header("Filter Data")
 num_weeks = st.sidebar.slider("Number of weeks to show", 1, 12, 4)
 
 # 3. Pull Data
-# Note: I am initializing df as empty first to prevent the NameError
 df = pd.DataFrame() 
 
 try:
+    # We convert weeks to days to keep BigQuery happy
+    num_days = num_weeks * 7
+    
     query = f"""
     SELECT timestamp, depth, temperature 
     FROM `sensorpush-export.sensor_data.monday_morning_depth_profile`
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {num_weeks} WEEK)
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {num_days} DAY)
     ORDER BY timestamp DESC, depth ASC
     """
     df = client.query(query).to_dataframe()
