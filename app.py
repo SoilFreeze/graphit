@@ -29,7 +29,7 @@ df_proj = df_raw[df_raw['Project'] == selected_project].copy()
 # 3. Sidebar - Time Filter
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
-df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date]
+df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 
 st.title(f"Project: {selected_project}")
 tab_depth, tab_time = st.tabs(["📊 Weekly Depth Profiles", "📈 Hourly Trends"])
@@ -43,18 +43,20 @@ with tab_depth:
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered[df_filtered['Location'] == loc].copy()
             
-            # Filter for Monday (0) at the 6th hour
+            # Filter for Monday (0) at Hour 6
             df_monday = df_loc[(df_loc['timestamp'].dt.weekday == 0) & (df_loc['timestamp'].dt.hour == 6)]
             
             if not df_monday.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
                 
-                # IMPORTANT: Loop through each specific timestamp to prevent the "return line"
+                # Loop through each specific Monday timestamp
                 for ts in sorted(df_monday['timestamp'].unique()):
-                    # Get exactly one snapshot (one vertical line's worth of sensors)
+                    # Create the 'snapshot' for THIS specific time
                     snapshot = df_monday[df_monday['timestamp'] == ts].sort_values('Depth')
                     label_date = pd.to_datetime(ts).strftime('%Y-%m-%d')
-                    ax1.plot(subset['temperature'], subset['Depth'], marker='o', label=label_date)
+                    
+                    # Plot using the 'snapshot' variable
+                    ax1.plot(snapshot['temperature'], snapshot['Depth'], marker='o', label=label_date)
                 
                 ax1.invert_yaxis()
                 ax1.axvline(x=32, color='red', linestyle='--', alpha=0.7)
@@ -63,22 +65,24 @@ with tab_depth:
                 ax1.legend(title="Monday 6AM", bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 ax1.grid(True, alpha=0.2)
                 st.pyplot(fig1)
+            else:
+                st.info("No data found for Mondays at 6:00 AM.")
 
 # --- TAB 2: HOURLY TRENDS (Continuous Data) ---
 with tab_time:
     st.subheader("Continuous Hourly Trends")
     for loc in available_locations:
         with st.expander(f"Trends: {loc}", expanded=True):
-            # No Monday filter here—pulls everything from the project
+            # Sort by timestamp to ensure lines connect correctly over time
             df_loc_time = df_filtered[df_filtered['Location'] == loc].sort_values('timestamp')
             
             if not df_loc_time.empty:
                 fig2, ax2 = plt.subplots(figsize=(12, 5))
                 # Plot each sensor depth as its own line over time
                 for d in sorted(df_loc_time['Depth'].unique()):
-                    subset = df_loc_time[df_loc_time['Depth'] == d]
-                    # Markers added to see hourly density
-                    ax2.plot(subset['timestamp'], subset['temperature'], label=f"{d}ft", linewidth=1, marker='.', markersize=3)
+                    subset_depth = df_loc_time[df_loc_time['Depth'] == d]
+                    # We use markers so you can see every hourly data point
+                    ax2.plot(subset_depth['timestamp'], subset_depth['temperature'], label=f"{d}ft", linewidth=1, marker='.', markersize=3)
                     
                 ax2.axhline(y=32, color='red', linestyle='--', alpha=0.8)
                 ax2.set_ylabel("Temp (°F)")
