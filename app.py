@@ -1,52 +1,39 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-# 1. Setup Page and Auth
+# 1. Setup
 st.set_page_config(page_title="Geotechnical Temp Dashboard", layout="wide")
 
 scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
+creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+client = bigquery.Client(credentials=creds, project="sensorpush-export")
 
-try:
-    creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-    client = bigquery.Client(credentials=creds, project="sensorpush-export")
-except Exception as e:
-    st.error(f"Authentication Error: {e}")
-    st.stop()
-
-# 2. Sidebar - Project & Thresholds
+# 2. Sidebar
 st.sidebar.title("📁 Project Controls")
 
 @st.cache_data(ttl=300)
 def get_full_dataset():
-    # Pulling from your master continuous dataset
     query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
     return client.query(query).to_dataframe()
 
 df_raw = get_full_dataset()
-
-# --- STANDARDIZATION STEP ---
-# This makes all columns lowercase and removes spaces so 'Value' becomes 'value'
 df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
-
-# Convert timestamp to datetime objects
 df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
-
-# Handle missing Project names
 df_raw['project'] = df_raw['project'].fillna('Unnamed').astype(str)
 
 available_projects = sorted(df_raw['project'].unique())
 selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 df_proj = df_raw[df_raw['project'] == selected_project].copy()
 
-# Sidebar: Reference Marks
+# Thresholds
 st.sidebar.subheader("Reference Marks")
 show_freezing = st.sidebar.checkbox("Show Freezing Line (32°F)", value=True)
 custom_marks_input = st.sidebar.text_input("Custom Reference Temps (comma separated)", "25, 40")
 
-# Sidebar: Time Filter
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
 df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
@@ -54,23 +41,19 @@ df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 st.title(f"Project: {selected_project}")
 tab_depth, tab_time = st.tabs(["📊 Weekly Depth Profiles", "📈 Hourly Trends"])
 
-# Use lowercase 'location'
 available_locations = sorted(df_filtered['location'].unique())
 
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
-        # THE BLUE LINE: Requested 32 degree reference
         if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
         else: ax.axhline(y=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
     if custom_marks_input:
         try:
             marks = [float(x.strip()) for x in custom_marks_input.split(',') if x.strip()]
-            colors = ['green', 'orange', 'purple', 'brown']
-            for idx, m in enumerate(marks):
-                c = colors[idx % len(colors)]
-                if is_vertical: ax.axvline(x=m, color=c, linestyle=':', label=f'Ref: {m}°F')
-                else: ax.axhline(y=m, color=c, linestyle=':', label=f'Ref: {m}°F')
-        except ValueError: pass
+            for m in marks:
+                if is_vertical: ax.axvline(x=m, color='green', linestyle=':', label=f'Ref: {m}°F')
+                else: ax.axhline(y=m, color='green', linestyle=':')
+        except: pass
 
 # --- TAB 1: WEEKLY DEPTH PROFILES ---
 with tab_depth:
@@ -83,7 +66,6 @@ with tab_depth:
             if not df_monday.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
                 for ts in sorted(df_monday['timestamp'].unique()):
-                    # UPDATED: Using 'value' instead of 'temperature'
                     snapshot = df_monday[df_monday['timestamp'] == ts].sort_values('depth')
                     label_date = pd.to_datetime(ts).strftime('%Y-%m-%d')
                     ax1.plot(snapshot['value'], snapshot['depth'], marker='o', label=label_date)
@@ -95,7 +77,7 @@ with tab_depth:
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 st.pyplot(fig1)
 
-# --- TAB 2: HOURLY TRENDS ---
+# --- TAB 2: HOURLY TRENDS (With Gap Handling) ---
 with tab_time:
     st.subheader("Continuous Hourly Trends")
     for loc in available_locations:
@@ -105,10 +87,14 @@ with tab_time:
             if not df_loc_time.empty:
                 fig2, ax2 = plt.subplots(figsize=(12, 5))
                 for d in sorted(df_loc_time['depth'].unique()):
-                    subset_depth = df_loc_time[df_loc_time['depth'] == d]
-                    # UPDATED: Using 'value' for the hourly wiggles
-                    ax2.plot(subset_depth['timestamp'], subset_depth['value'], 
-                             label=f"{d}ft", linewidth=1, marker='.', markersize=3, alpha=0.7)
+                    subset = df_loc_time[df_loc_time['depth'] == d].copy()
+                    
+                    # --- THE FIX: Insert NaNs where there is a time gap > 2 hours ---
+                    # This breaks the line so it doesn't "stretch" across missing data
+                    subset = subset.set_index('timestamp').resample('1H').asfreq().reset_index()
+                    
+                    ax2.plot(subset['timestamp'], subset['value'], 
+                             label=f"{d}ft", linewidth=1.2, marker='.', markersize=2, alpha=0.8)
                 
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
