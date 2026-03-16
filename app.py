@@ -19,8 +19,6 @@ st.sidebar.title("📁 Project Controls")
 unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit (°F)", "Celsius (°C)"])
 is_celsius = unit == "Celsius (°C)"
 u_label = "°C" if is_celsius else "°F"
-
-# Threshold for red alert: 1.0°C or 1.8°F
 alert_threshold = 1.0 if is_celsius else 1.8
 
 @st.cache_data(ttl=300)
@@ -41,26 +39,27 @@ selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 df_proj = df_raw[df_raw['project'] == selected_project].copy()
 
 # Sidebar: Controls
-freeze_val = 0 if is_celsius else 32
-show_freezing = st.sidebar.checkbox(f"Show Freezing Line ({freeze_val}{u_label})", value=True)
-custom_marks_input = st.sidebar.text_input(f"Custom Reference Temps ({u_label})", "25.0, 40.0" if not is_celsius else "-4.0, 4.0")
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
-
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
 df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 
 # 3. Helpers
 def add_ref_lines(ax, is_vertical=True):
-    if show_freezing:
-        if is_vertical: ax.axvline(x=freeze_val, color='blue', linestyle='--', linewidth=2, label='Freezing')
-        else: ax.axhline(y=freeze_val, color='blue', linestyle='--', linewidth=2, label='Freezing')
-    if custom_marks_input:
-        try:
-            marks = [float(x.strip()) for x in custom_marks_input.split(',') if x.strip()]
-            for m in marks:
-                if is_vertical: ax.axvline(x=m, color='green', linestyle=':', label=f'Ref: {round(m, 1)}{u_label}')
-                else: ax.axhline(y=m, color='green', linestyle=':')
-        except: pass
+    # Reference Line Values (Fahrenheit)
+    refs = [
+        {'val': 10.2, 'color': 'red', 'label': '10.2'},
+        {'val': 26.6, 'color': 'blue', 'label': '26.6'}
+    ]
+    
+    for r in refs:
+        v = r['val']
+        if is_celsius:
+            v = (v - 32) * 5/9
+        
+        if is_vertical:
+            ax.axvline(x=v, color=r['color'], linestyle='--', linewidth=1.5, label=f"{r['label']}{u_label}")
+        else:
+            ax.axhline(y=v, color=r['color'], linestyle='--', linewidth=1.5)
 
 # 4. Tabs
 tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp vs Depth", "📈 Temp vs Time"])
@@ -83,7 +82,6 @@ with tab_summary:
                 p_min, p_max = pipe_data['min'].min(), pipe_data['max'].max()
                 top_node_row = pipe_data.loc[pipe_data['delta'].idxmax()]
                 
-                # Apply 1-decimal rounding here
                 summary_rows.append({
                     "Pipe": loc,
                     f"Min ({u_label})": round(p_min, 1),
@@ -93,15 +91,12 @@ with tab_summary:
                 })
             
             res_df = pd.DataFrame(summary_rows)
-            
             def highlight_delta(row):
                 color = 'red' if row['24h Change'] >= alert_threshold else None
                 return [f'color: {color}' if color else '' for _ in row]
 
             st.table(res_df.style.apply(highlight_delta, axis=1).format({
-                f"Min ({u_label})": "{:.1f}",
-                f"Max ({u_label})": "{:.1f}",
-                "24h Change": "{:.1f}"
+                f"Min ({u_label})": "{:.1f}", f"Max ({u_label})": "{:.1f}", "24h Change": "{:.1f}"
             }))
         else:
             st.info("No active data in the last 24 hours.")
@@ -112,7 +107,6 @@ with tab_summary:
         active_sensors = last_24[['location', 'depth']].drop_duplicates()
         offline = all_sensors.merge(active_sensors, on=['location', 'depth'], how='left', indicator=True)
         offline = offline[offline['_merge'] == 'left_only'][['location', 'depth']]
-        
         if not offline.empty:
             st.warning(f"{len(offline)} nodes offline (24h+)")
             st.dataframe(offline.rename(columns={'location': 'Pipe', 'depth': 'Node'}), hide_index=True)
@@ -153,11 +147,9 @@ with tab_time:
                 for d in sorted(df_loc_time['depth'].unique()):
                     subset = df_loc_time[df_loc_time['depth'] == d].copy()
                     subset = subset.drop_duplicates('timestamp').sort_values('timestamp')
-                    # 6hr gap break
                     diff = subset['timestamp'].diff() > pd.Timedelta(hours=6)
                     new_rows = [{'timestamp': subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1), 'value': np.nan} for i, has_gap in enumerate(diff) if has_gap]
                     if new_rows: subset = pd.concat([subset, pd.DataFrame(new_rows)]).sort_values('timestamp')
-                    
                     label_name = f"Node {d}" if "bank" in loc.lower() else f"{round(float(d), 1) if str(d).replace('.','').isdigit() else d}ft"
                     ax2.plot(subset['timestamp'], subset['value'], label=label_name, linewidth=1.5, marker='.', markersize=3, alpha=0.8)
                 
