@@ -21,10 +21,11 @@ is_celsius = unit == "Celsius (°C)"
 u_label = "°C" if is_celsius else "°F"
 alert_threshold = 1.0 if is_celsius else 1.8
 
-# --- NEW: Reference Line Toggles ---
+# --- UPDATED: Reference Line Toggles ---
 st.sidebar.subheader("Reference Lines")
 show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
 show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
+show_freezing_ref = st.sidebar.checkbox("Show 32.0 Line (Black)", value=False) # New Toggle
 
 @st.cache_data(ttl=300)
 def get_full_dataset():
@@ -49,22 +50,30 @@ df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 
 # 3. Helpers
 def add_ref_lines(ax, is_vertical=True):
-    # Dictionary of possible lines
     refs = []
+    # 10.2 Threshold
     if show_red_ref:
-        refs.append({'val': 10.2, 'color': 'red', 'label': '10.2'})
+        val_f = 10.2
+        disp_val = round((val_f - 32) * 5/9, 1) if is_celsius else val_f
+        refs.append({'val': disp_val, 'color': 'red', 'label': f"{disp_val}{u_label}"})
+    
+    # 26.6 Threshold
     if show_blue_ref:
-        refs.append({'val': 26.6, 'color': 'blue', 'label': '26.6'})
+        val_f = 26.6
+        disp_val = round((val_f - 32) * 5/9, 1) if is_celsius else val_f
+        refs.append({'val': disp_val, 'color': 'blue', 'label': f"{disp_val}{u_label}"})
+
+    # 32.0 Freezing Threshold
+    if show_freezing_ref:
+        val_f = 32.0
+        disp_val = 0.0 if is_celsius else 32.0
+        refs.append({'val': disp_val, 'color': 'black', 'label': f"{disp_val}{u_label}"})
     
     for r in refs:
-        v = r['val']
-        if is_celsius:
-            v = (v - 32) * 5/9
-        
         if is_vertical:
-            ax.axvline(x=v, color=r['color'], linestyle='--', linewidth=1.5, label=f"{r['label']}{u_label}")
+            ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
         else:
-            ax.axhline(y=v, color=r['color'], linestyle='--', linewidth=1.5)
+            ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
 
 # 4. Tabs
 tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp vs Depth", "📈 Temp vs Time"])
