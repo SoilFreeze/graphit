@@ -21,6 +21,11 @@ is_celsius = unit == "Celsius (°C)"
 u_label = "°C" if is_celsius else "°F"
 alert_threshold = 1.0 if is_celsius else 1.8
 
+# --- NEW: Reference Line Toggles ---
+st.sidebar.subheader("Reference Lines")
+show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
+show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
+
 @st.cache_data(ttl=300)
 def get_full_dataset():
     query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
@@ -38,18 +43,18 @@ available_projects = sorted(df_raw['project'].unique())
 selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 df_proj = df_raw[df_raw['project'] == selected_project].copy()
 
-# Sidebar: Controls
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
 df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 
 # 3. Helpers
 def add_ref_lines(ax, is_vertical=True):
-    # Reference Line Values (Fahrenheit)
-    refs = [
-        {'val': 10.2, 'color': 'red', 'label': '10.2'},
-        {'val': 26.6, 'color': 'blue', 'label': '26.6'}
-    ]
+    # Dictionary of possible lines
+    refs = []
+    if show_red_ref:
+        refs.append({'val': 10.2, 'color': 'red', 'label': '10.2'})
+    if show_blue_ref:
+        refs.append({'val': 26.6, 'color': 'blue', 'label': '26.6'})
     
     for r in refs:
         v = r['val']
