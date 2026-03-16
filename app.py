@@ -9,6 +9,7 @@ from google.oauth2 import service_account
 # 1. Setup
 st.set_page_config(page_title="Geotechnical Temp Dashboard", layout="wide")
 
+# Credential logic
 scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
@@ -19,7 +20,8 @@ st.sidebar.title("📁 Project Controls")
 unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit (°F)", "Celsius (°C)"])
 is_celsius = unit == "Celsius (°C)"
 u_label = "°C" if is_celsius else "°F"
-# Threshold for red alert: 1.0C or 1.8F
+
+# Threshold for red alert: 1.0°C or 1.8°F
 alert_threshold = 1.0 if is_celsius else 1.8
 
 @st.cache_data(ttl=300)
@@ -32,6 +34,7 @@ df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
 df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 df_raw['project'] = df_raw['project'].fillna('Unnamed').astype(str)
 
+# Apply Conversion
 if is_celsius:
     df_raw['value'] = (df_raw['value'] - 32) * 5/9
 
@@ -51,8 +54,8 @@ df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 # 3. Helpers
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
-        if is_vertical: ax.axvline(x=freeze_val, color='blue', linestyle='--', linewidth=2, label=f'Freezing')
-        else: ax.axhline(y=freeze_val, color='blue', linestyle='--', linewidth=2, label=f'Freezing')
+        if is_vertical: ax.axvline(x=freeze_val, color='blue', linestyle='--', linewidth=2, label='Freezing')
+        else: ax.axhline(y=freeze_val, color='blue', linestyle='--', linewidth=2, label='Freezing')
     if custom_marks_input:
         try:
             marks = [float(x.strip()) for x in custom_marks_input.split(',') if x.strip()]
@@ -67,18 +70,18 @@ tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp 
 # --- TAB: 24-HOUR INSIGHTS ---
 with tab_summary:
     col1, col2 = st.columns([2, 1])
-    
     now = pd.Timestamp.now(tz='UTC')
     last_24 = df_proj[df_proj['timestamp'] >= (now - pd.Timedelta(hours=24))].copy()
     
     with col1:
-        st.subheader(f"Thermal Activity (Alert > {alert_threshold}{u_label} Change)")
+        st.subheader(f"All Pipes: 24h Thermal Activity")
         if not last_24.empty:
+            # Group by pipe and node to find individual deltas
             node_stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max']).reset_index()
             node_stats['delta'] = node_stats['max'] - node_stats['min']
             
             summary_rows = []
-            for loc in last_24['location'].unique():
+            for loc in sorted(last_24['location'].unique()):
                 pipe_data = node_stats[node_stats['location'] == loc]
                 p_min, p_max = pipe_data['min'].min(), pipe_data['max'].max()
                 top_node_row = pipe_data.loc[pipe_data['delta'].idxmax()]
@@ -93,30 +96,28 @@ with tab_summary:
             
             res_df = pd.DataFrame(summary_rows)
             
-            # --- STYLING: Red for changes > threshold ---
+            # --- STYLE: Red rows if 24h Change >= threshold ---
             def highlight_delta(row):
-                color = 'red' if row['24h Change'] >= alert_threshold else 'white'
-                return [f'color: {color}'] * len(row)
+                color = 'red' if row['24h Change'] >= alert_threshold else None
+                return [f'color: {color}' if color else '' for _ in row]
 
             st.table(res_df.style.apply(highlight_delta, axis=1))
+            st.caption(f"Note: Rows in red indicate a change of {alert_threshold}{u_label} or more in 24 hours.")
         else:
-            st.info("No active data in last 24h.")
+            st.info("No active data in the last 24 hours.")
 
     with col2:
         st.subheader("⚠️ Offline Sensors")
-        # Find sensors assigned to project that ARE NOT in last_24
         all_sensors = df_proj[['location', 'depth']].drop_duplicates()
         active_sensors = last_24[['location', 'depth']].drop_duplicates()
-        
-        # Merge to find the missing ones
         offline = all_sensors.merge(active_sensors, on=['location', 'depth'], how='left', indicator=True)
         offline = offline[offline['_merge'] == 'left_only'][['location', 'depth']]
         
         if not offline.empty:
-            st.warning(f"{len(offline)} nodes have not reported in 24h.")
+            st.warning(f"{len(offline)} nodes offline (24h+)")
             st.dataframe(offline.rename(columns={'location': 'Pipe', 'depth': 'Node'}), hide_index=True)
         else:
-            st.success("All sensors are currently online.")
+            st.success("All project sensors are online.")
 
 # --- TAB: TEMPERATURE VS DEPTH ---
 with tab_depth:
@@ -152,10 +153,14 @@ with tab_time:
                 for d in sorted(df_loc_time['depth'].unique()):
                     subset = df_loc_time[df_loc_time['depth'] == d].copy()
                     subset = subset.drop_duplicates('timestamp').sort_values('timestamp')
+                    # 6hr gap break
                     diff = subset['timestamp'].diff() > pd.Timedelta(hours=6)
                     new_rows = [{'timestamp': subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1), 'value': np.nan} for i, has_gap in enumerate(diff) if has_gap]
                     if new_rows: subset = pd.concat([subset, pd.DataFrame(new_rows)]).sort_values('timestamp')
-                    ax2.plot(subset['timestamp'], subset['value'], label=f"Node {d}", linewidth=1.5, marker='.', markersize=3, alpha=0.8)
+                    
+                    label_name = f"Node {d}" if "bank" in loc.lower() else f"{d}ft"
+                    ax2.plot(subset['timestamp'], subset['value'], label=label_name, linewidth=1.5, marker='.', markersize=3, alpha=0.8)
+                
                 ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0))
                 ax2.xaxis.set_minor_locator(mdates.DayLocator())
                 ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d' if num_weeks > 3 else '%a %m/%d'))
