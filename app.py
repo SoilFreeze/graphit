@@ -36,10 +36,18 @@ df_proj = df_raw[df_raw['Project'] == selected_project]
 
 # 3. Sidebar - Time Filter
 num_weeks = st.sidebar.slider("Weeks of History", 1, 12, 4)
-cutoff_date = pd.Timestamp.now() - pd.Timedelta(weeks=num_weeks)
+
+# Ensure the timestamp column is actually datetime objects
+df_proj['timestamp'] = pd.to_datetime(df_proj['timestamp'])
+
+# Make the cutoff date timezone-aware (UTC) to match BigQuery
+cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
+
+# Filter the data
 df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date]
 
-st.title(f"Project: {selected_project}")
+# Sort data so the lines connect correctly on the graph
+df_filtered = df_filtered.sort_values(['Location', 'depth', 'timestamp'])
 
 # 4. Create Tabs based on your Locations (Pipes) within that project
 available_pipes = sorted(df_filtered['Location'].unique())
