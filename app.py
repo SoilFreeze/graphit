@@ -9,8 +9,18 @@ st.set_page_config(page_title="Soil Temperature Profile", layout="wide")
 st.title("🧪 Ground Temperature Depth Profile")
 
 # 1. Setup Authentication
+# Update your credentials setup to include Drive and BigQuery scopes
+scopes = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/bigquery",
+    "https://www.googleapis.com/auth/cloud-platform"
+]
+
 try:
-    creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    creds = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], 
+        scopes=scopes  # THIS IS THE KEY ADDITION
+    )
     client = bigquery.Client(credentials=creds, project="sensorpush-export")
 except Exception as e:
     st.error(f"Authentication Error: {e}")
