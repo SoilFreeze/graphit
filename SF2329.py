@@ -7,9 +7,9 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 # 1. SETUP
-st.set_page_config(page_title="Project 2329 Temperature Dashboard", layout="wide")
+st.set_page_config(page_title="Project 2329 Dashboard", layout="wide")
 
-# 2. DATA LOADING (Hardcoded for Project 2329)
+# 2. DATA LOADING
 scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
@@ -32,14 +32,12 @@ is_celsius = unit == "Celsius (°C)"
 u_symbol = "°C" if is_celsius else "°F"
 alert_threshold = 1.0 if is_celsius else 1.8
 
-# Standardize values immediately
 if is_celsius:
     df_proj['value'] = (df_proj['value'] - 32) * 5/9
 
 st.sidebar.subheader("Reference Lines")
 show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
 show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
-# 32 degree line checkbox removed as requested
 
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
 cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
@@ -57,63 +55,54 @@ def add_ref_lines(ax, is_vertical=True):
     if show_blue_ref:
         v = round((26.6 - 32) * 5/9, 1) if is_celsius else 26.6
         refs.append({'val': v, 'color': 'blue', 'label': f"{v}{u_symbol}"})
-    # Logic for 32 degree line removed from helper
+    
     for r in refs:
-        if is_vertical: ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
-        else: ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
+        if is_vertical:
+            ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
+        else:
+            ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
 
 # --- TAB 1: 24-HOUR INSIGHTS ---
 with tab_summary:
-    col1, col2 = st.columns([2, 1])
+    # Removed col2 to give tables full width
     now = pd.Timestamp.now(tz='UTC')
     last_24 = df_proj[df_proj['timestamp'] >= (now - pd.Timedelta(hours=24))].copy()
     
-    with col1:
-        if not last_24.empty:
-            node_stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max']).reset_index()
-            node_stats['delta'] = node_stats['max'] - node_stats['min']
+    if not last_24.empty:
+        node_stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max']).reset_index()
+        node_stats['delta'] = node_stats['max'] - node_stats['min']
+        
+        p_rows, b_rows = [], []
+        for loc in sorted(last_24['location'].unique()):
+            p_data = node_stats[node_stats['location'] == loc]
+            p_min, p_max = p_data['min'].min(), p_data['max'].max()
+            top_node = p_data.loc[p_data['delta'].idxmax()]
             
-            p_rows, b_rows = [], []
-            for loc in sorted(last_24['location'].unique()):
-                p_data = node_stats[node_stats['location'] == loc]
-                p_min, p_max = p_data['min'].min(), p_data['max'].max()
-                top_node = p_data.loc[p_data['delta'].idxmax()]
-                
-                row_disp = {
-                    "Pipe": loc,
-                    "Min Temp": f"{p_min:.1f}{u_symbol}",
-                    "Max Temp": f"{p_max:.1f}{u_symbol}",
-                    "Max Change at": f"{float(top_node['depth']):.1f}ft" if "bank" not in loc.lower() else top_node['depth'],
-                    "24h Change": f"{top_node['delta']:.1f}{u_symbol}"
-                }
-                color = 'color: red' if top_node['delta'] >= alert_threshold else ''
-                if "bank" in loc.lower(): b_rows.append((row_disp, color))
-                else: p_rows.append((row_disp, color))
+            row_disp = {
+                "Pipe": loc,
+                "Min Temp": f"{p_min:.1f}{u_symbol}",
+                "Max Temp": f"{p_max:.1f}{u_symbol}",
+                "Max Change at": f"{float(top_node['depth']):.1f}ft" if "bank" not in loc.lower() else top_node['depth'],
+                "24h Change": f"{top_node['delta']:.1f}{u_symbol}"
+            }
+            # Color logic based on delta
+            color = 'color: red' if top_node['delta'] >= alert_threshold else ''
+            
+            if "bank" in loc.lower(): b_rows.append((row_disp, color))
+            else: p_rows.append((row_disp, color))
 
-            def draw_table(rows, title):
-                st.subheader(title)
-                if rows:
-                    df = pd.DataFrame([r[0] for r in rows])
-                    colors = [r[1] for r in rows]
-                    styler = df.style.apply(lambda x: [colors[i] for i in range(len(x))], axis=0)
-                    st.table(styler)
+        def draw_table(rows, title):
+            st.subheader(title)
+            if rows:
+                df = pd.DataFrame([r[0] for r in rows])
+                colors = [r[1] for r in rows]
+                styler = df.style.apply(lambda x: [colors[i] for i in range(len(x))], axis=0)
+                st.table(styler)
 
-            draw_table(p_rows, "Standard Pipes: 24h Activity")
-            draw_table(b_rows, "Bank Temperatures: 24h Activity")
-        else:
-            st.info("No sensor activity in the last 24 hours.")
-
-    with col2:
-        st.subheader("⚠️ Offline Sensors")
-        all_s = df_proj[['location', 'depth']].drop_duplicates()
-        act_s = last_24[['location', 'depth']].drop_duplicates()
-        offline = all_s.merge(act_s, on=['location', 'depth'], how='left', indicator=True)
-        offline = offline[offline['_merge'] == 'left_only']
-        if not offline.empty:
-            st.warning(f"{len(offline)} nodes offline")
-            st.dataframe(offline[['location', 'depth']].rename(columns={'location':'Pipe','depth':'Node'}), hide_index=True)
-        else:
-            st.success("All Project 2329 nodes are online.")
+        draw_table(p_rows, "Standard Pipes: 24h Activity")
+        draw_table(b_rows, "Bank Temperatures: 24h Activity")
+    else:
+        st.info("No sensor activity recorded in the last 24 hours.")
 
 # --- TAB 2: TEMP VS DEPTH ---
 with tab_depth:
