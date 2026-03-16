@@ -21,7 +21,7 @@ show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
 show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
 show_freezing_ref = st.sidebar.checkbox("Show 32.0 Line (Blue)", value=True)
 
-# 3. DATA LOADING (Run this before Tabs)
+# 3. DATA LOADING
 scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
@@ -42,7 +42,11 @@ available_projects = sorted(df_raw['project'].dropna().unique())
 selected_project = st.sidebar.selectbox("Choose Project", available_projects)
 df_proj = df_raw[df_raw['project'] == selected_project].copy()
 
-# 4. CREATE TABS (Must happen before 'with tab_summary')
+num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
+cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
+df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
+
+# 4. CREATE TABS (Crucial step for sequencing)
 tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp vs Depth", "📈 Temp vs Time"])
 
 # 5. HELPERS
@@ -59,9 +63,12 @@ def add_ref_lines(ax, is_vertical=True):
     if show_freezing_ref:
         v = 0.0 if is_celsius else 32.0
         refs.append({'val': v, 'color': 'blue', 'label': f"{v}{u_symbol}"})
+    
     for r in refs:
-        if is_vertical: ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
-        else: ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
+        if is_vertical:
+            ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
+        else:
+            ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
 
 # --- TAB: 24-HOUR INSIGHTS ---
 with tab_summary:
@@ -80,7 +87,6 @@ with tab_summary:
                 p_min, p_max = p_data['min'].min(), p_data['max'].max()
                 top_node = p_data.loc[p_data['delta'].idxmax()]
                 
-                # Dictionary for display ONLY
                 row_disp = {
                     "Pipe": loc,
                     "Min Temp": f"{p_min:.1f}{u_symbol}",
@@ -88,8 +94,6 @@ with tab_summary:
                     "Max Change at": f"{float(top_node['depth']):.1f}ft" if "bank" not in loc.lower() else top_node['depth'],
                     "24h Change": f"{top_node['delta']:.1f}{u_symbol}"
                 }
-                
-                # Pre-calculate alert color
                 color = 'color: red' if top_node['delta'] >= alert_threshold else ''
                 
                 if "bank" in loc.lower(): b_rows.append((row_disp, color))
@@ -100,7 +104,6 @@ with tab_summary:
                 if rows:
                     df = pd.DataFrame([r[0] for r in rows])
                     colors = [r[1] for r in rows]
-                    # Map colors row-by-row
                     styler = df.style.apply(lambda x: [colors[i] for i in range(len(x))], axis=0)
                     st.table(styler)
 
@@ -121,4 +124,50 @@ with tab_summary:
         else:
             st.success("All nodes online.")
 
-# [Tabs for Depth and Time follow here using the same Sequencing...]
+# --- TAB: TEMPERATURE VS DEPTH ---
+with tab_depth:
+    st.subheader(f"Temperature vs Depth ({u_symbol})")
+    depth_locations = [loc for loc in df_filtered['location'].unique() if "bank" not in loc.lower()]
+    for loc in depth_locations:
+        with st.expander(f"Location: {loc}", expanded=True):
+            df_loc = df_filtered[df_filtered['location'] == loc].copy()
+            df_loc['ts_round'] = df_loc['timestamp'].dt.round('1h')
+            # Filter for Monday at 6 AM snapshots
+            df_snapshot = df_loc[(df_loc['ts_round'].dt.weekday == 0) & (df_loc['ts_round'].dt.hour == 6)].copy()
+            if not df_snapshot.empty:
+                fig1, ax1 = plt.subplots(figsize=(8, 6))
+                for ts, group in df_snapshot.groupby('ts_round'):
+                    snap = group.sort_values('depth')
+                    ax1.plot(snap['value'], snap['depth'], marker='o', label=ts.strftime('%Y-%m-%d'))
+                ax1.invert_yaxis()
+                add_ref_lines(ax1, is_vertical=True)
+                ax1.set_xlabel(f"Temp ({u_symbol})")
+                ax1.set_ylabel("Depth (ft)")
+                ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
+                st.pyplot(fig1)
+            else:
+                st.info("No Monday 6 AM data available for this range.")
+
+# --- TAB: TEMPERATURE VS TIME ---
+with tab_time:
+    st.subheader(f"Temperature vs Time ({u_symbol})")
+    for loc in sorted(df_filtered['location'].unique()):
+        with st.expander(f"Location: {loc}", expanded=True):
+            df_lt = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
+            if not df_lt.empty:
+                fig2, ax2 = plt.subplots(figsize=(12, 5))
+                for d in sorted(df_lt['depth'].unique()):
+                    sub = df_lt[df_lt['depth'] == d].copy()
+                    # Gap handling (broken lines for missing data)
+                    diff = sub['timestamp'].diff() > pd.Timedelta(hours=6)
+                    new_rows = [{'timestamp': sub.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1), 'value': np.nan} for i, has_gap in enumerate(diff) if has_gap]
+                    if new_rows: sub = pd.concat([sub, pd.DataFrame(new_rows)]).sort_values('timestamp')
+                    
+                    lbl = f"Node {d}" if "bank" in loc.lower() else f"{float(d):.1f}ft"
+                    ax2.plot(sub['timestamp'], sub['value'], label=lbl, alpha=0.8)
+                
+                ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+                add_ref_lines(ax2, is_vertical=False)
+                ax2.set_ylabel(f"Temp ({u_symbol})")
+                ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
+                st.pyplot(fig2)
