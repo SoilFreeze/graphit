@@ -45,6 +45,7 @@ available_locations = sorted(df_filtered['location'].unique())
 
 def add_ref_lines(ax, is_vertical=True):
     if show_freezing:
+        # Bold Blue 32°F Line
         if is_vertical: ax.axvline(x=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
         else: ax.axhline(y=32, color='blue', linestyle='--', linewidth=2, label='32°F Freezing')
     if custom_marks_input:
@@ -55,19 +56,32 @@ def add_ref_lines(ax, is_vertical=True):
                 else: ax.axhline(y=m, color='green', linestyle=':')
         except: pass
 
-# --- TAB 1: WEEKLY DEPTH PROFILES ---
+# --- TAB 1: WEEKLY DEPTH PROFILES (Office Fix Applied) ---
 with tab_depth:
     st.subheader("Vertical Temperature: Mondays at 6:00 AM")
     for loc in available_locations:
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered[df_filtered['location'] == loc].copy()
-            df_monday = df_loc[(df_loc['timestamp'].dt.weekday == 0) & (df_loc['timestamp'].dt.hour == 6)]
+            
+            # Office Fix: Ensure depth is numeric to prevent sorting issues
+            df_loc['depth'] = pd.to_numeric(df_loc['depth'], errors='coerce')
+            df_loc = df_loc.dropna(subset=['depth'])
+
+            # Filter for Mondays
+            df_monday_all = df_loc[df_loc['timestamp'].dt.weekday == 0]
+            
+            # Find the actual hours available on those Mondays (Office might not have exactly 6:00:00)
+            available_hours = df_monday_all['timestamp'].dt.hour.unique()
+            target_hour = 6 if 6 in available_hours else (available_hours[0] if len(available_hours) > 0 else None)
+            
+            df_monday = df_monday_all[df_monday_all['timestamp'].dt.hour == target_hour]
             
             if not df_monday.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
-                for ts in sorted(df_monday['timestamp'].unique()):
-                    snapshot = df_monday[df_monday['timestamp'] == ts].drop_duplicates('depth').sort_values('depth')
-                    label_date = pd.to_datetime(ts).strftime('%Y-%m-%d')
+                # Group by timestamp to ensure we don't connect points from different times
+                for ts, group in df_monday.groupby('timestamp'):
+                    snapshot = group.drop_duplicates('depth').sort_values('depth')
+                    label_date = ts.strftime('%Y-%m-%d %H:%M')
                     ax1.plot(snapshot['value'], snapshot['depth'], marker='o', label=label_date)
                 
                 ax1.invert_yaxis()
@@ -75,9 +89,12 @@ with tab_depth:
                 ax1.set_xlabel("Temp (°F)")
                 ax1.set_ylabel("Depth (ft)")
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
+                ax1.grid(True, alpha=0.2)
                 st.pyplot(fig1)
+            else:
+                st.info(f"No Monday data found for {loc}. Available hours: {list(available_hours)}")
 
-# --- TAB 2: HOURLY TRENDS (With 6-Hour Break Logic) ---
+# --- TAB 2: HOURLY TRENDS (6hr Gap Break Logic) ---
 with tab_time:
     st.subheader("Continuous Hourly Trends (6hr Gap Break)")
     for loc in available_locations:
@@ -90,24 +107,17 @@ with tab_time:
                     subset = df_loc_time[df_loc_time['depth'] == d].copy()
                     subset = subset.drop_duplicates('timestamp').sort_values('timestamp')
                     
-                    # --- THE FIX: Insert NaNs where gap > 6 hours ---
-                    # Calculate time difference between consecutive rows
+                    # Logic to break the line if gap > 6 hours
                     diff = subset['timestamp'].diff() > pd.Timedelta(hours=6)
-                    
-                    # Create a new dataframe with NaNs where the breaks are
-                    new_index = []
+                    new_rows = []
                     for i, has_gap in enumerate(diff):
                         if has_gap:
-                            # Insert a dummy timestamp 1 second after the previous point to break the line
-                            new_index.append(subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1))
+                            new_rows.append({'timestamp': subset.iloc[i-1]['timestamp'] + pd.Timedelta(seconds=1), 'value': np.nan})
                     
-                    # Add the NaNs and re-sort
-                    if new_index:
-                        gap_df = pd.DataFrame({'timestamp': new_index})
-                        subset = pd.concat([subset, gap_df]).sort_values('timestamp')
+                    if new_rows:
+                        subset = pd.concat([subset, pd.DataFrame(new_rows)]).sort_values('timestamp')
                     
-                    ax2.plot(subset['timestamp'], subset['value'], 
-                             label=f"{d}ft", linewidth=1.5, marker='.', markersize=3, alpha=0.8)
+                    ax2.plot(subset['timestamp'], subset['value'], label=f"{d}ft", linewidth=1.5, marker='.', markersize=3, alpha=0.8)
                 
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel("Temp (°F)")
