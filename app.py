@@ -9,22 +9,22 @@ from google.oauth2 import service_account
 # 1. SETUP
 st.set_page_config(page_title="Master Geotechnical Dashboard", layout="wide")
 
-# 2. DATA LOADING (Must happen before UI logic)
-scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
-creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-client = bigquery.Client(credentials=creds, project="sensorpush-export")
-
-@st.cache_data(ttl=60) # This tells the app to refresh data every 60 seconds
+# 2. DATA LOADING
+@st.cache_data(ttl=60)
 def load_lab_data():
-    ...
-    
-# Add this temporarily to see EVERY node the app finds
-st.sidebar.write("Debug - All Nodes Found:", sorted(df['depth'].unique()))
-
-@st.cache_data(ttl=300)
-def get_full_dataset():
     query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
     return client.query(query).to_dataframe()
+
+# THIS LINE MUST RUN FIRST
+df = load_lab_data() 
+df.columns = [str(c).strip().lower() for c in df.columns]
+
+# NOW THE DEBUG LINE WILL WORK
+st.sidebar.write("Debug - All Nodes Found:", sorted(df['depth'].unique().astype(str)))
+
+# 3. HANDLING THE "NULL" ROWS
+# This line removes any rows where the temperature (value) or node ID (depth) are missing
+df = df.dropna(subset=['value', 'depth', 'location'])
 
 df_raw = get_full_dataset()
 df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
