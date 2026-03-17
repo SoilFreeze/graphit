@@ -158,19 +158,51 @@ with tab_depth:
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 st.pyplot(fig1)
 
-# --- TAB 3: TEMP VS TIME ---
+# --- TAB 3: TEMP VS TIME (Improved Visuals) ---
 with tab_time:
     st.subheader(f"Temperature vs Time ({u_symbol})")
+    
+    # Calculate the strict start of the current week (Monday at 00:00:00)
+    today = pd.Timestamp.now(tz='UTC').normalize()
+    days_since_monday = today.weekday()
+    current_monday = today - pd.Timedelta(days=days_since_monday)
+    
+    # Calculate the exact graph start based on the 'num_weeks' slider
+    # This ensures the graph always starts on a Monday midnight
+    graph_start = current_monday - pd.Timedelta(weeks=num_weeks-1)
+    graph_end = pd.Timestamp.now(tz='UTC')
+
     for loc in sorted(df_filtered['location'].unique()):
         with st.expander(f"Location: {loc}", expanded=True):
             df_lt = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
+            
             if not df_lt.empty:
                 fig2, ax2 = plt.subplots(figsize=(12, 5))
+                
+                # Plot each node
                 for d in sorted(df_lt['depth'].unique()):
                     sub = df_lt[df_lt['depth'] == d].copy()
-                    ax2.plot(sub['timestamp'], sub['value'], label=f"Node {d}", alpha=0.8)
+                    ax2.plot(sub['timestamp'], sub['value'], label=f"Node {d}", alpha=0.9, linewidth=1.5)
+                
+                # 1. & 2. GRID LINES: Monday (Dark) vs Daily (Light)
+                # Create a range of every single day in the view
+                all_days = pd.date_range(start=graph_start, end=graph_end, freq='D')
+                
+                for day in all_days:
+                    if day.weekday() == 0: # Monday
+                        ax2.axvline(day, color='#333333', linewidth=1.2, alpha=0.8, zorder=1) # Dark line
+                    else: # Other days
+                        ax2.axvline(day, color='#CCCCCC', linewidth=0.6, alpha=0.5, zorder=1) # Light line
+                
+                # 3. NO BUFFERS: Force data from edge to edge
+                ax2.set_xlim(graph_start, graph_end)
+                ax2.margins(x=0) # Remove the internal padding
+                
+                # Formatting
                 ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
                 add_ref_lines(ax2, is_vertical=False)
                 ax2.set_ylabel(f"Temp ({u_symbol})")
+                ax2.grid(True, axis='y', alpha=0.3, linestyle=':')
                 ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
+                
                 st.pyplot(fig2)
