@@ -7,86 +7,128 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from scipy.stats import linregress
 
-# 1. SETUP
+# 1. PAGE SETUP
 st.set_page_config(page_title="Engineer Data Lab", layout="wide")
 
-# 2. DATA LOADING
-scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
-creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-client = bigquery.Client(credentials=creds, project="sensorpush-export")
+# 2. ESTABLISH BIGQUERY CONNECTION
+# This must be defined before the load function is called
+try:
+    scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
+    creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    client = bigquery.Client(credentials=creds, project="sensorpush-export")
+except Exception as e:
+    st.error(f"Failed to connect to Google Cloud: {e}")
+    st.stop()
 
+# 3. DATA LOADING FUNCTION
 @st.cache_data(ttl=60)
 def load_lab_data():
-    # Adjusted to ensure we get the full dataset for exploration
+    # Pulling the full dataset for exploration
     query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
     return client.query(query).to_dataframe()
 
-df = load_lab_data()
-df.columns = [str(c).strip().lower() for c in df_raw.columns]
-df['timestamp'] = pd.to_datetime(df['timestamp'])
+# 4. DATA PROCESSING & CLEANING
+df_raw = load_lab_data()
 
-# 3. SIDEBAR: SELECTION
+# Clean headers and timestamps
+df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
+df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
+
+# REMOVE NULL ROWS: Drop rows where temperature or depth is missing
+df_clean = df_raw.dropna(subset=['value', 'depth', 'location']).copy()
+
+# TYPE FIXER: Force all Depths/Nodes to be strings (fixes the "missing node" issue)
+df_clean['depth'] = df_clean['depth'].astype(str).str.strip()
+
+# 5. SIDEBAR: SELECTION CONTROLS
 st.sidebar.title("🛠 Engineering Lab")
-project = st.sidebar.selectbox("Select Project", sorted(df['project'].unique()))
-df_p = df[df['project'] == project].copy()
 
-loc = st.sidebar.selectbox("Location/Pipe", sorted(df_p['location'].unique()))
-depth = st.sidebar.selectbox("Node/Depth", sorted(df_p[df_p['location'] == loc]['depth'].unique()))
+# Project Selection
+projects = sorted(df_clean['project'].unique())
+selected_proj = st.sidebar.selectbox("Select Project", projects)
+df_p = df_clean[df_clean['project'] == selected_proj].copy()
 
-node_data = df_p[(df_p['location'] == loc) & (df_p['depth'] == depth)].sort_values('timestamp').copy()
+# Location & Node Selection
+locs = sorted(df_p['location'].unique())
+selected_loc = st.sidebar.selectbox("Location (Pipe)", locs)
 
-# 4. TREND ANALYSIS & GOAL SETTING
-st.header(f"Project {project}: Analysis for {loc} ({depth})")
+nodes = sorted(df_p[df_p['location'] == selected_loc]['depth'].unique())
+selected_node = st.sidebar.selectbox("Node / Depth ID", nodes)
 
-col1, col2 = st.columns([1, 2])
+# Sidebar Divider & Debug info
+st.sidebar.divider()
+st.sidebar.write(f"Unique Nodes found: {len(nodes)}")
 
-with col1:
-    st.subheader("Analysis Parameters")
-    # Slider to clean out sensor spikes instantly
-    min_t, max_t = st.slider("Valid Temp Range", -40.0, 140.0, (node_data['value'].min(), node_data['value'].max()))
-    clean_data = node_data[(node_data['value'] >= min_t) & (node_data['value'] <= max_t)].copy()
+# Filter to specific sensor
+working_df = df_p[(df_p['location'] == selected_loc) & (df_p['depth'] == selected_node)].sort_values('timestamp')
+
+# 6. MAIN INTERFACE
+st.header(f"Analysis: {selected_proj} | {selected_loc} | Node {selected_node}")
+
+if not working_df.empty:
+    col1, col2 = st.columns([1, 2])
     
-    st.write(f"Points Analyzed: {len(clean_data)}")
-    
-    # Target Temperature Prediction
-    target_temp = st.number_input("Target Temp Goal (e.g. 32.0)", value=32.0)
-    forecast_days = st.slider("Forecast Visibility (Days)", 7, 180, 30)
+    with col1:
+        st.subheader("Data Cleaning")
+        # Slider to filter out spikes or sensor errors
+        min_v = float(working_df['value'].min())
+        max_v = float(working_df['value'].max())
+        valid_range = st.slider("Valid Temp Range", -50.0, 150.0, (min_v, max_v))
+        
+        # Apply filter
+        filtered_df = working_df[
+            (working_df['value'] >= valid_range[0]) & 
+            (working_df['value'] <= valid_range[1])
+        ].copy()
+        
+        st.write(f"Points Analyzed: {len(filtered_df)} of {len(working_df)}")
+        
+        # Goal Forecasting
+        st.subheader("Forecast Parameters")
+        target_temp = st.number_input("Target Goal Temp", value=32.0)
+        forecast_days = st.slider("Days to Forecast", 7, 180, 30)
 
-with col2:
-    if len(clean_data) > 2:
-        # Math: Linear Regression
-        x_num = mdates.date2num(clean_data['timestamp'])
-        y_vals = clean_data['value']
-        slope, intercept, r_val, p_val, std_err = linregress(x_num, y_vals)
-        
-        # Plotting
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.scatter(node_data['timestamp'], node_data['value'], color='lightgrey', alpha=0.3, label="Excluded/Errors")
-        ax.scatter(clean_data['timestamp'], clean_data['value'], color='black', s=12, label="Clean Data")
-        
-        # Calculate Trend & Prediction
-        x_future = np.array([x_num.min(), x_num.max() + forecast_days])
-        y_future = slope * x_future + intercept
-        ax.plot(mdates.num2date(x_future), y_future, color='red', linestyle='--', linewidth=2, label="Trend Line")
-        
-        # Calculate Intersection with Goal
-        if slope != 0:
-            intersect_num = (target_temp - intercept) / slope
-            intersect_date = mdates.num2date(intersect_num)
-            ax.axhline(y=target_temp, color='blue', linestyle=':', label=f"Goal ({target_temp})")
+    with col2:
+        if len(filtered_df) > 2:
+            # Linear Regression Math
+            x_num = mdates.date2num(filtered_df['timestamp'])
+            y_vals = filtered_df['value']
+            slope, intercept, r_val, p_val, std_err = linregress(x_num, y_vals)
             
-        ax.set_ylabel("Temperature")
-        ax.legend()
-        st.pyplot(fig)
-        
-        # Metrics
-        st.info(f"**Slope:** {slope:.4f}/day | **R²:** {r_val**2:.3f}")
-        if slope != 0:
-            st.success(f"Projected to hit {target_temp} on: **{intersect_date.strftime('%Y-%m-%d')}**")
-    else:
-        st.warning("Please adjust the 'Valid Temp Range' to include at least 3 data points.")
+            # Create Plot
+            fig, ax = plt.subplots(figsize=(10, 5))
+            # Plot original data as light grey to show what was removed
+            ax.scatter(working_df['timestamp'], working_df['value'], color='lightgrey', alpha=0.3, label="Excluded Points")
+            # Plot cleaned data in black
+            ax.scatter(filtered_df['timestamp'], filtered_df['value'], color='black', s=12, label="Clean Data")
+            
+            # Draw Trend & Forecast
+            x_future = np.array([x_num.min(), x_num.max() + forecast_days])
+            y_future = slope * x_future + intercept
+            ax.plot(mdates.num2date(x_future), y_future, color='red', linestyle='--', linewidth=2, label="Trend Line")
+            
+            # Calculate Intersection with Goal
+            if slope != 0:
+                intersect_num = (target_temp - intercept) / slope
+                intersect_date = mdates.num2date(intersect_num)
+                ax.axhline(y=target_temp, color='blue', linestyle=':', label=f"Goal ({target_temp})")
+            
+            ax.legend()
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
+            
+            # Results
+            st.success(f"**Current Slope:** {slope:.4f} units/day | **R² Fit:** {r_val**2:.3f}")
+            if slope != 0:
+                st.info(f"Projected to hit {target_temp} on: **{intersect_date.strftime('%Y-%m-%d')}**")
+        else:
+            st.warning("Insufficient clean data to calculate trend. Adjust the Valid Temp Range.")
 
-# 5. THE DATA EDITOR (Manual Deletion)
-st.subheader("Manual Data Review")
-st.write("Edit values below. Changes will reflect in the graph above upon refresh.")
-st.data_editor(clean_data[['timestamp', 'value']], use_container_width=True, hide_index=True)
+    # 7. THE DATA EDITOR
+    st.divider()
+    st.subheader("Manual Data Review")
+    st.write("Edit values in the table below to see how they impact the trend line above.")
+    st.data_editor(filtered_df[['timestamp', 'value']], use_container_width=True, hide_index=True)
+
+else:
+    st.error("No data found for the selected criteria. Check your Node ID or Project name.")
