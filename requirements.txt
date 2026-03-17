@@ -1,8 +1,8 @@
+streamlit>=1.35.0
+altair>=5.0.0
 pandas
-streamlit
 google-cloud-bigquery
 google-auth
 matplotlib
 numpy
 scipy
-db-dtypes
