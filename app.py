@@ -31,7 +31,7 @@ df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 # --- DATA REPAIR LOGIC ---
 df_raw = df_raw.dropna(subset=['value', 'depth', 'location'])
 
-# Ensure '54018-ch1' and '54018_ch1' are merged and treated as strings
+# Merge '54018-ch1' and '54018_ch1' and strip spaces
 df_raw['depth'] = (
     df_raw['depth']
     .astype(str)
@@ -42,7 +42,6 @@ df_raw['depth'] = (
 
 # 4. SIDEBAR
 st.sidebar.title("📁 Main Dashboard")
-
 unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit (°F)", "Celsius (°C)"])
 is_celsius = unit == "Celsius (°C)"
 u_symbol = "°C" if is_celsius else "°F"
@@ -79,71 +78,85 @@ def add_ref_lines(ax, is_vertical=True):
         if is_vertical: ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
         else: ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
 
-# --- TAB 1: 24-HOUR INSIGHTS ---
+# --- TAB 1: 24-HOUR INSIGHTS (WITH OFFLINE CHECK) ---
 with tab_summary:
+    col_tables, col_offline = st.columns([2, 1])
     now = pd.Timestamp.now(tz='UTC')
     last_24 = df_proj[df_proj['timestamp'] >= (now - pd.Timedelta(hours=24))].copy()
     
-    if not last_24.empty:
-        node_stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max']).reset_index()
-        node_stats['delta'] = node_stats['max'] - node_stats['min']
-        
-        p_rows = []
-        for loc in sorted(last_24['location'].unique()):
-            p_data = node_stats[node_stats['location'] == loc]
-            if p_data.empty: continue
-            p_min, p_max = p_data['min'].min(), p_data['max'].max()
-            top_node = p_data.loc[p_data['delta'].idxmax()]
+    with col_tables:
+        if not last_24.empty:
+            node_stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max']).reset_index()
+            node_stats['delta'] = node_stats['max'] - node_stats['min']
             
-            row_disp = {
-                "Pipe": loc,
-                "Min Temp": f"{p_min:.1f}{u_symbol}",
-                "Max Temp": f"{p_max:.1f}{u_symbol}",
-                "Max Change at": f"{top_node['depth']}",
-                "24h Change": f"{top_node['delta']:.1f}{u_symbol}"
-            }
-            color = 'color: red' if top_node['delta'] >= alert_threshold else ''
-            p_rows.append((row_disp, color))
+            p_rows, b_rows = [], []
+            for loc in sorted(last_24['location'].unique()):
+                p_data = node_stats[node_stats['location'] == loc]
+                p_min, p_max = p_data['min'].min(), p_data['max'].max()
+                top_node = p_data.loc[p_data['delta'].idxmax()]
+                
+                row_disp = {
+                    "Pipe": loc,
+                    "Min Temp": f"{p_min:.1f}{u_symbol}",
+                    "Max Temp": f"{p_max:.1f}{u_symbol}",
+                    "Max Change at": f"{top_node['depth']}",
+                    "24h Change": f"{top_node['delta']:.1f}{u_symbol}"
+                }
+                color = 'color: red' if top_node['delta'] >= alert_threshold else ''
+                if "bank" in loc.lower(): b_rows.append((row_disp, color))
+                else: p_rows.append((row_disp, color))
 
-        st.subheader("Sensor Activity (Last 24h)")
-        if p_rows:
-            df_disp = pd.DataFrame([r[0] for r in p_rows])
-            colors = [r[1] for r in p_rows]
-            st.table(df_disp.style.apply(lambda x: [colors[i] for i in range(len(x))], axis=0))
-    else:
-        st.info("No sensor activity in the last 24 hours.")
+            def draw_table(rows, title):
+                st.subheader(title)
+                if rows:
+                    df_disp = pd.DataFrame([r[0] for r in rows])
+                    colors = [r[1] for r in rows]
+                    st.table(df_disp.style.apply(lambda x: [colors[i] for i in range(len(x))], axis=0))
 
-# --- TAB 2: TEMP VS DEPTH (RESTORED LOGIC) ---
+            draw_table(p_rows, "Standard Pipes: 24h Activity")
+            draw_table(b_rows, "Bank Temperatures: 24h Activity")
+        else:
+            st.info("No sensor activity in the last 24 hours.")
+
+    with col_offline:
+        st.subheader("⚠️ Offline Sensors")
+        # Find every sensor that has EVER been seen in this project
+        all_sensors = df_proj[['location', 'depth']].drop_duplicates()
+        # Find sensors seen in the last 24 hours
+        active_sensors = last_24[['location', 'depth']].drop_duplicates()
+        
+        # Merge to find the difference
+        offline = all_sensors.merge(active_sensors, on=['location', 'depth'], how='left', indicator=True)
+        offline = offline[offline['_merge'] == 'left_only']
+        
+        if not offline.empty:
+            st.warning(f"{len(offline)} nodes have not reported in 24h")
+            st.dataframe(offline[['location', 'depth']].rename(columns={'location':'Pipe','depth':'Node'}), hide_index=True)
+        else:
+            st.success("All sensors are currently online.")
+
+# --- TAB 2: TEMP VS DEPTH (RESTORED) ---
 with tab_depth:
     st.subheader(f"Temperature vs Depth ({u_symbol})")
-    # Filter out 'bank' sensors for depth charts
     depth_locs = [l for l in df_filtered['location'].unique() if "bank" not in l.lower()]
-    
     for loc in depth_locs:
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered[df_filtered['location'] == loc].copy()
-            # Convert depth to numeric for correct sorting on the Y-axis
             df_loc['depth_num'] = pd.to_numeric(df_loc['depth'], errors='coerce')
             df_loc = df_loc.dropna(subset=['depth_num'])
-            
             df_loc['ts_round'] = df_loc['timestamp'].dt.round('1h')
-            # Restore Monday 6am snapshot logic
             df_snap = df_loc[(df_loc['ts_round'].dt.weekday == 0) & (df_loc['ts_round'].dt.hour == 6)].copy()
-            
             if not df_snap.empty:
                 fig1, ax1 = plt.subplots(figsize=(8, 6))
                 for ts, gp in df_snap.groupby('ts_round'):
                     snap = gp.sort_values('depth_num')
                     ax1.plot(snap['value'], snap['depth_num'], marker='o', label=ts.strftime('%Y-%m-%d'))
-                
-                ax1.invert_yaxis() # Depth 0 at top
+                ax1.invert_yaxis()
                 add_ref_lines(ax1, is_vertical=True)
                 ax1.set_xlabel(f"Temp ({u_symbol})")
                 ax1.set_ylabel("Depth (ft)")
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 st.pyplot(fig1)
-            else:
-                st.info(f"No Monday 6:00 AM data available for {loc} in this timeframe.")
 
 # --- TAB 3: TEMP VS TIME ---
 with tab_time:
