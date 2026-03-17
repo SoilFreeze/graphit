@@ -31,7 +31,7 @@ df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 # --- DATA REPAIR LOGIC ---
 df_raw = df_raw.dropna(subset=['value', 'depth', 'location'])
 
-# STANDARD: Force all node names to use DASHES to match your mapping
+# STANDARD: Force all node names to use DASHES
 df_raw['depth'] = (
     df_raw['depth']
     .astype(str)
@@ -76,7 +76,7 @@ def add_ref_lines(ax, is_vertical=True):
         if is_vertical: ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5)
         else: ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5)
 
-# --- TAB 1: 24-HOUR INSIGHTS (RESTORED) ---
+# --- TAB 1: 24-HOUR INSIGHTS ---
 with tab_summary:
     col_tables, col_offline = st.columns([2, 1])
     now = pd.Timestamp.now(tz='UTC')
@@ -118,34 +118,71 @@ with tab_summary:
         else:
             st.success("All sensors online.")
 
-# --- TAB 3: TEMP VS TIME (IMPROVED GRAPHICS) ---
+# --- TAB 2: TEMP VS DEPTH (ROBUST FIX) ---
+with tab_depth:
+    st.subheader(f"Temperature vs Depth Profile ({u_symbol})")
+    depth_locs = [l for l in df_proj['location'].unique() if "bank" not in l.lower()]
+    
+    cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
+    df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
+
+    for loc in sorted(depth_locs):
+        with st.expander(f"Location: {loc}", expanded=True):
+            df_loc = df_filtered[df_filtered['location'] == loc].copy()
+            # Clean depth for sorting
+            df_loc['depth_num'] = pd.to_numeric(df_loc['depth'].str.extract('(\d+)')[0], errors='coerce')
+            df_loc = df_loc.dropna(subset=['depth_num'])
+            
+            # Group by 1-hour intervals
+            df_loc['ts_round'] = df_loc['timestamp'].dt.round('1h')
+            
+            # Snapshots: Look for Mondays at 6:00 AM
+            df_snap = df_loc[(df_loc['ts_round'].dt.weekday == 0) & (df_loc['ts_round'].dt.hour == 6)].copy()
+            
+            # FALLBACK: If no Mondays, use the absolute latest snapshot available
+            if df_snap.empty and not df_loc.empty:
+                latest_ts = df_loc['ts_round'].max()
+                df_snap = df_loc[df_loc['ts_round'] == latest_ts].copy()
+                st.caption(f"Showing latest snapshot: {latest_ts.strftime('%Y-%m-%d %H:%M')}")
+
+            if not df_snap.empty:
+                fig1, ax1 = plt.subplots(figsize=(7, 6))
+                for ts, gp in df_snap.groupby('ts_round'):
+                    snap = gp.sort_values('depth_num')
+                    ax1.plot(snap['value'], snap['depth_num'], marker='o', label=ts.strftime('%Y-%m-%d'))
+                
+                ax1.invert_yaxis() # 0ft at top
+                add_ref_lines(ax1, is_vertical=True)
+                ax1.set_xlabel(f"Temp ({u_symbol})")
+                ax1.set_ylabel("Depth (ft)")
+                ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
+                st.pyplot(fig1)
+            else:
+                st.warning(f"No data points found for {loc} in the last {num_weeks} weeks.")
+
+# --- TAB 3: TEMP VS TIME ---
 with tab_time:
-    # 1. GRAPH CALCULATIONS: Start on Monday
     today = pd.Timestamp.now(tz='UTC').normalize()
     graph_monday = today - pd.Timedelta(days=today.weekday()) - pd.Timedelta(weeks=num_weeks-1)
     graph_end = pd.Timestamp.now(tz='UTC')
 
     for loc in sorted(df_proj['location'].unique()):
         with st.expander(f"Location: {loc}", expanded=True):
-            df_lt = df_proj[df_proj['location'] == loc].sort_values('timestamp')
+            df_lt = df_proj[(df_proj['location'] == loc) & (df_proj['timestamp'] >= graph_monday)].sort_values('timestamp')
             if not df_lt.empty:
                 fig, ax = plt.subplots(figsize=(12, 5))
-                
-                # Plot data
                 for d in sorted(df_lt['depth'].unique()):
                     sub = df_lt[df_lt['depth'] == d]
                     ax.plot(sub['timestamp'], sub['value'], label=f"Node {d}", linewidth=1.5)
                 
-                # 2. GRID LINES: Monday Midnight (Dark) vs Daily (Light)
+                # Grid Logic
                 all_days = pd.date_range(start=graph_monday, end=graph_end, freq='D')
                 for day in all_days:
                     if day.weekday() == 0: ax.axvline(day, color='#333333', linewidth=1.2, alpha=0.7)
                     else: ax.axvline(day, color='#CCCCCC', linewidth=0.5, alpha=0.4)
                 
-                # 3. NO BUFFERS: Edge-to-Edge
                 ax.set_xlim(graph_monday, graph_end)
                 ax.margins(x=0)
-                
                 ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
                 add_ref_lines(ax, is_vertical=False)
                 ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
