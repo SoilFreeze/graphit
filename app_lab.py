@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
 from datetime import date
+from google.oauth2 import service_account
 
 # This replaces your single 'from_service_account_json' line
 if "gcp_service_account" in st.secrets:
