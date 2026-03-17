@@ -14,6 +14,13 @@ scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/a
 creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
 
+@st.cache_data(ttl=60) # This tells the app to refresh data every 60 seconds
+def load_lab_data():
+    ...
+    
+# Add this temporarily to see EVERY node the app finds
+st.sidebar.write("Debug - All Nodes Found:", sorted(df['depth'].unique()))
+
 @st.cache_data(ttl=300)
 def get_full_dataset():
     query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
