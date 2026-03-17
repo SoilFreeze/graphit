@@ -6,3 +6,4 @@ google-auth
 matplotlib
 numpy
 scipy
+plotly
