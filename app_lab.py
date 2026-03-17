@@ -34,6 +34,10 @@ df_raw = load_lab_data()
 df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
 df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 
+# --- DATA REPAIR LOGIC ---
+# Standardize Node IDs: Replace hyphens with underscores so they group together
+df_raw['depth'] = df_raw['depth'].astype(str).str.replace('-', '_', regex=False).str.strip()
+
 # REMOVE NULL ROWS: Drop rows where temperature or depth is missing
 df_clean = df_raw.dropna(subset=['value', 'depth', 'location']).copy()
 
