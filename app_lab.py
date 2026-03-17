@@ -88,16 +88,61 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
 # --- SERVICE: DATA EXPORT LAB ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
     st.header("📥 Data Export Lab")
-    start_d = st.sidebar.date_input("Start Date", value=date.today() - pd.Timedelta(days=14))
-    end_d = st.sidebar.date_input("End Date", value=date.today())
     
-    # Filter by date and provide download
-    export_df = full_df[(full_df['timestamp'].dt.date >= start_d) & (full_df['timestamp'].dt.date <= end_d)]
-    st.write(f"Showing {len(export_df)} records.")
-    st.dataframe(export_df.head(500))
+    # 1. DATE SELECTION
+    col_a, col_b = st.columns(2)
+    with col_a:
+        start_d = st.date_input("Start Date", value=date.today() - pd.Timedelta(days=14))
+    with col_b:
+        end_d = st.date_input("End Date", value=date.today())
+
+    # 2. HIERARCHICAL FILTERS
+    st.markdown("---")
+    st.subheader("Filter Scope")
+    f_col1, f_col2, f_col3 = st.columns(3)
     
-    csv = export_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download Filtered CSV", data=csv, file_name=f"SoilFreeze_Lab_Export.csv")
+    with f_col1:
+        # Project Filter (Required)
+        export_projs = sorted(full_df['Project'].dropna().unique())
+        sel_export_proj = st.selectbox("Select Project to Export", export_projs)
+        filtered_export = full_df[full_df['Project'] == sel_export_proj]
+
+    with f_col2:
+        # Location Filter (Optional - Add "All" option)
+        export_locs = ["All Locations"] + sorted(filtered_export['Location'].dropna().unique().tolist())
+        sel_export_loc = st.selectbox("Select Location", export_locs)
+        if sel_export_loc != "All Locations":
+            filtered_export = filtered_export[filtered_export['Location'] == sel_export_loc]
+
+    with f_col3:
+        # Node Filter (Optional - Add "All" option)
+        export_nodes = ["All Nodes"] + sorted(filtered_export['nodenumber'].unique().tolist())
+        sel_export_node = st.selectbox("Select Specific Node", export_nodes)
+        if sel_export_node != "All Nodes":
+            filtered_export = filtered_export[filtered_export['nodenumber'] == sel_export_node]
+
+    # 3. APPLY DATE FILTER & PREVIEW
+    final_export_df = filtered_export[
+        (filtered_export['timestamp'].dt.date >= start_d) & 
+        (filtered_export['timestamp'].dt.date <= end_d)
+    ].sort_values('timestamp')
+
+    st.write(f"📊 **Rows found:** {len(final_export_df)}")
+    st.dataframe(final_export_df.head(500), use_container_width=True)
+
+    # 4. DOWNLOAD BUTTON
+    if not final_export_df.empty:
+        # Naming the file based on selection for easier organization
+        file_tag = f"{sel_export_proj}_{sel_export_loc}_{sel_export_node}".replace(" ", "_")
+        csv = final_export_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download This Selection as CSV",
+            data=csv,
+            file_name=f"SoilFreeze_Export_{file_tag}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.warning("No data found for the selected filters and date range.")
 
 # --- SERVICE: DATA CLEANING TOOL ---
 elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
