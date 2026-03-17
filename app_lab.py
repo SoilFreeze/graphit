@@ -6,13 +6,22 @@ from google.oauth2 import service_account
 from datetime import date
 
 # --- 1. AUTHENTICATION ---
+# --- 1. AUTHENTICATION (Updated for Google Sheets Access) ---
+# We need to add 'drive' to the scopes so BigQuery can read the metadata sheet
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/bigquery",
+    "https://www.googleapis.com/auth/cloud-platform"
+]
+
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
-    credentials = service_account.Credentials.from_service_account_info(info)
+    # We add 'scopes=SCOPES' here
+    credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     client = bigquery.Client(credentials=credentials, project=info["project_id"])
 else:
-    client = bigquery.Client.from_service_account_json("service_account.json")
-
+    # For local testing, ensure your .json key also has Drive access
+    client = bigquery.Client.from_service_account_json("service_account.json", scopes=SCOPES)
 # --- 2. DATA PULL (Standardized Columns) ---
 @st.cache_data(ttl=600)
 def fetch_engineering_data():
