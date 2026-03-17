@@ -91,23 +91,25 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     plot_df = loc_data[loc_data['nodenumber'].isin(selected_nodes)].sort_values('timestamp')
 
     # 4. RENDER THE GRAPH
-    if not plot_df.empty:
-        # We color by 'nodenumber' so each toggle gets its own line
-        fig = px.line(
-            plot_df, 
-            x='timestamp', 
-            y='value', 
-            color='nodenumber',
-            title=f"Location: {sel_loc} | {len(selected_nodes)} Nodes Active",
-            hover_data=['depth'] # Shows depth when they hover over a line
-        )
-        
-        # Move legend to the bottom to give the graph more width
-        fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.5, xanchor="center", x=0.5))
-        
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Please select at least one node to view the graph.")
+    # --- 4. RENDER THE GRAPH ---
+if not plot_df.empty:
+    # Double-check that these names match your SQL 'SELECT' exactly!
+    fig = px.line(
+        plot_df, 
+        x='timestamp', 
+        y='value',        # Ensure this isn't 'temperature'
+        color='nodenumber', # Ensure this matches your unified column name
+        title=f"Location: {sel_loc} | {len(selected_nodes)} Nodes Active",
+        hover_data=['Depth'] # Case sensitive! Matches your screenshot 'Depth'
+    )
+    
+    # This cleans up the legend layout for your manager
+    fig.update_layout(
+        legend=dict(orientation="h", y=-0.2),
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
 
 # --- SERVICE: DATA EXPORT LAB ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
