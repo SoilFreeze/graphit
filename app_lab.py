@@ -3,9 +3,16 @@ import pandas as pd
 from google.cloud import bigquery
 from datetime import date
 
-# 1. SETUP BIGQUERY (Make sure your .json key is in the folder)
-client = bigquery.Client.from_service_account_json("service_account.json")
-
+# This replaces your single 'from_service_account_json' line
+if "gcp_service_account" in st.secrets:
+    # CLOUD: Use the secrets you pasted into the Streamlit dashboard
+    info = st.secrets["gcp_service_account"]
+    credentials = service_account.Credentials.from_service_account_info(info)
+    client = bigquery.Client(credentials=credentials, project=info["project_id"])
+else:
+    # LOCAL: Use the file on your computer
+    client = bigquery.Client.from_service_account_json("service_account.json")
+    
 # 2. PULL THE DATA FIRST
 query = "SELECT timestamp, value, nodenumber FROM `sensorpush-export.sensor_data.raw_lord`"
 full_df = client.query(query).to_dataframe()
