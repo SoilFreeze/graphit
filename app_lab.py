@@ -4,6 +4,32 @@ from google.cloud import bigquery
 from datetime import date
 from google.oauth2 import service_account
 
+# --- SHARED AUTHENTICATION LOGIC ---
+# (Keep the BigQuery client setup we just fixed here so it works for all pages)
+
+st.sidebar.title("🛠 Engineering Services")
+service = st.sidebar.selectbox(
+    "Select Service",
+    ["📥 Data Export Lab", "🔍 Node Diagnostics", "🧹 Data Cleaning Tool"]
+)
+
+# --- SERVICE 1: DATA EXPORT LAB ---
+if service == "📥 Data Export Lab":
+    st.header("Data Export Lab")
+    # Paste the code for the date range filter and CSV download button here.
+
+# --- SERVICE 2: NODE DIAGNOSTICS ---
+elif service == "🔍 Node Diagnostics":
+    st.header("Node Diagnostics")
+    # Paste your code here that looks at individual node health, 
+    # battery levels, and last-seen timestamps.
+
+# --- SERVICE 3: DATA CLEANING TOOL ---
+elif service == "🧹 Data Cleaning Tool":
+    st.header("Data Cleaning Tool")
+    st.write("Current Filter: Removing 'NaN' and Outliers (>100°C or <-50°C)")
+    # We can add a slider here to let engineers define what 'erroneous' means.
+
 # This replaces your single 'from_service_account_json' line
 if "gcp_service_account" in st.secrets:
     # CLOUD: Use the secrets you pasted into the Streamlit dashboard
