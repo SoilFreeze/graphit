@@ -1,93 +1,92 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from scipy.stats import linregress
-import matplotlib.pyplot as plt
 
 # 1. SETUP
-st.set_page_config(page_title="Engineering Data Lab", layout="wide")
+st.set_page_config(page_title="Engineer Data Lab", layout="wide")
 
 # 2. DATA LOADING
-# (Use the same credentials logic as your other apps)
-creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
+creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 client = bigquery.Client(credentials=creds, project="sensorpush-export")
 
 @st.cache_data(ttl=60)
-def load_lab_data(project):
-    query = f"SELECT * FROM `sensor_data.final_dashboard_data` WHERE project = '{project}'"
+def load_lab_data():
+    # Adjusted to ensure we get the full dataset for exploration
+    query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
     return client.query(query).to_dataframe()
 
-# 3. SIDEBAR: SELECTOR & CONTROLS
+df = load_lab_data()
+df.columns = [str(c).strip().lower() for c in df_raw.columns]
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+# 3. SIDEBAR: SELECTION
 st.sidebar.title("🛠 Engineering Lab")
-proj_list = ["2329", "SF2329", "North Dam"] # Or pull unique from DB
-selected_proj = st.sidebar.selectbox("Select Project", proj_list)
+project = st.sidebar.selectbox("Select Project", sorted(df['project'].unique()))
+df_p = df[df['project'] == project].copy()
 
-raw_df = load_lab_data(selected_proj)
-raw_df['timestamp'] = pd.to_datetime(raw_df['timestamp'])
+loc = st.sidebar.selectbox("Location/Pipe", sorted(df_p['location'].unique()))
+depth = st.sidebar.selectbox("Node/Depth", sorted(df_p[df_p['location'] == loc]['depth'].unique()))
 
-# Filter by Specific Node
-locations = sorted(raw_df['location'].unique())
-loc = st.sidebar.selectbox("Select Location/Pipe", locations)
-depths = sorted(raw_df[raw_df['location'] == loc]['depth'].unique())
-depth = st.sidebar.selectbox("Select Depth/Node", depths)
+node_data = df_p[(df_p['location'] == loc) & (df_p['depth'] == depth)].sort_values('timestamp').copy()
 
-# Filter the working dataset
-working_df = raw_df[(raw_df['location'] == loc) & (raw_df['depth'] == depth)].copy()
-working_df = working_df.sort_values('timestamp')
+# 4. TREND ANALYSIS & GOAL SETTING
+st.header(f"Project {project}: Analysis for {loc} ({depth})")
 
-# 4. DATA CLEANING (Delete Errors)
-st.header(f"🗂 Data Cleaning: {loc} at {depth}")
-st.info("Edit the 'value' column below. To 'delete' a point, remove the number or set to NaN.")
-
-# Use st.data_editor to allow live editing
-edited_df = st.data_editor(
-    working_df[['timestamp', 'value']], 
-    num_rows="dynamic",
-    use_container_width=True,
-    key="data_editor"
-)
-
-# 5. TREND ANALYSIS
-st.header("📈 Trend Analysis & Forecasting")
-col1, col2 = st.columns([1, 3])
+col1, col2 = st.columns([1, 2])
 
 with col1:
     st.subheader("Analysis Parameters")
-    days_to_predict = st.slider("Forecast Days", 7, 90, 30)
-    show_trend = st.checkbox("Calculate Trend Line", value=True)
+    # Slider to clean out sensor spikes instantly
+    min_t, max_t = st.slider("Valid Temp Range", -40.0, 140.0, (node_data['value'].min(), node_data['value'].max()))
+    clean_data = node_data[(node_data['value'] >= min_t) & (node_data['value'] <= max_t)].copy()
     
-    # Calculate Linear Regression
-    clean_df = edited_df.dropna(subset=['value'])
-    if not clean_df.empty and show_trend:
-        # Convert time to numeric for regression
-        x = mdates.date2num(clean_df['timestamp'])
-        y = clean_df['value']
-        slope, intercept, r_value, p_value, std_err = linregress(x, y)
-        
-        st.metric("Daily Change", f"{slope:.4f} units/day")
-        st.write(f"Confidence (R²): {r_value**2:.2f}")
+    st.write(f"Points Analyzed: {len(clean_data)}")
+    
+    # Target Temperature Prediction
+    target_temp = st.number_input("Target Temp Goal (e.g. 32.0)", value=32.0)
+    forecast_days = st.slider("Forecast Visibility (Days)", 7, 180, 30)
 
 with col2:
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.scatter(clean_df['timestamp'], clean_df['value'], color='black', s=10, label="Observed Data")
-    
-    if show_trend:
-        # Create forecast range
-        last_date = clean_df['timestamp'].max()
-        future_dates = pd.date_range(start=clean_df['timestamp'].min(), 
-                                     periods=len(clean_df) + days_to_predict)
-        x_future = mdates.date2num(future_dates)
-        y_trend = slope * x_future + intercept
+    if len(clean_data) > 2:
+        # Math: Linear Regression
+        x_num = mdates.date2num(clean_data['timestamp'])
+        y_vals = clean_data['value']
+        slope, intercept, r_val, p_val, std_err = linregress(x_num, y_vals)
         
-        ax.plot(future_dates, y_trend, color='red', linestyle='--', label="Calculated Trend")
-    
-    plt.xticks(rotation=45)
-    ax.legend()
-    st.pyplot(fig)
+        # Plotting
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.scatter(node_data['timestamp'], node_data['value'], color='lightgrey', alpha=0.3, label="Excluded/Errors")
+        ax.scatter(clean_data['timestamp'], clean_data['value'], color='black', s=12, label="Clean Data")
+        
+        # Calculate Trend & Prediction
+        x_future = np.array([x_num.min(), x_num.max() + forecast_days])
+        y_future = slope * x_future + intercept
+        ax.plot(mdates.num2date(x_future), y_future, color='red', linestyle='--', linewidth=2, label="Trend Line")
+        
+        # Calculate Intersection with Goal
+        if slope != 0:
+            intersect_num = (target_temp - intercept) / slope
+            intersect_date = mdates.num2date(intersect_num)
+            ax.axhline(y=target_temp, color='blue', linestyle=':', label=f"Goal ({target_temp})")
+            
+        ax.set_ylabel("Temperature")
+        ax.legend()
+        st.pyplot(fig)
+        
+        # Metrics
+        st.info(f"**Slope:** {slope:.4f}/day | **R²:** {r_val**2:.3f}")
+        if slope != 0:
+            st.success(f"Projected to hit {target_temp} on: **{intersect_date.strftime('%Y-%m-%d')}**")
+    else:
+        st.warning("Please adjust the 'Valid Temp Range' to include at least 3 data points.")
 
-# 6. SAVE CHANGES
-if st.button("💾 Push Cleaned Data to BigQuery"):
-    st.warning("Note: This requires 'BigQuery Data Editor' permissions for the service account.")
-    # Logic to overwrite or update BigQuery rows would go here
+# 5. THE DATA EDITOR (Manual Deletion)
+st.subheader("Manual Data Review")
+st.write("Edit values below. Changes will reflect in the graph above upon refresh.")
+st.data_editor(clean_data[['timestamp', 'value']], use_container_width=True, hide_index=True)
