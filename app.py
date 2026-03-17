@@ -1,162 +1,138 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import numpy as np
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from scipy.stats import linregress
 
-# 1. SETUP
-st.set_page_config(page_title="Geotechnical Dashboard", layout="wide")
+# 1. PAGE SETUP
+st.set_page_config(page_title="Engineer Data Lab", layout="wide")
 
-# 2. BIGQUERY CONNECTION
-# Defined globally to avoid NameErrors inside functions
+# 2. ESTABLISH BIGQUERY CONNECTION
+# This must be defined before the load function is called
 try:
     scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
     creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     client = bigquery.Client(credentials=creds, project="sensorpush-export")
 except Exception as e:
-    st.error(f"Credentials Error: {e}")
+    st.error(f"Failed to connect to Google Cloud: {e}")
     st.stop()
 
-# 3. DATA LOADING (With 60-second Refresh)
+# 3. DATA LOADING FUNCTION
 @st.cache_data(ttl=60)
-def get_full_dataset():
-    # Querying the main table
+def load_lab_data():
+    # Pulling the full dataset for exploration
     query = "SELECT * FROM `sensorpush-export.sensor_data.final_dashboard_data` ORDER BY timestamp ASC"
     return client.query(query).to_dataframe()
 
-# Load and immediately Clean
-df_raw = get_full_dataset()
+# 4. DATA PROCESSING & CLEANING
+df_raw = load_lab_data()
+
+# Clean headers and timestamps
 df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
 df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 
 # --- DATA REPAIR LOGIC ---
-# Remove the "null null null" rows
-df_raw = df_raw.dropna(subset=['value', 'depth', 'location'])
+# Standardize Node IDs: Replace hyphens with underscores so they group together
+df_raw['depth'] = df_raw['depth'].astype(str).str.replace('-', '_', regex=False).str.strip()
 
-# FIX MISSING NODES: Force everything to string and strip spaces
-# This ensures '23', 23, and ' 23 ' are all grouped together
-df_raw['depth'] = df_raw['depth'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+# REMOVE NULL ROWS: Drop rows where temperature or depth is missing
+df_clean = df_raw.dropna(subset=['value', 'depth', 'location']).copy()
 
-# 4. SIDEBAR CONTROLS
-st.sidebar.title("📁 Dashboard Controls")
+# TYPE FIXER: Force all Depths/Nodes to be strings (fixes the "missing node" issue)
+df_clean['depth'] = df_clean['depth'].astype(str).str.strip()
 
-unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit (°F)", "Celsius (°C)"])
-is_celsius = unit == "Celsius (°C)"
-u_symbol = "°C" if is_celsius else "°F"
-alert_threshold = 1.0 if is_celsius else 1.8
+# 5. SIDEBAR: SELECTION CONTROLS
+st.sidebar.title("🛠 Engineering Lab")
 
 # Project Selection
-available_projects = sorted(df_raw['project'].unique())
-selected_project = st.sidebar.selectbox("Choose Project", available_projects)
+projects = sorted(df_clean['project'].unique())
+selected_proj = st.sidebar.selectbox("Select Project", projects)
+df_p = df_clean[df_clean['project'] == selected_proj].copy()
 
-# Filter data to selection
-df_proj = df_raw[df_raw['project'] == selected_project].copy()
-if is_celsius:
-    df_proj['value'] = (df_proj['value'] - 32) * 5/9
+# Location & Node Selection
+locs = sorted(df_p['location'].unique())
+selected_loc = st.sidebar.selectbox("Location (Pipe)", locs)
 
-st.sidebar.subheader("Reference Lines")
-show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
-show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
-# 32.0 line intentionally excluded from sidebar
+nodes = sorted(df_p[df_p['location'] == selected_loc]['depth'].unique())
+selected_node = st.sidebar.selectbox("Node / Depth ID", nodes)
 
-num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
-cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
-df_filtered = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
+# Sidebar Divider & Debug info
+st.sidebar.divider()
+st.sidebar.write(f"Unique Nodes found: {len(nodes)}")
 
-# 5. UI TABS
-tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp vs Depth", "📈 Temp vs Time"])
+# Filter to specific sensor
+working_df = df_p[(df_p['location'] == selected_loc) & (df_p['depth'] == selected_node)].sort_values('timestamp')
 
-# --- HELPERS ---
-def add_ref_lines(ax, is_vertical=True):
-    refs = []
-    if show_red_ref:
-        v = round((10.2 - 32) * 5/9, 1) if is_celsius else 10.2
-        refs.append({'val': v, 'color': 'red', 'label': f"{v}{u_symbol}"})
-    if show_blue_ref:
-        v = round((26.6 - 32) * 5/9, 1) if is_celsius else 26.6
-        refs.append({'val': v, 'color': 'blue', 'label': f"{v}{u_symbol}"})
+# 6. MAIN INTERFACE
+st.header(f"Analysis: {selected_proj} | {selected_loc} | Node {selected_node}")
+
+if not working_df.empty:
+    col1, col2 = st.columns([1, 2])
     
-    for r in refs:
-        if is_vertical: ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
-        else: ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5, label=r['label'])
-
-# --- TAB 1: 24-HOUR INSIGHTS ---
-with tab_summary:
-    now = pd.Timestamp.now(tz='UTC')
-    last_24 = df_proj[df_proj['timestamp'] >= (now - pd.Timedelta(hours=24))].copy()
-    
-    if not last_24.empty:
-        node_stats = last_24.groupby(['location', 'depth'])['value'].agg(['min', 'max']).reset_index()
-        node_stats['delta'] = node_stats['max'] - node_stats['min']
+    with col1:
+        st.subheader("Data Cleaning")
+        # Slider to filter out spikes or sensor errors
+        min_v = float(working_df['value'].min())
+        max_v = float(working_df['value'].max())
+        valid_range = st.slider("Valid Temp Range", -50.0, 150.0, (min_v, max_v))
         
-        p_rows, b_rows = [], []
-        for loc in sorted(last_24['location'].unique()):
-            p_data = node_stats[node_stats['location'] == loc]
-            if p_data.empty: continue
+        # Apply filter
+        filtered_df = working_df[
+            (working_df['value'] >= valid_range[0]) & 
+            (working_df['value'] <= valid_range[1])
+        ].copy()
+        
+        st.write(f"Points Analyzed: {len(filtered_df)} of {len(working_df)}")
+        
+        # Goal Forecasting
+        st.subheader("Forecast Parameters")
+        target_temp = st.number_input("Target Goal Temp", value=32.0)
+        forecast_days = st.slider("Days to Forecast", 7, 180, 30)
+
+    with col2:
+        if len(filtered_df) > 2:
+            # Linear Regression Math
+            x_num = mdates.date2num(filtered_df['timestamp'])
+            y_vals = filtered_df['value']
+            slope, intercept, r_val, p_val, std_err = linregress(x_num, y_vals)
             
-            p_min, p_max = p_data['min'].min(), p_data['max'].max()
-            top_node = p_data.loc[p_data['delta'].idxmax()]
+            # Create Plot
+            fig, ax = plt.subplots(figsize=(10, 5))
+            # Plot original data as light grey to show what was removed
+            ax.scatter(working_df['timestamp'], working_df['value'], color='lightgrey', alpha=0.3, label="Excluded Points")
+            # Plot cleaned data in black
+            ax.scatter(filtered_df['timestamp'], filtered_df['value'], color='black', s=12, label="Clean Data")
             
-            row_disp = {
-                "Pipe": loc,
-                "Min Temp": f"{p_min:.1f}{u_symbol}",
-                "Max Temp": f"{p_max:.1f}{u_symbol}",
-                "Max Change at": f"{top_node['depth']}ft" if "bank" not in loc.lower() else top_node['depth'],
-                "24h Change": f"{top_node['delta']:.1f}{u_symbol}"
-            }
-            color = 'color: red' if top_node['delta'] >= alert_threshold else ''
-            if "bank" in loc.lower(): b_rows.append((row_disp, color))
-            else: p_rows.append((row_disp, color))
+            # Draw Trend & Forecast
+            x_future = np.array([x_num.min(), x_num.max() + forecast_days])
+            y_future = slope * x_future + intercept
+            ax.plot(mdates.num2date(x_future), y_future, color='red', linestyle='--', linewidth=2, label="Trend Line")
+            
+            # Calculate Intersection with Goal
+            if slope != 0:
+                intersect_num = (target_temp - intercept) / slope
+                intersect_date = mdates.num2date(intersect_num)
+                ax.axhline(y=target_temp, color='blue', linestyle=':', label=f"Goal ({target_temp})")
+            
+            ax.legend()
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
+            
+            # Results
+            st.success(f"**Current Slope:** {slope:.4f} units/day | **R² Fit:** {r_val**2:.3f}")
+            if slope != 0:
+                st.info(f"Projected to hit {target_temp} on: **{intersect_date.strftime('%Y-%m-%d')}**")
+        else:
+            st.warning("Insufficient clean data to calculate trend. Adjust the Valid Temp Range.")
 
-        def draw_table(rows, title):
-            st.subheader(title)
-            if rows:
-                df_disp = pd.DataFrame([r[0] for r in rows])
-                colors = [r[1] for r in rows]
-                styler = df_disp.style.apply(lambda x: [colors[i] for i in range(len(x))], axis=0)
-                st.table(styler)
+    # 7. THE DATA EDITOR
+    st.divider()
+    st.subheader("Manual Data Review")
+    st.write("Edit values in the table below to see how they impact the trend line above.")
+    st.data_editor(filtered_df[['timestamp', 'value']], use_container_width=True, hide_index=True)
 
-        draw_table(p_rows, "Standard Pipes: 24h Activity")
-        draw_table(b_rows, "Bank Temperatures: 24h Activity")
-    else:
-        st.info("No sensor activity in the last 24 hours.")
-
-# --- TAB 2: TEMP VS DEPTH ---
-with tab_depth:
-    st.subheader(f"Temperature vs Depth ({u_symbol})")
-    depth_locs = [l for l in df_filtered['location'].unique() if "bank" not in l.lower()]
-    for loc in depth_locs:
-        with st.expander(f"Location: {loc}", expanded=True):
-            df_loc = df_filtered[df_filtered['location'] == loc].copy()
-            df_loc['ts_round'] = df_loc['timestamp'].dt.round('1h')
-            # Weekly snapshot (Monday at 6am)
-            df_snap = df_loc[(df_loc['ts_round'].dt.weekday == 0) & (df_loc['ts_round'].dt.hour == 6)].copy()
-            if not df_snap.empty:
-                fig1, ax1 = plt.subplots(figsize=(8, 6))
-                for ts, gp in df_snap.groupby('ts_round'):
-                    snap = gp.sort_values('depth', key=lambda x: x.astype(float) if x.str.replace('.','').str.isdigit().all() else x)
-                    ax1.plot(snap['value'], snap['depth'], marker='o', label=ts.strftime('%Y-%m-%d'))
-                ax1.invert_yaxis()
-                add_ref_lines(ax1, is_vertical=True)
-                ax1.set_xlabel(f"Temp ({u_symbol})"); ax1.set_ylabel("Depth (ft)")
-                ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
-                st.pyplot(fig1)
-
-# --- TAB 3: TEMP VS TIME ---
-with tab_time:
-    st.subheader(f"Temperature vs Time ({u_symbol})")
-    for loc in sorted(df_filtered['location'].unique()):
-        with st.expander(f"Location: {loc}", expanded=True):
-            df_lt = df_filtered[df_filtered['location'] == loc].sort_values('timestamp')
-            if not df_lt.empty:
-                fig2, ax2 = plt.subplots(figsize=(12, 5))
-                for d in sorted(df_lt['depth'].unique()):
-                    sub = df_lt[df_lt['depth'] == d].copy()
-                    ax2.plot(sub['timestamp'], sub['value'], label=f"Node {d}", alpha=0.8)
-                ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-                add_ref_lines(ax2, is_vertical=False)
-                ax2.set_ylabel(f"Temp ({u_symbol})")
-                ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
-                st.pyplot(fig2)
+else:
+    st.error("No data found for the selected criteria. Check your Node ID or Project name.")
