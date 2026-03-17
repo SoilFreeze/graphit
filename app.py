@@ -57,7 +57,7 @@ if is_celsius:
 st.sidebar.subheader("Reference Lines")
 show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
 show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
-show_freeze_ref = st.sidebar.checkbox("Show 32.0 Line (Long-Dash Blue)", value=True) # Custom 32 line
+show_freeze_ref = st.sidebar.checkbox("Show 32.0 Line (Dot-Dash Blue)", value=True) # Custom 32
 
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
 
@@ -82,12 +82,13 @@ def add_ref_lines(ax, is_vertical=True):
         if is_vertical: ax.axvline(x=v, color='blue', linestyle='--', linewidth=1.5)
         else: ax.axhline(y=v, color='blue', linestyle='--', linewidth=1.5)
     
-    # Custom 32.0 Line (Blue with Long Dashes)
+    # Custom 32.0 Line (Blue Dot-Dash)
     if show_freeze_ref:
         v = 0.0 if is_celsius else 32.0
-        # dashes=(10, 10) creates the long-dash effect
-        if is_vertical: ax.axvline(x=v, color='blue', linestyle=(0, (10, 10)), linewidth=2.0)
-        else: ax.axhline(y=v, color='blue', linestyle=(0, (10, 10)), linewidth=2.0)
+        # (0, (10, 2, 2, 2)) = long dash, tight gap, dot, tight gap
+        style = (0, (10, 2, 2, 2))
+        if is_vertical: ax.axvline(x=v, color='blue', linestyle=style, linewidth=2.0)
+        else: ax.axhline(y=v, color='blue', linestyle=style, linewidth=2.0)
 
 # --- TAB 1: 24-HOUR INSIGHTS ---
 with tab_summary:
