@@ -59,7 +59,58 @@ show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
 show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
 
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
+# --- GLOBAL DATE CALCULATIONS (Place this before the Tabs) ---
+# This ensures graph_monday is always defined for the whole app
+today = pd.Timestamp.now(tz='UTC').normalize()
+# Find this week's Monday, then go back (num_weeks - 1)
+graph_monday = today - pd.Timedelta(days=today.weekday()) - pd.Timedelta(weeks=num_weeks-1)
+graph_end = pd.Timestamp.now(tz='UTC')
 
+# 5. UI TABS
+tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp vs Depth", "📈 Temp vs Time"])
+
+# ... [Keep Tab 1 and Tab 2 code as previously fixed] ...
+
+# --- TAB 3: TEMP VS TIME (Fixed NameError + 10-Deg Grid) ---
+with tab_time:
+    st.subheader(f"Temperature vs Time ({u_symbol})")
+    
+    for loc in sorted(df_proj['location'].unique()):
+        with st.expander(f"Location: {loc}", expanded=True):
+            # Filtering using the global graph_monday
+            df_lt = df_proj[(df_proj['location'] == loc) & (df_proj['timestamp'] >= graph_monday)].sort_values('timestamp')
+            
+            if not df_lt.empty:
+                fig, ax = plt.subplots(figsize=(12, 5))
+                
+                # Plot each node
+                for d in sorted(df_lt['depth'].unique()):
+                    sub = df_lt[df_lt['depth'] == d]
+                    ax.plot(sub['timestamp'], sub['value'], label=f"Node {d}", linewidth=1.5)
+                
+                # 1. & 2. GRID: Monday Midnight (Dark) vs Daily (Light)
+                all_days = pd.date_range(start=graph_monday, end=graph_end, freq='D')
+                for day in all_days:
+                    if day.weekday() == 0: 
+                        ax.axvline(day, color='#333333', linewidth=1.2, alpha=0.7, zorder=1)
+                    else: 
+                        ax.axvline(day, color='#CCCCCC', linewidth=0.5, alpha=0.4, zorder=1)
+                
+                # NEW: Horizontal light gray lines every 10 degrees
+                ax.yaxis.set_major_locator(plt.MultipleLocator(10))
+                ax.grid(True, axis='y', color='#EEEEEE', linewidth=0.8, alpha=0.6)
+                
+                # 3. NO BUFFERS: Edge-to-Edge
+                ax.set_xlim(graph_monday, graph_end)
+                ax.margins(x=0)
+                
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+                add_ref_lines(ax, is_vertical=False)
+                ax.set_ylabel(f"Temp ({u_symbol})")
+                ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
+                st.pyplot(fig)
+            else:
+                st.info(f"No data available for {loc} starting from {graph_monday.strftime('%Y-%m-%d')}")
 # 5. UI TABS
 tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp vs Depth", "📈 Temp vs Time"])
 
