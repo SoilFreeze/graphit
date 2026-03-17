@@ -5,7 +5,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import date
 
-# --- 1. AUTHENTICATION (Secrets vs Local) ---
+# --- 1. AUTHENTICATION ---
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
     credentials = service_account.Credentials.from_service_account_info(info)
@@ -15,87 +15,86 @@ else:
 
 # --- 2. DATA PULL ---
 @st.cache_data(ttl=600)
-def fetch_data():
-    # We build the master data manually to bypass the 'Forbidden' View error
+def fetch_engineering_data():
+    # Joining raw data with your master_metadata table
     query = """
-    WITH unified AS (
-        SELECT timestamp, value, nodenumber 
-        FROM `sensorpush-export.sensor_data.raw_lord`
+    WITH raw_combined AS (
+        SELECT timestamp, value, nodenumber FROM `sensorpush-export.sensor_data.raw_lord`
         UNION ALL
-        SELECT timestamp, temperature AS value, sensor_name AS nodenumber
+        SELECT timestamp, temperature AS value, sensor_name AS nodenumber 
         FROM `sensorpush-export.sensor_data.raw_sensorpush`
     )
     SELECT 
-        u.timestamp, 
-        u.value, 
-        u.nodenumber, 
-        m.job_site AS project, 
-        m.location, 
-        m.depth 
-    FROM unified AS u
-    LEFT JOIN `sensorpush-export.sensor_data.SensorMapping` AS m
-      ON u.nodenumber = m.nodenumber
+        r.timestamp, 
+        r.value, 
+        r.nodenumber, 
+        m.Project AS project, 
+        m.TempPipe AS location, 
+        m.Depth AS depth
+    FROM raw_combined AS r
+    LEFT JOIN `sensorpush-export.sensor_data.master_metadata` AS m
+      ON r.nodenumber = m.NodeNum
     """
     df = client.query(query).to_dataframe()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
-    
-    # Fill in blanks so the dropdown menus work correctly
-    df['project'] = df['project'].fillna('Unmapped').astype(str)
-    df['location'] = df['location'].fillna('Unmapped').astype(str)
-    
     return df
 
-full_df = fetch_data()
+try:
+    full_df = fetch_engineering_data()
+except Exception as e:
+    st.error(f"Error fetching data: {e}")
+    full_df = pd.DataFrame()
 
 # --- 3. SIDEBAR NAVIGATION ---
-st.sidebar.title("🛠 Engineering Services")
+st.sidebar.title("🛠 Engineering Hub")
 service = st.sidebar.selectbox(
     "Select Service",
     ["🔍 Node Diagnostics", "📥 Data Export Lab", "🧹 Data Cleaning Tool"]
 )
 
-# --- SERVICE: NODE DIAGNOSTICS (Restored Features) ---
-if service == "🔍 Node Diagnostics":
-    st.header("🔍 Individual Node Diagnostics")
-
-    # Filter Row: Project -> Location -> Node
-    col1, col2, col3 = st.columns(3)
+# --- SERVICE: NODE DIAGNOSTICS ---
+if service == "🔍 Node Diagnostics" and not full_df.empty:
+    st.header("🔍 Node Diagnostics")
     
+    col1, col2, col3 = st.columns(3)
     with col1:
-        projects = sorted(full_df['job_site'].dropna().unique())
-        selected_project = st.selectbox("Select Project ID", projects)
-        proj_df = full_df[full_df['job_site'] == selected_project]
-
+        projs = sorted(full_df['project'].dropna().unique())
+        sel_proj = st.selectbox("Project", projs)
     with col2:
-        locations = sorted(proj_df['location'].dropna().unique())
-        selected_loc = st.selectbox("Select Location", locations)
-        loc_df = proj_df[proj_df['location'] == selected_loc]
-
+        locs = sorted(full_df[full_df['project']==sel_proj]['location'].dropna().unique())
+        sel_loc = st.selectbox("Location", locs)
     with col3:
-        nodes = sorted(loc_df['nodenumber'].unique())
-        selected_node = st.selectbox("Select Node", nodes)
-        final_df = loc_df[loc_df['nodenumber'] == selected_node]
+        nodes = sorted(full_df[(full_df['project']==sel_proj) & (full_df['location']==sel_loc)]['nodenumber'].unique())
+        sel_node = st.selectbox("Node", nodes)
 
-    # The Graph (Clean Raw Data)
-    if not final_df.empty:
-        fig = px.line(final_df, x='timestamp', y='value', 
-                      title=f"Node {selected_node} - {selected_loc}",
-                      labels={'value': 'Temperature (°C)', 'timestamp': 'Date/Time'})
+    plot_df = full_df[full_df['nodenumber'] == sel_node].sort_values('timestamp')
+    
+    if not plot_df.empty:
+        fig = px.line(plot_df, x='timestamp', y='value', title=f"Sensor: {sel_node} ({sel_loc})")
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Diagnostic Stats
-        st.write(f"**Total Samples:** {len(final_df)}")
-        st.write(f"**Max Temp:** {final_df['value'].max()}°C")
-        st.write(f"**Min Temp:** {final_df['value'].min()}°C")
     else:
-        st.warning("No data found for the selected combination.")
+        st.info("No data found for this node.")
 
-# --- SERVICE: DATA EXPORT LAB (Existing Feature) ---
-elif service == "📥 Data Export Lab":
+# --- SERVICE: DATA EXPORT LAB ---
+elif service == "📥 Data Export Lab" and not full_df.empty:
     st.header("📥 Data Export Lab")
-    # (Insert your date range and CSV download logic here)
+    start_d = st.sidebar.date_input("Start Date", value=date.today() - pd.Timedelta(days=7))
+    end_d = st.sidebar.date_input("End Date", value=date.today())
+    
+    # Filter and Download
+    export_df = full_df[(full_df['timestamp'].dt.date >= start_d) & (full_df['timestamp'].dt.date <= end_d)]
+    st.dataframe(export_df.head(100))
+    
+    csv = export_df.to_csv(index=False).encode('utf-8')
+    st.download_button("Download CSV", data=csv, file_name=f"SoilFreeze_Export_{start_d}.csv")
 
-# --- SERVICE: DATA CLEANING TOOL (New Feature) ---
-elif service == "🧹 Data Cleaning Tool":
+# --- SERVICE: DATA CLEANING TOOL ---
+elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     st.header("🧹 Data Cleaning Tool")
-    # (Insert cleaning logic here)
+    st.write("Remove outliers based on temperature bounds.")
+    
+    min_t, max_t = st.slider("Valid Temperature Range (°C)", -60, 100, (-40, 60))
+    
+    clean_df = full_df[(full_df['value'] >= min_t) & (full_df['value'] <= max_t)]
+    st.success(f"Cleaned Data: {len(clean_df)} rows (Removed {len(full_df)-len(clean_df)} outliers)")
+    st.dataframe(clean_df.head(100))
