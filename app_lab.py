@@ -16,11 +16,15 @@ else:
 # --- 2. DATA PULL ---
 @st.cache_data(ttl=600)
 def fetch_engineering_data():
-    # Joining raw data with your master_metadata table
     query = """
     WITH raw_combined AS (
-        SELECT timestamp, value, nodenumber FROM `sensorpush-export.sensor_data.raw_lord`
+        -- Convert Lord DATETIME to TIMESTAMP
+        SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, nodenumber 
+        FROM `sensorpush-export.sensor_data.raw_lord`
+        
         UNION ALL
+        
+        -- SensorPush is already TIMESTAMP
         SELECT timestamp, temperature AS value, sensor_name AS nodenumber 
         FROM `sensorpush-export.sensor_data.raw_sensorpush`
     )
@@ -36,7 +40,8 @@ def fetch_engineering_data():
       ON r.nodenumber = m.NodeNum
     """
     df = client.query(query).to_dataframe()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # BigQuery timestamps are usually UTC; this ensures Pandas handles them correctly
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
     return df
 
 try:
