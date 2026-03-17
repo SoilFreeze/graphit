@@ -14,15 +14,26 @@ else:
     client = bigquery.Client.from_service_account_json("service_account.json")
 
 # --- 2. DATA PULL ---
-@st.cache_data(ttl=600)  # Caches data for 10 mins to save BigQuery costs
+@st.cache_data(ttl=600)
 def fetch_data():
-    # Including job_site and location columns from your SensorMapping logic
+    # We pull the clean, pre-combined data directly
     query = """
-        SELECT timestamp, value, nodenumber, job_site, location 
-        FROM `sensorpush-export.sensor_data.raw_lord`
+        SELECT 
+            timestamp, 
+            nodenumber, 
+            value, 
+            project, 
+            location, 
+            depth 
+        FROM `sensorpush-export.sensor_data.final_dashboard_data`
     """
     df = client.query(query).to_dataframe()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
+    
+    # Ensuring we have strings for the dropdown menus
+    df['project'] = df['project'].astype(str)
+    df['location'] = df['location'].astype(str)
+    
     return df
 
 full_df = fetch_data()
