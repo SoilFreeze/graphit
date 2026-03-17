@@ -16,23 +16,32 @@ else:
 # --- 2. DATA PULL ---
 @st.cache_data(ttl=600)
 def fetch_data():
-    # We pull the clean, pre-combined data directly
+    # We build the master data manually to bypass the 'Forbidden' View error
     query = """
-        SELECT 
-            timestamp, 
-            nodenumber, 
-            value, 
-            project, 
-            location, 
-            depth 
-        FROM `sensorpush-export.sensor_data.final_dashboard_data`
+    WITH unified AS (
+        SELECT timestamp, value, nodenumber 
+        FROM `sensorpush-export.sensor_data.raw_lord`
+        UNION ALL
+        SELECT timestamp, temperature AS value, sensor_name AS nodenumber
+        FROM `sensorpush-export.sensor_data.raw_sensorpush`
+    )
+    SELECT 
+        u.timestamp, 
+        u.value, 
+        u.nodenumber, 
+        m.job_site AS project, 
+        m.location, 
+        m.depth 
+    FROM unified AS u
+    LEFT JOIN `sensorpush-export.sensor_data.SensorMapping` AS m
+      ON u.nodenumber = m.nodenumber
     """
     df = client.query(query).to_dataframe()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     
-    # Ensuring we have strings for the dropdown menus
-    df['project'] = df['project'].astype(str)
-    df['location'] = df['location'].astype(str)
+    # Fill in blanks so the dropdown menus work correctly
+    df['project'] = df['project'].fillna('Unmapped').astype(str)
+    df['location'] = df['location'].fillna('Unmapped').astype(str)
     
     return df
 
