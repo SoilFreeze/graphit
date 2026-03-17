@@ -16,6 +16,7 @@ else:
 # --- 2. DATA PULL (Standardized Columns) ---
 @st.cache_data(ttl=600)
 def fetch_engineering_data():
+    # This query uses the exact columns from your Master Metadata screenshot
     query = """
     WITH raw_combined AS (
         SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, nodenumber 
