@@ -57,7 +57,7 @@ if is_celsius:
 st.sidebar.subheader("Reference Lines")
 show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
 show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
-show_freeze_ref = st.sidebar.checkbox("Show 32.0 Line (Black)", value=True) # Restored 32 line
+show_freeze_ref = st.sidebar.checkbox("Show 32.0 Line (Long-Dash Blue)", value=True) # Custom 32 line
 
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
 
@@ -71,20 +71,23 @@ tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp 
 
 # --- HELPERS ---
 def add_ref_lines(ax, is_vertical=True):
-    refs = []
+    # Standard Ref Lines (Short Dashes)
     if show_red_ref:
         v = round((10.2 - 32) * 5/9, 1) if is_celsius else 10.2
-        refs.append({'val': v, 'color': 'red'})
+        if is_vertical: ax.axvline(x=v, color='red', linestyle='--', linewidth=1.5)
+        else: ax.axhline(y=v, color='red', linestyle='--', linewidth=1.5)
+        
     if show_blue_ref:
         v = round((26.6 - 32) * 5/9, 1) if is_celsius else 26.6
-        refs.append({'val': v, 'color': 'blue'})
+        if is_vertical: ax.axvline(x=v, color='blue', linestyle='--', linewidth=1.5)
+        else: ax.axhline(y=v, color='blue', linestyle='--', linewidth=1.5)
+    
+    # Custom 32.0 Line (Blue with Long Dashes)
     if show_freeze_ref:
         v = 0.0 if is_celsius else 32.0
-        refs.append({'val': v, 'color': 'black'}) # Restored 32 line logic
-    
-    for r in refs:
-        if is_vertical: ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5)
-        else: ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5)
+        # dashes=(10, 10) creates the long-dash effect
+        if is_vertical: ax.axvline(x=v, color='blue', linestyle=(0, (10, 10)), linewidth=2.0)
+        else: ax.axhline(y=v, color='blue', linestyle=(0, (10, 10)), linewidth=2.0)
 
 # --- TAB 1: 24-HOUR INSIGHTS ---
 with tab_summary:
