@@ -31,7 +31,7 @@ df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
 # --- DATA REPAIR LOGIC ---
 df_raw = df_raw.dropna(subset=['value', 'depth', 'location'])
 
-# STANDARD: Force all node names to use DASHES
+# STANDARD: Force all node names to use DASHES to match your mapping
 df_raw['depth'] = (
     df_raw['depth']
     .astype(str)
@@ -59,58 +59,12 @@ show_red_ref = st.sidebar.checkbox("Show 10.2 Line (Red)", value=True)
 show_blue_ref = st.sidebar.checkbox("Show 26.6 Line (Blue)", value=True)
 
 num_weeks = st.sidebar.slider("Weeks of History", 1, 24, 8)
-# --- GLOBAL DATE CALCULATIONS (Place this before the Tabs) ---
-# This ensures graph_monday is always defined for the whole app
+
+# --- GLOBAL DATE CALCULATIONS (Prevents NameErrors) ---
 today = pd.Timestamp.now(tz='UTC').normalize()
-# Find this week's Monday, then go back (num_weeks - 1)
 graph_monday = today - pd.Timedelta(days=today.weekday()) - pd.Timedelta(weeks=num_weeks-1)
 graph_end = pd.Timestamp.now(tz='UTC')
 
-# 5. UI TABS
-tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp vs Depth", "📈 Temp vs Time"])
-
-# ... [Keep Tab 1 and Tab 2 code as previously fixed] ...
-
-# --- TAB 3: TEMP VS TIME (Fixed NameError + 10-Deg Grid) ---
-with tab_time:
-    st.subheader(f"Temperature vs Time ({u_symbol})")
-    
-    for loc in sorted(df_proj['location'].unique()):
-        with st.expander(f"Location: {loc}", expanded=True):
-            # Filtering using the global graph_monday
-            df_lt = df_proj[(df_proj['location'] == loc) & (df_proj['timestamp'] >= graph_monday)].sort_values('timestamp')
-            
-            if not df_lt.empty:
-                fig, ax = plt.subplots(figsize=(12, 5))
-                
-                # Plot each node
-                for d in sorted(df_lt['depth'].unique()):
-                    sub = df_lt[df_lt['depth'] == d]
-                    ax.plot(sub['timestamp'], sub['value'], label=f"Node {d}", linewidth=1.5)
-                
-                # 1. & 2. GRID: Monday Midnight (Dark) vs Daily (Light)
-                all_days = pd.date_range(start=graph_monday, end=graph_end, freq='D')
-                for day in all_days:
-                    if day.weekday() == 0: 
-                        ax.axvline(day, color='#333333', linewidth=1.2, alpha=0.7, zorder=1)
-                    else: 
-                        ax.axvline(day, color='#CCCCCC', linewidth=0.5, alpha=0.4, zorder=1)
-                
-                # NEW: Horizontal light gray lines every 10 degrees
-                ax.yaxis.set_major_locator(plt.MultipleLocator(10))
-                ax.grid(True, axis='y', color='#EEEEEE', linewidth=0.8, alpha=0.6)
-                
-                # 3. NO BUFFERS: Edge-to-Edge
-                ax.set_xlim(graph_monday, graph_end)
-                ax.margins(x=0)
-                
-                ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-                add_ref_lines(ax, is_vertical=False)
-                ax.set_ylabel(f"Temp ({u_symbol})")
-                ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
-                st.pyplot(fig)
-            else:
-                st.info(f"No data available for {loc} starting from {graph_monday.strftime('%Y-%m-%d')}")
 # 5. UI TABS
 tab_summary, tab_depth, tab_time = st.tabs(["📊 24-Hour Insights", "📏 Temp vs Depth", "📈 Temp vs Time"])
 
@@ -127,11 +81,10 @@ def add_ref_lines(ax, is_vertical=True):
         if is_vertical: ax.axvline(x=r['val'], color=r['color'], linestyle='--', linewidth=1.5)
         else: ax.axhline(y=r['val'], color=r['color'], linestyle='--', linewidth=1.5)
 
-# --- TAB 1: 24-HOUR INSIGHTS ---
+# --- TAB 1: 24-HOUR INSIGHTS (WITH OFFLINE CHECK) ---
 with tab_summary:
     col_tables, col_offline = st.columns([2, 1])
-    now = pd.Timestamp.now(tz='UTC')
-    last_24 = df_proj[df_proj['timestamp'] >= (now - pd.Timedelta(hours=24))].copy()
+    last_24 = df_proj[df_proj['timestamp'] >= (pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=24))].copy()
     
     with col_tables:
         if not last_24.empty:
@@ -165,41 +118,33 @@ with tab_summary:
         offline = offline[offline['_merge'] == 'left_only']
         if not offline.empty:
             st.warning(f"{len(offline)} nodes offline")
-            st.dataframe(offline[['location', 'depth']], hide_index=True)
+            st.dataframe(offline[['location', 'depth']].rename(columns={'location':'Pipe','depth':'Node'}), hide_index=True)
         else:
             st.success("All sensors online.")
 
-# --- TAB 2: TEMP VS DEPTH (Fixed NameError + 10ft Grid) ---
+# --- TAB 2: TEMP VS DEPTH (PROFESSIONAL GRID) ---
 with tab_depth:
     st.subheader(f"Temperature vs Depth Profile ({u_symbol})")
     depth_locs = [l for l in df_proj['location'].unique() if "bank" not in l.lower()]
     
-    cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
-    df_filtered_depth = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
+    df_filtered_depth = df_proj[df_proj['timestamp'] >= graph_monday].copy()
 
     for loc in sorted(depth_locs):
         with st.expander(f"Location: {loc}", expanded=True):
             df_loc = df_filtered_depth[df_filtered_depth['location'] == loc].copy()
-            
-            # Initialize df_snap as empty to prevent NameError
-            df_snap = pd.DataFrame() 
+            df_snap = pd.DataFrame() # Initialize
 
             if not df_loc.empty:
-                # Clean depth for sorting
                 df_loc['depth_num'] = pd.to_numeric(df_loc['depth'].str.extract('(\d+)')[0], errors='coerce')
                 df_loc = df_loc.dropna(subset=['depth_num'])
                 df_loc['ts_round'] = df_loc['timestamp'].dt.round('1h')
                 
-                # Snapshots: Look for Mondays at 6:00 AM
                 df_snap = df_loc[(df_loc['ts_round'].dt.weekday == 0) & (df_loc['ts_round'].dt.hour == 6)].copy()
-                
-                # FALLBACK: If no Mondays, use the latest snapshot
                 if df_snap.empty:
                     latest_ts = df_loc['ts_round'].max()
                     df_snap = df_loc[df_loc['ts_round'] == latest_ts].copy()
                     st.caption(f"Showing latest snapshot: {latest_ts.strftime('%Y-%m-%d %H:%M')}")
 
-            # Now safe to check if df_snap exists
             if not df_snap.empty:
                 fig1, ax1 = plt.subplots(figsize=(7, 6))
                 for ts, gp in df_snap.groupby('ts_round'):
@@ -207,51 +152,44 @@ with tab_depth:
                     ax1.plot(snap['value'], snap['depth_num'], marker='o', label=ts.strftime('%Y-%m-%d'))
                 
                 ax1.invert_yaxis()
-                
-                # GRID: Horizontal light gray lines every 10ft
+                # 10-Unit Grid for Depth and Temp
                 ax1.yaxis.set_major_locator(plt.MultipleLocator(10))
-                ax1.grid(True, axis='y', color='#EEEEEE', linewidth=0.8)
-                # Temperature vertical grid lines every 10 degrees
                 ax1.xaxis.set_major_locator(plt.MultipleLocator(10))
-                ax1.grid(True, axis='x', color='#EEEEEE', linewidth=0.8)
+                ax1.grid(True, which='major', color='#EEEEEE', linewidth=0.8)
                 
                 add_ref_lines(ax1, is_vertical=True)
-                ax1.set_xlabel(f"Temp ({u_symbol})")
-                ax1.set_ylabel("Depth (ft)")
+                ax1.set_xlabel(f"Temp ({u_symbol})"); ax1.set_ylabel("Depth (ft)")
                 ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
                 st.pyplot(fig1)
-            else:
-                st.warning(f"No data points found for {loc} in this timeframe.")
-        
-# --- TAB 3: TEMP VS TIME (With 10-Degree Grid) ---
-with tab_time:
-    # ... (Keep existing Monday-start and Monday-marker logic) ...
 
+# --- TAB 3: TEMP VS TIME (PROFESSIONAL GRID + NO BUFFERS) ---
+with tab_time:
+    st.subheader(f"Temperature vs Time ({u_symbol})")
     for loc in sorted(df_proj['location'].unique()):
         with st.expander(f"Location: {loc}", expanded=True):
             df_lt = df_proj[(df_proj['location'] == loc) & (df_proj['timestamp'] >= graph_monday)].sort_values('timestamp')
+            
             if not df_lt.empty:
                 fig, ax = plt.subplots(figsize=(12, 5))
-                
                 for d in sorted(df_lt['depth'].unique()):
                     sub = df_lt[df_lt['depth'] == d]
                     ax.plot(sub['timestamp'], sub['value'], label=f"Node {d}", linewidth=1.5)
                 
-                # Existing Monday/Daily Vertical Grid
+                # Monday Midnight vs Daily Grid
                 all_days = pd.date_range(start=graph_monday, end=graph_end, freq='D')
                 for day in all_days:
                     if day.weekday() == 0: ax.axvline(day, color='#333333', linewidth=1.2, alpha=0.7)
                     else: ax.axvline(day, color='#CCCCCC', linewidth=0.5, alpha=0.4)
                 
-                # ADDED: Horizontal light gray lines every 10 degrees
+                # 10-Degree Horizontal Grid
                 ax.yaxis.set_major_locator(plt.MultipleLocator(10))
                 ax.grid(True, axis='y', color='#EEEEEE', linewidth=0.8)
                 
+                # No Buffers (Edge-to-Edge)
                 ax.set_xlim(graph_monday, graph_end)
                 ax.margins(x=0)
-                ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
                 
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
                 add_ref_lines(ax, is_vertical=False)
                 ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
                 st.pyplot(fig)
-                
