@@ -63,27 +63,51 @@ service = st.sidebar.selectbox(
 )
 
 # --- SERVICE: NODE DIAGNOSTICS ---
+# --- SERVICE: NODE DIAGNOSTICS (With Toggle Feature) ---
 if service == "🔍 Node Diagnostics" and not full_df.empty:
-    st.header("🔍 Node Diagnostics")
+    st.header("🔍 Interactive Node Graph")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         projs = sorted(full_df['Project'].dropna().unique())
-        sel_proj = st.selectbox("Select Project", projs)
+        sel_proj = st.selectbox("Project", projs)
     with col2:
         locs = sorted(full_df[full_df['Project']==sel_proj]['Location'].dropna().unique())
-        sel_loc = st.selectbox("Select Location", locs)
-    with col3:
-        nodes = sorted(full_df[(full_df['Project']==sel_proj) & (full_df['Location']==sel_loc)]['nodenumber'].unique())
-        sel_node = st.selectbox("Select Node (Serial)", nodes)
+        sel_loc = st.selectbox("Location", locs)
 
-    plot_df = full_df[full_df['nodenumber'] == sel_node].sort_values('timestamp')
-    
+    # 1. GET ALL NODES FOR THIS LOCATION
+    loc_data = full_df[(full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc)]
+    available_nodes = sorted(loc_data['nodenumber'].unique().tolist())
+
+    # 2. THE TOGGLE BOX (Turn lines on/off)
+    st.markdown("### 📈 Line Controls")
+    selected_nodes = st.multiselect(
+        "Select nodes to display (Uncheck to turn line off):",
+        options=available_nodes,
+        default=available_nodes  # Start with everything turned ON
+    )
+
+    # 3. FILTER DATA BASED ON TOGGLES
+    plot_df = loc_data[loc_data['nodenumber'].isin(selected_nodes)].sort_values('timestamp')
+
+    # 4. RENDER THE GRAPH
     if not plot_df.empty:
-        fig = px.line(plot_df, x='timestamp', y='value', title=f"Sensor: {sel_node} | Depth: {plot_df['Depth'].iloc[0]}")
+        # We color by 'nodenumber' so each toggle gets its own line
+        fig = px.line(
+            plot_df, 
+            x='timestamp', 
+            y='value', 
+            color='nodenumber',
+            title=f"Location: {sel_loc} | {len(selected_nodes)} Nodes Active",
+            hover_data=['depth'] # Shows depth when they hover over a line
+        )
+        
+        # Move legend to the bottom to give the graph more width
+        fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.5, xanchor="center", x=0.5))
+        
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No data points found for this selection.")
+        st.info("Please select at least one node to view the graph.")
 
 # --- SERVICE: DATA EXPORT LAB ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
