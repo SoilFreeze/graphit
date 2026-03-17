@@ -118,28 +118,59 @@ with tab_summary:
         else:
             st.success("All sensors online.")
 
-# --- TAB 2: TEMP VS DEPTH (With 10ft Grid) ---
+# --- TAB 2: TEMP VS DEPTH (Fixed NameError + 10ft Grid) ---
 with tab_depth:
     st.subheader(f"Temperature vs Depth Profile ({u_symbol})")
-    # ... (Keep existing filtering and snapshot logic) ...
+    depth_locs = [l for l in df_proj['location'].unique() if "bank" not in l.lower()]
+    
+    cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(weeks=num_weeks)
+    df_filtered_depth = df_proj[df_proj['timestamp'] >= cutoff_date].copy()
 
-    if not df_snap.empty:
-        fig1, ax1 = plt.subplots(figsize=(7, 6))
-        for ts, gp in df_snap.groupby('ts_round'):
-            snap = gp.sort_values('depth_num')
-            ax1.plot(snap['value'], snap['depth_num'], marker='o', label=ts.strftime('%Y-%m-%d'))
-        
-        ax1.invert_yaxis()
-        
-        # ADDED: Horizontal light gray lines every 10 units of depth
-        ax1.yaxis.set_major_locator(plt.MultipleLocator(10))
-        ax1.grid(True, axis='y', color='#EEEEEE', linewidth=0.8)
-        
-        add_ref_lines(ax1, is_vertical=True)
-        ax1.set_xlabel(f"Temp ({u_symbol})")
-        ax1.set_ylabel("Depth (ft)")
-        ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
-        st.pyplot(fig1)
+    for loc in sorted(depth_locs):
+        with st.expander(f"Location: {loc}", expanded=True):
+            df_loc = df_filtered_depth[df_filtered_depth['location'] == loc].copy()
+            
+            # Initialize df_snap as empty to prevent NameError
+            df_snap = pd.DataFrame() 
+
+            if not df_loc.empty:
+                # Clean depth for sorting
+                df_loc['depth_num'] = pd.to_numeric(df_loc['depth'].str.extract('(\d+)')[0], errors='coerce')
+                df_loc = df_loc.dropna(subset=['depth_num'])
+                df_loc['ts_round'] = df_loc['timestamp'].dt.round('1h')
+                
+                # Snapshots: Look for Mondays at 6:00 AM
+                df_snap = df_loc[(df_loc['ts_round'].dt.weekday == 0) & (df_loc['ts_round'].dt.hour == 6)].copy()
+                
+                # FALLBACK: If no Mondays, use the latest snapshot
+                if df_snap.empty:
+                    latest_ts = df_loc['ts_round'].max()
+                    df_snap = df_loc[df_loc['ts_round'] == latest_ts].copy()
+                    st.caption(f"Showing latest snapshot: {latest_ts.strftime('%Y-%m-%d %H:%M')}")
+
+            # Now safe to check if df_snap exists
+            if not df_snap.empty:
+                fig1, ax1 = plt.subplots(figsize=(7, 6))
+                for ts, gp in df_snap.groupby('ts_round'):
+                    snap = gp.sort_values('depth_num')
+                    ax1.plot(snap['value'], snap['depth_num'], marker='o', label=ts.strftime('%Y-%m-%d'))
+                
+                ax1.invert_yaxis()
+                
+                # GRID: Horizontal light gray lines every 10ft
+                ax1.yaxis.set_major_locator(plt.MultipleLocator(10))
+                ax1.grid(True, axis='y', color='#EEEEEE', linewidth=0.8)
+                # Temperature vertical grid lines every 10 degrees
+                ax1.xaxis.set_major_locator(plt.MultipleLocator(10))
+                ax1.grid(True, axis='x', color='#EEEEEE', linewidth=0.8)
+                
+                add_ref_lines(ax1, is_vertical=True)
+                ax1.set_xlabel(f"Temp ({u_symbol})")
+                ax1.set_ylabel("Depth (ft)")
+                ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='x-small')
+                st.pyplot(fig1)
+            else:
+                st.warning(f"No data points found for {loc} in this timeframe.")
         
 # --- TAB 3: TEMP VS TIME (With 10-Degree Grid) ---
 with tab_time:
