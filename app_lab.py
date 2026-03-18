@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, time, date
 
 # --- 0. PAGE CONFIGURATION (REQUIRED FOR WIDE GRAPHS) ---
 # This MUST be the first Streamlit command in your script
-st.set_page_config(layout="medium", page_title="SoilFreeze Engineering Hub")
+st.set_page_config(layout="wide", page_title="SoilFreeze Engineering Hub")
 
 # --- 1. AUTHENTICATION ---
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
