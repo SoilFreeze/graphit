@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, time, date
 
 # --- 0. PAGE CONFIGURATION (REQUIRED FOR WIDE GRAPHS) ---
 # This MUST be the first Streamlit command in your script
-st.set_page_config(layout="wide", page_title="SoilFreeze Engineering Hub")
+st.set_page_config(layout="medium", page_title="SoilFreeze Engineering Hub")
 
 # --- 1. AUTHENTICATION ---
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
@@ -87,7 +87,36 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         st.download_button("📥 Download Current Graph Data (CSV)", data=plot_df.to_csv(index=False).encode('utf-8'), file_name="QuickView.csv")
     else:
         st.info("No data found.")
+        
+# --- SERVICE 2: DATA EXPORT LAB ---
+elif service == "📥 Data Export Lab" and not full_df.empty:
+    st.header("📥 Bulk Data Export")
+    d_col1, d_col2 = st.columns(2)
+    with d_col1:
+        start_d = st.date_input("Start Date", value=date.today() - timedelta(days=30))
+    with d_col2:
+        end_d = st.date_input("End Date", value=date.today())
 
+    s_col1, s_col2, s_col3 = st.columns(3)
+    with s_col1:
+        ex_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
+        sel_ex_proj = st.selectbox("Project", ex_projs)
+        ex_df = full_df[full_df['Project'] == sel_ex_proj]
+    with s_col2:
+        ex_locs = ["All Locations"] + sorted([l for l in ex_df['Location'].unique() if l is not None])
+        sel_ex_loc = st.selectbox("Location", ex_locs)
+        if sel_ex_loc != "All Locations": ex_df = ex_df[ex_df['Location'] == sel_ex_loc]
+    with s_col3:
+        ex_nodes = ["All Nodes"] + sorted(ex_df['nodenumber'].unique().tolist())
+        sel_ex_node = st.selectbox("Node/Serial", ex_nodes)
+        if sel_ex_node != "All Nodes": ex_df = ex_df[ex_df['nodenumber'] == sel_ex_node]
+
+    final_ex_df = ex_df[(ex_df['timestamp'].dt.date >= start_d) & (ex_df['timestamp'].dt.date <= end_d)]
+    st.write(f"📊 Found **{len(final_ex_df)}** records.")
+    st.dataframe(final_ex_df.head(100), width='stretch')
+    if not final_ex_df.empty:
+        st.download_button("📥 Download Bulk Export (CSV)", data=final_ex_df.to_csv(index=False).encode('utf-8'), file_name="SoilFreeze_Bulk.csv")
+        
 # --- SERVICE 3: DATA CLEANING TOOL ---
 elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     st.header("🧹 Surgical Data Cleaning")
