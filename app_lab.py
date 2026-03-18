@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import date
 
-# --- 1. AUTHENTICATION ---
+# --- 1. AUTHENTICATION (Standardized) ---
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/bigquery",
@@ -41,87 +40,53 @@ def fetch_engineering_data():
     df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
     return df
 
-# Attempt to load data
-full_df = pd.DataFrame() # Initialize as empty so the app doesn't crash
+# Initialize Data
+full_df = pd.DataFrame()
 try:
     full_df = fetch_engineering_data()
 except Exception as e:
     st.sidebar.error(f"Database Error: {e}")
 
-# --- 3. SIDEBAR NAVIGATION ---
-st.sidebar.title("🛠 Engineering Hub")
-service = st.sidebar.selectbox(
-    "Select Service",
-    ["🔍 Node Diagnostics", "📥 Data Export Lab", "🧹 Data Cleaning Tool"]
-)
+# --- 3. MAIN INTERFACE ---
+st.title("📥 SoilFreeze Engineering Lab")
 
-# --- SERVICE: NODE DIAGNOSTICS ---
-if service == "🔍 Node Diagnostics" and not full_df.empty:
-    st.header("🔍 Node Diagnostics")
+if not full_df.empty:
+    st.subheader("Data Export Controls")
     
+    # Filter Layout
     col1, col2 = st.columns(2)
     with col1:
-        projs = sorted(full_df['Project'].dropna().unique())
-        sel_proj = st.selectbox("Select Project", projs)
-    with col2:
-        locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].dropna().unique())
-        sel_loc = st.selectbox("Select Location", locs)
-
-    # Prepare Data
-    loc_data = full_df[(full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc)].copy()
-    loc_data['display_name'] = loc_data['nodenumber'].astype(str) + " | Depth: " + loc_data['Depth'].astype(str)
-
-    # Line Controls
-    st.markdown("### 📈 Line Controls")
-    available_lines = sorted(loc_data['display_name'].unique().tolist())
-    selected_lines = st.multiselect("Toggle sensors on/off:", options=available_lines, default=available_lines)
-
-    # Filtered Plot Data
-    plot_df = loc_data[loc_data['display_name'].isin(selected_lines)].sort_values('timestamp')
-
-    # THE GRAPH (Notice this is indented INSIDE the Diagnostics block)
-    if not plot_df.empty:
-        fig = px.line(
-            plot_df, x='timestamp', y='value', color='display_name',
-            title=f"Location: {sel_loc}",
-            labels={'display_name': 'Sensor', 'value': 'Temp (°C)'}
-        )
-        fig.update_layout(legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02), margin=dict(r=150))
-        fig.update_traces(connectgaps=True)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Select sensors to view the graph.")
-
-# --- SERVICE: DATA EXPORT LAB ---
-elif service == "📥 Data Export Lab" and not full_df.empty:
-    st.header("📥 Data Export Lab")
-    
-    e_col1, e_col2 = st.columns(2)
-    with e_col1:
         start_date = st.date_input("Start Date", value=date.today() - pd.Timedelta(days=14))
-    with e_col2:
+        ex_projs = sorted(full_df['Project'].dropna().unique())
+        sel_proj = st.selectbox("Select Project", ex_projs)
+        
+    with col2:
         end_date = st.date_input("End Date", value=date.today())
+        ex_locs = ["All Locations"] + sorted(full_df[full_df['Project']==sel_proj]['Location'].dropna().unique().tolist())
+        sel_loc = st.selectbox("Select Location", ex_locs)
 
-    ex_projs = sorted(full_df['Project'].dropna().unique())
-    sel_ex_proj = st.selectbox("Project to Export", ex_projs)
-    
-    final_df = full_df[
-        (full_df['Project'] == sel_ex_proj) & 
+    # Filtering Logic
+    export_df = full_df[
+        (full_df['Project'] == sel_proj) & 
         (full_df['timestamp'].dt.date >= start_date) & 
         (full_df['timestamp'].dt.date <= end_date)
     ]
     
-    st.write(f"📊 Found **{len(final_df)}** rows.")
-    st.dataframe(final_df.head(100))
+    if sel_loc != "All Locations":
+        export_df = export_df[export_df['Location'] == sel_loc]
 
-    if not final_df.empty:
-        csv = final_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download CSV", data=csv, file_name=f"SoilFreeze_{sel_ex_proj}.csv", mime='text/csv')
+    # Results & Download
+    st.markdown("---")
+    st.write(f"📊 **Rows Found:** {len(export_df)}")
+    st.dataframe(export_df.head(500), use_container_width=True)
 
-# --- SERVICE: DATA CLEANING TOOL ---
-elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
-    st.header("🧹 Data Cleaning Tool")
-    min_v, max_v = st.slider("Valid Temperature Range (°C)", -60.0, 100.0, (-40.0, 50.0))
-    cleaned_df = full_df[(full_df['value'] >= min_v) & (full_df['value'] <= max_v)]
-    st.success(f"Original: {len(full_df)} | Cleaned: {len(cleaned_df)}")
-    st.dataframe(cleaned_df.head(200))
+    if not export_df.empty:
+        csv = export_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download CSV Export",
+            data=csv,
+            file_name=f"SoilFreeze_{sel_proj}_{sel_loc}.csv",
+            mime='text/csv'
+        )
+else:
+    st.info("Loading data from BigQuery...")
