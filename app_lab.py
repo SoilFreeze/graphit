@@ -1,6 +1,73 @@
-# --- 3. THE GRAPH (Standardized -20 to 80°F with Weekly Markers) ---
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from google.cloud import bigquery
+from google.oauth2 import service_account
+from datetime import date
+
+# --- 1. AUTHENTICATION (Includes Drive Scopes) ---
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/bigquery",
+    "https://www.googleapis.com/auth/cloud-platform"
+]
+
+if "gcp_service_account" in st.secrets:
+    info = st.secrets["gcp_service_account"]
+    credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    client = bigquery.Client(credentials=credentials, project=info["project_id"])
+else:
+    client = bigquery.Client.from_service_account_json("service_account.json", scopes=SCOPES)
+
+# --- 2. DATA FETCHING ---
+@st.cache_data(ttl=600)
+def fetch_engineering_data():
+    query = """
+    WITH raw_combined AS (
+        SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, nodenumber 
+        FROM `sensorpush-export.sensor_data.raw_lord`
+        UNION ALL
+        SELECT timestamp, temperature AS value, sensor_name AS nodenumber 
+        FROM `sensorpush-export.sensor_data.raw_sensorpush`
+    )
+    SELECT 
+        r.timestamp, r.value, r.nodenumber, 
+        m.Project, m.Location, m.Depth
+    FROM raw_combined AS r
+    LEFT JOIN `sensorpush-export.sensor_data.master_metadata` AS m
+      ON r.nodenumber = m.NodeNum
+    """
+    df = client.query(query).to_dataframe()
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    return df
+
+# Initialize Data
+full_df = pd.DataFrame()
+try:
+    full_df = fetch_engineering_data()
+except Exception as e:
+    st.sidebar.error(f"Database Error: {e}")
+
+# --- 3. MAIN INTERFACE ---
+st.title("🛠 SoilFreeze Engineering Hub")
+
+if not full_df.empty:
+    # FILTERS
+    col1, col2 = st.columns(2)
+    with col1:
+        projs = sorted(full_df['Project'].dropna().unique())
+        sel_proj = st.selectbox("Project", projs)
+    with col2:
+        locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].dropna().unique())
+        sel_loc = st.selectbox("Location", locs)
+
+    # DATA PREP
+    plot_df = full_df[(full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc)].copy()
+    plot_df['Sensor_ID'] = plot_df['nodenumber'].astype(str) + " | Depth: " + plot_df['Depth'].astype(str)
+    plot_df = plot_df.sort_values('timestamp')
+
+    # --- 4. THE GRAPH (Standardized Axis & Monday Markers) ---
     if not plot_df.empty:
-        # Create the base plot
         fig = px.line(
             plot_df, 
             x='timestamp', 
@@ -11,45 +78,39 @@
             range_y=[-20, 80]
         )
 
-        # 1. Identify all Monday Midnights in the current data range for the dark lines
-        min_date = plot_df['timestamp'].min()
-        max_date = plot_df['timestamp'].max()
+        # Draw Monday Midnight Vertical Lines
+        min_ts, max_ts = plot_df['timestamp'].min(), plot_df['timestamp'].max()
+        mondays = pd.date_range(start=min_ts.floor('D'), end=max_ts.ceil('D'), freq='W-MON')
         
-        # Generate a list of Mondays between the start and end of your data
-        mondays = pd.date_range(
-            start=min_date.floor('D'), 
-            end=max_date.ceil('D'), 
-            freq='W-MON'
-        )
+        for mon in mondays:
+            fig.add_vline(x=mon.timestamp() * 1000, line_width=2, line_color="black", opacity=0.7)
 
-        # 2. Add the Dark Vertical Lines for Monday Midnight
-        for monday in mondays:
-            fig.add_vline(
-                x=monday.timestamp() * 1000, # Plotly expects milliseconds for timestamps
-                line_width=2, 
-                line_color="black", 
-                line_dash="solid",
-                opacity=0.8
-            )
-
-        # 3. Configure the X-Axis for Daily Grid Lines
+        # Configure Daily Grid and Monday Labels
         fig.update_xaxes(
             showgrid=True,
-            dtick=86400000.0, # One day in milliseconds
+            dtick=86400000.0, # 1 day in ms
             gridcolor='lightgrey',
-            gridwidth=1,
-            tickformat="%a\n%b %d" # Shows "Mon Nov 01" etc.
+            tickformat="%a\n%b %d"
         )
 
-        # 4. Final Layout Adjustments
         fig.update_layout(
             legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
             margin=dict(r=150),
             hovermode="x unified",
-            plot_bgcolor='white' # Making background white makes the grid lines easier to see
+            plot_bgcolor='white'
         )
         
         fig.update_traces(connectgaps=True)
         fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         
         st.plotly_chart(fig, use_container_width=True)
+
+        # 5. EXPORT
+        st.markdown("---")
+        csv = plot_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download This View as CSV", data=csv, file_name=f"SoilFreeze_{sel_proj}.csv", mime='text/csv')
+    else:
+        st.info("No data found for this selection.")
+
+else:
+    st.warning("Awaiting data from BigQuery...")
