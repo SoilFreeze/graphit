@@ -68,7 +68,7 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     plot_df['Sensor_ID'] = plot_df['nodenumber'].astype(str) + " | Depth: " + plot_df['Depth'].astype(str)
 
     if not plot_df.empty:
-        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=700) # LARGER CHART
+        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=600, width=700) # LARGER CHART
         
         mondays = pd.date_range(start=start_time, end=datetime.now(), freq='W-MON')
         for mon in mondays:
