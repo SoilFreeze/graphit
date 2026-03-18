@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date # Fixed missing date import
 
 # --- 1. AUTHENTICATION ---
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
@@ -57,8 +57,8 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=2)
 
     # Time Logic: Monday Midnight Start
-    today = datetime.now().date()
-    last_monday = today - timedelta(days=today.weekday())
+    today_dt = datetime.now().date()
+    last_monday = today_dt - timedelta(days=today_dt.weekday())
     start_time = datetime.combine(last_monday, time.min) - timedelta(weeks=weeks_to_show - 1)
     end_time = datetime.now()
 
@@ -84,15 +84,16 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         # X-Axis: Midnight Grid, No Buffer
         fig.update_xaxes(
             range=[start_time, end_time],
-            showgrid=True, dtick=86400000.0, gridcolor='lightgrey',
+            showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', # Darker daily lines
             tickformat="%a\n%b %d", automargin=True
         )
 
-        # Y-Axis: Major every 20, Minor every 5
+        # Y-Axis: Major every 20 (Dark), Minor every 5 (Medium)
         fig.update_yaxes(
-            tick0=-20, dtick=20, # Major ticks (labeled)
-            minor=dict(dtick=5, gridcolor='GhostWhite', gridwidth=0.5), # Minor grid
-            showgrid=True, gridcolor='LightGrey'
+            tick0=-20, dtick=20, 
+            gridcolor='DimGrey', gridwidth=1.5, # Major grid lines
+            minor=dict(dtick=5, gridcolor='Grey', gridwidth=0.5, showgrid=True), # Minor grid lines
+            showgrid=True, zeroline=True, zerolinecolor='black', zerolinewidth=2
         )
 
         fig.update_layout(
@@ -105,7 +106,7 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         fig.update_traces(connectgaps=True)
         fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch') # Updated for 2026 standard
 
         # Download Button for current view
         csv_view = plot_df.sort_values('timestamp').to_csv(index=False).encode('utf-8')
@@ -117,14 +118,12 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
 elif service == "📥 Data Export Lab" and not full_df.empty:
     st.header("📥 Bulk Data Export")
     
-    # 1. Date Range
     d_col1, d_col2 = st.columns(2)
     with d_col1:
         start_d = st.date_input("Start Date", value=date.today() - timedelta(days=30))
     with d_col2:
         end_d = st.date_input("End Date", value=date.today())
 
-    # 2. Scope Controls
     s_col1, s_col2, s_col3 = st.columns(3)
     with s_col1:
         ex_projs = sorted(full_df['Project'].dropna().unique())
@@ -143,11 +142,10 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
         if sel_ex_node != "All Nodes":
             ex_df = ex_df[ex_df['nodenumber'] == sel_ex_node]
 
-    # Final Filter
     final_ex_df = ex_df[(ex_df['timestamp'].dt.date >= start_d) & (ex_df['timestamp'].dt.date <= end_d)]
     
     st.write(f"📊 Found **{len(final_ex_df)}** records.")
-    st.dataframe(final_ex_df.head(100), use_container_width=True)
+    st.dataframe(final_ex_df.head(100), width='stretch')
 
     if not final_ex_df.empty:
         csv_bulk = final_ex_df.sort_values(['Project', 'timestamp']).to_csv(index=False).encode('utf-8')
@@ -159,4 +157,4 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     min_v, max_v = st.slider("Valid Temperature Range (°F)", -60.0, 100.0, (-20.0, 80.0))
     cleaned_df = full_df[(full_df['value'] >= min_v) & (full_df['value'] <= max_v)]
     st.success(f"Original: {len(full_df)} | Cleaned: {len(cleaned_df)}")
-    st.dataframe(cleaned_df.head(200))
+    st.dataframe(cleaned_df.head(200), width='stretch')
