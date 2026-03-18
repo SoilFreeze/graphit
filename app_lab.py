@@ -62,75 +62,40 @@ service = st.sidebar.selectbox(
     ["🔍 Node Diagnostics", "📥 Data Export Lab", "🧹 Data Cleaning Tool"]
 )
 
-# --- SERVICE: NODE DIAGNOSTICS (Updated Legend & Labels) ---
+# --- SERVICE: NODE DIAGNOSTICS ---
 if service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostics")
     
-    # 1. FILTERS
-    col1, col2 = st.columns(2)
-    with col1:
-        projs = sorted(full_df['Project'].dropna().unique())
-        sel_proj = st.selectbox("Project", projs)
-    with col2:
-        locs = sorted(full_df[full_df['Project']==sel_proj]['Location'].dropna().unique())
-        sel_loc = st.selectbox("Location", locs)
-
+    # ... your existing filter code (col1, col2, etc.) ...
+    
     # 2. DATA PREP
     loc_data = full_df[(full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc)].copy()
-    
-    # Create a 'Display Name' for the legend: "Node (Depth m/ft)"
-    # This fulfills the manager's request to see Depth + Node in the legend
-    loc_data['display_name'] = (
-        loc_data['nodenumber'].astype(str) + 
-        " | Depth: " + 
-        loc_data['Depth'].astype(str)
-    )
+    loc_data['display_name'] = loc_data['nodenumber'].astype(str) + " | Depth: " + loc_data['Depth'].astype(str)
 
     # 3. LINE CONTROLS
-    available_display_names = sorted(loc_data['display_name'].unique().tolist())
-    selected_displays = st.multiselect(
-        "Toggle Lines On/Off:",
-        options=available_display_names,
-        default=available_display_names
-    )
+    selected_displays = st.multiselect("Toggle Lines On/Off:", options=sorted(loc_data['display_name'].unique()), default=loc_data['display_name'].unique())
 
     # 4. FILTERED PLOT DATA
     plot_df = loc_data[loc_data['display_name'].isin(selected_displays)].sort_values('timestamp')
 
-    # 5. RENDER THE GRAPH
+    # --- 5. RENDER THE GRAPH (MUST BE INDENTED UNDER THIS 'IF' BLOCK) ---
     if not plot_df.empty:
         fig = px.line(
             plot_df, 
             x='timestamp', 
             y='value', 
-            color='display_name',  # This puts the color and combined name in the legend
-            title=f"Location: {sel_loc}",
-            labels={'display_name': 'Sensor (Node | Depth)', 'value': 'Temp (°C)'}
-        )
-
-        # Move Legend to the Right Side (Vertical)
-        fig.update_layout(
-            legend=dict(
-                orientation="v",
-                yanchor="top",
-                y=1,
-                xanchor="left",
-                x=1.02
-            ),
-            margin=dict(r=150) # Add a right margin so the legend doesn't overlap the graph
+            color='display_name',
+            title=f"Location: {sel_loc}"
         )
         
-        # Keep lines continuous even with small data gaps
-        fig.update_traces(connectgaps=True)
-        
+        fig.update_layout(legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02))
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Please select sensors from the list above to view the graph.")
+        st.info("Please select sensors to view the graph.")
 
-    # 3. FILTER DATA BASED ON TOGGLES
-    plot_df = loc_data[loc_data['nodenumber'].isin(selected_nodes)].sort_values('timestamp')
-
-    # 4. RENDER THE GRAPH
+# --- SERVICE: DATA EXPORT LAB ---
+elif service == "📥 Data Export Lab":
+    # The export code goes here...
     # --- 4. RENDER THE GRAPH ---
 if not plot_df.empty:
     # Double-check that these names match your SQL 'SELECT' exactly!
