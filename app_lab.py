@@ -46,11 +46,11 @@ except Exception as e:
 st.sidebar.title("🛠 Engineering Hub")
 service = st.sidebar.selectbox("Select Service", ["🔍 Node Diagnostics", "📥 Data Export Lab", "🧹 Data Cleaning Tool"])
 
-# --- SERVICE 1: NODE DIAGNOSTICS ---
+# --- SERVICE 1: NODE DIAGNOSTIC HUB ---
 if service == "🔍 Node Diagnostics" and not full_df.empty:
-    st.header("🔍 Node Diagnostics")
+    st.header("🔍 Engineering Command Center")
     
-    # ... (Selectors for Project, Location, Weeks remain the same) ...
+    # --- 1. SELECTION CONTROLS ---
     col1, col2, col3 = st.columns(3)
     with col1:
         projs = sorted([p for p in full_df['Project'].unique() if p is not None])
@@ -61,75 +61,91 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=2)
 
+    # Time Logic
     today_dt = datetime.now().date()
     last_monday = today_dt - timedelta(days=today_dt.weekday())
     start_time = datetime.combine(last_monday, time.min) - timedelta(weeks=weeks_to_show - 1)
     start_ts = pd.Timestamp(start_time, tz='UTC')
     
+    # Filter Data
     raw_plot_df = full_df[
         (full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc) &
         (full_df['timestamp'] >= start_ts)
     ].copy()
-    
-    hourly_range = pd.date_range(start=start_ts, end=datetime.now(tz=pytz.UTC), freq='h')
-    
-    processed_dfs = []
-    discrepancies = [] # To store the high-variance flags
 
+    # --- 2. THE RUNDOWN (HEALTH & EXTREMES) ---
     if not raw_plot_df.empty:
+        st.subheader("📊 Site Health & Extremes (Last 24h Focus)")
+        
+        # Calculate Stats for the last 24 hours specifically for the "Rundown"
+        last_24h = datetime.now(tz=pytz.UTC) - timedelta(hours=24)
+        recent_df = raw_plot_df[raw_plot_df['timestamp'] >= last_24h].copy()
+        
+        # A. Highs and Lows
+        overall_max = recent_df['value'].max()
+        overall_min = recent_df['value'].min()
+        
+        # B. Deviation (Noise) Logic
+        # We group by sensor and hour to find where the spread was largest
+        recent_df['hr'] = recent_df['timestamp'].dt.round('h')
+        dev_stats = recent_df.groupby(['nodenumber', 'hr'])['value'].agg(['max', 'min'])
+        dev_stats['spread'] = dev_stats['max'] - dev_stats['min']
+        max_dev = dev_stats['spread'].max()
+        noisiest_node = dev_stats['spread'].idxmax()[0] if not dev_stats.empty else "N/A"
+
+        # C. Sensor Out (Offline) Notification
+        # Check if any sensor hasn't reported in 6 hours
+        cutoff = datetime.now(tz=pytz.UTC) - timedelta(hours=6)
+        last_seen = raw_plot_df.groupby('nodenumber')['timestamp'].max()
+        offline_nodes = last_seen[last_seen < cutoff]
+
+        # Display Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Site High (24h)", f"{overall_max:.1f}°F")
+        m2.metric("Site Low (24h)", f"{overall_min:.1f}°F")
+        m3.metric("Max Deviation", f"{max_dev:.2f}°F", help=f"Sensor {noisiest_node} is showing the most noise.")
+        
+        if not offline_nodes.empty:
+            m4.error(f"⚠️ {len(offline_nodes)} SENSORS OFFLINE")
+            with st.expander("View Offline Sensors"):
+                for node, ts in offline_nodes.items():
+                    st.write(f"Node **{node}** last seen: {ts.strftime('%m/%d %H:%M')}")
+        else:
+            m4.success("✅ All Sensors Online")
+
+        # --- 3. THE GRAPH (With Duplicate Cleaning & Gap Logic) ---
+        st.divider()
+        hourly_range = pd.date_range(start=start_ts, end=datetime.now(tz=pytz.UTC), freq='h')
+        processed_dfs = []
+        
         for sensor in raw_plot_df['nodenumber'].unique():
             s_df = raw_plot_df[raw_plot_df['nodenumber'] == sensor].copy()
             sensor_depth = s_df['Depth'].iloc[0] if not s_df.empty else "Unknown"
             
-            # --- 🛠 CLEANING & FLAGGING LOGIC ---
-            # 1. Round timestamps to the nearest hour to find "duplicates"
-            s_df['hour_bin'] = s_df['timestamp'].dt.round('h')
+            # Group and Reindex for Gaps
+            s_df = s_df.groupby('timestamp').mean(numeric_only=True).reset_index()
+            s_df = s_df.set_index('timestamp').reindex(hourly_range).rename_axis('timestamp').reset_index()
             
-            # 2. Calculate the Spread (Max - Min) for each hour
-            stats = s_df.groupby('hour_bin')['value'].agg(['mean', 'max', 'min', 'count'])
-            stats['spread'] = stats['max'] - stats['min']
-            
-            # 3. Find hours where variation > 1.0 degree
-            high_var = stats[stats['spread'] > 1.0].copy()
-            if not high_var.empty:
-                for hr, row in high_var.iterrows():
-                    discrepancies.append({
-                        "Sensor": sensor,
-                        "Depth": sensor_depth,
-                        "Time": hr,
-                        "Avg Temp": f"{row['mean']:.2f}°F",
-                        "Variation": f"{row['spread']:.2f}°F",
-                        "Readings": int(row['count'])
-                    })
+            s_df['Sensor_ID'] = f"Depth: {sensor_depth} (SN: {sensor})"
+            processed_dfs.append(s_df)
+        
+        plot_df = pd.concat(processed_dfs) if processed_dfs else pd.DataFrame()
 
-            # 4. Use the Mean for the actual graph data
-            clean_s_df = stats[['mean']].reindex(hourly_range).rename_axis('timestamp').reset_index()
-            clean_s_df.rename(columns={'mean': 'value'}, inplace=True)
-            clean_s_df['Sensor_ID'] = f"Depth: {sensor_depth} (SN: {sensor})"
-            processed_dfs.append(clean_s_df)
-    
-    plot_df = pd.concat(processed_dfs) if processed_dfs else pd.DataFrame()
-
-    # --- DISPLAY FLAG REPORT ---
-    if discrepancies:
-        with st.expander(f"⚠️ {len(discrepancies)} Inconsistent Hourly Readings Detected"):
-            st.write("The following hours had multiple readings that varied by more than 1°F:")
-            st.table(pd.DataFrame(discrepancies))
-
-    if not plot_df.empty:
-        # ... (Graph code remains the same as v4.9/5.0) ...
+        # Build Large Chart
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=800)
         fig.update_traces(connectgaps=False, hovertemplate="<b>%{fullData.name}</b><br>Avg Temp: %{y:.2f}°F<extra></extra>")
         
-        # Grid/Layout logic
-        fig.update_layout(plot_bgcolor='white', hovermode="x unified", legend=dict(x=1.02))
-        fig.update_xaxes(showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', tickformat="%a\n%b %d")
+        # Grid, Monday Markers, and Unified Hover
+        fig.update_layout(plot_bgcolor='white', hovermode="x unified", margin=dict(l=20, r=150, t=50, b=20))
+        fig.update_xaxes(showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', tickformat="%a\n%b %d", tickfont=dict(size=14))
+        fig.update_yaxes(tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Grey', showgrid=True), tickfont=dict(size=14))
         fig.add_hline(y=32, line_dash="dash", line_color="blue")
         
         st.plotly_chart(fig, width='stretch')
-        st.download_button("📥 Download Cleaned Data", data=plot_df.to_csv(index=False).encode('utf-8'), 
-                           file_name=f"Cleaned_{sel_proj}.csv", key="diag_dl")
+        st.download_button("📥 Download View", data=plot_df.to_csv(index=False).encode('utf-8'), key="hub_dl")
 
+    else:
+        st.info("No data found for this selection.")
 # --- SERVICE 2: DATA EXPORT LAB (RESTORED) ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
     st.header("📥 Bulk Data Export")
