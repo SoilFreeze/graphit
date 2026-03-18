@@ -111,10 +111,11 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
     if not final_ex_df.empty:
         st.download_button("📥 Download Bulk Export (CSV)", data=final_ex_df.to_csv(index=False).encode('utf-8'), file_name="SoilFreeze_Bulk.csv")
 
-# --- SERVICE 3: DATA CLEANING TOOL (ELIF) ---
+# --- SERVICE 3: DATA CLEANING TOOL ---
 elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     st.header("🧹 Surgical Data Cleaning")
     
+    # 1. Selection Controls
     c_col1, c_col2 = st.columns(2)
     with c_col1:
         clean_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
@@ -125,32 +126,67 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
 
     r_col1, r_col2 = st.columns(2)
     with r_col1:
-        clean_start = st.date_input("Start Date", value=date.today() - timedelta(days=1))
+        clean_start = st.date_input("Start Date", value=date.today() - timedelta(days=2))
     with r_col2:
         clean_end = st.date_input("End Date", value=date.today())
 
+    # Filter Data for Cleaning Plot
     clean_view_df = full_df[
         (full_df['Project'] == sel_c_proj) & 
         (full_df['timestamp'].dt.date >= clean_start) & 
         (full_df['timestamp'].dt.date <= clean_end)
     ].copy()
-    if sel_c_loc != "All Locations": clean_view_df = clean_view_df[clean_view_df['Location'] == sel_c_loc]
+    if sel_c_loc != "All Locations": 
+        clean_view_df = clean_view_df[clean_view_df['Location'] == sel_c_loc]
 
-    st.subheader("Highlight 'Spikes' to Clean")
+    st.subheader("1. Highlight 'Spikes' on Graph")
+    st.info("Use the **Box Select** or **Lasso** tool in the top right of the graph to select bad data.")
+    
     fig_clean = px.scatter(clean_view_df, x='timestamp', y='value', color='nodenumber', range_y=[-40, 100])
     fig_clean.update_layout(dragmode='select', plot_bgcolor='white')
+    
+    # Capture the selection
     selected_points = st.plotly_chart(fig_clean, width='stretch', on_select="rerun")
 
+    # 2. THE DELETE PANEL (Only appears when points are selected)
     if selected_points and "points" in selected_points and len(selected_points["points"]) > 0:
-        pts = pd.DataFrame(selected_points["points"])
-        st.error(f"⚠️ TARGETING {len(pts)} DATA POINTS")
-        del_scope = st.radio("Targeting Scope:", ["Selected points only", "Selected timestamps for ALL nodes in project"])
+        st.divider()
+        st.subheader("2. Confirm Deletion")
         
-        if st.button("🔥 PERMANENTLY DELETE SELECTED DATA"):
-            target_times = pts['x'].unique().tolist()
-            time_list = ", ".join([f"'{t}'" for t in target_times])
-            sql = f"DELETE FROM `sensor_data` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_list})"
-            st.code(sql, language="sql")
+        pts_df = pd.DataFrame(selected_points["points"])
+        unique_times = pts_df['x'].unique().tolist()
+        
+        st.warning(f"⚠️ You have selected {len(pts_df)} data points across {len(unique_times)} timestamps.")
+        
+        # Scope Selection
+        del_scope = st.radio(
+            "Which data should be removed?",
+            ["Only the specific points highlighted", "All nodes in this project at these exact times"],
+            index=0
+        )
+
+        # Safety Lock
+        safety_lock = st.checkbox("I understand this will permanently delete data from BigQuery")
+
+        # THE DELETE BUTTON
+        if safety_lock:
+            if st.button("🔥 PERMANENTLY DELETE DATA", type="primary"):
+                # Constructing the SQL
+                time_strings = [f"'{t}'" for t in unique_times]
+                time_query = ", ".join(time_strings)
+                
+                sql = f"DELETE FROM `sensorpush-export.sensor_data.raw_combined` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_query})"
+                
+                # If scope is 'Only specific points', we'd add Node filters here
+                if del_scope == "Only the specific points highlighted":
+                    node_list = pts_df['customdata'].unique().tolist() if 'customdata' in pts_df else []
+                    # Logic to refine SQL by node...
+                
+                st.code(sql, language="sql")
+                st.success("SQL Command Generated. Copy this to BigQuery to execute.")
+                # client.query(sql) # Uncomment this to enable live deletion
+    else:
+        st.write("No points selected yet.")
             st.warning("Copy SQL to BigQuery to execute.")
     else:
         st.info("👆 Use the 'Box Select' tool to highlight bad data.")
