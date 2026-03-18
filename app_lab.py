@@ -153,8 +153,58 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
 
 # --- SERVICE: DATA CLEANING TOOL ---
 elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
-    st.header("🧹 Data Cleaning Tool")
-    min_v, max_v = st.slider("Valid Temperature Range (°F)", -60.0, 100.0, (-20.0, 80.0))
-    cleaned_df = full_df[(full_df['value'] >= min_v) & (full_df['value'] <= max_v)]
-    st.success(f"Original: {len(full_df)} | Cleaned: {len(cleaned_df)}")
-    st.dataframe(cleaned_df.head(200), width='stretch')
+    st.header("🧹 Surgical Data Cleaning")
+    st.markdown("*Instructions: Zoom into the graph and use the **Box Select** tool to highlight 'spikes' or bad data.*")
+
+    # 1. FILTERS FOR CLEANING VIEW
+    c_col1, c_col2, c_col3 = st.columns(3)
+    with c_col1:
+        sel_c_proj = st.selectbox("Project to Clean", sorted(full_df['Project'].unique()))
+    with c_col2:
+        c_locs = ["All Locations"] + sorted(full_df[full_df['Project']==sel_c_proj]['Location'].unique().tolist())
+        sel_c_loc = st.selectbox("Location Filter", c_locs)
+    with c_col3:
+        # Narrow down the date to find the "Spike"
+        clean_date = st.date_input("Focus Date", value=date.today())
+
+    # Filter data for the cleaning chart
+    c_df = full_df[
+        (full_df['Project'] == sel_c_proj) & 
+        (full_df['timestamp'].dt.date == clean_date)
+    ].copy()
+    
+    if sel_c_loc != "All Locations":
+        c_df = c_df[c_df['Location'] == sel_c_loc]
+
+    # 2. INTERACTIVE SELECTION GRAPH
+    # We use st.plotly_chart with 'on_select' to capture the highlighted points
+    fig_clean = px.scatter(
+        c_df, x='timestamp', y='value', color='nodenumber',
+        title="Select Points to Remove",
+        labels={'value': 'Temp (°F)'},
+        range_y=[-40, 100]
+    )
+    fig_clean.update_layout(dragmode='select', plot_bgcolor='white')
+    
+    # This captures the points you highlight with your mouse
+    selected_points = st.plotly_chart(fig_clean, width='stretch', on_select="rerun")
+
+    # 3. ACTION PANEL
+    if selected_points and "points" in selected_points and len(selected_points["points"]) > 0:
+        st.subheader("🛠 Selection Actions")
+        
+        # Convert selected points back to a dataframe for preview
+        selected_data = pd.DataFrame(selected_points["points"])
+        
+        # In a real app, we'd map these back to your BigQuery IDs
+        st.warning(f"You have highlighted {len(selected_data)} data points.")
+        
+        # OPTION: Delete Project-Wide
+        apply_project_wide = st.checkbox("Delete these timestamps for ALL nodes in this Project?")
+        
+        if st.button("🚀 EXECUTE PERMANENT DELETE"):
+            # This is where we would send the DELETE command to BigQuery
+            st.error("Access Restricted: Direct deletion requires 'Data Editor' permissions.")
+            st.info("Logic: Generating SQL DELETE script for the selected timestamps...")
+    else:
+        st.info("Use the 'Box Select' tool (top right of graph) to highlight bad data points.")
