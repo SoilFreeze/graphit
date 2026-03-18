@@ -5,6 +5,10 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta, time, date
 
+# --- 0. PAGE CONFIGURATION (REQUIRED FOR WIDE GRAPHS) ---
+# This MUST be the first Streamlit command in your script
+st.set_page_config(layout="wide", page_title="SoilFreeze Engineering Hub")
+
 # --- 1. AUTHENTICATION ---
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
 
@@ -68,7 +72,8 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     plot_df['Sensor_ID'] = plot_df['nodenumber'].astype(str) + " | Depth: " + plot_df['Depth'].astype(str)
 
     if not plot_df.empty:
-        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=600, width=2500) # LARGER CHART
+        # Height 800 + width='stretch' + wide layout = Large Graph
+        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=800)
         
         mondays = pd.date_range(start=start_time, end=datetime.now(), freq='W-MON')
         for mon in mondays:
@@ -76,41 +81,12 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         
         fig.update_xaxes(showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', tickformat="%a\n%b %d", range=[start_time, datetime.now()])
         fig.update_yaxes(tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Grey', showgrid=True))
-        fig.update_layout(plot_bgcolor='white', margin=dict(l=0, r=150, t=30, b=0), legend=dict(x=1.02), hovermode="x unified")
+        fig.update_layout(plot_bgcolor='white', margin=dict(l=20, r=150, t=30, b=20), legend=dict(x=1.02), hovermode="x unified")
         
         st.plotly_chart(fig, width='stretch')
         st.download_button("📥 Download Current Graph Data (CSV)", data=plot_df.to_csv(index=False).encode('utf-8'), file_name="QuickView.csv")
     else:
         st.info("No data found.")
-
-# --- SERVICE 2: DATA EXPORT LAB ---
-elif service == "📥 Data Export Lab" and not full_df.empty:
-    st.header("📥 Bulk Data Export")
-    d_col1, d_col2 = st.columns(2)
-    with d_col1:
-        start_d = st.date_input("Start Date", value=date.today() - timedelta(days=30))
-    with d_col2:
-        end_d = st.date_input("End Date", value=date.today())
-
-    s_col1, s_col2, s_col3 = st.columns(3)
-    with s_col1:
-        ex_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
-        sel_ex_proj = st.selectbox("Project", ex_projs)
-        ex_df = full_df[full_df['Project'] == sel_ex_proj]
-    with s_col2:
-        ex_locs = ["All Locations"] + sorted([l for l in ex_df['Location'].unique() if l is not None])
-        sel_ex_loc = st.selectbox("Location", ex_locs)
-        if sel_ex_loc != "All Locations": ex_df = ex_df[ex_df['Location'] == sel_ex_loc]
-    with s_col3:
-        ex_nodes = ["All Nodes"] + sorted(ex_df['nodenumber'].unique().tolist())
-        sel_ex_node = st.selectbox("Node/Serial", ex_nodes)
-        if sel_ex_node != "All Nodes": ex_df = ex_df[ex_df['nodenumber'] == sel_ex_node]
-
-    final_ex_df = ex_df[(ex_df['timestamp'].dt.date >= start_d) & (ex_df['timestamp'].dt.date <= end_d)]
-    st.write(f"📊 Found **{len(final_ex_df)}** records.")
-    st.dataframe(final_ex_df.head(100), width='stretch')
-    if not final_ex_df.empty:
-        st.download_button("📥 Download Bulk Export (CSV)", data=final_ex_df.to_csv(index=False).encode('utf-8'), file_name="SoilFreeze_Bulk.csv")
 
 # --- SERVICE 3: DATA CLEANING TOOL ---
 elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
@@ -141,23 +117,21 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     fig_clean = px.scatter(clean_view_df, x='timestamp', y='value', color='nodenumber', range_y=[-40, 100], height=600)
     fig_clean.update_layout(dragmode='select', selectionrevision=True)
     
-    # capturing selection more robustly
+    # capturing selection 
     event_data = st.plotly_chart(fig_clean, width='stretch', on_select="rerun")
 
-    # The button panel will show if ANY points are returned in the event_data
-    if event_data and len(event_data.get("selection", {}).get("points", [])) > 0:
+    # This is the "Engine" that shows the delete button
+    if event_data and event_data.get("selection", {}).get("points"):
         st.divider()
         st.subheader("2. Confirm Deletion")
         
         pts = event_data["selection"]["points"]
         st.warning(f"⚠️ Targeted: {len(pts)} points selected.")
         
-        # Security Lock
-        safety = st.checkbox("Verify: I am deleting data for " + sel_c_proj)
+        safety = st.checkbox(f"Verify: I am deleting data for Project {sel_c_proj}")
         
         if safety:
             if st.button("🔥 PERMANENTLY DELETE DATA", type="primary"):
-                # Extract timestamps
                 target_times = list(set([p['x'] for p in pts]))
                 time_list = ", ".join([f"'{t}'" for t in target_times])
                 
@@ -165,4 +139,4 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
                 st.code(sql, language="sql")
                 st.success("SQL generated. Execute in BigQuery to finalize.")
     else:
-        st.info("👆 Use the **Box Select** tool (square icon in graph menu) to highlight points. The delete options will appear here.")
+        st.info("👆 Use the **Box Select** tool to highlight points. The delete button will appear here.")
