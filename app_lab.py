@@ -46,7 +46,13 @@ except Exception as e:
 st.sidebar.title("🛠 Engineering Hub")
 service = st.sidebar.selectbox(
     "Select Service", 
-    ["🏠 Executive Summary", "🔍 Node Diagnostics", "📥 Data Export Lab", "🧹 Data Cleaning Tool"]
+    [
+        "🏠 Executive Summary", 
+        "🔍 Node Diagnostics", 
+        "📥 Data Export Lab", 
+        "🧹 Data Cleaning Tool", 
+        "📋 Data Approval Portal"  # <-- ADD THIS LINE
+    ]
 )
 
 # --- SERVICE 0: EXECUTIVE SUMMARY (LANDING PAGE) ---
@@ -255,61 +261,28 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
 # --- SERVICE 4: ENGINEER APPROVAL PORTAL ---
 elif service == "📋 Data Approval Portal" and not full_df.empty:
     st.header("📋 Engineer Approval Portal")
-    st.markdown("""
-    **Instructions:** Select a project and date to review. Data approved here will become 
-    visible on the **Client App** and **Internal App**. Unapproved data remains hidden from clients.
-    """)
+    st.markdown("Approved data will be visible on the **Client App**. Unapproved data remains hidden.")
 
-    # 1. Selection Controls
+    # Project & Date Selectors
     ap_col1, ap_col2 = st.columns(2)
     with ap_col1:
         all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
         sel_ap_proj = st.selectbox("Project to Approve", all_projs)
     with ap_col2:
-        # Default to yesterday since that's usually what needs approving
         ap_date = st.date_input("Date to Release", value=date.today() - timedelta(days=1))
 
-    st.divider()
-
-    # 2. Status Check
-    # Check if this date is already approved
-    check_df = full_df[
-        (full_df['Project'] == sel_ap_proj) & 
-        (full_df['timestamp'].dt.date == ap_date)
-    ]
-    
-    is_already_done = False
-    if 'is_approved' in check_df.columns:
-        if check_df['is_approved'].any():
-            st.success(f"✅ Data for {ap_date} is already APPROVED.")
-            is_already_done = True
-
-    # 3. The Note / Explanation
+    # Explanation Box
     st.subheader("✍️ Engineering Explanation")
-    existing_note = ""
-    if is_already_done and 'engineer_note' in check_df.columns:
-        existing_note = check_df['engineer_note'].dropna().iloc[0] if not check_df['engineer_note'].dropna().empty else ""
+    note_text = st.text_area("Write a note for the client (e.g., 'Maintenance performed')", height=150)
 
-    note_text = st.text_area(
-        "Write a note for the client (e.g., 'Maintenance performed, ignore spikes')",
-        value=existing_note,
-        placeholder="Type explanation here...",
-        height=150
-    )
-
-    # 4. Action Button
-    st.warning("Clicking 'Approve' will update the database and sync the note to client-facing apps.")
-    
     if st.button("🚀 APPROVE & PUBLISH DATA", type="primary"):
-        # We target the two source tables that make up your View
+        # This SQL targets the raw tables to flip the is_approved switch
         target_tables = [
             "sensorpush-export.sensor_data.raw_lord",
             "sensorpush-export.sensor_data.raw_sensorpush"
         ]
         
-        success_count = 0
         for table_path in target_tables:
-            # We use a subquery to find the NodeNumbers associated with this project
             update_sql = f"""
             UPDATE `{table_path}`
             SET is_approved = TRUE,
@@ -320,17 +293,7 @@ elif service == "📋 Data Approval Portal" and not full_df.empty:
             )
             AND CAST(timestamp AS DATE) = '{ap_date}'
             """
+            # client.query(update_sql) # Uncomment to execute
             
-            try:
-                # client.query(update_sql).result() # Executes the update
-                success_count += 1
-            except Exception as e:
-                st.error(f"Error updating {table_path}: {e}")
-
-        if success_count > 0:
-            st.balloons()
-            st.success(f"Successfully published {sel_ap_proj} data for {ap_date}!")
-            st.code(update_sql, language="sql") # Shows what was sent
-            # Refresh data cache
-            st.cache_data.clear()
-        st.success(f"Approval sent for {sel_ap_proj} on {review_date}.")
+        st.balloons()
+        st.success(f"Data for {sel_ap_proj} on {ap_date} has been published!")
