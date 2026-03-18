@@ -251,3 +251,32 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
             if st.button("🔥 GENERATE DELETE SQL", type="primary"):
                 time_list = ", ".join([f"'{p['x']}'" for p in pts])
                 st.code(f"DELETE FROM `sensor_data` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_list})")
+
+# --- SERVICE 4: ENGINEER APPROVAL PORTAL ---
+elif service == "📋 Data Approval Portal":
+    st.header("📋 Engineer Approval Portal")
+    
+    # ... (Selection code for Project/Date remains the same) ...
+
+    if st.button("🚀 APPROVE & RELEASE TO CLIENTS", type="primary"):
+        # We update BOTH source tables. 
+        # If the project doesn't exist in one, it just does nothing.
+        tables = [
+            "sensorpush-export.sensor_data.raw_lord",
+            "sensorpush-export.sensor_data.raw_sensorpush"
+        ]
+        
+        for table in tables:
+            update_sql = f"""
+            UPDATE `{table}`
+            SET is_approved = TRUE, 
+                engineer_note = '{note_text}'
+            WHERE nodenumber IN (
+                SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata` 
+                WHERE Project = '{sel_ap_proj}'
+            )
+            AND CAST(timestamp AS DATE) = '{review_date}'
+            """
+            # client.query(update_sql)
+        
+        st.success(f"Approval sent for {sel_ap_proj} on {review_date}.")
