@@ -259,71 +259,74 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
                 st.code(f"DELETE FROM `sensor_data` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_list})")
 
 # --- SERVICE 4: ENGINEER APPROVAL PORTAL ---
-elif "Data Approval Portal" in service:
+elif "Approval" in service:
     st.header("📋 Engineer Approval Portal")
-    
-    # 1. Selection Controls
+    st.markdown("Use this to release data to clients or pull it back for internal review.")
+
+    # 1. PRIMARY SELECTION (Project & Date)
     ap_col1, ap_col2 = st.columns(2)
     with ap_col1:
         ap_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
         sel_ap_proj = st.selectbox("1. Select Project", ap_projs)
     with ap_col2:
-        ap_date = st.date_input("2. Select Date to Release", value=date.today() - timedelta(days=1))
+        ap_date = st.date_input("2. Select Date", value=date.today() - timedelta(days=1))
 
-    # 2. Scope Selection
-    scope_col1, scope_col2 = st.columns(2)
-    with scope_col1:
+    # 2. SCOPE & ACTION
+    scope_col, action_col = st.columns(2)
+    with scope_col:
         approval_scope = st.radio("3. Approval Scope", ["Entire Project", "Specific Pipe / Bank"])
-    
-    sel_ap_loc = None
-    if approval_scope == "Specific Pipe / Bank":
-        with scope_col2:
+        
+        sel_ap_loc = None
+        if "Specific Pipe" in approval_scope:
             proj_locs = sorted([l for l in full_df[full_df['Project'] == sel_ap_proj]['Location'].unique() if l is not None])
-            sel_ap_loc = st.selectbox("Select Pipe/Bank to Approve", proj_locs)
+            sel_ap_loc = st.selectbox("Select Pipe to Target", proj_locs)
 
-    # 3. Note Section
+    with action_col:
+        approval_status = st.radio("4. Action", ["✅ Approve (Show to Client)", "🚫 Disapprove (Hide from Client)"])
+        is_approved_val = "TRUE" if "Approve" in approval_status else "FALSE"
+
+    # 3. EXPLANATION NOTE
     st.subheader("✍️ Engineering Explanation")
     note_text = st.text_area(
-        "Write a note for the client", 
-        placeholder="Example: 'Pipe 3 data is confirmed accurate after sensor maintenance.'",
+        "Note for Client App", 
+        placeholder="Example: 'Pipe 4 maintenance in progress. Data is currently being validated.'",
         height=100
     )
 
-    # 4. Action Button & SQL Logic
-    if st.button("🚀 APPROVE & PUBLISH DATA", type="primary"):
+    # 4. EXECUTION
+    if st.button("🚀 SYNC TO DATABASE", type="primary"):
         target_tables = [
             "sensorpush-export.sensor_data.raw_lord",
             "sensorpush-export.sensor_data.raw_sensorpush"
         ]
         
-        # Build the WHERE clause based on the scope
-        if approval_scope == "Entire Project":
-            scope_desc = f"Project {sel_ap_proj}"
-            where_clause = f"""
-                nodenumber IN (
-                    SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`
-                    WHERE Project = '{sel_ap_proj}'
-                )
-            """
+        # Build the metadata filter based on Scope
+        if "Entire Project" in approval_scope:
+            target_desc = f"Project {sel_ap_proj}"
+            scope_filter = f"Project = '{sel_ap_proj}'"
         else:
-            scope_desc = f"Pipe {sel_ap_loc} in Project {sel_ap_proj}"
-            where_clause = f"""
-                nodenumber IN (
-                    SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`
-                    WHERE Project = '{sel_ap_proj}' AND Location = '{sel_ap_loc}'
-                )
-            """
+            target_desc = f"Pipe {sel_ap_loc}"
+            scope_filter = f"Project = '{sel_ap_proj}' AND Location = '{sel_ap_loc}'"
 
         for table_path in target_tables:
             update_sql = f"""
             UPDATE `{table_path}`
-            SET is_approved = TRUE,
+            SET is_approved = {is_approved_val},
                 engineer_note = '{note_text.replace("'", "''")}'
-            WHERE {where_clause}
+            WHERE nodenumber IN (
+                SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`
+                WHERE {scope_filter}
+            )
             AND CAST(timestamp AS DATE) = '{ap_date}'
             """
-            # client.query(update_sql).result() # Execute the update
             
-        st.balloons()
-        st.success(f"✅ Successfully published data for {scope_desc} on {ap_date}!")
+            # client.query(update_sql).result() # Execute the BigQuery update
+            
+        if "Approve" in approval_status:
+            st.balloons()
+            st.success(f"✅ {target_desc} is now LIVE for {ap_date}.")
+        else:
+            st.warning(f"🚫 {target_desc} has been HIDDEN from the client app for {ap_date}.")
+            
         st.code(update_sql, language="sql")
+        st.cache_data.clear() # Force app to fetch fresh status
