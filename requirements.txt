@@ -1,5 +1,5 @@
+streamlit
 pandas
-matplotlib
+plotly
 google-cloud-bigquery
-db-dtypes
-scipy
+pytz
