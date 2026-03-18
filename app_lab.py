@@ -258,41 +258,72 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
                 time_list = ", ".join([f"'{p['x']}'" for p in pts])
                 st.code(f"DELETE FROM `sensor_data` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_list})")
 
-# --- SERVICE 4: ENGINEER APPROVAL PORTAL (ADD THIS EXACTLY) ---
+# --- SERVICE 4: ENGINEER APPROVAL PORTAL ---
 elif "Data Approval Portal" in service:
     st.header("📋 Engineer Approval Portal")
     
     # 1. Selection Controls
     ap_col1, ap_col2 = st.columns(2)
     with ap_col1:
-        # Get projects from your full_df
         ap_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
-        sel_ap_proj = st.selectbox("Project to Approve", ap_projs)
+        sel_ap_proj = st.selectbox("1. Select Project", ap_projs)
     with ap_col2:
-        ap_date = st.date_input("Date to Release", value=date.today() - timedelta(days=1))
+        ap_date = st.date_input("2. Select Date to Release", value=date.today() - timedelta(days=1))
 
-    # 2. Note Section
+    # 2. Scope Selection
+    scope_col1, scope_col2 = st.columns(2)
+    with scope_col1:
+        approval_scope = st.radio("3. Approval Scope", ["Entire Project", "Specific Pipe / Bank"])
+    
+    sel_ap_loc = None
+    if approval_scope == "Specific Pipe / Bank":
+        with scope_col2:
+            proj_locs = sorted([l for l in full_df[full_df['Project'] == sel_ap_proj]['Location'].unique() if l is not None])
+            sel_ap_loc = st.selectbox("Select Pipe/Bank to Approve", proj_locs)
+
+    # 3. Note Section
     st.subheader("✍️ Engineering Explanation")
-    note_text = st.text_area("Write a note for the client (e.g., 'Sensor maintenance')", height=150)
+    note_text = st.text_area(
+        "Write a note for the client", 
+        placeholder="Example: 'Pipe 3 data is confirmed accurate after sensor maintenance.'",
+        height=100
+    )
 
+    # 4. Action Button & SQL Logic
     if st.button("🚀 APPROVE & PUBLISH DATA", type="primary"):
         target_tables = [
             "sensorpush-export.sensor_data.raw_lord",
             "sensorpush-export.sensor_data.raw_sensorpush"
         ]
         
+        # Build the WHERE clause based on the scope
+        if approval_scope == "Entire Project":
+            scope_desc = f"Project {sel_ap_proj}"
+            where_clause = f"""
+                nodenumber IN (
+                    SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`
+                    WHERE Project = '{sel_ap_proj}'
+                )
+            """
+        else:
+            scope_desc = f"Pipe {sel_ap_loc} in Project {sel_ap_proj}"
+            where_clause = f"""
+                nodenumber IN (
+                    SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`
+                    WHERE Project = '{sel_ap_proj}' AND Location = '{sel_ap_loc}'
+                )
+            """
+
         for table_path in target_tables:
             update_sql = f"""
             UPDATE `{table_path}`
             SET is_approved = TRUE,
                 engineer_note = '{note_text.replace("'", "''")}'
-            WHERE nodenumber IN (
-                SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`
-                WHERE Project = '{sel_ap_proj}'
-            )
+            WHERE {where_clause}
             AND CAST(timestamp AS DATE) = '{ap_date}'
             """
-            # client.query(update_sql)
+            # client.query(update_sql).result() # Execute the update
             
         st.balloons()
-        st.success(f"Data for {sel_ap_proj} on {ap_date} is now LIVE.")
+        st.success(f"✅ Successfully published data for {scope_desc} on {ap_date}!")
+        st.code(update_sql, language="sql")
