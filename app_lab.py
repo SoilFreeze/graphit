@@ -59,38 +59,89 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=2)
 
+    # 1. TIME LOGIC
     today_dt = datetime.now().date()
     last_monday = today_dt - timedelta(days=today_dt.weekday())
     start_time = datetime.combine(last_monday, time.min) - timedelta(weeks=weeks_to_show - 1)
+    start_ts = pd.Timestamp(start_time, tz='UTC')
     
-    plot_df = full_df[
+    # 2. DATA PREP & GAP HANDLING
+    # Filter and create the Sensor_ID
+    raw_plot_df = full_df[
         (full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc) &
-        (full_df['timestamp'] >= pd.Timestamp(start_time, tz='UTC'))
+        (full_df['timestamp'] >= start_ts)
     ].copy()
-    plot_df['Sensor_ID'] = plot_df['nodenumber'].astype(str) + " | Depth: " + plot_df['Depth'].astype(str)
-    plot_df = plot_df.sort_values('timestamp')
+    raw_plot_df['Sensor_ID'] = "Depth: " + raw_plot_df['Depth'].astype(str)
+    
+    # --- 💡 FIX: Force 6-Hour Breaks ---
+    # We reindex each sensor to an hourly grid. If an hour is missing, it becomes NaN.
+    # Plotly will then see the NaN and break the line.
+    hourly_range = pd.date_range(start=start_ts, end=datetime.now(tz=pytz.UTC), freq='1H')
+    
+    processed_dfs = []
+    for sensor in raw_plot_df['Sensor_ID'].unique():
+        s_df = raw_plot_df[raw_plot_df['Sensor_ID'] == sensor].set_index('timestamp')
+        # This inserts the missing hours as empty rows
+        s_df = s_df.reindex(hourly_range).rename_axis('timestamp').reset_index()
+        s_df['Sensor_ID'] = sensor
+        processed_dfs.append(s_df)
+    
+    plot_df = pd.concat(processed_dfs) if processed_dfs else raw_plot_df
 
     if not plot_df.empty:
-        # Large Chart with 6-hour gap logic
-        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=800)
-        fig.update_traces(connectgaps=False) # Break lines if data is missing
+        # 3. CREATE CHART
+        fig = px.line(
+            plot_df, 
+            x='timestamp', 
+            y='value', 
+            color='Sensor_ID', 
+            range_y=[-20, 80], 
+            height=800,
+            # Custom Hover Template: Time at top, then Color | Depth | Value
+            # <br> is a line break. %{y} is the temperature value.
+            hover_data={'timestamp': '| %b %d, %H:%M', 'Sensor_ID': True, 'value': ':.2f'}
+        )
 
+        # 4. HOVER TEMPLATE OVERRIDE (Simplified as requested)
+        fig.update_traces(
+            connectgaps=False, # Do not bridge the NaN gaps we created
+            hovertemplate="<b>%{fullData.name}</b><br>Value: %{y}°F<extra></extra>"
+        )
+
+        # 5. GRID & MONDAY MARKERS
         mondays = pd.date_range(start=start_time, end=datetime.now(), freq='W-MON')
         for mon in mondays:
             fig.add_vline(x=mon.timestamp() * 1000, line_width=2.5, line_color="black")
         
-        fig.update_xaxes(showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', tickformat="%a\n%b %d", range=[start_time, datetime.now()], tickfont=dict(size=14))
-        fig.update_yaxes(tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Grey', showgrid=True), tickfont=dict(size=14))
-        
+        fig.update_xaxes(
+            showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', 
+            tickformat="%a\n%b %d", range=[start_time, datetime.now()],
+            tickfont=dict(size=14)
+        )
+        fig.update_yaxes(
+            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5, 
+            minor=dict(dtick=5, gridcolor='Grey', showgrid=True),
+            tickfont=dict(size=14)
+        )
+
+        # 6. LAYOUT
         fig.update_layout(
-            plot_bgcolor='white', margin=dict(l=20, r=150, t=50, b=20),
-            hovermode="x unified", legend=dict(x=1.02),
+            plot_bgcolor='white', 
+            margin=dict(l=20, r=150, t=50, b=20),
+            hovermode="x unified", # Shows the timestamp box at the top
+            legend=dict(x=1.02, title="Sensors"),
             title=dict(text=f"Project: {sel_proj} | {sel_loc}", font=dict(size=20))
         )
         
         fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         st.plotly_chart(fig, width='stretch')
-        st.download_button("📥 Download View (CSV)", data=plot_df.to_csv(index=False).encode('utf-8'), file_name="SoilFreeze_Diagnostic.csv")
+        
+        # Download button remains
+        st.download_button(
+            "📥 Download View (CSV)", 
+            data=plot_df.dropna(subset=['value']).to_csv(index=False).encode('utf-8'), 
+            file_name="SoilFreeze_Diagnostic.csv"
+        )
     else:
         st.info("No data found.")
 
