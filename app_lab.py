@@ -258,25 +258,24 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
                 time_list = ", ".join([f"'{p['x']}'" for p in pts])
                 st.code(f"DELETE FROM `sensor_data` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_list})")
 
-# --- SERVICE 4: ENGINEER APPROVAL PORTAL ---
-elif service == "📋 Data Approval Portal" and not full_df.empty:
+# --- SERVICE 4: ENGINEER APPROVAL PORTAL (ADD THIS EXACTLY) ---
+elif "Data Approval Portal" in service:
     st.header("📋 Engineer Approval Portal")
-    st.markdown("Approved data will be visible on the **Client App**. Unapproved data remains hidden.")
-
-    # Project & Date Selectors
+    
+    # 1. Selection Controls
     ap_col1, ap_col2 = st.columns(2)
     with ap_col1:
-        all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
-        sel_ap_proj = st.selectbox("Project to Approve", all_projs)
+        # Get projects from your full_df
+        ap_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
+        sel_ap_proj = st.selectbox("Project to Approve", ap_projs)
     with ap_col2:
         ap_date = st.date_input("Date to Release", value=date.today() - timedelta(days=1))
 
-    # Explanation Box
+    # 2. Note Section
     st.subheader("✍️ Engineering Explanation")
-    note_text = st.text_area("Write a note for the client (e.g., 'Maintenance performed')", height=150)
+    note_text = st.text_area("Write a note for the client (e.g., 'Sensor maintenance')", height=150)
 
     if st.button("🚀 APPROVE & PUBLISH DATA", type="primary"):
-        # This SQL targets the raw tables to flip the is_approved switch
         target_tables = [
             "sensorpush-export.sensor_data.raw_lord",
             "sensorpush-export.sensor_data.raw_sensorpush"
@@ -293,7 +292,7 @@ elif service == "📋 Data Approval Portal" and not full_df.empty:
             )
             AND CAST(timestamp AS DATE) = '{ap_date}'
             """
-            # client.query(update_sql) # Uncomment to execute
+            # client.query(update_sql)
             
         st.balloons()
-        st.success(f"Data for {sel_ap_proj} on {ap_date} has been published!")
+        st.success(f"Data for {sel_ap_proj} on {ap_date} is now LIVE.")
