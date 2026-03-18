@@ -68,7 +68,8 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     plot_df['Sensor_ID'] = plot_df['nodenumber'].astype(str) + " | Depth: " + plot_df['Depth'].astype(str)
 
     if not plot_df.empty:
-        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80])
+        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=700) # LARGER CHART
+        
         mondays = pd.date_range(start=start_time, end=datetime.now(), freq='W-MON')
         for mon in mondays:
             fig.add_vline(x=mon.timestamp() * 1000, line_width=2.5, line_color="black")
@@ -137,26 +138,31 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     if sel_c_loc != "All Locations": clean_view_df = clean_view_df[clean_view_df['Location'] == sel_c_loc]
 
     st.subheader("1. Highlight 'Spikes' on Graph")
-    fig_clean = px.scatter(clean_view_df, x='timestamp', y='value', color='nodenumber', range_y=[-40, 100])
-    fig_clean.update_layout(dragmode='select', plot_bgcolor='white')
-    selected_points = st.plotly_chart(fig_clean, width='stretch', on_select="rerun")
+    fig_clean = px.scatter(clean_view_df, x='timestamp', y='value', color='nodenumber', range_y=[-40, 100], height=600)
+    fig_clean.update_layout(dragmode='select', selectionrevision=True)
+    
+    # capturing selection more robustly
+    event_data = st.plotly_chart(fig_clean, width='stretch', on_select="rerun")
 
-    if selected_points and "points" in selected_points and len(selected_points["points"]) > 0:
+    # The button panel will show if ANY points are returned in the event_data
+    if event_data and len(event_data.get("selection", {}).get("points", [])) > 0:
         st.divider()
         st.subheader("2. Confirm Deletion")
-        pts_df = pd.DataFrame(selected_points["points"])
-        unique_times = pts_df['x'].unique().tolist()
-        st.warning(f"⚠️ Selected {len(pts_df)} points.")
         
-        del_scope = st.radio("Scope:", ["Highlighted points only", "ALL nodes in project at these times"])
-        safety_lock = st.checkbox("I understand this is permanent")
-
-        if safety_lock:
+        pts = event_data["selection"]["points"]
+        st.warning(f"⚠️ Targeted: {len(pts)} points selected.")
+        
+        # Security Lock
+        safety = st.checkbox("Verify: I am deleting data for " + sel_c_proj)
+        
+        if safety:
             if st.button("🔥 PERMANENTLY DELETE DATA", type="primary"):
-                time_strings = [f"'{t}'" for t in unique_times]
-                time_query = ", ".join(time_strings)
-                sql = f"DELETE FROM `sensorpush-export.sensor_data.raw_combined` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_query})"
+                # Extract timestamps
+                target_times = list(set([p['x'] for p in pts]))
+                time_list = ", ".join([f"'{t}'" for t in target_times])
+                
+                sql = f"DELETE FROM `sensorpush-export.sensor_data.raw_combined` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_list})"
                 st.code(sql, language="sql")
-                st.warning("Copy SQL to BigQuery to execute.")
+                st.success("SQL generated. Execute in BigQuery to finalize.")
     else:
-        st.info("👆 Use the 'Box Select' tool on the graph to highlight bad data.")
+        st.info("👆 Use the **Box Select** tool (square icon in graph menu) to highlight points. The delete options will appear here.")
