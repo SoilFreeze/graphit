@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta, time, date # Fixed missing date import
+from datetime import datetime, timedelta, time, date
 
 # --- 1. AUTHENTICATION ---
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
@@ -48,20 +48,19 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        projs = sorted(full_df['Project'].dropna().unique())
+        # Filter out None to prevent sort errors
+        projs = sorted([p for p in full_df['Project'].unique() if p is not None])
         sel_proj = st.selectbox("Project", projs)
     with col2:
-        locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].dropna().unique())
+        locs = sorted([l for l in full_df[full_df['Project'] == sel_proj]['Location'].unique() if l is not None])
         sel_loc = st.selectbox("Location", locs)
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=2)
 
-    # Time Logic: Monday Midnight Start
     today_dt = datetime.now().date()
     last_monday = today_dt - timedelta(days=today_dt.weekday())
     start_time = datetime.combine(last_monday, time.min) - timedelta(weeks=weeks_to_show - 1)
-    end_time = datetime.now()
-
+    
     plot_df = full_df[
         (full_df['Project'] == sel_proj) & 
         (full_df['Location'] == sel_loc) &
@@ -70,54 +69,26 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     plot_df['Sensor_ID'] = plot_df['nodenumber'].astype(str) + " | Depth: " + plot_df['Depth'].astype(str)
 
     if not plot_df.empty:
-        fig = px.line(
-            plot_df, x='timestamp', y='value', color='Sensor_ID',
-            labels={'value': 'Temp (°F)'},
-            range_y=[-20, 80]
-        )
-
-        # Vertical Monday Lines
-        mondays = pd.date_range(start=start_time, end=end_time, freq='W-MON')
+        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80])
+        
+        # Grid Customization
+        mondays = pd.date_range(start=start_time, end=datetime.now(), freq='W-MON')
         for mon in mondays:
-            fig.add_vline(x=mon.timestamp() * 1000, line_width=2.5, line_color="black", opacity=1)
-
-        # X-Axis: Midnight Grid, No Buffer
-        fig.update_xaxes(
-            range=[start_time, end_time],
-            showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', # Darker daily lines
-            tickformat="%a\n%b %d", automargin=True
-        )
-
-        # Y-Axis: Major every 20 (Dark), Minor every 5 (Medium)
-        fig.update_yaxes(
-            tick0=-20, dtick=20, 
-            gridcolor='DimGrey', gridwidth=1.5, # Major grid lines
-            minor=dict(dtick=5, gridcolor='Grey', gridwidth=0.5, showgrid=True), # Minor grid lines
-            showgrid=True, zeroline=True, zerolinecolor='black', zerolinewidth=2
-        )
-
-        fig.update_layout(
-            plot_bgcolor='white',
-            margin=dict(l=0, r=150, t=30, b=0),
-            legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
-            hovermode="x unified"
-        )
+            fig.add_vline(x=mon.timestamp() * 1000, line_width=2.5, line_color="black")
         
-        fig.update_traces(connectgaps=True)
-        fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+        fig.update_xaxes(showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', tickformat="%a\n%b %d", range=[start_time, datetime.now()])
+        fig.update_yaxes(tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Grey', showgrid=True))
+        fig.update_layout(plot_bgcolor='white', margin=dict(l=0, r=150, t=30, b=0), legend=dict(x=1.02), hovermode="x unified")
         
-        st.plotly_chart(fig, width='stretch') # Updated for 2026 standard
-
-        # Download Button for current view
+        st.plotly_chart(fig, width='stretch')
         csv_view = plot_df.sort_values('timestamp').to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download Current Graph Data (CSV)", data=csv_view, file_name=f"QuickView_{sel_proj}_{sel_loc}.csv")
+        st.download_button("📥 Download Current Graph Data (CSV)", data=csv_view, file_name=f"QuickView_{sel_proj}.csv")
     else:
         st.info("No data found for this selection.")
 
 # --- SERVICE: DATA EXPORT LAB ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
     st.header("📥 Bulk Data Export")
-    
     d_col1, d_col2 = st.columns(2)
     with d_col1:
         start_d = st.date_input("Start Date", value=date.today() - timedelta(days=30))
@@ -126,85 +97,61 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
 
     s_col1, s_col2, s_col3 = st.columns(3)
     with s_col1:
-        ex_projs = sorted(full_df['Project'].dropna().unique())
+        ex_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
         sel_ex_proj = st.selectbox("Project", ex_projs)
         ex_df = full_df[full_df['Project'] == sel_ex_proj]
-    
     with s_col2:
-        ex_locs = ["All Locations"] + sorted(ex_df['Location'].dropna().unique().tolist())
+        ex_locs = ["All Locations"] + sorted([l for l in ex_df['Location'].unique() if l is not None])
         sel_ex_loc = st.selectbox("Location", ex_locs)
-        if sel_ex_loc != "All Locations":
-            ex_df = ex_df[ex_df['Location'] == sel_ex_loc]
-
+        if sel_ex_loc != "All Locations": ex_df = ex_df[ex_df['Location'] == sel_ex_loc]
     with s_col3:
         ex_nodes = ["All Nodes"] + sorted(ex_df['nodenumber'].unique().tolist())
         sel_ex_node = st.selectbox("Node/Serial", ex_nodes)
-        if sel_ex_node != "All Nodes":
-            ex_df = ex_df[ex_df['nodenumber'] == sel_ex_node]
+        if sel_ex_node != "All Nodes": ex_df = ex_df[ex_df['nodenumber'] == sel_ex_node]
 
     final_ex_df = ex_df[(ex_df['timestamp'].dt.date >= start_d) & (ex_df['timestamp'].dt.date <= end_d)]
-    
     st.write(f"📊 Found **{len(final_ex_df)}** records.")
     st.dataframe(final_ex_df.head(100), width='stretch')
-
     if not final_ex_df.empty:
-        csv_bulk = final_ex_df.sort_values(['Project', 'timestamp']).to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download Bulk Export (CSV)", data=csv_bulk, file_name=f"SoilFreeze_Export_{sel_ex_proj}.csv")
+        csv_bulk = final_ex_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download Bulk Export (CSV)", data=csv_bulk, file_name="SoilFreeze_Export.csv")
 
 # --- SERVICE: DATA CLEANING TOOL ---
 elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     st.header("🧹 Surgical Data Cleaning")
-    st.markdown("*Instructions: Zoom into the graph and use the **Box Select** tool to highlight 'spikes' or bad data.*")
-
-    # 1. FILTERS FOR CLEANING VIEW
+    
+    # 1. Selection Controls
     c_col1, c_col2, c_col3 = st.columns(3)
     with c_col1:
-        sel_c_proj = st.selectbox("Project to Clean", sorted(full_df['Project'].unique()))
+        clean_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
+        sel_c_proj = st.selectbox("Project to Clean", clean_projs)
     with c_col2:
-        c_locs = ["All Locations"] + sorted(full_df[full_df['Project']==sel_c_proj]['Location'].unique().tolist())
+        c_locs = ["All Locations"] + sorted([l for l in full_df[full_df['Project']==sel_c_proj]['Location'].unique() if l is not None])
         sel_c_loc = st.selectbox("Location Filter", c_locs)
     with c_col3:
-        # Narrow down the date to find the "Spike"
-        clean_date = st.date_input("Focus Date", value=date.today())
+        clean_date = st.date_input("Spike Date", value=date.today())
 
-    # Filter data for the cleaning chart
-    c_df = full_df[
-        (full_df['Project'] == sel_c_proj) & 
-        (full_df['timestamp'].dt.date == clean_date)
-    ].copy()
-    
-    if sel_c_loc != "All Locations":
-        c_df = c_df[c_df['Location'] == sel_c_loc]
+    # Filter for the cleaning chart
+    clean_view_df = full_df[(full_df['Project'] == sel_c_proj) & (full_df['timestamp'].dt.date == clean_date)].copy()
+    if sel_c_loc != "All Locations": clean_view_df = clean_view_df[clean_view_df['Location'] == sel_c_loc]
 
-    # 2. INTERACTIVE SELECTION GRAPH
-    # We use st.plotly_chart with 'on_select' to capture the highlighted points
-    fig_clean = px.scatter(
-        c_df, x='timestamp', y='value', color='nodenumber',
-        title="Select Points to Remove",
-        labels={'value': 'Temp (°F)'},
-        range_y=[-40, 100]
-    )
+    # 2. Interactive Chart (Use Box Select to highlight spikes)
+    st.subheader("Highlight 'Spikes' to Clean")
+    fig_clean = px.scatter(clean_view_df, x='timestamp', y='value', color='nodenumber', range_y=[-40, 100])
     fig_clean.update_layout(dragmode='select', plot_bgcolor='white')
-    
-    # This captures the points you highlight with your mouse
     selected_points = st.plotly_chart(fig_clean, width='stretch', on_select="rerun")
 
-    # 3. ACTION PANEL
+    # 3. Execution Panel
     if selected_points and "points" in selected_points and len(selected_points["points"]) > 0:
-        st.subheader("🛠 Selection Actions")
+        pts = pd.DataFrame(selected_points["points"])
+        st.warning(f"Highlighted {len(pts)} points at {len(pts['x'].unique())} distinct timestamps.")
         
-        # Convert selected points back to a dataframe for preview
-        selected_data = pd.DataFrame(selected_points["points"])
+        del_type = st.radio("Deletion Scope:", ["Delete only selected points", "Delete these timestamps for ALL nodes in project"])
         
-        # In a real app, we'd map these back to your BigQuery IDs
-        st.warning(f"You have highlighted {len(selected_data)} data points.")
-        
-        # OPTION: Delete Project-Wide
-        apply_project_wide = st.checkbox("Delete these timestamps for ALL nodes in this Project?")
-        
-        if st.button("🚀 EXECUTE PERMANENT DELETE"):
-            # This is where we would send the DELETE command to BigQuery
-            st.error("Access Restricted: Direct deletion requires 'Data Editor' permissions.")
-            st.info("Logic: Generating SQL DELETE script for the selected timestamps...")
+        if st.button("🚀 PREPARE CLEANING SCRIPT"):
+            # Generate the list of timestamps to target
+            target_times = pts['x'].unique().tolist()
+            st.code(f"-- SQL Command --\nDELETE FROM `sensor_data` WHERE Project = '{sel_proj}' AND timestamp IN {tuple(target_times)}")
+            st.info("Copy this to BigQuery Console to execute the permanent delete.")
     else:
-        st.info("Use the 'Box Select' tool (top right of graph) to highlight bad data points.")
+        st.info("👆 Use the 'Box Select' tool on the graph to highlight bad data.")
