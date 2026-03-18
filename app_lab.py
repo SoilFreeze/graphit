@@ -5,7 +5,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import date
 
-# --- 1. AUTHENTICATION (Includes Drive Scopes) ---
+# --- 1. AUTHENTICATION ---
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/bigquery",
@@ -41,12 +41,12 @@ def fetch_engineering_data():
     df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
     return df
 
-# Initialize Data
+# Attempt to load data
+full_df = pd.DataFrame() # Initialize as empty so the app doesn't crash
 try:
     full_df = fetch_engineering_data()
 except Exception as e:
     st.sidebar.error(f"Database Error: {e}")
-    full_df = pd.DataFrame()
 
 # --- 3. SIDEBAR NAVIGATION ---
 st.sidebar.title("🛠 Engineering Hub")
@@ -67,19 +67,19 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].dropna().unique())
         sel_loc = st.selectbox("Select Location", locs)
 
-    # 1. Prepare Local Data
+    # Prepare Data
     loc_data = full_df[(full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc)].copy()
     loc_data['display_name'] = loc_data['nodenumber'].astype(str) + " | Depth: " + loc_data['Depth'].astype(str)
 
-    # 2. Line Controls
+    # Line Controls
     st.markdown("### 📈 Line Controls")
     available_lines = sorted(loc_data['display_name'].unique().tolist())
-    selected_lines = st.multiselect("Toggle lines on/off:", options=available_lines, default=available_lines)
+    selected_lines = st.multiselect("Toggle sensors on/off:", options=available_lines, default=available_lines)
 
-    # 3. Create plot_df ONLY HERE
+    # Filtered Plot Data
     plot_df = loc_data[loc_data['display_name'].isin(selected_lines)].sort_values('timestamp')
 
-    # 4. Render Graph (Indented inside this service block)
+    # THE GRAPH (Notice this is indented INSIDE the Diagnostics block)
     if not plot_df.empty:
         fig = px.line(
             plot_df, x='timestamp', y='value', color='display_name',
@@ -90,7 +90,7 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         fig.update_traces(connectgaps=True)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Please select sensors to view the graph.")
+        st.info("Select sensors to view the graph.")
 
 # --- SERVICE: DATA EXPORT LAB ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
@@ -102,23 +102,20 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
     with e_col2:
         end_date = st.date_input("End Date", value=date.today())
 
-    # Filter Logic
     ex_projs = sorted(full_df['Project'].dropna().unique())
     sel_ex_proj = st.selectbox("Project to Export", ex_projs)
-    ex_df = full_df[full_df['Project'] == sel_ex_proj]
     
-    ex_locs = ["All Locations"] + sorted(ex_df['Location'].dropna().unique().tolist())
-    sel_ex_loc = st.selectbox("Location Filter", ex_locs)
-    if sel_ex_loc != "All Locations":
-        ex_df = ex_df[ex_df['Location'] == sel_ex_loc]
-            
-    # Result
-    export_final = ex_df[(ex_df['timestamp'].dt.date >= start_date) & (ex_df['timestamp'].dt.date <= end_date)]
-    st.write(f"📊 Found **{len(export_final)}** rows.")
-    st.dataframe(export_final.head(100))
+    final_df = full_df[
+        (full_df['Project'] == sel_ex_proj) & 
+        (full_df['timestamp'].dt.date >= start_date) & 
+        (full_df['timestamp'].dt.date <= end_date)
+    ]
+    
+    st.write(f"📊 Found **{len(final_df)}** rows.")
+    st.dataframe(final_df.head(100))
 
-    if not export_final.empty:
-        csv = export_final.to_csv(index=False).encode('utf-8')
+    if not final_df.empty:
+        csv = final_df.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download CSV", data=csv, file_name=f"SoilFreeze_{sel_ex_proj}.csv", mime='text/csv')
 
 # --- SERVICE: DATA CLEANING TOOL ---
@@ -126,5 +123,5 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     st.header("🧹 Data Cleaning Tool")
     min_v, max_v = st.slider("Valid Temperature Range (°C)", -60.0, 100.0, (-40.0, 50.0))
     cleaned_df = full_df[(full_df['value'] >= min_v) & (full_df['value'] <= max_v)]
-    st.success(f"Cleaned Data: {len(cleaned_df)} rows remaining.")
+    st.success(f"Original: {len(full_df)} | Cleaned: {len(cleaned_df)}")
     st.dataframe(cleaned_df.head(200))
