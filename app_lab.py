@@ -97,10 +97,10 @@ if service == "🏠 Executive Summary" and not full_df.empty:
 
         def style_pipe_health(row):
             val = row['24h Change']
-            if val >= 5.0: return ['background-color: #ff4b4b; color: white'] * len(row) # RED
-            elif val >= 2.5: return ['background-color: #ffa500; color: black'] * len(row) # ORANGE
-            elif val >= 1.0: return ['background-color: #ffff00; color: black'] * len(row) # YELLOW
-            elif val <= -1.0: return ['background-color: #90ee90; color: black'] * len(row) # GREEN
+            if val >= 5.0: return ['background-color: #ff4b4b; color: white'] * len(row)
+            elif val >= 2.5: return ['background-color: #ffa500; color: black'] * len(row)
+            elif val >= 1.0: return ['background-color: #ffff00; color: black'] * len(row)
+            elif val <= -1.0: return ['background-color: #90ee90; color: black'] * len(row)
             return [''] * len(row)
 
         if not summary_table.empty:
@@ -113,42 +113,39 @@ if service == "🏠 Executive Summary" and not full_df.empty:
 
     st.divider()
 
-    # --- 4. SENSOR CONNECTIVITY HEAT MAP ---
-    # --- 4. SENSOR CONNECTIVITY HEAT MAP (CURRENT ASSIGNMENTS ONLY) ---
+    # --- 4. SENSOR CONNECTIVITY HEAT MAP (FIXED KEYERROR) ---
     st.subheader(f"📡 Current Sensor Connectivity: {sel_summary_loc}")
     
-    # 1. First, identify which nodes are CURRENTLY assigned to this location 
-    # based on the most recent metadata in our full_df
+    # Identify CURRENTLY assigned nodes
     current_mapping = proj_df[proj_df['Location'] == sel_summary_loc][['Depth', 'nodenumber']].drop_duplicates()
     
     if not current_mapping.empty:
-        # 2. Get the last heartbeat for ONLY those current nodes
-        # We merge the mapping with the latest timestamps to exclude historical/replaced sensors
         last_heartbeats = proj_df.groupby('nodenumber')['timestamp'].max().reset_index()
         connectivity_df = pd.merge(current_mapping, last_heartbeats, on='nodenumber', how='left')
         
-        # Calculate hours silent for color logic
+        # Internal Math Column
         connectivity_df['Hours_Silent'] = (now_ts - connectivity_df['timestamp']).dt.total_seconds() / 3600
         
         def style_connectivity(row):
             hrs = row['Hours_Silent']
-            if pd.isna(hrs) or hrs >= 24: return ['background-color: #ff4b4b; color: white'] * len(row) # RED
-            elif hrs >= 12: return ['background-color: #ffa500; color: black'] * len(row) # ORANGE
-            elif hrs >= 6: return ['background-color: #ffff00; color: black'] * len(row) # YELLOW
-            return ['background-color: #f0f2f6; color: gray'] * len(row) # Recent/Healthy
+            if pd.isna(hrs) or hrs >= 24: return ['background-color: #ff4b4b; color: white'] * len(row)
+            elif hrs >= 12: return ['background-color: #ffa500; color: black'] * len(row)
+            elif hrs >= 6: return ['background-color: #ffff00; color: black'] * len(row)
+            return ['background-color: #f0f2f6; color: gray'] * len(row)
 
-        # Sort by Depth for a logical top-down pipe view
-        connectivity_df = connectivity_df.sort_values('Depth')
-        
-        # Rename for the final table display
-        display_conn_df = connectivity_df.rename(columns={
+        connectivity_df = connectivity_df.sort_values('Depth').rename(columns={
             'timestamp': 'Last Seen', 
             'nodenumber': 'Active Node ID'
         })
         
-        st.table(display_conn_df[['Depth', 'Active Node ID', 'Last Seen']].style.apply(style_connectivity, axis=1).format({
-            "Last Seen": lambda t: t.strftime('%m/%d %H:%M') if pd.notnull(t) else "NEVER SEEN"
-        }))
+        # --- 💡 THE FIX: Hide 'Hours_Silent' after styling but before displaying ---
+        styled_conn = connectivity_df.style.apply(style_connectivity, axis=1).format({
+            "Last Seen": lambda t: t.strftime('%m/%d %H:%M') if pd.notnull(t) else "NEVER SEEN",
+            "Hours_Silent": "{:.1f}"
+        })
+        
+        # Use hide() to remove the math column from the final display
+        st.table(styled_conn.hide(['Hours_Silent'], axis=1))
     else:
         st.info("No active sensor mappings found for this location.")
     
