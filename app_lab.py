@@ -62,11 +62,11 @@ service = st.sidebar.selectbox(
     ["🔍 Node Diagnostics", "📥 Data Export Lab", "🧹 Data Cleaning Tool"]
 )
 
-# --- SERVICE: NODE DIAGNOSTICS ---
-# --- SERVICE: NODE DIAGNOSTICS (With Toggle Feature) ---
+# --- SERVICE: NODE DIAGNOSTICS (Updated Legend & Labels) ---
 if service == "🔍 Node Diagnostics" and not full_df.empty:
-    st.header("🔍 Interactive Node Graph")
+    st.header("🔍 Node Diagnostics")
     
+    # 1. FILTERS
     col1, col2 = st.columns(2)
     with col1:
         projs = sorted(full_df['Project'].dropna().unique())
@@ -75,17 +75,57 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         locs = sorted(full_df[full_df['Project']==sel_proj]['Location'].dropna().unique())
         sel_loc = st.selectbox("Location", locs)
 
-    # 1. GET ALL NODES FOR THIS LOCATION
-    loc_data = full_df[(full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc)]
-    available_nodes = sorted(loc_data['nodenumber'].unique().tolist())
-
-    # 2. THE TOGGLE BOX (Turn lines on/off)
-    st.markdown("### 📈 Line Controls")
-    selected_nodes = st.multiselect(
-        "Select nodes to display (Uncheck to turn line off):",
-        options=available_nodes,
-        default=available_nodes  # Start with everything turned ON
+    # 2. DATA PREP
+    loc_data = full_df[(full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc)].copy()
+    
+    # Create a 'Display Name' for the legend: "Node (Depth m/ft)"
+    # This fulfills the manager's request to see Depth + Node in the legend
+    loc_data['display_name'] = (
+        loc_data['nodenumber'].astype(str) + 
+        " | Depth: " + 
+        loc_data['Depth'].astype(str)
     )
+
+    # 3. LINE CONTROLS
+    available_display_names = sorted(loc_data['display_name'].unique().tolist())
+    selected_displays = st.multiselect(
+        "Toggle Lines On/Off:",
+        options=available_display_names,
+        default=available_display_names
+    )
+
+    # 4. FILTERED PLOT DATA
+    plot_df = loc_data[loc_data['display_name'].isin(selected_displays)].sort_values('timestamp')
+
+    # 5. RENDER THE GRAPH
+    if not plot_df.empty:
+        fig = px.line(
+            plot_df, 
+            x='timestamp', 
+            y='value', 
+            color='display_name',  # This puts the color and combined name in the legend
+            title=f"Location: {sel_loc}",
+            labels={'display_name': 'Sensor (Node | Depth)', 'value': 'Temp (°C)'}
+        )
+
+        # Move Legend to the Right Side (Vertical)
+        fig.update_layout(
+            legend=dict(
+                orientation="v",
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02
+            ),
+            margin=dict(r=150) # Add a right margin so the legend doesn't overlap the graph
+        )
+        
+        # Keep lines continuous even with small data gaps
+        fig.update_traces(connectgaps=True)
+        
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Please select sensors from the list above to view the graph.")
 
     # 3. FILTER DATA BASED ON TOGGLES
     plot_df = loc_data[loc_data['nodenumber'].isin(selected_nodes)].sort_values('timestamp')
