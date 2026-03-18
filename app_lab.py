@@ -51,46 +51,75 @@ service = st.sidebar.selectbox(
 
 # --- SERVICE 0: EXECUTIVE SUMMARY (LANDING PAGE) ---
 if service == "🏠 Executive Summary" and not full_df.empty:
-    st.header("🏠 Site-Wide Executive Summary")
-    st.write(f"Last Refresh: {datetime.now().strftime('%m/%d %H:%M')}")
+    st.header("🏠 Site Health Command Center")
+    
+    # 1. PROJECT SELECTOR (To keep it from getting overwhelming)
+    all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
+    sel_summary_proj = st.selectbox("Select Project to Audit", all_projs)
+    
+    st.divider()
 
-    # Calculate global stats for the last 24h
+    # 2. FILTER DATA FOR THE LAST 24H
     cutoff_24h = datetime.now(tz=pytz.UTC) - timedelta(hours=24)
-    recent_all = full_df[full_df['timestamp'] >= cutoff_24h].copy()
-    
-    # 1. Global Metrics
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Active Sensors", len(recent_all['nodenumber'].unique()))
-    m2.metric("Highest Temp (24h)", f"{recent_all['value'].max():.1f}°F")
-    m3.metric("Lowest Temp (24h)", f"{recent_all['value'].min():.1f}°F")
-    
-    offline_cutoff = datetime.now(tz=pytz.UTC) - timedelta(hours=6)
-    last_seen_all = full_df.groupby(['Project', 'nodenumber'])['timestamp'].max()
-    global_offline = last_seen_all[last_seen_all < offline_cutoff]
-    m4.metric("Offline Sensors", len(global_offline), delta_color="inverse")
+    proj_recent = full_df[
+        (full_df['Project'] == sel_summary_proj) & 
+        (full_df['timestamp'] >= cutoff_24h)
+    ].copy()
 
-    # 2. Project Breakdown Table
-    st.subheader("📋 Project Health Overview")
-    project_stats = []
-    for proj in sorted([p for p in full_df['Project'].unique() if p is not None]):
-        proj_data = recent_all[recent_all['Project'] == proj]
-        if not proj_data.empty:
-            project_stats.append({
-                "Project": proj,
-                "Avg Temp": f"{proj_data['value'].mean():.1f}°F",
-                "Max Temp": f"{proj_data['value'].max():.1f}°F",
-                "Min Temp": f"{proj_data['value'].min():.1f}°F",
-                "Sensors Reporting": len(proj_data['nodenumber'].unique())
-            })
-    
-    if project_stats:
-        st.table(pd.DataFrame(project_stats))
+    if not proj_recent.empty:
+        # 3. TOP LEVEL PROJECT METRICS
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Project High", f"{proj_recent['value'].max():.1f}°F")
+        m2.metric("Project Low", f"{proj_recent['value'].min():.1f}°F")
+        
+        # Check for Offline
+        cutoff_6h = datetime.now(tz=pytz.UTC) - timedelta(hours=6)
+        last_seen = proj_recent.groupby('nodenumber')['timestamp'].max()
+        offline = last_seen[last_seen < cutoff_6h]
+        
+        if not offline.empty:
+            m3.error(f"⚠️ {len(offline)} OFFLINE SENSORS")
+        else:
+            m3.success("✅ All Sensors Reporting")
 
-    # 3. Urgent Alerts
-    if len(global_offline) > 0:
-        st.error(f"⚠️ ATTENTION: {len(global_offline)} sensors have not reported in over 6 hours.")
-        with st.expander("Show Offline Sensor List"):
-            st.dataframe(global_offline.reset_index(), width='stretch')
+        st.subheader(f"📍 Location Breakdown: Project {sel_summary_proj}")
+        st.write("Calculated based on the last 24 hours of data.")
+
+        # 4. LOCATION (PIPE/BANK) LOOP
+        # We loop through every Pipe/Bank in this project to show their specific health
+        locations = sorted([l for l in proj_recent['Location'].unique() if l is not None])
+        
+        for loc in locations:
+            with st.expander(f"Pipe/Bank: {loc}", expanded=True):
+                loc_data = proj_recent[proj_recent['Location'] == loc].copy()
+                
+                # Calculate Deviation (Greatest Change in a single Node)
+                # We look for the max "swing" (Max-Min) within any 1-hour window
+                loc_data['hr'] = loc_data['timestamp'].dt.round('h')
+                node_stats = loc_data.groupby(['nodenumber', 'hr'])['value'].agg(['max', 'min'])
+                node_stats['diff'] = node_stats['max'] - node_stats['min']
+                
+                # Find the single node with the highest swing
+                if not node_stats.empty:
+                    noisiest_node = node_stats['diff'].idxmax()[0]
+                    max_swing = node_stats['diff'].max()
+                else:
+                    noisiest_node = "N/A"
+                    max_swing = 0.0
+
+                # Display Row
+                r1, r2, r3, r4 = st.columns(4)
+                r1.write(f"**Max:** {loc_data['value'].max():.1f}°F")
+                r2.write(f"**Min:** {loc_data['value'].min():.1f}°F")
+                r3.write(f"**Greatest Change:** {max_swing:.2f}°F")
+                r4.write(f"**At Node:** `{noisiest_node}`")
+                
+                # Visual Warning for High Change
+                if max_swing > 1.5:
+                    st.warning(f"High variability detected in {loc} at Node {noisiest_node}.")
+
+    else:
+        st.info(f"No data reported for Project {sel_summary_proj} in the last 24 hours.")
 
 # --- SERVICE 1: NODE DIAGNOSTICS ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
