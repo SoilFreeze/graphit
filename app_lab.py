@@ -5,8 +5,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta, time, date
 
-# --- 0. PAGE CONFIGURATION (REQUIRED FOR WIDE GRAPHS) ---
-# This MUST be the first Streamlit command in your script
+# --- 0. PAGE CONFIGURATION (Wide Mode + Large Fonts) ---
 st.set_page_config(layout="wide", page_title="SoilFreeze Engineering Hub")
 
 # --- 1. AUTHENTICATION ---
@@ -65,32 +64,40 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     start_time = datetime.combine(last_monday, time.min) - timedelta(weeks=weeks_to_show - 1)
     
     plot_df = full_df[
-        (full_df['Project'] == sel_proj) & 
-        (full_df['Location'] == sel_loc) &
+        (full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc) &
         (full_df['timestamp'] >= pd.Timestamp(start_time, tz='UTC'))
     ].copy()
     plot_df['Sensor_ID'] = plot_df['nodenumber'].astype(str) + " | Depth: " + plot_df['Depth'].astype(str)
+    plot_df = plot_df.sort_values('timestamp')
 
     if not plot_df.empty:
-        # Height 800 + width='stretch' + wide layout = Large Graph
+        # Large Chart with 6-hour gap logic
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=800)
-        
+        fig.update_traces(connectgaps=False) # Break lines if data is missing
+
         mondays = pd.date_range(start=start_time, end=datetime.now(), freq='W-MON')
         for mon in mondays:
             fig.add_vline(x=mon.timestamp() * 1000, line_width=2.5, line_color="black")
         
-        fig.update_xaxes(showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', tickformat="%a\n%b %d", range=[start_time, datetime.now()])
-        fig.update_yaxes(tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Grey', showgrid=True))
-        fig.update_layout(plot_bgcolor='white', margin=dict(l=20, r=150, t=30, b=20), legend=dict(x=1.02), hovermode="x unified")
+        fig.update_xaxes(showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', tickformat="%a\n%b %d", range=[start_time, datetime.now()], tickfont=dict(size=14))
+        fig.update_yaxes(tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Grey', showgrid=True), tickfont=dict(size=14))
         
+        fig.update_layout(
+            plot_bgcolor='white', margin=dict(l=20, r=150, t=50, b=20),
+            hovermode="x unified", legend=dict(x=1.02),
+            title=dict(text=f"Project: {sel_proj} | {sel_loc}", font=dict(size=20))
+        )
+        
+        fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         st.plotly_chart(fig, width='stretch')
-        st.download_button("📥 Download Current Graph Data (CSV)", data=plot_df.to_csv(index=False).encode('utf-8'), file_name="QuickView.csv")
+        st.download_button("📥 Download View (CSV)", data=plot_df.to_csv(index=False).encode('utf-8'), file_name="SoilFreeze_Diagnostic.csv")
     else:
         st.info("No data found.")
-        
-# --- SERVICE 2: DATA EXPORT LAB ---
+
+# --- SERVICE 2: DATA EXPORT LAB (RESTORED) ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
     st.header("📥 Bulk Data Export")
+    
     d_col1, d_col2 = st.columns(2)
     with d_col1:
         start_d = st.date_input("Start Date", value=date.today() - timedelta(days=30))
@@ -104,19 +111,21 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
         ex_df = full_df[full_df['Project'] == sel_ex_proj]
     with s_col2:
         ex_locs = ["All Locations"] + sorted([l for l in ex_df['Location'].unique() if l is not None])
-        sel_ex_loc = st.selectbox("Location", ex_locs)
+        sel_ex_loc = st.selectbox("Location Filter", ex_locs)
         if sel_ex_loc != "All Locations": ex_df = ex_df[ex_df['Location'] == sel_ex_loc]
     with s_col3:
         ex_nodes = ["All Nodes"] + sorted(ex_df['nodenumber'].unique().tolist())
-        sel_ex_node = st.selectbox("Node/Serial", ex_nodes)
+        sel_ex_node = st.selectbox("Node/Serial Filter", ex_nodes)
         if sel_ex_node != "All Nodes": ex_df = ex_df[ex_df['nodenumber'] == sel_ex_node]
 
     final_ex_df = ex_df[(ex_df['timestamp'].dt.date >= start_d) & (ex_df['timestamp'].dt.date <= end_d)]
     st.write(f"📊 Found **{len(final_ex_df)}** records.")
     st.dataframe(final_ex_df.head(100), width='stretch')
+    
     if not final_ex_df.empty:
-        st.download_button("📥 Download Bulk Export (CSV)", data=final_ex_df.to_csv(index=False).encode('utf-8'), file_name="SoilFreeze_Bulk.csv")
-        
+        csv_bulk = final_ex_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download Bulk Export (CSV)", data=csv_bulk, file_name=f"SoilFreeze_Export_{sel_ex_proj}.csv")
+
 # --- SERVICE 3: DATA CLEANING TOOL ---
 elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
     st.header("🧹 Surgical Data Cleaning")
@@ -131,41 +140,28 @@ elif service == "🧹 Data Cleaning Tool" and not full_df.empty:
 
     r_col1, r_col2 = st.columns(2)
     with r_col1:
-        clean_start = st.date_input("Start Date", value=date.today() - timedelta(days=2))
+        clean_start = st.date_input("Clean Start Date", value=date.today() - timedelta(days=2))
     with r_col2:
-        clean_end = st.date_input("End Date", value=date.today())
+        clean_end = st.date_input("Clean End Date", value=date.today())
 
-    clean_view_df = full_df[
-        (full_df['Project'] == sel_c_proj) & 
-        (full_df['timestamp'].dt.date >= clean_start) & 
-        (full_df['timestamp'].dt.date <= clean_end)
-    ].copy()
+    clean_view_df = full_df[(full_df['Project'] == sel_c_proj) & (full_df['timestamp'].dt.date >= clean_start) & (full_df['timestamp'].dt.date <= clean_end)].copy()
     if sel_c_loc != "All Locations": clean_view_df = clean_view_df[clean_view_df['Location'] == sel_c_loc]
 
     st.subheader("1. Highlight 'Spikes' on Graph")
     fig_clean = px.scatter(clean_view_df, x='timestamp', y='value', color='nodenumber', range_y=[-40, 100], height=600)
     fig_clean.update_layout(dragmode='select', selectionrevision=True)
-    
-    # capturing selection 
     event_data = st.plotly_chart(fig_clean, width='stretch', on_select="rerun")
 
-    # This is the "Engine" that shows the delete button
     if event_data and event_data.get("selection", {}).get("points"):
         st.divider()
         st.subheader("2. Confirm Deletion")
-        
         pts = event_data["selection"]["points"]
         st.warning(f"⚠️ Targeted: {len(pts)} points selected.")
-        
         safety = st.checkbox(f"Verify: I am deleting data for Project {sel_c_proj}")
-        
         if safety:
             if st.button("🔥 PERMANENTLY DELETE DATA", type="primary"):
                 target_times = list(set([p['x'] for p in pts]))
                 time_list = ", ".join([f"'{t}'" for t in target_times])
-                
-                sql = f"DELETE FROM `sensorpush-export.sensor_data.raw_combined` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_list})"
+                sql = f"DELETE FROM `sensor_data` WHERE Project = '{sel_c_proj}' AND timestamp IN ({time_list})"
                 st.code(sql, language="sql")
-                st.success("SQL generated. Execute in BigQuery to finalize.")
-    else:
-        st.info("👆 Use the **Box Select** tool to highlight points. The delete button will appear here.")
+                st.success("SQL generated. Execute in BigQuery.")
