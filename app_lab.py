@@ -51,15 +51,13 @@ service = st.sidebar.selectbox(
 
 # --- SERVICE 0: EXECUTIVE SUMMARY (LANDING PAGE) ---
 if service == "🏠 Executive Summary" and not full_df.empty:
-    st.header("🏠 Site Health Command Center")
+    st.header("🏠 Site Health & Warming Alerts")
     
-    # 1. PROJECT SELECTOR (To keep it from getting overwhelming)
+    # 1. PROJECT SELECTOR
     all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
     sel_summary_proj = st.selectbox("Select Project to Audit", all_projs)
     
-    st.divider()
-
-    # 2. FILTER DATA FOR THE LAST 24H
+    # 2. DATA WINDOW (Last 24 Hours)
     cutoff_24h = datetime.now(tz=pytz.UTC) - timedelta(hours=24)
     proj_recent = full_df[
         (full_df['Project'] == sel_summary_proj) & 
@@ -67,56 +65,70 @@ if service == "🏠 Executive Summary" and not full_df.empty:
     ].copy()
 
     if not proj_recent.empty:
-        # 3. TOP LEVEL PROJECT METRICS
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Project High", f"{proj_recent['value'].max():.1f}°F")
-        m2.metric("Project Low", f"{proj_recent['value'].min():.1f}°F")
-        
-        # Check for Offline
+        # 3. OFFLINE SENSORS SECTION
         cutoff_6h = datetime.now(tz=pytz.UTC) - timedelta(hours=6)
-        last_seen = proj_recent.groupby('nodenumber')['timestamp'].max()
-        offline = last_seen[last_seen < cutoff_6h]
+        last_seen = proj_recent.groupby(['nodenumber', 'Depth'])['timestamp'].max().reset_index()
+        offline = last_seen[last_seen['timestamp'] < cutoff_6h]
         
         if not offline.empty:
-            m3.error(f"⚠️ {len(offline)} OFFLINE SENSORS")
+            st.error(f"⚠️ {len(offline)} SENSORS OFFLINE (No data in 6+ hours)")
+            st.dataframe(offline.rename(columns={'timestamp': 'Last Seen'}), width='stretch')
         else:
-            m3.success("✅ All Sensors Reporting")
+            st.success("✅ All Sensors Online")
 
-        st.subheader(f"📍 Location Breakdown: Project {sel_summary_proj}")
-        st.write("Calculated based on the last 24 hours of data.")
+        st.subheader(f"📊 24-Hour Pipe Performance: Project {sel_summary_proj}")
 
-        # 4. LOCATION (PIPE/BANK) LOOP
-        # We loop through every Pipe/Bank in this project to show their specific health
+        # 4. LOCATION (PIPE/BANK) ANALYSIS
         locations = sorted([l for l in proj_recent['Location'].unique() if l is not None])
         
         for loc in locations:
-            with st.expander(f"Pipe/Bank: {loc}", expanded=True):
-                loc_data = proj_recent[proj_recent['Location'] == loc].copy()
-                
-                # Calculate Deviation (Greatest Change in a single Node)
-                # We look for the max "swing" (Max-Min) within any 1-hour window
-                loc_data['hr'] = loc_data['timestamp'].dt.round('h')
-                node_stats = loc_data.groupby(['nodenumber', 'hr'])['value'].agg(['max', 'min'])
-                node_stats['diff'] = node_stats['max'] - node_stats['min']
-                
-                # Find the single node with the highest swing
-                if not node_stats.empty:
-                    noisiest_node = node_stats['diff'].idxmax()[0]
-                    max_swing = node_stats['diff'].max()
-                else:
-                    noisiest_node = "N/A"
-                    max_swing = 0.0
+            st.markdown(f"### 📍 {loc}")
+            loc_data = proj_recent[proj_recent['Location'] == loc].copy()
+            
+            # Calculate 24h Delta for each node
+            # We compare the first reading of the 24h window to the last reading
+            node_analysis = []
+            for node in loc_data['nodenumber'].unique():
+                n_df = loc_data[loc_data['nodenumber'] == node].sort_values('timestamp')
+                if len(n_df) > 1:
+                    depth = n_df['Depth'].iloc[0]
+                    first_val = n_df['value'].iloc[0]
+                    last_val = n_df['value'].iloc[-1]
+                    change = last_val - first_val # Positive = Warming, Negative = Cooling
+                    
+                    node_analysis.append({
+                        "Depth/Name": f"Depth: {depth} ({node})",
+                        "Min Temp": f"{n_df['value'].min():.2f}°F",
+                        "Max Temp": f"{n_df['value'].max():.1f}°F",
+                        "Current": f"{last_val:.1f}°F",
+                        "24h Change": change
+                    })
 
-                # Display Row
-                r1, r2, r3, r4 = st.columns(4)
-                r1.write(f"**Max:** {loc_data['value'].max():.1f}°F")
-                r2.write(f"**Min:** {loc_data['value'].min():.1f}°F")
-                r3.write(f"**Greatest Change:** {max_swing:.2f}°F")
-                r4.write(f"**At Node:** `{noisiest_node}`")
-                
-                # Visual Warning for High Change
-                if max_swing > 1.5:
-                    st.warning(f"High variability detected in {loc} at Node {noisiest_node}.")
+            # Create Table
+            summary_table = pd.DataFrame(node_analysis)
+
+            # 5. CONDITIONAL FORMATTING LOGIC
+            def style_warming(row):
+                val = row['24h Change']
+                if val >= 5.0:
+                    return ['background-color: #ff4b4b; color: white'] * len(row) # RED
+                elif val >= 2.5:
+                    return ['background-color: #ffa500; color: black'] * len(row) # ORANGE
+                elif val >= 1.0:
+                    return ['background-color: #ffff00; color: black'] * len(row) # YELLOW
+                elif val < -1.0:
+                    return ['background-color: #90ee90; color: black'] * len(row) # GREEN (Cooling)
+                else:
+                    return [''] * len(row) # Normal
+
+            if not summary_table.empty:
+                # Apply styles and format the Change column for display
+                styled_df = summary_table.style.apply(style_warming, axis=1).format({"24h Change": "{:+.2f}°F"})
+                st.table(styled_df)
+            else:
+                st.info(f"Insufficient data for {loc} to calculate 24h change.")
+            
+            st.divider()
 
     else:
         st.info(f"No data reported for Project {sel_summary_proj} in the last 24 hours.")
