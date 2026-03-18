@@ -53,13 +53,12 @@ service = st.sidebar.selectbox(
 if service == "🏠 Executive Summary" and not full_df.empty:
     st.header("🏠 Site Health & Warming Alerts")
     
-    # 1. DOUBLE-LAYER FILTERING (Project then Pipe)
+    # 1. PROJECT & PIPE SELECTION
     c1, c2 = st.columns(2)
     with c1:
         all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
         sel_summary_proj = st.selectbox("1. Select Project", all_projs)
         
-    # Filter global data to just this project for the next dropdown
     proj_df = full_df[full_df['Project'] == sel_summary_proj].copy()
     
     with c2:
@@ -68,33 +67,19 @@ if service == "🏠 Executive Summary" and not full_df.empty:
 
     st.divider()
 
-    # 2. DATA WINDOW (Last 24 Hours)
-    cutoff_24h = datetime.now(tz=pytz.UTC) - timedelta(hours=24)
+    # 2. DATA WINDOWS
+    now_ts = datetime.now(tz=pytz.UTC)
+    cutoff_24h = now_ts - timedelta(hours=24)
     loc_recent = proj_df[
         (proj_df['Location'] == sel_summary_loc) & 
         (proj_df['timestamp'] >= cutoff_24h)
     ].copy()
 
+    # --- 3. PERFORMANCE TABLE (FIRST) ---
+    st.subheader(f"📋 24-Hour Performance: {sel_summary_loc}")
     if not loc_recent.empty:
-        # 3. OFFLINE SENSORS (Specific to this Pipe)
-        cutoff_6h = datetime.now(tz=pytz.UTC) - timedelta(hours=6)
-        last_seen = loc_recent.groupby(['Depth', 'nodenumber'])['timestamp'].max().reset_index()
-        offline = last_seen[last_seen['timestamp'] < cutoff_6h]
-        
-        if not offline.empty:
-            st.error(f"⚠️ OFFLINE ALERT: {len(offline)} sensors in {sel_summary_loc} are silent.")
-            st.dataframe(offline.rename(columns={'timestamp': 'Last Seen'}), use_container_width=True)
-        else:
-            st.success(f"✅ All sensors in {sel_summary_loc} are reporting.")
-
-        st.subheader(f"📋 24-Hour Performance: {sel_summary_loc}")
-
-        # 4. SENSOR ANALYSIS TABLE
         node_analysis = []
-        # Sort by Depth numerically if possible, otherwise alphabetically
-        unique_nodes = loc_recent['nodenumber'].unique()
-        
-        for node in unique_nodes:
+        for node in loc_recent['nodenumber'].unique():
             n_df = loc_recent[loc_recent['nodenumber'] == node].sort_values('timestamp')
             if len(n_df) > 1:
                 depth = n_df['Depth'].iloc[0]
@@ -103,47 +88,58 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 change = last_val - first_val
                 
                 node_analysis.append({
-                    "Depth": depth,
-                    "Node ID": node,
-                    "Min Temp": n_df['value'].min(),
-                    "Max Temp": n_df['value'].max(),
-                    "Current": last_val,
-                    "24h Change": change
+                    "Depth": depth, "Node ID": node,
+                    "Min Temp": n_df['value'].min(), "Max Temp": n_df['value'].max(),
+                    "Current": last_val, "24h Change": change
                 })
 
-        # Create and Sort Table by Depth
         summary_table = pd.DataFrame(node_analysis).sort_values('Depth')
 
-        # 5. CUSTOM COLOR LOGIC (Warming = Warning, Cooling = Green)
         def style_pipe_health(row):
             val = row['24h Change']
-            # WARMING RULES (Positive Change)
-            if val >= 5.0:
-                return ['background-color: #ff4b4b; color: white'] * len(row) # RED
-            elif val >= 2.5:
-                return ['background-color: #ffa500; color: black'] * len(row) # ORANGE
-            elif val >= 1.0:
-                return ['background-color: #ffff00; color: black'] * len(row) # YELLOW
-            # COOLING RULES (Negative Change)
-            elif val <= -1.0:
-                return ['background-color: #90ee90; color: black'] * len(row) # GREEN
-            # STEADY
-            else:
-                return [''] * len(row)
+            if val >= 5.0: return ['background-color: #ff4b4b; color: white'] * len(row)
+            elif val >= 2.5: return ['background-color: #ffa500; color: black'] * len(row)
+            elif val >= 1.0: return ['background-color: #ffff00; color: black'] * len(row)
+            elif val <= -1.0: return ['background-color: #90ee90; color: black'] * len(row)
+            return [''] * len(row)
 
         if not summary_table.empty:
-            styled_df = summary_table.style.apply(style_pipe_health, axis=1).format({
-                "Min Temp": "{:.2f}°F",
-                "Max Temp": "{:.2f}°F",
-                "Current": "{:.2f}°F",
-                "24h Change": "{:+.2f}°F"
-            })
-            st.table(styled_df)
-        else:
-            st.info("Insufficient data to calculate 24h trends for this pipe.")
-
+            st.table(summary_table.style.apply(style_pipe_health, axis=1).format({
+                "Min Temp": "{:.2f}°F", "Max Temp": "{:.2f}°F",
+                "Current": "{:.2f}°F", "24h Change": "{:+.2f}°F"
+            }))
     else:
-        st.info(f"No data reported for {sel_summary_loc} in the last 24 hours.")
+        st.info("No active data found for performance calculation.")
+
+    st.divider()
+
+    # --- 4. OFFLINE SENSOR HEAT MAP (SECOND) ---
+    st.subheader(f"📡 Sensor Connectivity Heat Map: {sel_summary_loc}")
+    
+    # Get last seen timestamp for every node known to this Pipe/Location
+    last_seen_df = proj_df[proj_df['Location'] == sel_summary_loc].groupby(['Depth', 'nodenumber'])['timestamp'].max().reset_index()
+    
+    if not last_seen_df.empty:
+        last_seen_df['Hours Silent'] = (now_ts - last_seen_df['timestamp']).dt.total_seconds() / 3600
+        
+        def style_connectivity(row):
+            hrs = row['Hours Silent']
+            if hrs >= 24: return ['background-color: #ff4b4b; color: white'] * len(row) # RED
+            elif hrs >= 12: return ['background-color: #ffa500; color: black'] * len(row) # ORANGE
+            elif hrs >= 6: return ['background-color: #ffff00; color: black'] * len(row) # YELLOW
+            return ['background-color: #f0f2f6; color: gray'] * len(row) # Recent/Normal
+
+        # Sorting by depth for the connectivity map as well
+        last_seen_df = last_seen_df.sort_values('Depth')
+        
+        st.write("Visual status based on time since last heartbeat:")
+        st.table(last_seen_df.style.apply(style_connectivity, axis=1).format({
+            "timestamp": lambda t: t.strftime('%m/%d %H:%M'),
+            "Hours Silent": "{:.1f} hrs"
+        }))
+    else:
+        st.info("No historical sensor records found for this location.")
+        
 # --- SERVICE 1: NODE DIAGNOSTICS ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
