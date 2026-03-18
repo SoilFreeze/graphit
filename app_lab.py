@@ -4,6 +4,7 @@ import plotly.express as px
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta, time, date
+import pytz # Added to fix the NameError
 
 # --- 0. PAGE CONFIGURATION (Wide Mode + Large Fonts) ---
 st.set_page_config(layout="wide", page_title="SoilFreeze Engineering Hub")
