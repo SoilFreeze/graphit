@@ -72,24 +72,25 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         (full_df['timestamp'] >= start_ts)
     ].copy()
     
-    raw_plot_df['Sensor_ID'] = "Depth: " + raw_plot_df['Depth'].astype(str)
-    
     # Use lowercase 'h' for frequency as requested by the FutureWarning
     hourly_range = pd.date_range(start=start_ts, end=datetime.now(tz=pytz.UTC), freq='h')
     
     processed_dfs = []
     if not raw_plot_df.empty:
-        for sensor in raw_plot_df['Sensor_ID'].unique():
-            s_df = raw_plot_df[raw_plot_df['Sensor_ID'] == sensor].copy()
+        for sensor in raw_plot_df['nodenumber'].unique():
+            # Get data for this specific sensor
+            s_df = raw_plot_df[raw_plot_df['nodenumber'] == sensor].copy()
             
-            # --- 💡 FIX: Collapse duplicates before reindexing ---
-            # This averages any readings that share the exact same timestamp
+            # Save metadata so we don't lose it during reindexing
+            sensor_depth = s_df['Depth'].iloc[0] if not s_df.empty else "Unknown"
+            sensor_label = f"Depth: {sensor_depth}"
+            
+            # Collapse duplicates and reindex to create gaps
             s_df = s_df.groupby('timestamp').mean(numeric_only=True).reset_index()
+            s_df = s_df.set_index('timestamp').reindex(hourly_range).rename_axis('timestamp').reset_index()
             
-            s_df = s_df.set_index('timestamp')
-            # Reindexing now works because timestamps are unique
-            s_df = s_df.reindex(hourly_range).rename_axis('timestamp').reset_index()
-            s_df['Sensor_ID'] = sensor
+            # Restore the labels
+            s_df['Sensor_ID'] = sensor_label
             processed_dfs.append(s_df)
     
     plot_df = pd.concat(processed_dfs) if processed_dfs else raw_plot_df
@@ -97,16 +98,11 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     if not plot_df.empty:
         # 3. CREATE CHART
         fig = px.line(
-            plot_df, 
-            x='timestamp', 
-            y='value', 
-            color='Sensor_ID', 
-            range_y=[-20, 80], 
-            height=800
+            plot_df, x='timestamp', y='value', color='Sensor_ID', 
+            range_y=[-20, 80], height=800
         )
 
         # 4. HOVER & GAP CONFIG
-        # Custom hover: Time at top (unified), then just Label and Value
         fig.update_traces(
             connectgaps=False,
             hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.2f}°F<extra></extra>"
@@ -130,74 +126,20 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
 
         # 6. LAYOUT
         fig.update_layout(
-            plot_bgcolor='white', 
-            margin=dict(l=20, r=150, t=50, b=20),
-            hovermode="x unified",
-            legend=dict(x=1.02, font=dict(size=12)),
+            plot_bgcolor='white', margin=dict(l=20, r=150, t=50, b=20),
+            hovermode="x unified", legend=dict(x=1.02, font=dict(size=12)),
             title=dict(text=f"Project: {sel_proj} | {sel_loc}", font=dict(size=20))
         )
         
         fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         st.plotly_chart(fig, width='stretch')
         
+        # --- 💡 FIX: Added unique KEY to stop Duplicate ID Error ---
         st.download_button(
-            "📥 Download View (CSV)", 
+            label="📥 Download Diagnostic View (CSV)", 
             data=plot_df.dropna(subset=['value']).to_csv(index=False).encode('utf-8'), 
-            file_name="SoilFreeze_Diagnostic.csv"
-        )
-    else:
-        st.info("No data found for this selection.")
-    if not plot_df.empty:
-        # 3. CREATE CHART
-        fig = px.line(
-            plot_df, 
-            x='timestamp', 
-            y='value', 
-            color='Sensor_ID', 
-            range_y=[-20, 80], 
-            height=800
-        )
-
-        # 4. HOVER & GAP CONFIG
-        # connectgaps=False ensures the line actually breaks at the NaNs
-        # hovertemplate: Time is at the top (x unified), we just show Label and Value here
-        fig.update_traces(
-            connectgaps=False,
-            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y}°F<extra></extra>"
-        )
-
-        # 5. GRID & MONDAY MARKERS
-        mondays = pd.date_range(start=start_time, end=datetime.now(), freq='W-MON')
-        for mon in mondays:
-            fig.add_vline(x=mon.timestamp() * 1000, line_width=2.5, line_color="black")
-        
-        fig.update_xaxes(
-            showgrid=True, dtick=86400000.0, gridcolor='DarkGrey', 
-            tickformat="%a\n%b %d", range=[start_time, datetime.now()],
-            tickfont=dict(size=14)
-        )
-        fig.update_yaxes(
-            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5, 
-            minor=dict(dtick=5, gridcolor='Grey', showgrid=True),
-            tickfont=dict(size=14)
-        )
-
-        # 6. LAYOUT
-        fig.update_layout(
-            plot_bgcolor='white', 
-            margin=dict(l=20, r=150, t=50, b=20),
-            hovermode="x unified",
-            legend=dict(x=1.02, font=dict(size=12)),
-            title=dict(text=f"Project: {sel_proj} | {sel_loc}", font=dict(size=20))
-        )
-        
-        fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
-        st.plotly_chart(fig, width='stretch')
-        
-        st.download_button(
-            "📥 Download View (CSV)", 
-            data=plot_df.dropna(subset=['value']).to_csv(index=False).encode('utf-8'), 
-            file_name="SoilFreeze_Diagnostic.csv"
+            file_name=f"Diagnostic_{sel_proj}.csv",
+            key="btn_diagnostic_view" # UNIQUE KEY
         )
     else:
         st.info("No data found for this selection.")
