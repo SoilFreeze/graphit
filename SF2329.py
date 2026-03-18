@@ -44,6 +44,41 @@ def fetch_approved_data(pid):
 
 df = fetch_approved_data(PROJECT_ID)
 
+@st.cache_data(ttl=600)
+def fetch_approved_data(pid):
+    info = st.secrets["gcp_service_account"]
+    credentials = service_account.Credentials.from_service_account_info(info)
+    client = bigquery.Client(credentials=credentials, project=info["project_id"])
+    
+    # We query the View but ensure we are targeting the specific project correctly
+    # Note: I've wrapped column names in backticks to prevent reserved word conflicts
+    query = f"""
+    SELECT 
+        `timestamp`, 
+        `value`, 
+        `nodenumber`, 
+        `is_approved`, 
+        `engineer_note`,
+        m.Project,
+        m.Location,
+        m.Depth
+    FROM `sensorpush-export.sensor_data.final_databoard_data` as d
+    JOIN `sensorpush-export.sensor_data.master_metadata` as m 
+      ON d.nodenumber = m.NodeNum
+    WHERE m.Project = '{pid}' 
+    AND d.is_approved = TRUE
+    """
+    
+    try:
+        df = client.query(query).to_dataframe()
+        
+        # Convert timestamp to UTC for Plotly
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        return df
+    except Exception as e:
+        st.error(f"BigQuery Error: {e}")
+        return pd.DataFrame()
 # --- 3. DASHBOARD LAYOUT ---
 st.title(f"❄️ Project {PROJECT_ID} Dashboard")
 
