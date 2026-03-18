@@ -53,86 +53,97 @@ service = st.sidebar.selectbox(
 if service == "🏠 Executive Summary" and not full_df.empty:
     st.header("🏠 Site Health & Warming Alerts")
     
-    # 1. PROJECT SELECTOR
-    all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
-    sel_summary_proj = st.selectbox("Select Project to Audit", all_projs)
+    # 1. DOUBLE-LAYER FILTERING (Project then Pipe)
+    c1, c2 = st.columns(2)
+    with c1:
+        all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
+        sel_summary_proj = st.selectbox("1. Select Project", all_projs)
+        
+    # Filter global data to just this project for the next dropdown
+    proj_df = full_df[full_df['Project'] == sel_summary_proj].copy()
     
+    with c2:
+        all_locs = sorted([l for l in proj_df['Location'].unique() if l is not None])
+        sel_summary_loc = st.selectbox("2. Select Pipe / Bank", all_locs)
+
+    st.divider()
+
     # 2. DATA WINDOW (Last 24 Hours)
     cutoff_24h = datetime.now(tz=pytz.UTC) - timedelta(hours=24)
-    proj_recent = full_df[
-        (full_df['Project'] == sel_summary_proj) & 
-        (full_df['timestamp'] >= cutoff_24h)
+    loc_recent = proj_df[
+        (proj_df['Location'] == sel_summary_loc) & 
+        (proj_df['timestamp'] >= cutoff_24h)
     ].copy()
 
-    if not proj_recent.empty:
-        # 3. OFFLINE SENSORS SECTION
+    if not loc_recent.empty:
+        # 3. OFFLINE SENSORS (Specific to this Pipe)
         cutoff_6h = datetime.now(tz=pytz.UTC) - timedelta(hours=6)
-        last_seen = proj_recent.groupby(['nodenumber', 'Depth'])['timestamp'].max().reset_index()
+        last_seen = loc_recent.groupby(['Depth', 'nodenumber'])['timestamp'].max().reset_index()
         offline = last_seen[last_seen['timestamp'] < cutoff_6h]
         
         if not offline.empty:
-            st.error(f"⚠️ {len(offline)} SENSORS OFFLINE (No data in 6+ hours)")
-            st.dataframe(offline.rename(columns={'timestamp': 'Last Seen'}), width='stretch')
+            st.error(f"⚠️ OFFLINE ALERT: {len(offline)} sensors in {sel_summary_loc} are silent.")
+            st.dataframe(offline.rename(columns={'timestamp': 'Last Seen'}), use_container_width=True)
         else:
-            st.success("✅ All Sensors Online")
+            st.success(f"✅ All sensors in {sel_summary_loc} are reporting.")
 
-        st.subheader(f"📊 24-Hour Pipe Performance: Project {sel_summary_proj}")
+        st.subheader(f"📋 24-Hour Performance: {sel_summary_loc}")
 
-        # 4. LOCATION (PIPE/BANK) ANALYSIS
-        locations = sorted([l for l in proj_recent['Location'].unique() if l is not None])
+        # 4. SENSOR ANALYSIS TABLE
+        node_analysis = []
+        # Sort by Depth numerically if possible, otherwise alphabetically
+        unique_nodes = loc_recent['nodenumber'].unique()
         
-        for loc in locations:
-            st.markdown(f"### 📍 {loc}")
-            loc_data = proj_recent[proj_recent['Location'] == loc].copy()
-            
-            # Calculate 24h Delta for each node
-            # We compare the first reading of the 24h window to the last reading
-            node_analysis = []
-            for node in loc_data['nodenumber'].unique():
-                n_df = loc_data[loc_data['nodenumber'] == node].sort_values('timestamp')
-                if len(n_df) > 1:
-                    depth = n_df['Depth'].iloc[0]
-                    first_val = n_df['value'].iloc[0]
-                    last_val = n_df['value'].iloc[-1]
-                    change = last_val - first_val # Positive = Warming, Negative = Cooling
-                    
-                    node_analysis.append({
-                        "Depth/Name": f"Depth: {depth} ({node})",
-                        "Min Temp": f"{n_df['value'].min():.2f}°F",
-                        "Max Temp": f"{n_df['value'].max():.1f}°F",
-                        "Current": f"{last_val:.1f}°F",
-                        "24h Change": change
-                    })
+        for node in unique_nodes:
+            n_df = loc_recent[loc_recent['nodenumber'] == node].sort_values('timestamp')
+            if len(n_df) > 1:
+                depth = n_df['Depth'].iloc[0]
+                first_val = n_df['value'].iloc[0]
+                last_val = n_df['value'].iloc[-1]
+                change = last_val - first_val
+                
+                node_analysis.append({
+                    "Depth": depth,
+                    "Node ID": node,
+                    "Min Temp": n_df['value'].min(),
+                    "Max Temp": n_df['value'].max(),
+                    "Current": last_val,
+                    "24h Change": change
+                })
 
-            # Create Table
-            summary_table = pd.DataFrame(node_analysis)
+        # Create and Sort Table by Depth
+        summary_table = pd.DataFrame(node_analysis).sort_values('Depth')
 
-            # 5. CONDITIONAL FORMATTING LOGIC
-            def style_warming(row):
-                val = row['24h Change']
-                if val >= 5.0:
-                    return ['background-color: #ff4b4b; color: white'] * len(row) # RED
-                elif val >= 2.5:
-                    return ['background-color: #ffa500; color: black'] * len(row) # ORANGE
-                elif val >= 1.0:
-                    return ['background-color: #ffff00; color: black'] * len(row) # YELLOW
-                elif val < -1.0:
-                    return ['background-color: #90ee90; color: black'] * len(row) # GREEN (Cooling)
-                else:
-                    return [''] * len(row) # Normal
-
-            if not summary_table.empty:
-                # Apply styles and format the Change column for display
-                styled_df = summary_table.style.apply(style_warming, axis=1).format({"24h Change": "{:+.2f}°F"})
-                st.table(styled_df)
+        # 5. CUSTOM COLOR LOGIC (Warming = Warning, Cooling = Green)
+        def style_pipe_health(row):
+            val = row['24h Change']
+            # WARMING RULES (Positive Change)
+            if val >= 5.0:
+                return ['background-color: #ff4b4b; color: white'] * len(row) # RED
+            elif val >= 2.5:
+                return ['background-color: #ffa500; color: black'] * len(row) # ORANGE
+            elif val >= 1.0:
+                return ['background-color: #ffff00; color: black'] * len(row) # YELLOW
+            # COOLING RULES (Negative Change)
+            elif val <= -1.0:
+                return ['background-color: #90ee90; color: black'] * len(row) # GREEN
+            # STEADY
             else:
-                st.info(f"Insufficient data for {loc} to calculate 24h change.")
-            
-            st.divider()
+                return [''] * len(row)
+
+        if not summary_table.empty:
+            styled_df = summary_table.style.apply(style_pipe_health, axis=1).format({
+                "Min Temp": "{:.2f}°F",
+                "Max Temp": "{:.2f}°F",
+                "Current": "{:.2f}°F",
+                "24h Change": "{:+.2f}°F"
+            })
+            st.table(styled_df)
+        else:
+            st.info("Insufficient data to calculate 24h trends for this pipe.")
 
     else:
-        st.info(f"No data reported for Project {sel_summary_proj} in the last 24 hours.")
-
+        st.info(f"No data reported for {sel_summary_loc} in the last 24 hours.")
 # --- SERVICE 1: NODE DIAGNOSTICS ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
