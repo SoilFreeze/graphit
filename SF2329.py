@@ -28,14 +28,26 @@ def build_standard_chart(df, title, x_col='timestamp', y_col='value', color_col=
 # --- 3. DATA FETCHING (GATEKEEPER) ---
 PROJECT_ID = "2329" 
 
+from google.oauth2 import service_account # Ensure this is imported
+
 @st.cache_data(ttl=600)
 def fetch_project_data(pid):
-    # Retrieve credentials from Streamlit Secrets
     info = st.secrets["gcp_service_account"]
-    credentials = service_account.Credentials.from_service_account_info(info)
+    
+    # --- 💡 THE FIX: ADD DRIVE SCOPES ---
+    # This tells Google "I need to talk to BigQuery AND read Drive files"
+    scopes = [
+        "https://www.googleapis.com/auth/bigquery",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/cloud-platform"
+    ]
+    
+    credentials = service_account.Credentials.from_service_account_info(
+        info, scopes=scopes
+    )
+    
     client = bigquery.Client(credentials=credentials, project=info["project_id"])
     
-    # Simple, direct query to reduce permission 'noise'
     query = f"""
     SELECT 
         d.timestamp, d.value, d.nodenumber, d.is_approved, d.engineer_note,
@@ -47,11 +59,15 @@ def fetch_project_data(pid):
     AND d.is_approved = TRUE
     ORDER BY d.timestamp ASC
     """
-    df = client.query(query).to_dataframe()
-    if not df.empty:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-    return df
-
+    
+    try:
+        df = client.query(query).to_dataframe()
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        return df
+    except Exception as e:
+        st.error(f"Access Error: {e}")
+        return pd.DataFrame()
 # --- 4. MAIN INTERFACE ---
 st.title(f"❄️ Project {PROJECT_ID} Thermal Dashboard")
 df = fetch_project_data(PROJECT_ID)
