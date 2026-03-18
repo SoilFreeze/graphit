@@ -67,25 +67,26 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
     start_ts = pd.Timestamp(start_time, tz='UTC')
     
     # 2. DATA PREP & GAP HANDLING
-    # Filter and create the Sensor_ID
     raw_plot_df = full_df[
         (full_df['Project'] == sel_proj) & (full_df['Location'] == sel_loc) &
         (full_df['timestamp'] >= start_ts)
     ].copy()
+    
+    # Clean up the ID for the legend
     raw_plot_df['Sensor_ID'] = "Depth: " + raw_plot_df['Depth'].astype(str)
     
     # --- 💡 FIX: Force 6-Hour Breaks ---
-    # We reindex each sensor to an hourly grid. If an hour is missing, it becomes NaN.
-    # Plotly will then see the NaN and break the line.
+    # We reindex to an hourly grid. If an hour is missing, it becomes a NaN/Break.
     hourly_range = pd.date_range(start=start_ts, end=datetime.now(tz=pytz.UTC), freq='1H')
     
     processed_dfs = []
-    for sensor in raw_plot_df['Sensor_ID'].unique():
-        s_df = raw_plot_df[raw_plot_df['Sensor_ID'] == sensor].set_index('timestamp')
-        # This inserts the missing hours as empty rows
-        s_df = s_df.reindex(hourly_range).rename_axis('timestamp').reset_index()
-        s_df['Sensor_ID'] = sensor
-        processed_dfs.append(s_df)
+    if not raw_plot_df.empty:
+        for sensor in raw_plot_df['Sensor_ID'].unique():
+            s_df = raw_plot_df[raw_plot_df['Sensor_ID'] == sensor].set_index('timestamp')
+            # Reindexing creates the empty rows needed to break the lines
+            s_df = s_df.reindex(hourly_range).rename_axis('timestamp').reset_index()
+            s_df['Sensor_ID'] = sensor
+            processed_dfs.append(s_df)
     
     plot_df = pd.concat(processed_dfs) if processed_dfs else raw_plot_df
 
@@ -97,16 +98,15 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
             y='value', 
             color='Sensor_ID', 
             range_y=[-20, 80], 
-            height=800,
-            # Custom Hover Template: Time at top, then Color | Depth | Value
-            # <br> is a line break. %{y} is the temperature value.
-            hover_data={'timestamp': '| %b %d, %H:%M', 'Sensor_ID': True, 'value': ':.2f'}
+            height=800
         )
 
-        # 4. HOVER TEMPLATE OVERRIDE (Simplified as requested)
+        # 4. HOVER & GAP CONFIG
+        # connectgaps=False ensures the line actually breaks at the NaNs
+        # hovertemplate: Time is at the top (x unified), we just show Label and Value here
         fig.update_traces(
-            connectgaps=False, # Do not bridge the NaN gaps we created
-            hovertemplate="<b>%{fullData.name}</b><br>Value: %{y}°F<extra></extra>"
+            connectgaps=False,
+            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y}°F<extra></extra>"
         )
 
         # 5. GRID & MONDAY MARKERS
@@ -129,22 +129,21 @@ if service == "🔍 Node Diagnostics" and not full_df.empty:
         fig.update_layout(
             plot_bgcolor='white', 
             margin=dict(l=20, r=150, t=50, b=20),
-            hovermode="x unified", # Shows the timestamp box at the top
-            legend=dict(x=1.02, title="Sensors"),
+            hovermode="x unified",
+            legend=dict(x=1.02, font=dict(size=12)),
             title=dict(text=f"Project: {sel_proj} | {sel_loc}", font=dict(size=20))
         )
         
         fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         st.plotly_chart(fig, width='stretch')
         
-        # Download button remains
         st.download_button(
             "📥 Download View (CSV)", 
             data=plot_df.dropna(subset=['value']).to_csv(index=False).encode('utf-8'), 
             file_name="SoilFreeze_Diagnostic.csv"
         )
     else:
-        st.info("No data found.")
+        st.info("No data found for this selection.")
 
 # --- SERVICE 2: DATA EXPORT LAB (RESTORED) ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
