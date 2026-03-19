@@ -2,6 +2,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import math
+import streamlit as st
 
 def get_standard_24h_summary(df, theme):
     """
