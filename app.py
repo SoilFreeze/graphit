@@ -13,16 +13,24 @@ st.set_page_config(layout="wide", page_title="SF Technician Dashboard")
 st.markdown("""<style>.main .block-container {overflow-y: auto !important; height: auto !important;}</style>""", unsafe_allow_html=True)
 
 # 2. AUTHENTICATION
+# --- SECTION 2: AUTHENTICATION ---
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
+    
+    # 💡 THIS IS THE CRITICAL PART: 
+    # You must have both strings in this list!
     scopes = [
         "https://www.googleapis.com/auth/bigquery",
         "https://www.googleapis.com/auth/drive.readonly"
     ]
-    creds = service_account.Credentials.from_service_account_info(info)
+    
+    creds = service_account.Credentials.from_service_account_info(
+        info, 
+        scopes=scopes
+    )
     client = bigquery.Client(credentials=creds, project=info["project_id"])
 else:
-    st.error("Check Streamlit Secrets for 'gcp_service_account'")
+    st.error("GCP Secrets not found.")
     st.stop()
 
 # 3. THE UNIVERSAL THEME (Safe Load)
