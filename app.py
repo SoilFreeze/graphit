@@ -7,11 +7,19 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
 
+import streamlit as st
+import pandas as pd
+from google.cloud import bigquery
+from google.oauth2 import service_account
+from datetime import datetime, timedelta
+import pytz
+
 # =================================================================
 # 1. AUTHENTICATION FIRST (This creates 'creds')
 # =================================================================
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
+    # We define 'creds' here so it exists for the rest of the script
     creds = service_account.Credentials.from_service_account_info(
         info, 
         scopes=["https://www.googleapis.com/auth/drive.readonly", 
@@ -26,13 +34,13 @@ else:
 # 2. DEFINE THE THEME LOADER FUNCTION
 # =================================================================
 @st.cache_data(ttl=3600)
-def load_remote_theme(_credentials):
+def load_remote_theme(_credentials): # Use the underscore to avoid hashing errors
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
     import io, json
     try:
         service = build('drive', 'v3', credentials=_credentials)
-        # YOUR ACTUAL FILE ID FROM GOOGLE DRIVE
+        # REPLACE THIS with your actual ID from Google Drive
         file_id = 'YOUR_SF_STYLE_CONFIG_JSON_ID' 
         
         request = service.files().get_media(fileId=file_id)
@@ -44,100 +52,22 @@ def load_remote_theme(_credentials):
         fh.seek(0)
         return json.load(fh)
     except Exception as e:
-        st.sidebar.warning(f"Using default style. Error: {e}")
+        st.sidebar.warning(f"Theme Load Failed: Using Defaults. Error: {e}")
         return None
 
 # =================================================================
-# 3. NOW CALL THE THEME (Now 'creds' is defined!)
+# 3. NOW CALL THE THEME (Now 'creds' is safely defined!)
 # =================================================================
 SF_THEME = load_remote_theme(creds)
 
 # =================================================================
 # 4. IMPORT UTILS AND SETUP PAGE
 # =================================================================
+# Ensure sf_utils.py is uploaded to your GitHub repo
 from sf_utils import get_standard_24h_summary, apply_standard_chart_style
 
 st.set_page_config(layout="wide", page_title="SF Project Dashboard")
-# =================================================================
-# SECTION 2: AUTHENTICATION & CORE HEADER
-# =================================================================
-if "gcp_service_account" in st.secrets:
-    info = st.secrets["gcp_service_account"]
-    creds = service_account.Credentials.from_service_account_info(
-        info, 
-        scopes=["https://www.googleapis.com/auth/drive.readonly", 
-                "https://www.googleapis.com/auth/bigquery"]
-    )
-    client = bigquery.Client(credentials=creds, project=info["project_id"])
-else:
-    st.error("Credential Error: Please check Streamlit Secrets.")
-    st.stop()
 
-# --- THEME LOADER (With the _credentials fix) ---
-@st.cache_data(ttl=3600)
-def load_remote_theme(_credentials):
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
-    import io, json
-    try:
-        service = build('drive', 'v3', credentials=_credentials)
-        request = service.files().get_media(fileId=GOOGLE_DRIVE_THEME_ID)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        fh.seek(0)
-        return json.load(fh)
-    except Exception as e:
-        st.sidebar.warning(f"Using default style. Error: {e}")
-        return None
-
-SF_THEME = load_remote_theme(creds)
-
-# --- IMPORT SHARED UTILS (Ensure sf_utils.py is in your repo) ---
-from sf_utils import get_standard_24h_summary, apply_standard_chart_style
-
-# =================================================================
-# SECTION 3: DATA FETCHING
-# =================================================================
-@st.cache_data(ttl=300)
-def fetch_tech_data():
-    # Pulls everything for the tech view
-    query = f"""
-    SELECT d.timestamp, d.value, d.nodenumber, m.Project, m.Location, m.Depth
-    FROM `{BQ_PROJECT_ID}.{BQ_DATASET}.final_databoard_data` as d
-    INNER JOIN `{BQ_PROJECT_ID}.{BQ_DATASET}.master_metadata` as m ON d.nodenumber = m.NodeNum
-    ORDER BY d.timestamp ASC
-    """
-    df = client.query(query).to_dataframe()
-    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-    return df
-
-df_all = fetch_tech_data()
-
-# =================================================================
-# SECTION 4: SIDEBAR & GLOBAL FILTERS
-# =================================================================
-st.sidebar.title("🛠️ Tech Operations")
-unit = st.sidebar.radio("Display Unit", ["Fahrenheit (°F)", "Celsius (°C)"])
-is_celsius = unit == "Celsius (°C)"
-
-all_projects = sorted(df_all['Project'].unique())
-selected_project = st.sidebar.selectbox("Select Project", all_projects)
-df_proj = df_all[df_all['Project'] == selected_project].copy()
-
-if is_celsius:
-    df_proj['value'] = (df_proj['value'] - 32) * 5/9
-
-num_weeks = st.sidebar.slider("History (Weeks)", 1, 12, 4)
-
-# Standard Monday-to-Monday logic
-now_utc = datetime.now(tz=pytz.UTC)
-days_to_mon = (7 - now_utc.weekday()) % 7
-if days_to_mon == 0: days_to_mon = 7
-end_v = (now_utc + timedelta(days=days_to_mon)).replace(hour=0, minute=0, second=0)
-start_v = end_v - timedelta(weeks=num_weeks)
 
 # =================================================================
 # SECTION 5: UI TABS
