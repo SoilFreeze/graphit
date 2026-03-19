@@ -7,28 +7,33 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
 import math
+import json
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import io
 
-# --- GLOBAL PLOT STYLE GUIDE ---
-PLOT_CONFIG = {
-    "colors": {
-        "frame": "black",
-        "major_grid": "black",
-        "minor_grid": "#D3D3D3",
-        "faint_grid": "#F0F0F0",
-        "freezing_line": "blue",
-        "alert_low": "red",
-        "alert_mid": "blue",
-        "background": "white"
-    },
-    "line_weights": {
-        "frame": 2,
-        "major_grid": 1.5,
-        "minor_grid": 0.5,
-        "ref_lines": 1.5
-    },
-    "font_size": 12,
-    "chart_height": 850
-}
+@st.cache_data(ttl=3600) # Check for style updates once per hour
+def load_remote_theme(credentials):
+    try:
+        service = build('drive', 'v3', credentials=credentials)
+        # You'll need the File ID of your theme_config.json from Google Drive
+        file_id = 'theme_config.json' 
+        
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        
+        fh.seek(0)
+        return json.load(fh)
+    except Exception as e:
+        # Fallback styles if the file can't be reached
+        return {
+            "frame_color": "black", "frame_width": 2, 
+            "major_grid_color": "black", "chart_height": 850
+        }
 
 # --- 1. SETUP ---
 st.set_page_config(page_title="SoilFreeze Tech Ops", layout="wide", page_icon="🛠️")
