@@ -128,8 +128,19 @@ else:
         else:
             st.info("No approved data in the last 24 hours.")
 
-    with tab2:
+with tab2:
         st.subheader("Temperature vs Time")
+        
+        # 1. Determine Tick Frequency
+        # If showing more than 3 weeks, only show a label every Monday (7 days)
+        # Otherwise, show a label every day.
+        if weeks_to_show > 3:
+            tick_spacing = 604800000.0  # 7 days in ms
+            tick_format = "%b %d"        # e.g., "Oct 12"
+        else:
+            tick_spacing = 86400000.0   # 1 day in ms
+            tick_format = "%a\n%b %d"    # e.g., "Mon [newline] Oct 12"
+
         fig = px.line(loc_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=650)
         
         fig.update_layout(
@@ -138,15 +149,19 @@ else:
             hovermode="x unified",
             margin=dict(l=20, r=150, t=50, b=20)
         )
-        # Force Monday-to-Monday X-Axis
+
         fig.update_xaxes(
             range=[start_view, end_view], 
             showgrid=False, 
-            tickformat="%a\n%b %d",
-            dtick=86400000.0 # One tick per day
+            tickformat=tick_format,
+            dtick=tick_spacing,  # <--- DYNAMIC SPACING
+            tickangle=0          # Keeps labels horizontal for readability
         )
+        
         fig.update_yaxes(showgrid=True, gridcolor='LightGrey', dtick=20)
         fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+        
+        st.plotly_chart(fig, use_container_width=True)
         
         st.plotly_chart(fig, use_container_width=True)
 
