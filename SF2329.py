@@ -155,10 +155,10 @@ else:
         
         st.plotly_chart(fig, use_container_width=True, key="history_chart")
 
-    with tab3:
+   with tab3:
         st.subheader("Monday 6:00 AM Thermal Profile")
         
-        # Filter for Monday (weekday 0) at 6 AM
+        # 1. Filter for Monday at 6 AM
         profile_df = loc_df[
             (loc_df['timestamp'].dt.weekday == 0) & 
             (loc_df['timestamp'].dt.hour == 6)
@@ -166,6 +166,7 @@ else:
 
         if not profile_df.empty:
             latest_mon = profile_df['timestamp'].max()
+            # --- 💡 THE FIX: ENSURE PHYSICAL SORTING ---
             snap_df = profile_df[profile_df['timestamp'] == latest_mon].sort_values('Depth')
 
             fig_profile = px.line(
@@ -173,11 +174,44 @@ else:
                 title=f"Snapshot: {latest_mon.strftime('%A, %b %d @ 06:00 UTC')}",
                 labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
             )
-            fig_profile.update_layout(plot_bgcolor='white', height=600)
-            fig_profile.update_yaxes(autorange="reversed", gridcolor='LightGrey', zeroline=True)
-            fig_profile.update_xaxes(gridcolor='LightGrey', range=[-20, 80])
+            
+            # --- 💡 GRID HIERARCHY SETUP ---
+            # Temperature (X-axis)
+            fig_profile.update_xaxes(
+                range=[-20, 80],
+                # Major lines at 20
+                dtick=20, 
+                gridcolor='DimGrey', gridwidth=1.5,
+                # Minor lines logic (Show 5s and 1s using minor ticks)
+                minor=dict(
+                    dtick=5, gridcolor='Silver', gridwidth=0.5, # Every 5
+                    showgrid=True
+                ),
+                zeroline=True, zerolinecolor='black'
+            )
+            
+            # Depth (Y-axis)
+            fig_profile.update_yaxes(
+                autorange="reversed",
+                # Major lines at 10
+                dtick=10,
+                gridcolor='DimGrey', gridwidth=1.5,
+                # Minor lines at 1
+                minor=dict(
+                    dtick=1, gridcolor='LightGrey', gridwidth=0.2,
+                    showgrid=True
+                )
+            )
+
+            fig_profile.update_layout(
+                plot_bgcolor='white', 
+                height=800, # Increased height for better detail
+                hovermode="y unified"
+            )
+            
+            # Freezing Line
             fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
 
-            st.plotly_chart(fig_profile, use_container_width=True, key="profile_chart")
+            st.plotly_chart(fig_profile, use_container_width=True, key="profile_chart_fixed")
         else:
-            st.info("No Monday 6:00 AM data points available in this timeframe.")
+            st.info("No Monday 6:00 AM data points available.")
