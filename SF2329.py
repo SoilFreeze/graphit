@@ -76,64 +76,39 @@ def fetch_project_data(pid, weeks):
         st.error(f"Access Error: {e}")
         return pd.DataFrame()
 
-# --- 4. MAIN INTERFACE (UPDATED FOR MONDAY ALIGNMENT) ---
+# --- 4. MAIN INTERFACE ---
+st.title(f"❄️ Project {PROJECT_ID} Thermal Dashboard")
+
+# 1. Sidebar Settings
 st.sidebar.header("View Settings")
 weeks_to_show = st.sidebar.slider("Weeks of History", 1, 12, 2)
 
-# 1. Calculate the "End Monday" (The upcoming Monday at 00:00)
+# 2. Calculate Monday-to-Monday Boundaries
 now_utc = datetime.now(tz=pytz.UTC)
+# Find days until next Monday (0=Mon, 1=Tue... 6=Sun)
 days_until_monday = (7 - now_utc.weekday()) % 7
-if days_until_monday == 0 and now_utc.hour >= 0: # If today is Monday, move to next week
-    days_until_monday = 7
-    
-end_view = (now_utc + timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
+if days_until_monday == 0: days_until_monday = 7 # If today is Monday, look to next week
 
-# 2. Calculate the "Start Monday"
+end_view = (now_utc + timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
 start_view = end_view - timedelta(weeks=weeks_to_show)
 
-# 3. Fetch data using these strict boundaries
-# (Optional: Update your fetch function to use start_view and end_view)
-df = fetch_project_data(PROJECT_ID, weeks_to_show + 1) # Fetch extra to ensure coverage
-
-if not df.empty:
-    # ... (Keep your existing filtering/tab logic) ...
-
-    with tab2:
-        st.subheader("Temperature vs Time")
-        # Ensure the x-axis range is locked to the Monday-to-Monday window
-        fig.update_xaxes(
-            range=[start_view, end_view], 
-            showgrid=False, 
-            tickformat="%a\n%b %d",
-            dtick=86400000.0 # Forces one tick per day (in milliseconds)
-        )
-        
-        # Regenerate gridlines for this specific range
-        grid_shapes = get_time_gridlines(start_view, end_view)
-        fig.update_layout(shapes=grid_shapes)
-        
-        st.plotly_chart(fig, use_container_width=True)
-
-# Sidebar Filters
-st.sidebar.header("View Settings")
-weeks_to_show = st.sidebar.slider("Weeks of History", 1, 12, 2)
-
-df = fetch_project_data(PROJECT_ID, weeks_to_show)
+# 3. Fetch Data
+df = fetch_project_data(PROJECT_ID, weeks_to_show + 1)
 
 if df.empty:
     st.warning("⏳ **Review in Progress:** Verified data will appear here once approved.")
 else:
+    # DATA PROCESSING (Only runs if df is NOT empty)
     all_locs = sorted(df['Location'].dropna().unique())
     sel_loc = st.sidebar.selectbox("Select Pipe / Bank", all_locs)
     
     loc_df = df[df['Location'] == sel_loc].copy()
     loc_df['Sensor_ID'] = "Depth: " + loc_df['Depth'].astype(str) + "'"
 
-    # Define Time Boundaries
-    now_utc = datetime.now(tz=pytz.UTC)
-    start_view = now_utc - timedelta(weeks=weeks_to_show)
+    # Generate Gridlines for the Monday-to-Monday range
+    grid_shapes = get_time_gridlines(start_view, end_view)
 
-    # Tabs
+    # Initialize Tabs inside the else block
     tab1, tab2, tab3 = st.tabs(["📊 Site Health", "📈 Temp vs Time", "📉 Depth vs Time"])
 
     with tab1:
@@ -157,15 +132,19 @@ else:
         st.subheader("Temperature vs Time")
         fig = px.line(loc_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=650)
         
-        # Apply Custom Grid & Force Time Range
-        grid_shapes = get_time_gridlines(start_view, now_utc)
         fig.update_layout(
             shapes=grid_shapes, 
             plot_bgcolor='white', 
             hovermode="x unified",
             margin=dict(l=20, r=150, t=50, b=20)
         )
-        fig.update_xaxes(range=[start_view, now_utc], showgrid=False, tickformat="%a\n%b %d")
+        # Force Monday-to-Monday X-Axis
+        fig.update_xaxes(
+            range=[start_view, end_view], 
+            showgrid=False, 
+            tickformat="%a\n%b %d",
+            dtick=86400000.0 # One tick per day
+        )
         fig.update_yaxes(showgrid=True, gridcolor='LightGrey', dtick=20)
         fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         
@@ -173,8 +152,7 @@ else:
 
     with tab3:
         st.subheader("Depth Profile")
-        # Reuse same grid logic for the depth profile tab
         fig_depth = px.line(loc_df, x='timestamp', y='value', color='Depth', height=650)
         fig_depth.update_layout(shapes=grid_shapes, plot_bgcolor='white')
-        fig_depth.update_xaxes(range=[start_view, now_utc], showgrid=False)
+        fig_depth.update_xaxes(range=[start_view, end_view], showgrid=False)
         st.plotly_chart(fig_depth, use_container_width=True)
