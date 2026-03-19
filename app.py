@@ -6,14 +6,19 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
 import math
+import os
 
+# =================================================================
+# 1. PAGE SETUP (Must be the very first Streamlit command)
+# =================================================================
 st.set_page_config(layout="wide", page_title="SF Technician Dashboard")
 
 # =================================================================
-# 1. AUTHENTICATION (Creates 'creds' for everyone else)
+# 2. AUTHENTICATION & API CONNECTIONS
 # =================================================================
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
+    # We define 'creds' globally so it is available for BQ and Drive
     creds = service_account.Credentials.from_service_account_info(
         info, 
         scopes=["https://www.googleapis.com/auth/drive.readonly", 
@@ -21,20 +26,22 @@ if "gcp_service_account" in st.secrets:
     )
     client = bigquery.Client(credentials=creds, project=info["project_id"])
 else:
-    st.error("Credential Error: Please check Streamlit Secrets.")
+    st.error("Credential Error: 'gcp_service_account' not found in Streamlit Secrets.")
     st.stop()
 
 # =================================================================
-# 2. THEME LOADER (Pulls your JSON from Google Drive)
+# 3. THEME LOADER (Google Drive JSON)
 # =================================================================
 @st.cache_data(ttl=3600)
 def load_remote_theme(_credentials):
+    """Downloads the style JSON from Google Drive using the File ID."""
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
     import io, json
+    
     try:
         service = build('drive', 'v3', credentials=_credentials)
-        # Your verified File ID
+        # Verified File ID from your link
         file_id = '18_DQ72HQ1HGaRGjkTUI7PDoIvzp2CqDy' 
         
         request = service.files().get_media(fileId=file_id)
@@ -46,59 +53,65 @@ def load_remote_theme(_credentials):
         fh.seek(0)
         return json.load(fh)
     except Exception as e:
-        st.sidebar.warning(f"Theme Load Failed: Using Defaults. Error: {e}")
-        return None
+        # BACKUP THEME: If Drive fails, the app stays responsive
+        return {
+            "table_theme": {
+                "thresholds": {"critical_warming": 5.0, "warning_warming": 2.5, "slight_warming": 1.0, "cooling": -1.0},
+                "status_colors": {"offline_red": "#ff4b4b", "warning_orange": "#ffa500", "standby_yellow": "#ffff00", "healthy_green": "#90ee90"}
+            }
+        }
 
 SF_THEME = load_remote_theme(creds)
 
 # =================================================================
-# 3. IMPORT SHARED UTILS (Requires sf_utils.py in GitHub repo)
+# 4. SHARED UTILITIES (Logic from sf_utils.py)
 # =================================================================
+# This ensures that math and styles are identical across all 3 SF apps
 try:
     from sf_utils import get_standard_24h_summary, apply_standard_chart_style
 except ImportError:
-    st.error("Error: 'sf_utils.py' not found in repository.")
+    st.error("CRITICAL ERROR: 'sf_utils.py' missing from GitHub repository.")
     st.stop()
 
 # =================================================================
-# 4. DATA FETCHING (This defines 'full_df')
+# 5. DATA FETCHING (BigQuery)
 # =================================================================
-# --- SECTION 4: DATA FETCHING ---
 @st.cache_data(ttl=300)
 def fetch_tech_data():
+    """Pulls raw sensor data joined with master metadata."""
     query = """
     SELECT d.timestamp, d.value, d.nodenumber, m.Project, m.Location, m.Depth
     FROM `sensorpush-export.sensor_data.final_databoard_data` as d
     INNER JOIN `sensorpush-export.sensor_data.master_metadata` as m ON d.nodenumber = m.NodeNum
     ORDER BY d.timestamp ASC
     """
+    # Note: Requires 'db-dtypes' in requirements.txt
     df = client.query(query).to_dataframe()
     df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
     return df
 
-# 💡 ADD THIS LINE HERE (Flush to the left margin)
+# Create the main dataframe variable
 full_df = fetch_tech_data()
 
 # =================================================================
-# 5. PAGE SETUP & SIDEBAR
+# 6. SIDEBAR FILTERS
 # =================================================================
-st.set_page_config(layout="wide", page_title="SF Technician Dashboard")
 st.sidebar.title("🛠️ Tech Operations")
 
 unit = st.sidebar.radio("Temp Unit", ["Fahrenheit (°F)", "Celsius (°C)"])
 is_celsius = unit == "Celsius (°C)"
 
-# Now full_df is defined, so this line won't crash:
-all_projs = sorted(full_df['Project'].unique())
+all_projs = sorted(full_df['Project'].unique().tolist())
 sel_proj = st.sidebar.selectbox("1. Select Project", all_projs)
 df_proj = full_df[full_df['Project'] == sel_proj].copy()
 
+# Apply Celsius conversion globally if selected
 if is_celsius:
     df_proj['value'] = (df_proj['value'] - 32) * 5/9
 
 num_weeks = st.sidebar.slider("Weeks of History", 1, 12, 4)
 
-# Date Logic
+# Global Date Logic (Monday-to-Monday Windows)
 now_utc = datetime.now(tz=pytz.UTC)
 days_to_mon = (7 - now_utc.weekday()) % 7
 if days_to_mon == 0: days_to_mon = 7
@@ -106,44 +119,54 @@ graph_end = (now_utc + timedelta(days=days_to_mon)).replace(hour=0, minute=0, se
 graph_start = graph_end - timedelta(weeks=num_weeks)
 
 # =================================================================
-# 6. UI TABS
+# 7. UI TABS (The Main Display)
 # =================================================================
 tab_health, tab_depth, tab_time = st.tabs(["📡 System Health", "📏 Depth Profiles", "📈 Time History"])
 
 # --- TAB 1: SYSTEM HEALTH ---
 with tab_health:
     st.subheader(f"📋 24-Hour Performance: {sel_proj}")
+    
+    # Generate the standardized table from sf_utils
     perf_table = get_standard_24h_summary(df_proj, SF_THEME)
+    
     if perf_table is not None:
-        st.table(perf_table)
+        # STABILITY FIX: Use dataframe instead of table for better scrolling/responsiveness
+        st.dataframe(perf_table, use_container_width=True, hide_index=True)
     else:
-        st.info("No data recorded in the last 24 hours.")
+        st.info("No active data found in the last 24 hours.")
 
     st.divider()
+    
     st.subheader("⚠️ Connectivity (Last 24h)")
     cutoff_24 = now_utc - timedelta(hours=24)
     active_nodes = df_proj[df_proj['timestamp'] >= cutoff_24]['nodenumber'].unique()
-    expected = df_proj[['Location', 'Depth', 'nodenumber']].drop_duplicates()
-    offline = expected[~expected['nodenumber'].isin(active_nodes)]
+    expected_nodes = df_proj[['Location', 'Depth', 'nodenumber']].drop_duplicates()
+    
+    # Compare expected vs actual to find missing sensors
+    offline = expected_nodes[~expected_nodes['nodenumber'].isin(active_nodes)]
     
     if not offline.empty:
-        st.warning(f"{len(offline)} Sensors Offline")
-        st.dataframe(offline[['Location', 'Depth', 'nodenumber']], hide_index=True)
+        st.warning(f"{len(offline)} Sensors currently Offline.")
+        st.dataframe(offline[['Location', 'Depth', 'nodenumber']], use_container_width=True, hide_index=True)
     else:
-        st.success("All project sensors are reporting.")
+        st.success("All sensors for this project are reporting data.")
 
 # --- TAB 2: DEPTH PROFILES ---
 with tab_depth:
+    # Exclude horizontal "Banks" from the vertical profile view
     pipe_locs = [l for l in sorted(df_proj['Location'].unique()) if "bank" not in l.lower()]
+    
     if pipe_locs:
         sel_pipe = st.selectbox("Select Pipe for Profile", pipe_locs)
         pipe_df = df_proj[df_proj['Location'] == sel_pipe].copy()
         
-        # History Logic
+        # Snapshot Logic: Pull Monday morning at 6:00 AM
         mondays = [graph_end - timedelta(weeks=i) for i in range(num_weeks)]
         all_snaps = []
         for m in mondays:
             t_time = m.replace(hour=6, minute=0)
+            # Find the closest data point within a 6-hour window
             snap_data = pipe_df[(pipe_df['timestamp'] >= t_time - timedelta(hours=3)) & 
                                 (pipe_df['timestamp'] <= t_time + timedelta(hours=3))].copy()
             if not snap_data.empty:
@@ -158,23 +181,24 @@ with tab_depth:
             plot_df['Depth'] = pd.to_numeric(plot_df['Depth'], errors='coerce')
             plot_df = plot_df.dropna(subset=['Depth']).sort_values('Depth')
             
-            # Dynamic Depth Rounding
+            # Auto-calculate the scale of the Y-axis based on project depth
             max_d = plot_df['Depth'].max()
-            rounded_max = int(math.ceil(max_d / 10.0) * 10)
-            if rounded_max == max_d: rounded_max += 10
+            rounded_max = int(math.ceil(max_d / 10.0) * 10) + 10
 
             fig_prof = px.line(plot_df, x='value', y='Depth', color='Date', markers=True)
+            
+            # Apply the Standardized Chart Style from sf_utils
             fig_prof = apply_standard_chart_style(fig_prof, SF_THEME, is_profile=True)
             
-            # Y-Axis Customization (Ground Surface)
+            # Force Ground Surface at 0
             fig_prof.update_yaxes(
                 range=[rounded_max, 0],
                 tickvals=list(range(0, rounded_max + 1, 10)),
-                ticktext=[SF_THEME['chart_theme']['labels']['y_axis_zero']] + [str(i) for i in range(10, rounded_max + 1, 10)]
+                ticktext=["Ground Surface"] + [str(i) for i in range(10, rounded_max + 1, 10)]
             )
-            st.plotly_chart(fig_prof, width='stretch')
+            st.plotly_chart(fig_prof, use_container_width=True)
     else:
-        st.info("No 'Pipe' locations found (Banks are excluded from Profiles).")
+        st.info("No 'Pipe' locations found for this project.")
 
 # --- TAB 3: TIME HISTORY ---
 with tab_time:
@@ -182,9 +206,11 @@ with tab_time:
     if all_locs:
         sel_loc_time = st.selectbox("Select Location (Pipes or Banks)", all_locs)
         time_df = df_proj[df_proj['Location'] == sel_loc_time].copy()
+        
         fig_time = px.line(time_df, x='timestamp', y='value', color='Depth')
         
+        # Apply the Standardized Chart Style from sf_utils
         fig_time = apply_standard_chart_style(fig_time, SF_THEME, is_profile=False)
         fig_time.update_xaxes(range=[graph_start, graph_end])
         
-        st.plotly_chart(fig_time, width='stretch')
+        st.plotly_chart(fig_time, use_container_width=True)
