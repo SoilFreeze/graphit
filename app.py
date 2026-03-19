@@ -32,7 +32,7 @@ def load_remote_theme(_credentials): # Note the underscore to fix hashing
     try:
         service = build('drive', 'v3', credentials=_credentials)
         # REPLACE THIS with your actual ID from Google Drive
-        file_id = 'YOUR_SF_STYLE_CONFIG_JSON_ID' 
+        file_id = '18_DQ72HQ1HGaRGjkTUI7PDoIvzp2CqDy'
         
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
