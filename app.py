@@ -5,6 +5,22 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 # (Other imports stay the same...)
 
+st.title("🧪 SF Test Environment")
+
+# --- DEBUG STATUS BAR ---
+status = st.empty() 
+
+status.info("Step 1: Authenticating with GCP...")
+# ... your auth code ...
+
+status.info("Step 2: Connecting to Google Drive for Theme...")
+# ... your theme code ...
+
+status.info("Step 3: Querying BigQuery (This may take 10-20 seconds)...")
+# ... your fetch_data code ...
+
+status.success("Done! Data Loaded.")
+
 st.set_page_config(layout="wide", page_title="SF TEST ENVIRONMENT")
 
 # --- TEST FEATURE: ADVANCED THEME LOADER ---
