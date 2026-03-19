@@ -76,8 +76,43 @@ def fetch_project_data(pid, weeks):
         st.error(f"Access Error: {e}")
         return pd.DataFrame()
 
-# --- 4. MAIN INTERFACE ---
-st.title(f"❄️ Project {PROJECT_ID} Thermal Dashboard")
+# --- 4. MAIN INTERFACE (UPDATED FOR MONDAY ALIGNMENT) ---
+st.sidebar.header("View Settings")
+weeks_to_show = st.sidebar.slider("Weeks of History", 1, 12, 2)
+
+# 1. Calculate the "End Monday" (The upcoming Monday at 00:00)
+now_utc = datetime.now(tz=pytz.UTC)
+days_until_monday = (7 - now_utc.weekday()) % 7
+if days_until_monday == 0 and now_utc.hour >= 0: # If today is Monday, move to next week
+    days_until_monday = 7
+    
+end_view = (now_utc + timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+# 2. Calculate the "Start Monday"
+start_view = end_view - timedelta(weeks=weeks_to_show)
+
+# 3. Fetch data using these strict boundaries
+# (Optional: Update your fetch function to use start_view and end_view)
+df = fetch_project_data(PROJECT_ID, weeks_to_show + 1) # Fetch extra to ensure coverage
+
+if not df.empty:
+    # ... (Keep your existing filtering/tab logic) ...
+
+    with tab2:
+        st.subheader("Temperature vs Time")
+        # Ensure the x-axis range is locked to the Monday-to-Monday window
+        fig.update_xaxes(
+            range=[start_view, end_view], 
+            showgrid=False, 
+            tickformat="%a\n%b %d",
+            dtick=86400000.0 # Forces one tick per day (in milliseconds)
+        )
+        
+        # Regenerate gridlines for this specific range
+        grid_shapes = get_time_gridlines(start_view, end_view)
+        fig.update_layout(shapes=grid_shapes)
+        
+        st.plotly_chart(fig, use_container_width=True)
 
 # Sidebar Filters
 st.sidebar.header("View Settings")
