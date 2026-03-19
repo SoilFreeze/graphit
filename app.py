@@ -21,7 +21,11 @@ status.info("Step 3: Querying BigQuery (This may take 10-20 seconds)...")
 
 status.success("Done! Data Loaded.")
 
-st.set_page_config(layout="wide", page_title="SF TEST ENVIRONMENT")
+st.set_page_config(
+    layout="wide", 
+    page_title="SF TEST ENVIRONMENT",
+    initial_sidebar_state="expanded" # This forces the sidebar to stay open
+)
 
 # --- TEST FEATURE: ADVANCED THEME LOADER ---
 # We will use this to test if the JSON colors are working
