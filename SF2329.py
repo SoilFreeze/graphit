@@ -155,7 +155,7 @@ else:
         
         st.plotly_chart(fig, use_container_width=True, key="history_chart")
 
-   with tab3:
+    with tab3:
         st.subheader("Monday 6:00 AM Thermal Profile")
         
         # 1. Filter for Monday at 6 AM
