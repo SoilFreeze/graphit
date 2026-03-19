@@ -1,26 +1,44 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
-import math
 
-# =================================================================
-# 1. PAGE SETUP & SCROLL FIX
-# =================================================================
+# 1. PAGE CONFIG (Must be first)
 st.set_page_config(layout="wide", page_title="SF Technician Dashboard")
 
-# This CSS ensures the page is ALWAYS scrollable and UI stays snappy
-st.markdown("""
-    <style>
-    .main .block-container { overflow-y: auto !important; padding-bottom: 5rem; }
-    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; font-weight: bold; }
-    </style>
-    """, unsafe_allow_html=True)
+# 2. CSS TO UNLOCK SCROLLING
+st.markdown("""<style>.main .block-container {overflow-y: auto !important; height: auto !important;}</style>""", unsafe_allow_html=True)
 
+# 3. AUTHENTICATION
+if "gcp_service_account" in st.secrets:
+    info = st.secrets["gcp_service_account"]
+    creds = service_account.Credentials.from_service_account_info(info)
+    client = bigquery.Client(credentials=creds, project=info["project_id"])
+else:
+    st.stop()
+
+# 4. CACHED THEME LOAD (Prevents Rerun Loops)
+@st.cache_data(ttl=3600)
+def load_sf_theme(_creds):
+    # If this causes a freeze, it will only try once per hour
+    return None # Start with None to see if the page unfreezes
+
+SF_THEME = load_sf_theme(creds)
+
+# 5. CACHED DATA FETCH
+@st.cache_data(ttl=300)
+def get_data():
+    query = "SELECT * FROM `sensorpush-export.sensor_data.final_databoard_data` LIMIT 1000"
+    return client.query(query).to_dataframe()
+
+full_df = get_data()
+
+# 6. SIMPLE UI (To test responsiveness)
+st.title("🛠️ Tech Operations")
+st.write("If you can see this and scroll, the freeze is fixed.")
+st.dataframe(full_df, use_container_width=True, height=400)
 # =================================================================
 # 2. AUTHENTICATION (The "Engine Start")
 # =================================================================
