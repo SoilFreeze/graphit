@@ -127,15 +127,18 @@ tab_health, tab_depth, tab_time = st.tabs(["📡 System Health", "📏 Depth Pro
 with tab_health:
     st.subheader(f"📋 24-Hour Performance: {sel_proj}")
     
-    # Generate the standardized table from sf_utils
     perf_table = get_standard_24h_summary(df_proj, SF_THEME)
     
     if perf_table is not None:
-        # STABILITY FIX: Use dataframe instead of table for better scrolling/responsiveness
-        st.dataframe(perf_table, use_container_width=True, hide_index=True)
+        # ✅ FIX: This creates a modern, scrollable, and sortable table
+        st.dataframe(
+            perf_table, 
+            use_container_width=True, 
+            hide_index=True,
+            height=400 # This forces a scrollbar if the table is long
+        )
     else:
         st.info("No active data found in the last 24 hours.")
-
     st.divider()
     
     st.subheader("⚠️ Connectivity (Last 24h)")
