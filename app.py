@@ -108,7 +108,7 @@ with tab3:
     sel_l = st.selectbox("Select Location", locs)
     # 💡 One point per hour fix:
     time_df = df_proj[df_proj['Location'] == sel_l].copy()
-    time_df = time_df.set_index('timestamp').groupby('nodenumber').resample('1H').first().reset_index()
+    time_df = time_df.set_index('timestamp').groupby('nodenumber', as_index=False).resample('1H').first().reset_index()
     
     fig = px.line(time_df, x='timestamp', y='value', color='Depth', height=600)
     # Feature 4: The Universal Chart Style
