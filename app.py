@@ -181,10 +181,19 @@ with tab_depth:
 with tab_time:
     locs = sorted(df_proj['Location'].unique())
     sel_loc = st.selectbox("Select Location", locs)
-    # Downsample slightly (every 3rd point) to keep the browser fast
-    time_df = df_proj[df_proj['Location'] == sel_loc].iloc[::3]
+    
+    # 💡 CLEANING: Ensure we only have 1 point per hour per Depth
+    time_df = df_proj[df_proj['Location'] == sel_loc].copy()
+    time_df = time_df.sort_values('timestamp')
+    
+    # This keeps only the first entry for every hour/sensor combo
+    time_df['hour_round'] = time_df['timestamp'].dt.floor('H')
+    time_df = time_df.drop_duplicates(subset=['hour_round', 'Depth'])
     
     fig_time = px.line(time_df, x='timestamp', y='value', color='Depth')
+    
+    # 💡 SCROLL FIX: Set a fixed height for the chart so it doesn't "stretch" the page
+    fig_time.update_layout(height=600, margin=dict(l=20, r=20, t=40, b=20))
+    
     fig_time = apply_standard_chart_style(fig_time, SF_THEME, is_profile=False)
-    fig_time.update_xaxes(range=[graph_start, graph_end])
-    st.plotly_chart(fig_time, use_container_width=True)
+    st.plotly_chart(fig_time, use_container_width=True, theme=None) # theme=None stops CSS conflicts
