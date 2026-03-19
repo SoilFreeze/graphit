@@ -13,6 +13,18 @@ import os
 # =================================================================
 st.set_page_config(layout="wide", page_title="SF Technician Dashboard")
 
+# --- FORCE SCROLLBAR CSS ---
+st.markdown("""
+    <style>
+    .main .block-container {
+        overflow-y: auto !important;
+        height: auto !important;
+        max-height: none !important;
+        padding-bottom: 5rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 # =================================================================
 # 2. AUTHENTICATION & API CONNECTIONS
 # =================================================================
@@ -126,19 +138,14 @@ tab_health, tab_depth, tab_time = st.tabs(["📡 System Health", "📏 Depth Pro
 # --- TAB 1: SYSTEM HEALTH ---
 with tab_health:
     st.subheader(f"📋 24-Hour Performance: {sel_proj}")
-    
     perf_table = get_standard_24h_summary(df_proj, SF_THEME)
     
     if perf_table is not None:
-        # ✅ FIX: This creates a modern, scrollable, and sortable table
-        st.dataframe(
-            perf_table, 
-            use_container_width=True, 
-            hide_index=True,
-            height=400 # This forces a scrollbar if the table is long
-        )
+        # Use st.dataframe with a fixed height to prevent "Page Stretching"
+        st.dataframe(perf_table, use_container_width=True, hide_index=True, height=400)
     else:
-        st.info("No active data found in the last 24 hours.")
+        st.info("No data found for the last 24h.")
+        
     st.divider()
     
     st.subheader("⚠️ Connectivity (Last 24h)")
@@ -208,7 +215,7 @@ with tab_time:
     all_locs = sorted(df_proj['Location'].unique())
     if all_locs:
         sel_loc_time = st.selectbox("Select Location (Pipes or Banks)", all_locs)
-        time_df = df_proj[df_proj['Location'] == sel_loc_time].copy()
+        time_df = df_proj[df_proj['Location'] == sel_loc_time].tail(1000)
         
         fig_time = px.line(time_df, x='timestamp', y='value', color='Depth')
         
