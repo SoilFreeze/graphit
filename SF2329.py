@@ -128,7 +128,7 @@ else:
         else:
             st.info("No approved data in the last 24 hours.")
 
-with tab2:
+    with tab2:
         st.subheader("Temperature vs Time")
         
         # 1. Determine Tick Frequency
