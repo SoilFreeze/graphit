@@ -160,67 +160,68 @@ else:
         st.subheader(f"Thermal profile for {sel_loc}")
         
         # 1. Filter for Monday at 6 AM
-        # We use .dt.hour == 6 to catch readings between 6:00 and 6:59
         profile_df = loc_df[
             (loc_df['timestamp'].dt.weekday == 0) & 
             (loc_df['timestamp'].dt.hour == 6)
         ].copy()
 
         if not profile_df.empty:
-            # 2. Get the most recent Monday 6AM snapshot available in the data
+            # 2. Get the most recent Monday snapshot
             latest_mon = profile_df['timestamp'].max()
-            
-            # 3. CRITICAL FIX: Filter to exactly one snapshot and DROP duplicates
-            # This prevents the line from jumping between multiple readings at the same depth
             snap_df = profile_df[profile_df['timestamp'] == latest_mon].copy()
-            snap_df = snap_df.drop_duplicates(subset=['Depth'])
+
+            # --- 💡 THE ULTIMATE ZIGZAG FIX ---
+            # Group by Depth and take the MEAN temperature if multiple readings exist for 6 AM.
+            # This ensures exactly ONE point per depth level.
+            snap_df = snap_df.groupby('Depth')['value'].mean().reset_index()
             
-            # 4. CRITICAL FIX: Sort by Depth so the line draws a single vertical path
+            # Sort strictly by Depth so the line is a single vertical path
             snap_df = snap_df.sort_values('Depth', ascending=True)
 
-            # 5. Build the Profile Chart
+            # 3. Build the Profile Chart
             fig_profile = px.line(
                 snap_df, x='value', y='Depth', markers=True,
                 labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
             )
             
-            # 6. AXIS STANDARDIZATION & FRAME
+            # --- 💡 EXPLICIT GRID LINES (The 20s) ---
+            temp_steps_20 = [-20, 0, 20, 40, 60, 80]
+            depth_steps_10 = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+
             fig_profile.update_xaxes(
                 range=[-20, 80],
-                dtick=20, 
-                gridcolor='black', gridwidth=1,  # Black lines every 20 degrees
+                tickmode='array',
+                tickvals=temp_steps_20, # Explicitly set labels at 20s
+                gridcolor='black', gridwidth=1.5, # Heavy black lines at 20s
                 minor=dict(
-                    dtick=5, gridcolor='#D3D3D3', showgrid=True, # Grey lines every 5
+                    dtick=5, gridcolor='#D3D3D3', showgrid=True, # Grey lines at 5
                     ticks="outside"
                 ),
-                mirror=True, showline=True, linecolor='black', linewidth=1.5 # Frame
+                mirror=True, showline=True, linecolor='black', linewidth=2
             )
             
             fig_profile.update_yaxes(
-                autorange="reversed", # 0' at the top
-                dtick=10,
-                gridcolor='#A9A9A9', gridwidth=1, # Major depth lines
+                autorange="reversed",
+                tickmode='array',
+                tickvals=depth_steps_10, # Explicitly set labels at 10s
+                gridcolor='black', gridwidth=1.5, # Heavy black lines at 10s
                 minor=dict(
-                    dtick=1, gridcolor='#F0F0F0', showgrid=True # Faint lines every 1'
+                    dtick=1, gridcolor='#F0F0F0', showgrid=True # Faint lines at 1
                 ),
-                mirror=True, showline=True, linecolor='black', linewidth=1.5 # Frame
+                mirror=True, showline=True, linecolor='black', linewidth=2
             )
 
-            # 7. LAYOUT
+            # 4. LAYOUT
             fig_profile.update_layout(
                 plot_bgcolor='white', 
-                height=850,
-                margin=dict(l=50, r=50, t=50, b=50),
+                height=900, # Tall for better depth resolution
+                margin=dict(l=60, r=60, t=60, b=60),
                 hovermode="y unified"
             )
             
             # Add the Blue Freezing Line
             fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
 
-            st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_final")
-            
-            # Optional: Add a data table for verification
-            with st.expander("View Raw Snapshot Data"):
-                st.dataframe(snap_df[['Depth', 'value', 'timestamp']].sort_values('Depth'))
+            st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_v3")
         else:
-            st.info(f"No Monday 6:00 AM data points found for {sel_loc} in the current history.")
+            st.info(f"No Monday 6:00 AM data points found for {sel_loc}.")
