@@ -5,37 +5,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
-import json
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
-import io
 
-@st.cache_data(ttl=3600) # Check for style updates once per hour
-def load_remote_theme(credentials):
-    try:
-        service = build('drive', 'v3', credentials=credentials)
-        # You'll need the File ID of your theme_config.json from Google Drive
-        file_id = 'theme_config.json' 
-        
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        
-        fh.seek(0)
-        return json.load(fh)
-    except Exception as e:
-        # Fallback styles if the file can't be reached
-        return {
-            "frame_color": "black", "frame_width": 2, 
-            "major_grid_color": "black", "chart_height": 850
-        }
-
-# --- USE IT IN YOUR APP ---
-# (After defining your credentials)
-theme = load_remote_theme(creds)
 # --- 1. PAGE SETUP ---
 st.set_page_config(layout="wide", page_title="SF Project Dashboard", page_icon="❄️")
 
@@ -214,83 +184,70 @@ else:
         st.plotly_chart(fig, use_container_width=True, key="history_chart_framed")
 
     with tab3:
-        st.subheader(f"Historical Thermal Profiles for {sel_loc}")
+        st.subheader(f"Thermal profile for {sel_loc}")
         
-        # 1. FAILSAFE LOGIC: Find readings closest to Monday 06:00 UTC
-        # We define a "Target" for every Monday in our range
-        mondays = []
-        curr_mon = end_view - timedelta(days=end_view.weekday()) # Most recent Monday
-        for i in range(weeks_to_show):
-            mondays.append(curr_mon - timedelta(weeks=i))
+        # 1. Filter for Monday at 6 AM
+        profile_df = loc_df[
+            (loc_df['timestamp'].dt.weekday == 0) & 
+            (loc_df['timestamp'].dt.hour == 6)
+        ].copy()
 
-        all_snapshots = []
+        if not profile_df.empty:
+            latest_mon = profile_df['timestamp'].max()
+            snap_df = profile_df[profile_df['timestamp'] == latest_mon].copy()
 
-        for target_mon in mondays:
-            # Set target time to 6:00 AM
-            target_time = target_mon.replace(hour=6, minute=0, second=0, microsecond=0)
-            
-            # Filter data for this specific day (+/- 3 hours failsafe)
-            day_df = loc_df[
-                (loc_df['timestamp'] >= target_time - timedelta(hours=3)) & 
-                (loc_df['timestamp'] <= target_time + timedelta(hours=3))
-            ].copy()
-
-            if not day_df.empty:
-                # Find the record closest to exactly 06:00:00
-                day_df['time_diff'] = (day_df['timestamp'] - target_time).abs()
-                best_time = day_df.sort_values('time_diff')['timestamp'].iloc[0]
-                
-                # Extract only that specific moment's data
-                snap = day_df[day_df['timestamp'] == best_time].copy()
-                snap['Snapshot_Date'] = target_time.strftime('%b %d')
-                all_snapshots.append(snap)
-
-        if not all_snapshots:
-            st.info(f"No Monday morning data found for {sel_loc} in the selected range.")
-        else:
-            final_snap_df = pd.concat(all_snapshots)
-            # Ensure Depth is numeric for math
-            final_snap_df['Depth'] = pd.to_numeric(final_snap_df['Depth'], errors='coerce')
-            final_snap_df = final_snap_df.dropna(subset=['Depth'])
-            
             # 2. Collapse duplicates and sort
-            final_snap_df = final_snap_df.groupby(['Snapshot_Date', 'Depth'])['value'].mean().reset_index()
-            final_snap_df = final_snap_df.sort_values(['Snapshot_Date', 'Depth'], ascending=[False, True])
+            snap_df = snap_df.groupby('Depth')['value'].mean().reset_index()
+            snap_df = snap_df.sort_values('Depth', ascending=True)
 
-            # 3. Build Multi-Line Figure
-            fig_profile = px.line(
-                final_snap_df, x='value', y='Depth', color='Snapshot_Date', 
-                markers=True,
-                labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)', 'Snapshot_Date': 'Monday Date'}
-            )
-
-            # 4. Dynamic Depth Rounding
-            import math
-            max_depth_val = final_snap_df['Depth'].max()
-            rounded_max = int(math.ceil(max_depth_val / 10.0) * 10)
-            if rounded_max == max_depth_val: rounded_max += 10
-
+            # --- 💡 DYNAMIC DEPTH CALCULATION ---
+            max_depth_in_data = snap_df['Depth'].max()
+            # This rounds up to the next 10 (e.g., 74 becomes 80)
+            rounded_max = int(((max_depth_in_data // 10) + 1) * 10)
+            
+            # Generate tick values from 0 to our new rounded max
             depth_ticks = list(range(0, rounded_max + 1, 10))
             depth_labels = [str(t) for t in depth_ticks]
-            depth_labels[0] = "Ground Surface"
+            depth_labels[0] = "Ground Surface" # Replace '0' with your custom label
 
-            # 5. Styling & Frame
+            # 3. Build the Profile Chart
+            fig_profile = px.line(
+                snap_df, x='value', y='Depth', markers=True,
+                labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
+            )
+            
+            # --- 💡 APPLY DYNAMIC Y-AXIS ---
             fig_profile.update_yaxes(
-                range=[rounded_max, 0], tickmode='array', tickvals=depth_ticks, ticktext=depth_labels,
-                gridcolor='black', gridwidth=1.5, minor=dict(dtick=1, gridcolor='#F0F0F0', showgrid=True),
+                range=[rounded_max, 0], # Dynamic bottom, 0 at top
+                tickmode='array',
+                tickvals=depth_ticks,
+                ticktext=depth_labels,
+                gridcolor='black', gridwidth=1.5,
+                minor=dict(dtick=1, gridcolor='#F0F0F0', showgrid=True),
                 mirror=True, showline=True, linecolor='black', linewidth=2
             )
 
+            # --- 💡 X-AXIS STANDARDIZATION ---
             fig_profile.update_xaxes(
-                range=[-20, 80], tickmode='array', tickvals=[-20, 0, 20, 40, 60, 80],
-                gridcolor='black', gridwidth=1.5, minor=dict(dtick=5, gridcolor='#D3D3D3', showgrid=True),
+                range=[-20, 80],
+                tickmode='array',
+                tickvals=[-20, 0, 20, 40, 60, 80],
+                gridcolor='black', gridwidth=1.5,
+                minor=dict(dtick=5, gridcolor='#D3D3D3', showgrid=True),
                 mirror=True, showline=True, linecolor='black', linewidth=2
             )
 
+            # 4. LAYOUT
             fig_profile.update_layout(
-                plot_bgcolor='white', height=900, margin=dict(l=120, r=60, t=60, b=60),
-                hovermode="y unified", legend=dict(bgcolor="rgba(255,255,255,0.5)")
+                plot_bgcolor='white', 
+                height=900,
+                margin=dict(l=120, r=60, t=60, b=60),
+                hovermode="y unified"
             )
+            
+            # Freezing Line
             fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
 
-            st.plotly_chart(fig_profile, width='stretch', key="historical_profile_v5")
+            st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_dynamic")
+        else:
+            st.info(f"No Monday 6:00 AM data found for {sel_loc}.")
