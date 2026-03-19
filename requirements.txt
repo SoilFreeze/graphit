@@ -3,5 +3,6 @@ pandas
 plotly
 google-cloud-bigquery
 google-auth
+google-api-python-client
 db-dtypes
 pytz
