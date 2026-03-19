@@ -1,151 +1,151 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+import plotly.express as px
+import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
+import math
 
-# --- 1. SETUP & AUTH ---
-st.set_page_config(page_title="SoilFreeze Tech Dashboard", layout="wide", page_icon="🛠️")
+# --- 1. SETUP ---
+st.set_page_config(page_title="SoilFreeze Tech Ops", layout="wide", page_icon="🛠️")
 
-try:
-    scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
-    # Using the same secrets pattern as your client app
-    creds = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-    client = bigquery.Client(credentials=creds, project=st.secrets["gcp_service_account"]["project_id"])
-except Exception as e:
-    st.error(f"Credentials Error: {e}")
-    st.stop()
-
-# --- 2. DATA LOADING ---
+# --- 2. DATA FETCHING ---
 @st.cache_data(ttl=300)
-def get_full_dataset():
-    # Technician view doesn't filter by PID in SQL so all jobs can be seen
-    query = "SELECT * FROM `sensorpush-export.sensor_data.final_databoard_data` ORDER BY timestamp ASC"
+def get_tech_data():
+    info = st.secrets["gcp_service_account"]
+    scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
+    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    client = bigquery.Client(credentials=creds, project=info["project_id"])
+    
+    # Technician sees everything (no WHERE pid filter here)
+    query = """
+    SELECT d.timestamp, d.value, d.nodenumber, m.Project, m.Location, m.Depth
+    FROM `sensorpush-export.sensor_data.final_databoard_data` as d
+    INNER JOIN `sensorpush-export.sensor_data.master_metadata` as m ON d.nodenumber = m.NodeNum
+    WHERE d.is_approved = TRUE
+    ORDER BY d.timestamp ASC
+    """
     df = client.query(query).to_dataframe()
-    # Metadata Join if needed for Project Names
-    meta_query = "SELECT NodeNum, Project, Location, Depth FROM `sensorpush-export.sensor_data.master_metadata`"
-    meta = client.query(meta_query).to_dataframe()
-    return df, meta
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    return df
 
-df_raw, df_meta = get_full_dataset()
-df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'], utc=True)
+df_all = get_tech_data()
 
-# --- 3. SIDEBAR & GLOBAL FILTERS ---
+# --- 3. SIDEBAR CONTROLS ---
 st.sidebar.title("🛠️ Tech Operations")
-unit = st.sidebar.radio("Display Unit", ["Fahrenheit (°F)", "Celsius (°C)"])
+unit = st.sidebar.radio("Unit", ["Fahrenheit (°F)", "Celsius (°C)"])
 is_celsius = unit == "Celsius (°C)"
-u_symbol = "°C" if is_celsius else "°F"
+u_sym = "°C" if is_celsius else "°F"
 
-# Technician can see ALL projects
-all_projects = sorted(df_meta['Project'].unique())
-selected_project = st.sidebar.selectbox("Select Active Project", all_projects)
+# Project Selection
+all_projects = sorted(df_all['Project'].unique())
+selected_project = st.sidebar.selectbox("Active Project", all_projects)
+df_proj = df_all[df_all['Project'] == selected_project].copy()
 
-num_weeks = st.sidebar.slider("Weeks of History", 1, 12, 4)
-
-# Monday-to-Monday Calculation
-now_utc = datetime.now(tz=pytz.UTC)
-days_until_monday = (7 - now_utc.weekday()) % 7
-if days_until_monday == 0: days_until_monday = 7
-graph_end = (now_utc + timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
-graph_start = graph_end - timedelta(weeks=num_weeks)
-
-# Filter Data
-proj_nodes = df_meta[df_meta['Project'] == selected_project]['NodeNum'].unique()
-df_proj = df_raw[df_raw['nodenumber'].isin(proj_nodes)].merge(df_meta, left_on='nodenumber', right_on='NodeNum')
+# Global Ref Points (Converted if necessary)
+ref_32 = 0.0 if is_celsius else 32.0
+ref_26 = (26.6 - 32) * 5/9 if is_celsius else 26.6
+ref_10 = (10.2 - 32) * 5/9 if is_celsius else 10.2
 
 if is_celsius:
     df_proj['value'] = (df_proj['value'] - 32) * 5/9
 
+num_weeks = st.sidebar.slider("History (Weeks)", 1, 12, 4)
+
+# Monday-to-Monday Logic
+now_utc = datetime.now(tz=pytz.UTC)
+days_to_mon = (7 - now_utc.weekday()) % 7
+if days_to_mon == 0: days_to_mon = 7
+end_v = (now_utc + timedelta(days=days_to_mon)).replace(hour=0, minute=0, second=0)
+start_v = end_v - timedelta(weeks=num_weeks)
+
 # --- 4. TABS ---
-tab_health, tab_depth, tab_time = st.tabs(["📡 System Health", "📏 Depth Profiles", "📈 Time History"])
+tab1, tab2, tab3 = st.tabs(["📡 Offline Alerts", "📏 Pipe Profiles", "📈 Time History"])
 
-# --- TAB 1: SYSTEM HEALTH (OFFLINE DETECTION) ---
-with tab_health:
-    st.subheader(f"Project Health: {selected_project}")
-    col1, col2 = st.columns([2, 1])
+# --- TAB 1: SYSTEM HEALTH ---
+with tab1:
+    st.subheader("⚠️ Offline Sensor Report (Last 24h)")
+    cutoff_24 = now_utc - timedelta(hours=24)
+    active_now = df_proj[df_proj['timestamp'] >= cutoff_24]
     
-    # 24h Activity
-    cutoff_24h = now_utc - timedelta(hours=24)
-    last_24 = df_proj[df_proj['timestamp'] >= cutoff_24h]
+    # Compare project sensors to active sensors
+    all_sensors = df_proj[['Location', 'Depth', 'nodenumber']].drop_duplicates()
+    active_nodes = active_now['nodenumber'].unique()
+    offline = all_sensors[~all_sensors['nodenumber'].isin(active_nodes)]
     
-    with col2:
-        st.subheader("⚠️ Connectivity Issues")
-        # Expected sensors (from Meta) vs Active sensors (last 24h)
-        expected = df_meta[df_meta['Project'] == selected_project][['Location', 'Depth', 'NodeNum']]
-        active_nodes = last_24['nodenumber'].unique()
-        offline = expected[~expected['NodeNum'].isin(active_nodes)]
-        
-        if not offline.empty:
-            st.error(f"{len(offline)} Sensors Offline (No data < 24h)")
-            st.dataframe(offline[['Location', 'Depth']], hide_index=True, width=400)
-        else:
-            st.success("All project sensors are reporting.")
+    if not offline.empty:
+        st.warning(f"Found {len(offline)} sensors not reporting.")
+        st.table(offline[['Location', 'Depth']].sort_values(['Location', 'Depth']))
+    else:
+        st.success("All sensors for this project are online.")
 
-    with col1:
-        st.subheader("Recent Activity Summary")
-        if not last_24.empty:
-            summary = last_24.groupby(['Location', 'Depth'])['value'].agg(['min', 'max', 'last']).reset_index()
-            st.dataframe(summary.style.format({"min": "{:.1f}", "max": "{:.1f}", "last": "{:.1f}"}), width=800)
-        else:
-            st.warning("No data found for this project in the last 24 hours.")
-
-# --- TAB 2: DEPTH PROFILES ---
-with tab_depth:
-    st.subheader("Monday 6:00 AM Snapshots")
-    locs = sorted(df_proj['Location'].unique())
-    selected_loc = st.selectbox("Select Pipe for Profile", locs)
+# --- TAB 2: PIPE PROFILES (NON-BANK ONLY) ---
+with tab2:
+    # Filter out locations containing "Bank"
+    pipe_locs = [l for l in sorted(df_proj['Location'].unique()) if "bank" not in l.lower()]
+    sel_pipe = st.selectbox("Select Pipe", pipe_locs)
     
-    loc_data = df_proj[df_proj['Location'] == selected_loc].copy()
+    pipe_df = df_proj[df_proj['Location'] == sel_pipe].copy()
     
-    # Snapshot / Failsafe Logic
-    mondays = [graph_end - timedelta(weeks=i) for i in range(num_weeks)]
+    # Failsafe Snapshot Logic for History
+    mondays = [end_v - timedelta(weeks=i) for i in range(num_weeks)]
     all_snaps = []
     for m in mondays:
         t_time = m.replace(hour=6, minute=0)
-        window = loc_data[(loc_data['timestamp'] >= t_time - timedelta(hours=3)) & 
-                          (loc_data['timestamp'] <= t_time + timedelta(hours=3))]
-        if not window.empty:
-            # Get closest to 6am
-            window['diff'] = (window['timestamp'] - t_time).abs()
-            best_ts = window.sort_values('diff')['timestamp'].iloc[0]
-            snap = window[window['timestamp'] == best_ts].copy()
+        day_data = pipe_df[(pipe_df['timestamp'] >= t_time - timedelta(hours=3)) & 
+                           (pipe_df['timestamp'] <= t_time + timedelta(hours=3))].copy()
+        if not day_data.empty:
+            day_data['diff'] = (day_data['timestamp'] - t_time).abs()
+            best_t = day_data.sort_values('diff')['timestamp'].iloc[0]
+            snap = day_data[day_data['timestamp'] == best_t].copy()
             snap['Date'] = t_time.strftime('%b %d')
             all_snaps.append(snap)
-    
-    if all_snaps:
-        plot_df = pd.concat(all_snaps).sort_values('Depth')
-        fig, ax = plt.subplots(figsize=(8, 10))
-        for date, group in plot_df.groupby('Date'):
-            ax.plot(group['value'], group['Depth'], marker='o', label=date)
-        
-        ax.set_title(f"Thermal Profile: {selected_loc}")
-        ax.invert_yaxis()
-        ax.set_xlabel(f"Temp ({u_symbol})")
-        ax.set_ylabel("Depth (ft)")
-        ax.grid(True, which='both', linestyle=':', alpha=0.6)
-        ax.legend()
-        # Framing and standard lines
-        ax.axvline(0 if is_celsius else 32, color='blue', linestyle='--')
-        st.pyplot(fig)
 
-# --- TAB 3: TIME HISTORY ---
-with tab_time:
-    st.subheader("Historical Trends")
-    # Same plot logic as client view but using Matplotlib for the Technician's requested style
-    fig_time, ax_time = plt.subplots(figsize=(14, 6))
-    for node, group in loc_data.groupby('Depth'):
-        ax_time.plot(group['timestamp'], group['value'], label=f"{node} ft")
-    
-    # Custom Gridlines (Dark Monday, Light Day)
-    for day in pd.date_range(graph_start, graph_end):
-        lw = 1.5 if day.weekday() == 0 else 0.5
-        color = '#333333' if day.weekday() == 0 else '#CCCCCC'
-        ax_time.axvline(day, color=color, linewidth=lw, alpha=0.5)
+    if all_snaps:
+        plot_df = pd.concat(all_snaps)
+        plot_df['Depth'] = pd.to_numeric(plot_df['Depth'], errors='coerce')
+        plot_df = plot_df.dropna(subset=['Depth']).sort_values('Depth')
         
-    ax_time.set_xlim(graph_start, graph_end)
-    ax_time.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-    ax_time.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    st.pyplot(fig_time)
+        # Max Depth Calculation
+        m_depth = plot_df['Depth'].max()
+        r_max = int(math.ceil(m_depth / 10.0) * 10)
+        if r_max == m_depth: r_max += 10
+        
+        fig_prof = px.line(plot_df, x='value', y='Depth', color='Date', markers=True, height=800)
+        
+        # Grid & Frame
+        fig_prof.update_yaxes(range=[r_max, 0], tickvals=list(range(0, r_max+1, 10)), 
+                              ticktext=["Ground Surface"] + [str(i) for i in range(10, r_max+1, 10)],
+                              mirror=True, showline=True, linecolor='black', gridcolor='black')
+        
+        fig_prof.update_xaxes(range=[-20, 80] if not is_celsius else [-30, 30],
+                              tickvals=[-20, 0, 20, 40, 60, 80] if not is_celsius else [-30, -20, -10, 0, 10, 20, 30],
+                              mirror=True, showline=True, linecolor='black', gridcolor='black')
+        
+        # Baseline References
+        for val, col, name in [(ref_32, 'blue', '32°F'), (ref_26, 'blue', '26.6°F'), (ref_10, 'red', '10.2°F')]:
+            fig_prof.add_vline(x=val, line_dash="dash", line_color=col, annotation_text=name)
+
+        fig_prof.update_layout(plot_bgcolor='white', title=f"Thermal Profile: {sel_pipe}", hovermode="y unified")
+        st.plotly_chart(fig_prof, width='stretch', key="tech_profile")
+
+# --- TAB 3: TIME HISTORY (INCLUDES BANKS) ---
+with tab3:
+    all_locs = sorted(df_proj['Location'].unique())
+    sel_loc_time = st.selectbox("Select Location (Pipes or Banks)", all_locs)
+    
+    time_df = df_proj[df_proj['Location'] == sel_loc_time].copy()
+    
+    fig_time = px.line(time_df, x='timestamp', y='value', color='Depth', height=600)
+    
+    # Reference lines for Time History
+    for val, col, name in [(ref_32, 'blue', '32°F'), (ref_26, 'blue', '26.6°F'), (ref_10, 'red', '10.2°F')]:
+        fig_time.add_hline(y=val, line_dash="dash", line_color=col, annotation_text=name)
+
+    fig_time.update_layout(plot_bgcolor='white', hovermode="x unified", title=f"History: {sel_loc_time}")
+    fig_time.update_xaxes(range=[start_v, end_v], mirror=True, showline=True, linecolor='black')
+    fig_time.update_yaxes(mirror=True, showline=True, linecolor='black', gridcolor='black', gridwidth=0.5)
+    
+    st.plotly_chart(fig_time, width='stretch', key="tech_time")
