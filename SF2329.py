@@ -156,7 +156,8 @@ else:
         st.plotly_chart(fig, use_container_width=True, key="history_chart")
 
     with tab3:
-        st.subheader("Monday 6:00 AM Thermal Profile")
+        # Use the selected location for the title (e.g., Thermal profile for TP-22-1)
+        st.subheader(f"Thermal profile for {sel_loc}")
         
         # 1. Filter for Monday at 6 AM
         profile_df = loc_df[
@@ -166,52 +167,51 @@ else:
 
         if not profile_df.empty:
             latest_mon = profile_df['timestamp'].max()
-            # --- 💡 THE FIX: ENSURE PHYSICAL SORTING ---
+            
+            # --- 💡 THE FIX: Force sequence by Depth to stop the zigzag ---
             snap_df = profile_df[profile_df['timestamp'] == latest_mon].sort_values('Depth')
 
             fig_profile = px.line(
                 snap_df, x='value', y='Depth', markers=True,
-                title=f"Snapshot: {latest_mon.strftime('%A, %b %d @ 06:00 UTC')}",
                 labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
             )
             
-            # --- 💡 GRID HIERARCHY SETUP ---
-            # Temperature (X-axis)
+            # --- 💡 AXIS & GRID STANDARDIZATION ---
             fig_profile.update_xaxes(
                 range=[-20, 80],
-                # Major lines at 20
                 dtick=20, 
-                gridcolor='DimGrey', gridwidth=1.5,
-                # Minor lines logic (Show 5s and 1s using minor ticks)
+                gridcolor='black', gridwidth=1, # Major black lines at every 20
                 minor=dict(
-                    dtick=5, gridcolor='Silver', gridwidth=0.5, # Every 5
-                    showgrid=True
+                    dtick=5, gridcolor='#D3D3D3', showgrid=True, # Grey lines at 5
+                    ticks="outside"
                 ),
-                zeroline=True, zerolinecolor='black'
+                mirror=True, # Part of the 'frame'
+                showline=True, linecolor='black', linewidth=1 # Frame bottom
             )
             
-            # Depth (Y-axis)
             fig_profile.update_yaxes(
                 autorange="reversed",
-                # Major lines at 10
                 dtick=10,
-                gridcolor='DimGrey', gridwidth=1.5,
-                # Minor lines at 1
+                gridcolor='#A9A9A9', gridwidth=1, # Major lines at 10
                 minor=dict(
-                    dtick=1, gridcolor='LightGrey', gridwidth=0.2,
-                    showgrid=True
-                )
+                    dtick=1, gridcolor='#F0F0F0', showgrid=True # Faint lines at 1
+                ),
+                mirror=True, # Part of the 'frame'
+                showline=True, linecolor='black', linewidth=1 # Frame left
             )
 
+            # --- 💡 LAYOUT & FRAME ---
             fig_profile.update_layout(
                 plot_bgcolor='white', 
-                height=800, # Increased height for better detail
+                height=800,
+                margin=dict(l=40, r=40, t=40, b=40),
                 hovermode="y unified"
             )
             
-            # Freezing Line
+            # Add the Freezing Line
             fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
 
-            st.plotly_chart(fig_profile, use_container_width=True, key="profile_chart_fixed")
+            st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_frame")
         else:
-            st.info("No Monday 6:00 AM data points available.")
+            st.info("No Monday 6:00 AM data available for this selection.")
+            
