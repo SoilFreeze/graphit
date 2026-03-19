@@ -11,7 +11,19 @@ import math
 st.set_page_config(layout="wide", page_title="SF Technician Dashboard")
 
 # 2. CSS TO UNLOCK SCROLLING
-st.markdown("""<style>.main .block-container {overflow-y: auto !important; height: auto !important;}</style>""", unsafe_allow_html=True)
+st.markdown("""
+    <style>
+    /* Force vertical scroll on the main area */
+    .main .block-container {
+        max-height: 100vh !important;
+        overflow-y: auto !important;
+    }
+    /* Prevent the chart from blocking the scroll wheel */
+    .js-plotly-plot .plotly .modebar {
+        orientation: v;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # 3. AUTHENTICATION
 if "gcp_service_account" in st.secrets:
