@@ -155,7 +155,7 @@ else:
         
         st.plotly_chart(fig, use_container_width=True, key="history_chart")
 
-    with tab3:
+   with tab3:
         # Use the selected location for the title (e.g., Thermal profile for TP-22-1)
         st.subheader(f"Thermal profile for {sel_loc}")
         
@@ -214,4 +214,3 @@ else:
             st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_frame")
         else:
             st.info("No Monday 6:00 AM data available for this selection.")
-            
