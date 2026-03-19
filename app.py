@@ -15,6 +15,10 @@ st.markdown("""<style>.main .block-container {overflow-y: auto !important; heigh
 # 2. AUTHENTICATION
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
+    scopes = [
+        "https://www.googleapis.com/auth/bigquery",
+        "https://www.googleapis.com/auth/drive.readonly"
+    ]
     creds = service_account.Credentials.from_service_account_info(info)
     client = bigquery.Client(credentials=creds, project=info["project_id"])
 else:
