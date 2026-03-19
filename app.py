@@ -1,7 +1,4 @@
 import streamlit as st
-
-st.set_page_config(layout="wide", page_title="SF Technician Dashboard")
-
 import pandas as pd
 import plotly.express as px
 from google.cloud import bigquery
@@ -10,6 +7,7 @@ from datetime import datetime, timedelta
 import pytz
 import math
 
+st.set_page_config(layout="wide", page_title="SF Technician Dashboard")
 
 # =================================================================
 # 1. AUTHENTICATION (Creates 'creds' for everyone else)
