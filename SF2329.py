@@ -126,7 +126,7 @@ else:
     with tab2:
         st.subheader("Temperature vs Time (History)")
         
-        # Dynamic X-Axis labeling based on zoom level
+        # 1. Determine Tick Frequency
         if weeks_to_show > 3:
             tick_spacing = 604800000.0  # 1 week in ms
             tick_format = "%b %d"
@@ -136,24 +136,52 @@ else:
 
         fig = px.line(loc_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=650)
         
+        # 2. Apply Custom Gridlines (The vertical Monday/Midnight lines)
         grid_shapes = get_time_gridlines(start_view, end_view)
+        
+        # 3. Layout, Frame, and Axis Standardization
         fig.update_layout(
             shapes=grid_shapes, 
             plot_bgcolor='white', 
             hovermode="x unified",
-            margin=dict(l=20, r=150, t=50, b=20),
-            legend=dict(title="Sensor Depth")
+            margin=dict(l=60, r=40, t=50, b=60), # Balanced margins for the frame
+            legend=dict(title="Sensor Depth", x=1.02, font=dict(size=12))
         )
+
+        # X-Axis: Time
         fig.update_xaxes(
             range=[start_view, end_view], 
-            showgrid=False, 
+            showgrid=False, # We use our custom grid_shapes instead
             tickformat=tick_format,
-            dtick=tick_spacing
+            dtick=tick_spacing,
+            tickangle=0,
+            # --- THE FRAME ---
+            mirror=True, 
+            showline=True, 
+            linecolor='black', 
+            linewidth=2
         )
-        fig.update_yaxes(showgrid=True, gridcolor='LightGrey', dtick=20)
-        fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         
-        st.plotly_chart(fig, use_container_width=True, key="history_chart")
+        # Y-Axis: Temperature
+        fig.update_yaxes(
+            # --- THE 20 DEGREE BLACK LINES ---
+            tickmode='array',
+            tickvals=[-20, 0, 20, 40, 60, 80],
+            gridcolor='black', 
+            gridwidth=1.5,
+            # --- THE FRAME ---
+            mirror=True, 
+            showline=True, 
+            linecolor='black', 
+            linewidth=2,
+            # Minor lines for 5-degree increments
+            minor=dict(dtick=5, gridcolor='#D3D3D3', showgrid=True)
+        )
+
+        # Reference Freezing Line
+        fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F", annotation_position="top right")
+        
+        st.plotly_chart(fig, use_container_width=True, key="history_chart_framed")
 
     with tab3:
         # Title using the selected location variable
