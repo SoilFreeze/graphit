@@ -8,6 +8,28 @@ from datetime import datetime, timedelta
 import pytz
 import math
 
+# --- GLOBAL PLOT STYLE GUIDE ---
+PLOT_CONFIG = {
+    "colors": {
+        "frame": "black",
+        "major_grid": "black",
+        "minor_grid": "#D3D3D3",
+        "faint_grid": "#F0F0F0",
+        "freezing_line": "blue",
+        "alert_low": "red",
+        "alert_mid": "blue",
+        "background": "white"
+    },
+    "line_weights": {
+        "frame": 2,
+        "major_grid": 1.5,
+        "minor_grid": 0.5,
+        "ref_lines": 1.5
+    },
+    "font_size": 12,
+    "chart_height": 850
+}
+
 # --- 1. SETUP ---
 st.set_page_config(page_title="SoilFreeze Tech Ops", layout="wide", page_icon="🛠️")
 
