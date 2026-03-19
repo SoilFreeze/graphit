@@ -166,8 +166,58 @@ else:
         st.plotly_chart(fig, use_container_width=True)
 
     with tab3:
-        st.subheader("Depth Profile")
-        fig_depth = px.line(loc_df, x='timestamp', y='value', color='Depth', height=650)
-        fig_depth.update_layout(shapes=grid_shapes, plot_bgcolor='white')
-        fig_depth.update_xaxes(range=[start_view, end_view], showgrid=False)
-        st.plotly_chart(fig_depth, use_container_width=True)
+        st.subheader("Monday 6:00 AM Thermal Profile")
+        st.write("Showing the temperature gradient by depth for the most recent Monday.")
+
+        # 1. Identify the most recent Monday at 6 AM that exists in our data
+        # We look for timestamps where the hour is 6 and day is Monday (weekday 0)
+        monday_6am_df = loc_df[
+            (loc_df['timestamp'].dt.weekday == 0) & 
+            (loc_df['timestamp'].dt.hour == 6)
+        ].copy()
+
+        if not monday_6am_df.empty:
+            # Get the very latest Monday 6AM available
+            latest_monday_6am = monday_6am_df['timestamp'].max()
+            snap_df = monday_6am_df[monday_6am_df['timestamp'] == latest_monday_6am]
+            
+            # Sort by depth so the line connects points in order
+            snap_df = snap_df.sort_values('Depth')
+
+            # 2. Build the Profile Chart
+            # X = Temperature, Y = Depth
+            fig_profile = px.line(
+                snap_df, 
+                x='value', 
+                y='Depth', 
+                markers=True,
+                title=f"Snapshot: {latest_monday_6am.strftime('%A, %b %d at %H:%M UTC')}",
+                labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
+            )
+
+            # 3. Professional Engineering Adjustments
+            fig_profile.update_layout(
+                plot_bgcolor='white',
+                height=600,
+                hovermode="y unified"
+            )
+            
+            # Invert Y-axis so 0 (surface) is at the top
+            fig_profile.update_yaxes(
+                autorange="reversed", 
+                gridcolor='LightGrey',
+                zeroline=True,
+                zerolinecolor='black'
+            )
+            
+            fig_profile.update_xaxes(
+                gridcolor='LightGrey',
+                range=[-10, 80] # Match your other charts
+            )
+
+            # Add the Freezing Point reference line (Vertical this time!)
+            fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+
+            st.plotly_chart(fig_profile, use_container_width=True, key="monday_profile_chart")
+        else:
+            st.info("No Monday 6:00 AM data points found in the current date range.")
