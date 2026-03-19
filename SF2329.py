@@ -128,8 +128,10 @@ else:
         else:
             st.info("No approved data in the last 24 hours.")
 
-    with tab2:
-        st.subheader("Temperature vs Time")
+   with tab2:
+    st.subheader("Temperature vs Time")
+    # ... your chart setup ...
+    st.plotly_chart(fig, use_container_width=True, key="temp_time_chart")
         
         # 1. Determine Tick Frequency
         # If showing more than 3 weeks, only show a label every Monday (7 days)
