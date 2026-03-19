@@ -201,20 +201,38 @@ else:
             snap_df = snap_df.sort_values('Depth', ascending=True)
 
             # --- 💡 DYNAMIC DEPTH CALCULATION ---
-            max_depth_in_data = snap_df['Depth'].max()
-            # This rounds up to the next 10 (e.g., 74 becomes 80)
-            rounded_max = int(((max_depth_in_data // 10) + 1) * 10)
-            
-            # Generate tick values from 0 to our new rounded max
-            depth_ticks = list(range(0, rounded_max + 1, 10))
-            depth_labels = [str(t) for t in depth_ticks]
-            depth_labels[0] = "Ground Surface" # Replace '0' with your custom label
+        if not profile_df.empty:
+            latest_mon = profile_df['timestamp'].max()
+            snap_df = profile_df[profile_df['timestamp'] == latest_mon].copy()
 
-            # 3. Build the Profile Chart
-            fig_profile = px.line(
-                snap_df, x='value', y='Depth', markers=True,
-                labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
-            )
+            # --- 💡 THE FIX: CLEAN DATA BEFORE MATH ---
+            # Ensure Depth is numeric and drop any rows where Depth is missing
+            snap_df['Depth'] = pd.to_numeric(snap_df['Depth'], errors='coerce')
+            snap_df = snap_df.dropna(subset=['Depth'])
+
+            if snap_df.empty:
+                st.warning("No valid depth measurements found for this snapshot.")
+            else:
+                # Collapse duplicates and sort
+                snap_df = snap_df.groupby('Depth')['value'].mean().reset_index()
+                snap_df = snap_df.sort_values('Depth', ascending=True)
+
+                # --- 💡 DYNAMIC DEPTH CALCULATION (SAFE) ---
+                max_depth_val = snap_df['Depth'].max()
+                
+                # Use math.ceil to find the next 10 securely
+                import math
+                rounded_max = int(math.ceil(max_depth_val / 10.0) * 10)
+                
+                # If the max depth is exactly a multiple of 10, 
+                # add an extra 10 for a visual buffer at the bottom
+                if rounded_max == max_depth_val:
+                    rounded_max += 10
+
+                # Generate ticks
+                depth_ticks = list(range(0, rounded_max + 1, 10))
+                depth_labels = [str(t) for t in depth_ticks]
+                depth_labels[0] = "Ground Surface"
             
             # --- 💡 APPLY DYNAMIC Y-AXIS ---
             fig_profile.update_yaxes(
