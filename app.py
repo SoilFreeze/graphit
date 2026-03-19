@@ -61,9 +61,9 @@ except ImportError:
 # =================================================================
 # 4. DATA FETCHING (This defines 'full_df')
 # =================================================================
+# --- SECTION 4: DATA FETCHING ---
 @st.cache_data(ttl=300)
 def fetch_tech_data():
-    # This query joins your data with metadata so we have Project/Location/Depth
     query = """
     SELECT d.timestamp, d.value, d.nodenumber, m.Project, m.Location, m.Depth
     FROM `sensorpush-export.sensor_data.final_databoard_data` as d
@@ -74,7 +74,7 @@ def fetch_tech_data():
     df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
     return df
 
-# CALL THE FUNCTION HERE so full_df is available for the sidebar
+# 💡 ADD THIS LINE HERE (Flush to the left margin)
 full_df = fetch_tech_data()
 
 # =================================================================
