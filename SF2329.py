@@ -5,7 +5,37 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
+import json
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import io
 
+@st.cache_data(ttl=3600) # Check for style updates once per hour
+def load_remote_theme(credentials):
+    try:
+        service = build('drive', 'v3', credentials=credentials)
+        # You'll need the File ID of your theme_config.json from Google Drive
+        file_id = 'theme_config.json' 
+        
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        
+        fh.seek(0)
+        return json.load(fh)
+    except Exception as e:
+        # Fallback styles if the file can't be reached
+        return {
+            "frame_color": "black", "frame_width": 2, 
+            "major_grid_color": "black", "chart_height": 850
+        }
+
+# --- USE IT IN YOUR APP ---
+# (After defining your credentials)
+theme = load_remote_theme(creds)
 # --- 1. PAGE SETUP ---
 st.set_page_config(layout="wide", page_title="SF Project Dashboard", page_icon="❄️")
 
