@@ -9,11 +9,10 @@ import pytz
 # --- 1. PAGE SETUP ---
 st.set_page_config(layout="wide", page_title="SF Project Dashboard", page_icon="❄️")
 
-# --- 2. GRIDLINE ENGINE (NEW) ---
+# --- 2. GRIDLINE ENGINE ---
 def get_time_gridlines(start_date, end_date):
-    """Generates vertical lines for Monday, Midnight, and 6-hour intervals."""
+    """Generates vertical lines for Monday (Dark), Midnight (Grey), and 6-hour intervals (Light)."""
     shapes = []
-    # Round start_date down to the beginning of that day to catch the first midnight
     current = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
     
     while current <= end_date:
@@ -22,13 +21,13 @@ def get_time_gridlines(start_date, end_date):
             if line_time < start_date or line_time > end_date: 
                 continue
             
-            # Formatting Logic
+            # Formatting: Monday is Darkest, Midnight is Grey, 6hr is Light/Dotted
             if line_time.weekday() == 0 and hour_offset == 0:
-                color, width, dash = "#424242", 2, "solid" # Monday Midnight (Dark)
+                color, width, dash = "#424242", 2, "solid" 
             elif hour_offset == 0:
-                color, width, dash = "#9E9E9E", 1, "solid" # Daily Midnight (Grey)
+                color, width, dash = "#9E9E9E", 1, "solid" 
             else:
-                color, width, dash = "#E0E0E0", 0.5, "dot" # 6-hour marks (Light)
+                color, width, dash = "#E0E0E0", 0.5, "dot" 
             
             shapes.append(dict(
                 type="line", xref="x", yref="paper",
@@ -53,7 +52,8 @@ def fetch_project_data(pid, weeks):
     credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     client = bigquery.Client(credentials=credentials, project=info["project_id"])
     
-    cutoff = (datetime.now(tz=pytz.UTC) - timedelta(weeks=weeks)).strftime('%Y-%m-%d %H:%M:%S')
+    # Fetch slightly more than requested to ensure Monday boundaries are covered
+    cutoff = (datetime.now(tz=pytz.UTC) - timedelta(weeks=weeks+1)).strftime('%Y-%m-%d %H:%M:%S')
     
     query = f"""
     SELECT 
@@ -79,37 +79,32 @@ def fetch_project_data(pid, weeks):
 # --- 4. MAIN INTERFACE ---
 st.title(f"❄️ Project {PROJECT_ID} Thermal Dashboard")
 
-# 1. Sidebar Settings
+# Sidebar Filters
 st.sidebar.header("View Settings")
 weeks_to_show = st.sidebar.slider("Weeks of History", 1, 12, 2)
 
-# 2. Calculate Monday-to-Monday Boundaries
+# Calculate Monday-to-Monday Boundaries
 now_utc = datetime.now(tz=pytz.UTC)
-# Find days until next Monday (0=Mon, 1=Tue... 6=Sun)
-days_until_monday = (7 - now_utc.weekday()) % 7
-if days_until_monday == 0: days_until_monday = 7 # If today is Monday, look to next week
+days_until_next_monday = (7 - now_utc.weekday()) % 7
+if days_until_next_monday == 0: days_until_next_monday = 7
 
-end_view = (now_utc + timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
+end_view = (now_utc + timedelta(days=days_until_next_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
 start_view = end_view - timedelta(weeks=weeks_to_show)
 
-# 3. Fetch Data
-df = fetch_project_data(PROJECT_ID, weeks_to_show + 1)
+# Fetch and check data
+df = fetch_project_data(PROJECT_ID, weeks_to_show)
 
 if df.empty:
     st.warning("⏳ **Review in Progress:** Verified data will appear here once approved.")
 else:
-    # DATA PROCESSING (Only runs if df is NOT empty)
     all_locs = sorted(df['Location'].dropna().unique())
     sel_loc = st.sidebar.selectbox("Select Pipe / Bank", all_locs)
     
     loc_df = df[df['Location'] == sel_loc].copy()
     loc_df['Sensor_ID'] = "Depth: " + loc_df['Depth'].astype(str) + "'"
 
-    # Generate Gridlines for the Monday-to-Monday range
-    grid_shapes = get_time_gridlines(start_view, end_view)
-
-    # Initialize Tabs inside the else block
-    tab1, tab2, tab3 = st.tabs(["📊 Site Health", "📈 Temp vs Time", "📉 Depth vs Time"])
+    # Create Tabs
+    tab1, tab2, tab3 = st.tabs(["📊 Site Health", "📈 Temp vs Time", "📉 Depth Profile (Snapshot)"])
 
     with tab1:
         st.subheader(f"📋 24-Hour Summary: {sel_loc}")
@@ -128,80 +123,61 @@ else:
         else:
             st.info("No approved data in the last 24 hours.")
 
-   with tab2:
-    st.subheader("Temperature vs Time")
-    # ... your chart setup ...
-    
+    with tab2:
+        st.subheader("Temperature vs Time (History)")
         
-        # 1. Determine Tick Frequency
-        # If showing more than 3 weeks, only show a label every Monday (7 days)
-        # Otherwise, show a label every day.
+        # Dynamic X-Axis labeling based on zoom level
         if weeks_to_show > 3:
-            tick_spacing = 604800000.0  # 7 days in ms
-            tick_format = "%b %d"        # e.g., "Oct 12"
+            tick_spacing = 604800000.0  # 1 week in ms
+            tick_format = "%b %d"
         else:
             tick_spacing = 86400000.0   # 1 day in ms
-            tick_format = "%a\n%b %d"    # e.g., "Mon [newline] Oct 12"
+            tick_format = "%a\n%b %d"
 
         fig = px.line(loc_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=650)
         
+        grid_shapes = get_time_gridlines(start_view, end_view)
         fig.update_layout(
             shapes=grid_shapes, 
             plot_bgcolor='white', 
             hovermode="x unified",
-            margin=dict(l=20, r=150, t=50, b=20)
+            margin=dict(l=20, r=150, t=50, b=20),
+            legend=dict(title="Sensor Depth")
         )
-
         fig.update_xaxes(
             range=[start_view, end_view], 
             showgrid=False, 
             tickformat=tick_format,
-            dtick=tick_spacing,  # <--- DYNAMIC SPACING
-            tickangle=0          # Keeps labels horizontal for readability
+            dtick=tick_spacing
         )
-        
         fig.update_yaxes(showgrid=True, gridcolor='LightGrey', dtick=20)
         fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
         
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.plotly_chart(fig, use_container_width=True, key="temp_time_chart")
+        st.plotly_chart(fig, use_container_width=True, key="history_chart")
 
     with tab3:
-    st.subheader("Monday 6:00 AM Thermal Profile")
-    
-    # 1. Filter for Monday (weekday 0) at 6 AM
-    profile_df = loc_df[
-        (loc_df['timestamp'].dt.weekday == 0) & 
-        (loc_df['timestamp'].dt.hour == 6)
-    ].copy()
-
-    if not profile_df.empty:
-        # Get the most recent Monday 6AM snapshot
-        latest_mon = profile_df['timestamp'].max()
-        snap_df = profile_df[profile_df['timestamp'] == latest_mon].sort_values('Depth')
-
-        # 2. Build the Profile Chart (X=Temp, Y=Depth)
-        fig_profile = px.line(
-            snap_df, 
-            x='value', 
-            y='Depth', 
-            markers=True,
-            title=f"Snapshot: {latest_mon.strftime('%A, %b %d @ %H:%M')}",
-            labels={'value': 'Temp (°F)', 'Depth': 'Depth (ft)'}
-        )
-
-        # 3. Engineering Adjustments
-        fig_profile.update_layout(plot_bgcolor='white', height=600)
+        st.subheader("Monday 6:00 AM Thermal Profile")
         
-        # Reverse Y-axis so 0 is the ground surface
-        fig_profile.update_yaxes(autorange="reversed", gridcolor='LightGrey', zeroline=True)
-        fig_profile.update_xaxes(gridcolor='LightGrey', range=[-20, 80])
-        
-        # Vertical freezing line
-        fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+        # Filter for Monday (weekday 0) at 6 AM
+        profile_df = loc_df[
+            (loc_df['timestamp'].dt.weekday == 0) & 
+            (loc_df['timestamp'].dt.hour == 6)
+        ].copy()
 
-        # UNIQUE KEY FIX
-        st.plotly_chart(fig_profile, use_container_width=True, key="monday_6am_profile")
-    else:
-        st.info("No Monday 6:00 AM data points found in this date range.")
+        if not profile_df.empty:
+            latest_mon = profile_df['timestamp'].max()
+            snap_df = profile_df[profile_df['timestamp'] == latest_mon].sort_values('Depth')
+
+            fig_profile = px.line(
+                snap_df, x='value', y='Depth', markers=True,
+                title=f"Snapshot: {latest_mon.strftime('%A, %b %d @ 06:00 UTC')}",
+                labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
+            )
+            fig_profile.update_layout(plot_bgcolor='white', height=600)
+            fig_profile.update_yaxes(autorange="reversed", gridcolor='LightGrey', zeroline=True)
+            fig_profile.update_xaxes(gridcolor='LightGrey', range=[-20, 80])
+            fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+
+            st.plotly_chart(fig_profile, use_container_width=True, key="profile_chart")
+        else:
+            st.info("No Monday 6:00 AM data points available in this timeframe.")
