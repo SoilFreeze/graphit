@@ -9,44 +9,51 @@ import pytz
 # --- 1. PAGE SETUP ---
 st.set_page_config(layout="wide", page_title="SF Project Dashboard", page_icon="❄️")
 
-# --- 2. SHARED CHART ENGINE ---
-def build_standard_chart(df, title, x_col='timestamp', y_col='value', color_col='Sensor_ID'):
-    if df.empty: return None
-    fig = px.line(df, x=x_col, y=y_col, color=color_col, range_y=[-20, 80], height=650)
-    fig.update_traces(connectgaps=False, hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.2f}°F<extra></extra>")
-    fig.update_layout(
-        plot_bgcolor='white', hovermode="x unified",
-        margin=dict(l=20, r=150, t=50, b=20),
-        legend=dict(x=1.02, font=dict(size=12)),
-        title=dict(text=title, font=dict(size=22))
-    )
-    fig.update_xaxes(showgrid=True, gridcolor='LightGrey', tickformat="%a\n%b %d")
-    fig.update_yaxes(showgrid=True, gridcolor='LightGrey', dtick=20)
-    fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
-    return fig
+# --- 2. GRIDLINE ENGINE (NEW) ---
+def get_time_gridlines(start_date, end_date):
+    """Generates vertical lines for Monday, Midnight, and 6-hour intervals."""
+    shapes = []
+    # Round start_date down to the beginning of that day to catch the first midnight
+    current = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    while current <= end_date:
+        for hour_offset in [0, 6, 12, 18]:
+            line_time = current + timedelta(hours=hour_offset)
+            if line_time < start_date or line_time > end_date: 
+                continue
+            
+            # Formatting Logic
+            if line_time.weekday() == 0 and hour_offset == 0:
+                color, width, dash = "#424242", 2, "solid" # Monday Midnight (Dark)
+            elif hour_offset == 0:
+                color, width, dash = "#9E9E9E", 1, "solid" # Daily Midnight (Grey)
+            else:
+                color, width, dash = "#E0E0E0", 0.5, "dot" # 6-hour marks (Light)
+            
+            shapes.append(dict(
+                type="line", xref="x", yref="paper",
+                x0=line_time, y0=0, x1=line_time, y1=1,
+                line=dict(color=color, width=width, dash=dash),
+                layer="below"
+            ))
+        current += timedelta(days=1)
+    return shapes
 
-# --- 3. DATA FETCHING (GATEKEEPER) ---
+# --- 3. DATA FETCHING ---
 PROJECT_ID = "2329" 
 
-from google.oauth2 import service_account # Ensure this is imported
-
 @st.cache_data(ttl=600)
-def fetch_project_data(pid):
+def fetch_project_data(pid, weeks):
     info = st.secrets["gcp_service_account"]
-    
-    # --- 💡 THE FIX: ADD DRIVE SCOPES ---
-    # This tells Google "I need to talk to BigQuery AND read Drive files"
     scopes = [
         "https://www.googleapis.com/auth/bigquery",
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/cloud-platform"
     ]
-    
-    credentials = service_account.Credentials.from_service_account_info(
-        info, scopes=scopes
-    )
-    
+    credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     client = bigquery.Client(credentials=credentials, project=info["project_id"])
+    
+    cutoff = (datetime.now(tz=pytz.UTC) - timedelta(weeks=weeks)).strftime('%Y-%m-%d %H:%M:%S')
     
     query = f"""
     SELECT 
@@ -57,9 +64,9 @@ def fetch_project_data(pid):
       ON d.nodenumber = m.NodeNum
     WHERE m.Project = '{pid}' 
     AND d.is_approved = TRUE
+    AND d.timestamp >= '{cutoff}'
     ORDER BY d.timestamp ASC
     """
-    
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
@@ -68,12 +75,18 @@ def fetch_project_data(pid):
     except Exception as e:
         st.error(f"Access Error: {e}")
         return pd.DataFrame()
+
 # --- 4. MAIN INTERFACE ---
 st.title(f"❄️ Project {PROJECT_ID} Thermal Dashboard")
-df = fetch_project_data(PROJECT_ID)
+
+# Sidebar Filters
+st.sidebar.header("View Settings")
+weeks_to_show = st.sidebar.slider("Weeks of History", 1, 12, 2)
+
+df = fetch_project_data(PROJECT_ID, weeks_to_show)
 
 if df.empty:
-    st.warning("⏳ **Review in Progress:** Verified data will appear here once approved by Engineering.")
+    st.warning("⏳ **Review in Progress:** Verified data will appear here once approved.")
 else:
     all_locs = sorted(df['Location'].dropna().unique())
     sel_loc = st.sidebar.selectbox("Select Pipe / Bank", all_locs)
@@ -81,14 +94,16 @@ else:
     loc_df = df[df['Location'] == sel_loc].copy()
     loc_df['Sensor_ID'] = "Depth: " + loc_df['Depth'].astype(str) + "'"
 
+    # Define Time Boundaries
+    now_utc = datetime.now(tz=pytz.UTC)
+    start_view = now_utc - timedelta(weeks=weeks_to_show)
+
     # Tabs
     tab1, tab2, tab3 = st.tabs(["📊 Site Health", "📈 Temp vs Time", "📉 Depth vs Time"])
 
     with tab1:
         st.subheader(f"📋 24-Hour Summary: {sel_loc}")
-        now_utc = datetime.now(tz=pytz.UTC)
         recent_df = loc_df[loc_df['timestamp'] >= (now_utc - timedelta(hours=24))]
-        
         if not recent_df.empty:
             summary = []
             for node in recent_df['nodenumber'].unique():
@@ -99,19 +114,32 @@ else:
                     "Max": n_df['value'].max(),
                     "24h Change": n_df['value'].iloc[-1] - n_df['value'].iloc[0]
                 })
-            
-            summary_df = pd.DataFrame(summary).sort_values('Depth')
-            st.table(summary_df.style.format("{:.2f}°F"))
+            st.table(pd.DataFrame(summary).sort_values('Depth').style.format("{:.2f}°F"))
         else:
             st.info("No approved data in the last 24 hours.")
 
     with tab2:
         st.subheader("Temperature vs Time")
-        st.plotly_chart(build_standard_chart(loc_df, f"History: {sel_loc}"), use_container_width=True)
+        fig = px.line(loc_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=650)
+        
+        # Apply Custom Grid & Force Time Range
+        grid_shapes = get_time_gridlines(start_view, now_utc)
+        fig.update_layout(
+            shapes=grid_shapes, 
+            plot_bgcolor='white', 
+            hovermode="x unified",
+            margin=dict(l=20, r=150, t=50, b=20)
+        )
+        fig.update_xaxes(range=[start_view, now_utc], showgrid=False, tickformat="%a\n%b %d")
+        fig.update_yaxes(showgrid=True, gridcolor='LightGrey', dtick=20)
+        fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+        
+        st.plotly_chart(fig, use_container_width=True)
 
     with tab3:
         st.subheader("Depth Profile")
-        # Depth vs Time Line Chart
+        # Reuse same grid logic for the depth profile tab
         fig_depth = px.line(loc_df, x='timestamp', y='value', color='Depth', height=650)
-        fig_depth.update_layout(plot_bgcolor='white', title=f"Thermal Profile: {sel_loc}")
+        fig_depth.update_layout(shapes=grid_shapes, plot_bgcolor='white')
+        fig_depth.update_xaxes(range=[start_view, now_utc], showgrid=False)
         st.plotly_chart(fig_depth, use_container_width=True)
