@@ -8,12 +8,56 @@ from datetime import datetime, timedelta
 import pytz
 
 # =================================================================
-# SECTION 1: GLOBAL CONFIGURATION (Replace these)
+# 1. AUTHENTICATION FIRST (This creates 'creds')
 # =================================================================
-GOOGLE_DRIVE_THEME_ID = 'YOUR_SF_STYLE_CONFIG_JSON_ID'
-BQ_PROJECT_ID = 'sensorpush-export'
-BQ_DATASET = 'sensor_data'
+if "gcp_service_account" in st.secrets:
+    info = st.secrets["gcp_service_account"]
+    creds = service_account.Credentials.from_service_account_info(
+        info, 
+        scopes=["https://www.googleapis.com/auth/drive.readonly", 
+                "https://www.googleapis.com/auth/bigquery"]
+    )
+    client = bigquery.Client(credentials=creds, project=info["project_id"])
+else:
+    st.error("Credential Error: Please check Streamlit Secrets.")
+    st.stop()
 
+# =================================================================
+# 2. DEFINE THE THEME LOADER FUNCTION
+# =================================================================
+@st.cache_data(ttl=3600)
+def load_remote_theme(_credentials):
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+    import io, json
+    try:
+        service = build('drive', 'v3', credentials=_credentials)
+        # YOUR ACTUAL FILE ID FROM GOOGLE DRIVE
+        file_id = 'YOUR_SF_STYLE_CONFIG_JSON_ID' 
+        
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        fh.seek(0)
+        return json.load(fh)
+    except Exception as e:
+        st.sidebar.warning(f"Using default style. Error: {e}")
+        return None
+
+# =================================================================
+# 3. NOW CALL THE THEME (Now 'creds' is defined!)
+# =================================================================
+SF_THEME = load_remote_theme(creds)
+
+# =================================================================
+# 4. IMPORT UTILS AND SETUP PAGE
+# =================================================================
+from sf_utils import get_standard_24h_summary, apply_standard_chart_style
+
+st.set_page_config(layout="wide", page_title="SF Project Dashboard")
 # =================================================================
 # SECTION 2: AUTHENTICATION & CORE HEADER
 # =================================================================
