@@ -184,7 +184,6 @@ else:
         st.plotly_chart(fig, use_container_width=True, key="history_chart_framed")
 
     with tab3:
-        # Title using the selected location variable
         st.subheader(f"Thermal profile for {sel_loc}")
         
         # 1. Filter for Monday at 6 AM
@@ -194,27 +193,32 @@ else:
         ].copy()
 
         if not profile_df.empty:
-            # 2. Get the most recent Monday snapshot
             latest_mon = profile_df['timestamp'].max()
             snap_df = profile_df[profile_df['timestamp'] == latest_mon].copy()
 
-            # 3. Collapse duplicates and sort
+            # 2. Collapse duplicates and sort
             snap_df = snap_df.groupby('Depth')['value'].mean().reset_index()
             snap_df = snap_df.sort_values('Depth', ascending=True)
 
-            # 4. Build the Profile Chart
+            # --- 💡 DYNAMIC DEPTH CALCULATION ---
+            max_depth_in_data = snap_df['Depth'].max()
+            # This rounds up to the next 10 (e.g., 74 becomes 80)
+            rounded_max = int(((max_depth_in_data // 10) + 1) * 10)
+            
+            # Generate tick values from 0 to our new rounded max
+            depth_ticks = list(range(0, rounded_max + 1, 10))
+            depth_labels = [str(t) for t in depth_ticks]
+            depth_labels[0] = "Ground Surface" # Replace '0' with your custom label
+
+            # 3. Build the Profile Chart
             fig_profile = px.line(
                 snap_df, x='value', y='Depth', markers=True,
                 labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
             )
             
-            # --- 💡 CUSTOM Y-AXIS: "GROUND SURFACE" AT 0 ---
-            # We define where the ticks go and what they say
-            depth_ticks = [0, 10, 20, 30, 40, 50, 60, 70, 80]
-            depth_labels = ["Ground Surface", "10", "20", "30", "40", "50", "60", "70", "80"]
-
+            # --- 💡 APPLY DYNAMIC Y-AXIS ---
             fig_profile.update_yaxes(
-                range=[80, 0], # Forces 0 to the top and 80 to the bottom
+                range=[rounded_max, 0], # Dynamic bottom, 0 at top
                 tickmode='array',
                 tickvals=depth_ticks,
                 ticktext=depth_labels,
@@ -233,17 +237,17 @@ else:
                 mirror=True, showline=True, linecolor='black', linewidth=2
             )
 
-            # 5. LAYOUT
+            # 4. LAYOUT
             fig_profile.update_layout(
                 plot_bgcolor='white', 
                 height=900,
-                margin=dict(l=120, r=60, t=60, b=60), # Extra left margin for the long label
+                margin=dict(l=120, r=60, t=60, b=60),
                 hovermode="y unified"
             )
             
             # Freezing Line
             fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
 
-            st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_labeled")
+            st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_dynamic")
         else:
             st.info(f"No Monday 6:00 AM data found for {sel_loc}.")
