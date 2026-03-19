@@ -1,18 +1,16 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
-import math
 
 # =================================================================
-# 1. AUTHENTICATION (The "Engine Start")
+# 1. AUTHENTICATION FIRST (This creates 'creds')
 # =================================================================
-# This block creates 'creds' before anything else uses it.
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
+    # We define 'creds' here so it exists for the rest of the script
     creds = service_account.Credentials.from_service_account_info(
         info, 
         scopes=["https://www.googleapis.com/auth/drive.readonly", 
@@ -24,17 +22,16 @@ else:
     st.stop()
 
 # =================================================================
-# 2. THEME LOADER (Pulling from Google Drive)
+# 2. DEFINE THE THEME LOADER FUNCTION
 # =================================================================
 @st.cache_data(ttl=3600)
-def load_remote_theme(_credentials):
+def load_remote_theme(_credentials): # Note the underscore to fix hashing
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
     import io, json
     try:
         service = build('drive', 'v3', credentials=_credentials)
-        
-        # --- 💡 REPLACE THIS ID WITH YOUR ACTUAL FILE ID ---
+        # REPLACE THIS with your actual ID from Google Drive
         file_id = 'YOUR_SF_STYLE_CONFIG_JSON_ID' 
         
         request = service.files().get_media(fileId=file_id)
@@ -49,35 +46,18 @@ def load_remote_theme(_credentials):
         st.sidebar.warning(f"Theme Load Failed: Using Defaults. Error: {e}")
         return None
 
-# Load the SoilFreeze Global Theme
+# =================================================================
+# 3. NOW CALL THE THEME (Now 'creds' is safely defined!)
+# =================================================================
 SF_THEME = load_remote_theme(creds)
 
 # =================================================================
-# 3. IMPORT SHARED UTILS (Requires sf_utils.py in your GitHub repo)
+# 4. IMPORT UTILS AND SETUP PAGE
 # =================================================================
-try:
-    from sf_utils import get_standard_24h_summary, apply_standard_chart_style
-except ImportError:
-    st.error("Error: 'sf_utils.py' not found in repository.")
-    st.stop()
+# Ensure sf_utils.py is uploaded to your GitHub repo
+from sf_utils import get_standard_24h_summary, apply_standard_chart_style
 
-# =================================================================
-# 4. DATA FETCHING (The Technician View)
-# =================================================================
-@st.cache_data(ttl=300)
-def fetch_tech_data():
-    query = """
-    SELECT d.timestamp, d.value, d.nodenumber, m.Project, m.Location, m.Depth
-    FROM `sensorpush-export.sensor_data.final_databoard_data` as d
-    INNER JOIN `sensorpush-export.sensor_data.master_metadata` as m ON d.nodenumber = m.NodeNum
-    ORDER BY d.timestamp ASC
-    """
-    df = client.query(query).to_dataframe()
-    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-    return df
-
-full_df = fetch_tech_data()
-
+st.set_page_config(layout="wide", page_title="SF Project Dashboard")
 # =================================================================
 # 5. PAGE SETUP & SIDEBAR
 # =================================================================
