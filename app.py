@@ -12,6 +12,50 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 import io
 
+# --- 1. AUTHENTICATION & THEME LOADING ---
+# Ensure these match your secrets.toml or Streamlit Cloud Secrets
+if "gcp_service_account" in st.secrets:
+    info = st.secrets["gcp_service_account"]
+    creds = service_account.Credentials.from_service_account_info(
+        info, 
+        scopes=["https://www.googleapis.com/auth/drive.readonly", 
+                "https://www.googleapis.com/auth/bigquery"]
+    )
+    client = bigquery.Client(credentials=creds, project=info["project_id"])
+else:
+    st.error("Credential Error: Check Streamlit Secrets.")
+    st.stop()
+
+# --- 2. THEME LOADER ---
+@st.cache_data(ttl=3600)
+def load_remote_theme(credentials):
+    from googleapiclient.discovery import build
+    import io, json
+    from googleapiclient.http import MediaIoBaseDownload
+    
+    try:
+        service = build('drive', 'v3', credentials=credentials)
+        # REPLACE WITH YOUR ACTUAL FILE ID FROM GOOGLE DRIVE
+        file_id = 'YOUR_SF_STYLE_CONFIG_JSON_ID' 
+        
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        fh.seek(0)
+        return json.load(fh)
+    except Exception as e:
+        st.sidebar.warning(f"Theme Load Failed: Using Defaults. Error: {e}")
+        return None # Utilities will handle the fallback
+
+# Load the central theme
+SF_THEME = load_remote_theme(creds)
+
+# --- 3. IMPORT SHARED LOGIC ---
+# This pulls the tools from the sf_utils.py file you just created
+from sf_utils import get_standard_24h_summary, apply_standard_chart_style
 @st.cache_data(ttl=3600) # Check for style updates once per hour
 def load_remote_theme(credentials):
     try:
