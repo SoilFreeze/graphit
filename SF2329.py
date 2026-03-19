@@ -198,58 +198,52 @@ else:
             latest_mon = profile_df['timestamp'].max()
             snap_df = profile_df[profile_df['timestamp'] == latest_mon].copy()
 
-            # --- 💡 THE ULTIMATE ZIGZAG FIX ---
-            # Group by Depth and take the MEAN temperature if multiple readings exist for 6 AM.
-            # This ensures exactly ONE point per depth level.
+            # 3. Collapse duplicates and sort
             snap_df = snap_df.groupby('Depth')['value'].mean().reset_index()
-            
-            # Sort strictly by Depth so the line is a single vertical path
             snap_df = snap_df.sort_values('Depth', ascending=True)
 
-            # 3. Build the Profile Chart
+            # 4. Build the Profile Chart
             fig_profile = px.line(
                 snap_df, x='value', y='Depth', markers=True,
                 labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)'}
             )
             
-            # --- 💡 EXPLICIT GRID LINES (The 20s) ---
-            temp_steps_20 = [-20, 0, 20, 40, 60, 80]
-            depth_steps_10 = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            # --- 💡 CUSTOM Y-AXIS: "GROUND SURFACE" AT 0 ---
+            # We define where the ticks go and what they say
+            depth_ticks = [0, 10, 20, 30, 40, 50, 60, 70, 80]
+            depth_labels = ["Ground Surface", "10", "20", "30", "40", "50", "60", "70", "80"]
 
+            fig_profile.update_yaxes(
+                range=[80, 0], # Forces 0 to the top and 80 to the bottom
+                tickmode='array',
+                tickvals=depth_ticks,
+                ticktext=depth_labels,
+                gridcolor='black', gridwidth=1.5,
+                minor=dict(dtick=1, gridcolor='#F0F0F0', showgrid=True),
+                mirror=True, showline=True, linecolor='black', linewidth=2
+            )
+
+            # --- 💡 X-AXIS STANDARDIZATION ---
             fig_profile.update_xaxes(
                 range=[-20, 80],
                 tickmode='array',
-                tickvals=temp_steps_20, # Explicitly set labels at 20s
-                gridcolor='black', gridwidth=1.5, # Heavy black lines at 20s
-                minor=dict(
-                    dtick=5, gridcolor='#D3D3D3', showgrid=True, # Grey lines at 5
-                    ticks="outside"
-                ),
-                mirror=True, showline=True, linecolor='black', linewidth=2
-            )
-            
-            fig_profile.update_yaxes(
-                autorange="reversed",
-                tickmode='array',
-                tickvals=depth_steps_10, # Explicitly set labels at 10s
-                gridcolor='black', gridwidth=1.5, # Heavy black lines at 10s
-                minor=dict(
-                    dtick=1, gridcolor='#F0F0F0', showgrid=True # Faint lines at 1
-                ),
+                tickvals=[-20, 0, 20, 40, 60, 80],
+                gridcolor='black', gridwidth=1.5,
+                minor=dict(dtick=5, gridcolor='#D3D3D3', showgrid=True),
                 mirror=True, showline=True, linecolor='black', linewidth=2
             )
 
-            # 4. LAYOUT
+            # 5. LAYOUT
             fig_profile.update_layout(
                 plot_bgcolor='white', 
-                height=900, # Tall for better depth resolution
-                margin=dict(l=60, r=60, t=60, b=60),
+                height=900,
+                margin=dict(l=120, r=60, t=60, b=60), # Extra left margin for the long label
                 hovermode="y unified"
             )
             
-            # Add the Blue Freezing Line
+            # Freezing Line
             fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
 
-            st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_v3")
+            st.plotly_chart(fig_profile, use_container_width=True, key="thermal_profile_labeled")
         else:
-            st.info(f"No Monday 6:00 AM data points found for {sel_loc}.")
+            st.info(f"No Monday 6:00 AM data found for {sel_loc}.")
