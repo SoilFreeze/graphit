@@ -59,7 +59,7 @@ def fetch_project_data(pid, weeks):
     SELECT 
         d.timestamp, d.value, d.nodenumber, d.is_approved, d.engineer_note,
         m.Project, m.Location, m.Depth
-    FROM `sensorpush-export.sensor_data.final_databoard_data` as d
+    FROM `sensorpush-export.sensor_data.final_databoard_master` as d
     INNER JOIN `sensorpush-export.sensor_data.master_metadata` as m 
       ON d.nodenumber = m.NodeNum
     WHERE m.Project = '{pid}' 
