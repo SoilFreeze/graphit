@@ -330,3 +330,50 @@ elif "Approval" in service:
             
         st.code(update_sql, language="sql")
         st.cache_data.clear() # Force app to fetch fresh status
+# --- SERVICE 6: DATABASE MAINTENANCE ---
+elif service == "🧹 Database Maintenance":
+    st.header("🧹 Master Data Scrubbing")
+    st.warning("⚠️ This tool permanently deletes and averages raw data to the 'One Point Per Hour' standard.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Current Database Health")
+        # Quick counts to show status
+        lord_count = client.query("SELECT count(*) FROM `sensorpush-export.sensor_data.raw_lord`").to_dataframe().iloc[0,0]
+        sp_count = client.query("SELECT count(*) FROM `sensorpush-export.sensor_data.raw_sensorpush`").to_dataframe().iloc[0,0]
+        st.metric("Raw Lord Rows", f"{lord_count:,}")
+        st.metric("Raw SensorPush Rows", f"{sp_count:,}")
+
+    with col2:
+        st.subheader("Cleaning Controls")
+        if st.button("🚀 EXECUTE FULL SCRUB", type="primary"):
+            with st.spinner("Cleaning Heat Spikes (>80°F) and Averaging Hourly Duplicates..."):
+                # 1. Scrub Lord
+                sql_lord = """
+                CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.raw_lord` AS
+                SELECT TIMESTAMP_TRUNC(CAST(timestamp AS TIMESTAMP), HOUR) as timestamp,
+                       nodenumber, AVG(value) as value, ANY_VALUE(is_approved) as is_approved,
+                       ANY_VALUE(engineer_note) as engineer_note
+                FROM `sensorpush-export.sensor_data.raw_lord`
+                WHERE value <= 80
+                GROUP BY 1, 2
+                HAVING (MAX(value) - MIN(value)) <= 5.0
+                """
+                
+                # 2. Scrub SensorPush
+                sql_sp = """
+                CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.raw_sensorpush` AS
+                SELECT TIMESTAMP_TRUNC(CAST(timestamp AS TIMESTAMP), HOUR) as timestamp,
+                       sensor_name, AVG(temperature) as temperature, ANY_VALUE(is_approved) as is_approved,
+                       ANY_VALUE(engineer_note) as engineer_note
+                FROM `sensorpush-export.sensor_data.raw_sensorpush`
+                WHERE temperature <= 80
+                GROUP BY 1, 2
+                HAVING (MAX(temperature) - MIN(temperature)) <= 5.0
+                """
+                
+                client.query(sql_lord).result()
+                client.query(sql_sp).result()
+                
+                st.success("✨ Scrub Complete! Both tables are now optimized at 1 point per hour.")
+                st.balloons()
