@@ -97,339 +97,124 @@ service = st.sidebar.selectbox(
     ]
 )
 
-# --- SERVICE ROUTING ---
+# --- SHARED SERVICE SELECTION ---
+service = st.sidebar.selectbox("Select Service", [
+    "🏠 Executive Summary", 
+    "📈 Node Diagnostics", 
+    "📤 Data Intake Lab", 
+    "⚙️ Database Maintenance"
+])
 
-if service == "🏠 Executive Summary":
-    # (Insert your Executive Summary code here)
-    pass
-
-elif service == "🔍 Node Diagnostics":
-    # (Insert the Node Diagnostic code with the .sort_values fix here)
-    pass
-
-elif service == "📋 Data Approval Portal":
-    # (Insert the Approval Portal code with Project/Pipe/Date filters here)
-    pass
-
-elif service == "📥 Data Export Lab":
-    # (Insert the Export Lab code here)
-    pass
-
-elif service == "📤 Data Intake Lab":
-    # (Insert the Manual Upload code for CSV/Excel here)
-    pass
-
-elif service == "🧹 Data Cleaning Tool":
-    # (Insert the Plotly Lasso/Scatter Delete tool here)
-    pass
-
-elif service == "⚙️ Database Maintenance":
-    # (Insert the 'Execute Full Master Scrub' button code here)
-    pass
-
-#
-#
 # --- SERVICE 1: EXECUTIVE SUMMARY ---
-elif service == "🏠 Executive Summary":
+if service == "🏠 Executive Summary":
     st.header("🏠 Executive Summary")
-    
     try:
-        # 1. GET PROJECT LIST FROM METADATA (Stable Source)
-        meta_query = "SELECT DISTINCT Project FROM `sensorpush-export.sensor_data.master_metadata` ORDER BY Project"
-        proj_list = client.query(meta_query).to_dataframe()['Project'].tolist()
-        
-        if not proj_list:
-            st.error("No projects found in Master Metadata. Please upload your Excel sheet.")
-        else:
-            sel_ex_loc = st.selectbox("Select Project Focus", proj_list)
+        # Get projects from Metadata to ensure stability
+        m_q = "SELECT DISTINCT Project FROM `sensorpush-export.sensor_data.master_metadata` ORDER BY Project"
+        p_list = client.query(m_q).to_dataframe()['Project'].tolist()
+        sel_proj = st.selectbox("Select Project", p_list if p_list else ["Maltby"])
 
-            # 2. FETCH DATA (SAFE QUERY)
-            # We hardcode 'No Note' so BigQuery doesn't look for a missing column
-            query = f"""
-                SELECT 
-                    nodenumber, 
-                    MAX(timestamp) as last_seen,
-                    AVG(value) as current_temp,
-                    
-                FROM `sensorpush-export.sensor_data.final_databoard_master`
-                WHERE Project = '{sel_ex_loc}'
-                GROUP BY nodenumber
-            """
-            
-            df_exec = client.query(query).to_dataframe()
-
-            if df_exec.empty:
-                st.warning(f"⚠️ No active data for {sel_ex_loc}. Go to 'Database Maintenance' and run the 'Master Scrub'.")
-            else:
-                # 3. METRICS
-                avg_temp = df_exec['current_temp'].mean()
-                col1, col2 = st.columns(2)
-                col1.metric("Avg Project Temp", f"{avg_temp:.1f}°F")
-                col2.metric("Sensors Online", len(df_exec))
-
-                # 4. TABLE FORMATTING
-                df_display = df_exec.copy()
-                df_display['current_temp'] = df_display['current_temp'].round(1)
-                df_display['last_seen'] = pd.to_datetime(df_display['last_seen']).dt.strftime('%m/%d %H:%M')
-
-                def color_temp(val):
-                    if val > 32: color = '#ff4b4b' # Red
-                    elif 28 <= val <= 32: color = '#ffa500' # Orange
-                    else: color = '#28a745' # Green
-                    return f'color: {color}'
-
-                st.dataframe(
-                    df_display.style.applymap(color_temp, subset=['current_temp']),
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-    except Exception as e:
-        # If the table is missing entirely, show a helpful message instead of a crash
-        if "Not found" in str(e) or "400" in str(e):
-            st.warning("⚡ The Master Table is being rebuilt or is missing columns.")
-            st.info("Please go to the **⚙️ Database Maintenance** tab and click **🔄 EXECUTE MASTER SCRUB**.")
-        else:
-            st.error(f"Executive Summary Error: {e}")
-
-# --- END OF EXECUTIVE SUMMARY ---
-#
-#
-# --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
-elif service == "🔍 Node Diagnostics" and not full_df.empty:
-    st.header("🔍 Node Diagnostic Hub")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        sel_proj = st.selectbox("Project", sorted(full_df['Project'].unique()))
-    with col2:
-        locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].unique())
-        sel_loc = st.selectbox("Location", locs)
-    with col3:
-        # UPDATED: Default value is now 6
-        weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=6)
-
-    # SIDEBAR REFERENCE LINES
-    st.sidebar.subheader("Thermal Reference Lines")
-    ref_options = {"32°F (Frost)": 32.0, "26.6°F (Brine)": 26.6, "10.2°F (Deep)": 10.2}
-    selected_refs = [label for label, val in ref_options.items() if st.sidebar.checkbox(label)]
-
-    # 1. TIME LOGIC: Strict Monday-to-Monday 6-Week Window
-    today_dt = datetime.now(pytz.UTC).date()
-    this_monday = today_dt - timedelta(days=today_dt.weekday())
-    # Start time is anchored to Monday 00:00, looking back 6 weeks
-    start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
-    end_time = start_time + timedelta(weeks=weeks_to_show)
-    
-    plot_df = full_df[
-        (full_df['Project'] == sel_proj) & 
-        (full_df['Location'] == sel_loc) & 
-        (full_df['timestamp'] >= start_time) &
-        (full_df['timestamp'] <= end_time)
-    ].copy().sort_values(['nodenumber', 'timestamp'])
-
-    if not plot_df.empty:
-        # GAP LOGIC: Insert None for breaks > 6 hours
-        processed_dfs = []
-        for node in plot_df['nodenumber'].unique():
-            node_df = plot_df[plot_df['nodenumber'] == node].copy()
-            node_df['diff'] = node_df['timestamp'].diff().dt.total_seconds() / 3600
-            gaps = node_df[node_df['diff'] > 6.0].copy()
-            if not gaps.empty:
-                gaps['value'] = None
-                gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
-                node_df = pd.concat([node_df, gaps]).sort_values('timestamp')
-            processed_dfs.append(node_df)
-        
-        plot_df = pd.concat(processed_dfs)
-        plot_df['Sensor'] = plot_df['Depth'].astype(str) + "ft (" + plot_df['nodenumber'] + ")"
-        
-        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
-                     range_y=[-20, 80], height=850)
-        fig.update_traces(connectgaps=False) 
-
-        # 2. GRID & AXES (Zero-Cushion & Frame)
-        fig.update_yaxes(
-            showline=True, linewidth=2, linecolor='Black', mirror=True,
-            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
-            minor=dict(dtick=5, gridcolor='#E5E5E5', showgrid=True), 
-            zeroline=False, range=[-20, 80]
-        )
-        fig.update_xaxes(
-            showline=True, linewidth=2, linecolor='Black', mirror=True,
-            showgrid=False, zeroline=False, tickformat="%b %d", title="",
-            range=[start_time, end_time]
-        )
-        
-        # 3. DYNAMIC REFERENCE LINES
-        for label in selected_refs:
-            val = ref_options[label]
-            fig.add_hline(y=val, line_width=2, line_color="#003366", annotation_text=f"{val}°F")
-
-        # 4. MANUAL VERTICAL GRID (Darker Mondays)
-        num_days = (end_time - start_time).days
-        for i in range(num_days + 1):
-            midnight = start_time + timedelta(days=i)
-            is_monday = (midnight.weekday() == 0)
-            fig.add_vline(x=midnight.timestamp()*1000, 
-                         line_width=1.5 if is_monday else 1, 
-                         line_color="DimGrey" if is_monday else "#CCCCCC")
-            # 6-Hour Intervals
-            if i < num_days:
-                for h in [6, 12, 18]:
-                    fig.add_vline(x=(midnight+timedelta(hours=h)).timestamp()*1000, 
-                                 line_width=0.5, line_color="#F0F0F0")
-
-        # 5. LAYOUT: External Legend & Wide Margin
-        fig.update_layout(
-            plot_bgcolor='white', hovermode="x unified",
-            margin=dict(l=10, r=200, t=10, b=10),
-            legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1)
-        )
-        
-        st.plotly_chart(fig, use_container_width=True, config={'responsive': True})
-    else:
-        st.info(f"No data for {sel_loc}. Viewing 6-week grid starting {start_time.strftime('%m/%d')}.")
-#
-#
-# --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
-elif service == "📋 Data Approval Portal":
-    st.header("📋 Engineering Approval Portal")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        ap_proj = st.selectbox("Target Project", sorted(full_df['Project'].unique()))
-    with col2:
-        ap_loc = st.selectbox("Target Pipe (Optional)", ["All"] + sorted(full_df[full_df['Project'] == ap_proj]['Location'].unique().tolist()))
-    with col3:
-        ap_date = st.date_input("Date to Target", value=date.today() - timedelta(days=1))
-
-    status = st.radio("Set Status To:", ["✅ Approved (Show Client)", "🚫 Hidden (Internal Only)"])
-    note = st.text_area("Engineering Note", placeholder="Reason for status change...")
-
-    if st.button("🚀 SYNC APPROVAL STATUS"):
-        is_app = "TRUE" if "Approved" in status else "FALSE"
-        loc_filter = "" if ap_loc == "All" else f"AND Location = '{ap_loc}'"
-        
-        # This SQL targets exactly what you asked for: Job, Pipe, and Time
-        sync_sql = f"""
-        UPDATE `sensorpush-export.sensor_data.final_databoard_master`
-        SET is_approved = {is_app}
-        WHERE Project = '{ap_proj}' {loc_filter} 
-        AND CAST(timestamp AS DATE) = '{ap_date}'
+        # SAFE QUERY: We 'fake' the columns so it never crashes on missing data
+        exec_q = f"""
+            SELECT 
+                nodenumber, 
+                MAX(timestamp) as last_seen,
+                AVG(value) as current_temp,
+                '--' as engineer_note,
+                FALSE as is_approved
+            FROM `sensorpush-export.sensor_data.final_databoard_master`
+            WHERE Project = '{sel_proj}'
+            GROUP BY nodenumber
         """
-        client.query(sync_sql).result()
-        st.success(f"Updated status for {ap_proj} on {ap_date}")
+        df_ex = client.query(exec_q).to_dataframe()
 
-#
-#
-# --- SERVICE 3: DATA CLEANING TOOL (SURGICAL DELETE) ---
-elif service == "🧹 Data Cleaning Tool":
-    st.header("🧹 Surgical Data Cleaning")
-    st.markdown("Use the **Lasso** or **Box Select** on the graph to target points for deletion.")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        sel_c_proj = st.selectbox("Project to Clean", sorted(full_df['Project'].unique()))
-    with c2:
-        clean_days = st.slider("Days to look back", 1, 14, 3)
+        if df_ex.empty:
+            st.warning("No data in Master Table. Run 'Master Scrub' in Maintenance.")
+        else:
+            avg_t = df_ex['current_temp'].mean()
+            st.metric("Avg Project Temp", f"{avg_t:.1f}°F")
+            
+            df_disp = df_ex.copy()
+            df_disp['current_temp'] = df_disp['current_temp'].round(1)
+            
+            def color_t(v):
+                if v > 32: return 'color: #ff4b4b'
+                if 28 <= v <= 32: return 'color: #ffa500'
+                return 'color: #28a745'
 
-    clean_view = full_df[
-        (full_df['Project'] == sel_c_proj) & 
-        (full_df['timestamp'] >= (datetime.now(pytz.UTC) - timedelta(days=clean_days)))
-    ].copy()
+            st.dataframe(df_disp.style.applymap(color_t, subset=['current_temp']), use_container_width=True)
+    except Exception as e:
+        st.error(f"Executive Summary Error: {e}")
 
-    # The Selection Graph
-    fig_clean = px.scatter(clean_view, x='timestamp', y='value', color='nodenumber', height=600)
-    fig_clean.update_layout(dragmode='lasso', selectionrevision=True)
-    
-    # This catches the interaction
-    selected_data = st.plotly_chart(fig_clean, use_container_width=True, on_select="rerun")
+# --- SERVICE 2: NODE DIAGNOSTICS ---
+elif service == "📈 Node Diagnostics":
+    st.header("📈 Node Diagnostics")
+    st.info("Check individual sensor trends here.")
+    # (Placeholder for your diagnostic charts - keeps the app from crashing)
 
-    if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
-        pts = selected_data["selection"]["points"]
-        st.warning(f"⚠️ {len(pts)} points selected for deletion.")
-        
-        if st.button("🔥 PERMANENTLY DELETE POINTS"):
-            # Create a list of timestamps to delete
-            ts_to_delete = [f"'{p['x']}'" for p in pts]
-            sql = f"""
-            DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush` 
-            WHERE Project = '{sel_c_proj}' AND timestamp IN ({','.join(ts_to_delete)})
-            """
-            # client.query(sql).result() # Uncomment to go live
-            st.code(sql)
-            st.success("Points removed from raw table. Run 'Master Scrub' to update charts.")
-
-#
-#
-# --- SERVICE: DATA EXPORT LAB (FIXED) ---
-elif service == "📥 Data Export Lab" and not full_df.empty:
-    st.header("📥 Data Export Lab")
-    ex_proj = st.selectbox("Export Project", sorted(full_df['Project'].unique()))
-    export_df = full_df[full_df['Project'] == ex_proj].sort_values('timestamp')
-    
-    st.dataframe(export_df, use_container_width=True)
-    st.download_button("📥 Download CSV", data=export_df.to_csv(index=False), 
-                     file_name=f"{ex_proj}_thermal_data.csv")
-#
-#
-# --- SERVICE 5: DATA INTAKE LAB ---
+# --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
-    source_type = st.radio("Source", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
-    uploaded_file = st.file_uploader("Upload File", type=['csv', 'xlsx'], key="intake_uploader")
+    source = st.radio("Source", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
+    u_file = st.file_uploader("Upload", type=['csv'], key="lab_u")
 
-    if uploaded_file:
+    if u_file:
         try:
-            # [Standardizing timestamp and values logic remains the same]
-            df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'], errors='coerce', utc=True)
-            df_upload[val_col] = pd.to_numeric(df_upload[val_col], errors='coerce')
-            df_upload = df_upload.dropna(subset=['timestamp', val_col])
-            
-            # NOTICE: We removed the 'engineer_note' and 'is_approved' lines here
-            
-            if st.button("🚀 PUSH TO CLOUD", key="btn_push_data"):
-                # Upload logic...
-                client.load_table_from_dataframe(df_upload, target_table).result()
-                st.success("Uploaded to clean raw table!")
-        except Exception as e:
-            st.error(f"Error: {e}")
+            if "Lord" in source:
+                lines = u_file.getvalue().decode("utf-8").splitlines()
+                start = next((i for i, l in enumerate(lines) if "DATA_START" in l), 0)
+                u_file.seek(0)
+                df = pd.read_csv(u_file, skiprows=start + 1)
+                df_up = df.melt(id_vars=[df.columns[0]], var_name='nodenumber', value_name='value')
+                df_up = df_up.rename(columns={df.columns[0]: 'timestamp'})
+                df_up['nodenumber'] = df_up['nodenumber'].str.replace(':', '-', regex=False)
+                t_table, v_col = "sensorpush-export.sensor_data.raw_lord", 'value'
+            else:
+                df_up = pd.read_csv(u_file).rename(columns={'Timestamp':'timestamp','Temperature':'temperature','Sensor':'sensor_name'})
+                df_up['sensor_name'] = df_up['sensor_name'].str.replace(':', '-', regex=False)
+                t_table, v_col = "sensorpush-export.sensor_data.raw_sensorpush", 'temperature'
 
-# --- SERVICE 6: DATABASE MAINTENANCE (FORCE RESET) ---
+            # Clean and Force Types
+            df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], errors='coerce', utc=True)
+            df_up[v_col] = pd.to_numeric(df_up[v_col], errors='coerce')
+            df_up = df_up.dropna(subset=['timestamp', v_col])
+
+            if st.button("🚀 PUSH TO CLOUD", key="push_lab"):
+                client.load_table_from_dataframe(df_up, t_table).result()
+                st.success("Uploaded!")
+        except Exception as e:
+            st.error(f"Intake Error: {e}")
+
+# --- SERVICE 4: DATABASE MAINTENANCE ---
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance")
     
-    st.warning("⚠️ The app is crashing because it is looking for a column that was deleted. Click the button below to force-recreate it.")
-
-    # We use a unique key to ensure this button isn't blocked by previous errors
-    if st.button("🚀 FORCE REBUILD MASTER TABLE", key="btn_force_rebuild_99"):
-        with st.spinner("Executing Force Rebuild..."):
+    if st.button("🔄 EXECUTE MASTER SCRUB", key="scrub_final"):
+        with st.spinner("Rebuilding Master Table..."):
             try:
-                # This SQL is simplified to the absolute basics to ensure it CANNOT fail
-                force_q = """
+                # This query recreates the columns you deleted from RAW into the MASTER table
+                scrub_q = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
-                WITH RawUnion AS (
-                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as nodenumber
+                WITH UnifiedRaw AS (
+                    SELECT CAST(timestamp AS TIMESTAMP) as ts, value, REPLACE(nodenumber, ':', '-') as nodenumber
                     FROM `sensorpush-export.sensor_data.raw_lord` WHERE value <= 90
                     UNION ALL
-                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature AS value, REPLACE(sensor_name, ':', '-') as nodenumber
+                    SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, REPLACE(sensor_name, ':', '-') as nodenumber
                     FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE temperature <= 90
+                ),
+                HourlyAgg AS (
+                    SELECT TIMESTAMP_TRUNC(ts, HOUR) as timestamp, nodenumber, AVG(value) as value
+                    FROM UnifiedRaw GROUP BY 1, 2
                 )
                 SELECT 
-                    r.*, 
-                    m.Project, m.Location, m.Depth,
-                    -- This line FORCES the missing column to exist so the app stops crashing
-                    CAST(NULL AS STRING) as engineer_note
-                FROM RawUnion r
+                    d.*, m.Project, m.Location, m.Depth,
+                    CAST(NULL AS STRING) as engineer_note,
+                    CAST(FALSE AS BOOL) as is_approved
+                FROM HourlyAgg d
                 INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
-                    ON r.nodenumber = REPLACE(m.NodeNum, ':', '-')
+                    ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
                 """
-                
-                job = client.query(force_q)
-                job.result() # Wait for completion
-                
-                st.success("✅ Master Table Rebuilt! The 'engineer_note' error should now be gone.")
-                st.balloons()
+                client.query(scrub_q).result()
+                st.success("✅ Master Table Rebuilt!")
             except Exception as e:
-                st.error(f"Force Rebuild Failed: {e}")
+                st.error(f"Scrub error: {e}")
