@@ -158,7 +158,7 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
-# --- SERVICE 1: NODE DIAGNOSTICS (EXTERNAL LEGEND & ZERO CUSHION) ---
+# --- SERVICE 1: NODE DIAGNOSTICS (CLEANEST GRID) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
@@ -171,11 +171,11 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=1)
 
-    # 1. TIME LOGIC: Strict Monday Midnight to Monday Midnight (Full Week)
+    # 1. TIME LOGIC: Strict Monday-to-Monday Window
     today_dt = datetime.now(pytz.UTC).date()
     this_monday = today_dt - timedelta(days=today_dt.weekday())
     start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
-    end_time = start_time + timedelta(weeks=weeks_to_show) # Forces the full week view
+    end_time = start_time + timedelta(weeks=weeks_to_show)
     
     plot_df = full_df[
         (full_df['Project'] == sel_proj) & 
@@ -190,56 +190,61 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
                      range_y=[-20, 80], height=800)
 
-        # 2. Y-AXIS: Frame, Solid Grid (20s DimGrey, 5s LightGrey)
+        # 2. Y-AXIS: Solid Frame & Solid Grid
         fig.update_yaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
             tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
-            minor=dict(dtick=5, gridcolor='LightGrey', showgrid=True),
+            minor=dict(dtick=5, gridcolor='#E5E5E5', showgrid=True), # Very light 5-degree lines
             zeroline=True, zerolinecolor='Black', zerolinewidth=2,
             title="Temperature (°F)", range=[-20, 80]
         )
 
-        # 3. X-AXIS: Frame, No Default Grid, Strict Range
+        # 3. X-AXIS: Frame, Zero-Cushion, Kill ALL default grid
         fig.update_xaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
-            showgrid=False, # Stop double lines
-            minor=dict(dtick=21600000.0, gridcolor='LightGrey', showgrid=True), # 6 Hours
+            showgrid=False, # KILL DEFAULT GRID (STOPS DOUBLE LINES)
+            zeroline=False, # KILL ZERO LINE (STOPS DOUBLE LINES)
             tickformat="%a\n%b %d", title="",
-            range=[start_time, end_time] # Forces data/grid to hit frame
+            range=[start_time, end_time],
+            dtick=86400000.0 # One tick per day
         )
         
-        # 4. MANUAL DAILY LINES: Midnight Solid Lines
+        # 4. MANUAL GRID: The "One Source of Truth" for vertical lines
         num_days = (end_time - start_time).days
         for i in range(num_days + 1):
-            current_date = start_time + timedelta(days=i)
-            is_monday = (current_date.weekday() == 0)
+            midnight = start_time + timedelta(days=i)
+            is_monday = (midnight.weekday() == 0)
+            
+            # Midnight Lines (One per day)
             fig.add_vline(
-                x=current_date.timestamp() * 1000, 
+                x=midnight.timestamp() * 1000, 
                 line_width=1.5 if is_monday else 1, 
-                line_color="DimGrey" if is_monday else "LightGrey"
+                line_color="DimGrey" if is_monday else "#CCCCCC" # Grey for days
             )
+            
+            # 6-Hour Intervals (Even lighter grey)
+            if i < num_days: # Don't draw past end_time
+                for h in [6, 12, 18]:
+                    six_hour_mark = midnight + timedelta(hours=h)
+                    fig.add_vline(
+                        x=six_hour_mark.timestamp() * 1000,
+                        line_width=0.5,
+                        line_color="#F0F0F0" # Very light grey
+                    )
 
-        # 5. LAYOUT: External Legend & Zero Cushion
+        # 5. LAYOUT: External Legend
         fig.update_layout(
             plot_bgcolor='white', 
             hovermode="x unified", 
-            margin=dict(l=10, r=150, t=10, b=10), # Added right margin for legend space
-            showlegend=True,
+            margin=dict(l=10, r=180, t=10, b=10), 
             legend=dict(
-                title="Sensors",
-                orientation="v",
-                yanchor="top",
-                y=1,
-                xanchor="left",
-                x=1.02, # Positioned exactly outside the right frame line
-                bordercolor="Black",
-                borderwidth=1
+                x=1.02, y=1, bordercolor="Black", borderwidth=1
             )
         )
         
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info(f"No data found. Grid set for week of {start_time.strftime('%m/%d')}.")
+        st.info(f"No data for {sel_loc}. Viewing week starting {start_time.strftime('%m/%d')}.")
 
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
