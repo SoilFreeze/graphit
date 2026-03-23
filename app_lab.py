@@ -158,7 +158,7 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
-# --- SERVICE 1: NODE DIAGNOSTICS (CLEAN DAILY GRID) ---
+# --- SERVICE 1: NODE DIAGNOSTICS (ZERO-CUSHION GRID) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
@@ -169,23 +169,30 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
         locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].unique())
         sel_loc = st.selectbox("Location", locs)
     with col3:
-        weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=2)
+        weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=1)
 
-    # 1. TIME LOGIC: Align to Monday Midnight
-    today = datetime.now(pytz.UTC).date()
-    last_monday = today - timedelta(days=today.weekday())
-    start_time = datetime.combine(last_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
+    # 1. TIME LOGIC: Strict Monday Midnight to Monday Midnight
+    today_dt = datetime.now(pytz.UTC).date()
+    # Calculate this past Monday
+    this_monday = today_dt - timedelta(days=today_dt.weekday())
+    # Start Date: Move back based on weeks requested
+    start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
+    # End Date: Exactly 7 days after the 'most recent' Monday in the view
+    end_time = start_time + timedelta(weeks=weeks_to_show)
     
     plot_df = full_df[
         (full_df['Project'] == sel_proj) & 
         (full_df['Location'] == sel_loc) & 
-        (full_df['timestamp'] >= start_time)
+        (full_df['timestamp'] >= start_time) &
+        (full_df['timestamp'] <= end_time)
     ].copy().sort_values(['nodenumber', 'timestamp'])
 
     if not plot_df.empty:
         plot_df['Sensor'] = plot_df['Depth'].astype(str) + "ft (" + plot_df['nodenumber'] + ")"
+        
+        # Lock the X-axis range to remove the "cushion"
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
-                     range_y=[-20, 80], height=800)
+                     range_y=[-20, 80], range_x=[start_time, end_time], height=800)
 
         # 2. Y-AXIS: Frame, Dark 20s, Light 5s
         fig.update_yaxes(
@@ -193,42 +200,40 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
             tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
             minor=dict(dtick=5, gridcolor='LightGrey', showgrid=True),
             zeroline=True, zerolinecolor='Black', zerolinewidth=2,
-            title="Temperature (°F)"
+            title="Temperature (°F)", constraintoward='bottom'
         )
 
-        # 3. X-AXIS: Frame, Clean Labels, Minor 6-Hour Grid
+        # 3. X-AXIS: Frame, No Default Grid (to stop double lines)
         fig.update_xaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
-            showgrid=False, # We will draw the daily lines manually below
+            showgrid=False, # STOP DOUBLE LINES
             minor=dict(dtick=21600000.0, gridcolor='LightGrey', showgrid=True), # 6 Hours
-            tickformat="%a\n%b %d", title=""
+            tickformat="%a\n%b %d", title="",
+            range=[start_time, end_time] # REMOVE CUSHION
         )
         
-        # 4. MANUAL DAILY LINES: One line at Midnight
-        # If weekday is 0 (Monday), use DimGrey. Otherwise, use LightGrey.
-        num_days = (datetime.now(pytz.UTC) - start_time).days + 1
-        for i in range(num_days):
+        # 4. MANUAL DAILY LINES: One solid line at Midnight
+        num_days = (end_time - start_time).days
+        for i in range(num_days + 1):
             current_date = start_time + timedelta(days=i)
             # Monday = 0
-            line_color = "DimGrey" if current_date.weekday() == 0 else "LightGrey"
-            line_width = 1.5 if current_date.weekday() == 0 else 1
-            
+            is_monday = (current_date.weekday() == 0)
             fig.add_vline(
                 x=current_date.timestamp() * 1000, 
-                line_width=line_width, 
-                line_color=line_color
+                line_width=1.5 if is_monday else 1, 
+                line_color="DimGrey" if is_monday else "LightGrey"
             )
 
         fig.update_layout(
             plot_bgcolor='white', 
             hovermode="x unified", 
-            margin=dict(l=40, r=40, t=40, b=40),
-            legend=dict(bordercolor="Black", borderwidth=1)
+            margin=dict(l=10, r=10, t=10, b=10), # Tighten frame to edge
+            legend=dict(bordercolor="Black", borderwidth=1, yanchor="top", y=0.99, xanchor="left", x=0.01)
         )
         
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No data found for this selection.")
+        st.info(f"No data found for {sel_loc}. The chart is set to show the week starting {start_time.strftime('%m/%d')}.")
 
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
