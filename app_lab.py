@@ -127,76 +127,79 @@ elif service == "⚙️ Database Maintenance":
     # (Insert the 'Execute Full Master Scrub' button code here)
     pass
 
-# --- SERVICE 0: EXECUTIVE SUMMARY (ENHANCED) ---
+# --- SERVICE 0: EXECUTIVE SUMMARY (REACTIVE FILTERS) ---
 if service == "🏠 Executive Summary":
     st.header("🏠 Engineering Executive Summary")
 
     if not full_df.empty:
-        # 1. TOP LEVEL FILTERS
+        # 1. PRIMARY FILTERS
         col1, col2 = st.columns(2)
         with col1:
-            all_projs = sorted(full_df['Project'].unique())
-            sel_ex_proj = st.selectbox("Select Project Scope", all_projs)
+            all_projs = sorted([p for p in full_df['Project'].unique() if p])
+            sel_ex_proj = st.selectbox("Select Project", all_projs)
+        
+        # Filter data to the Project first
+        proj_df = full_df[full_df['Project'] == sel_ex_proj]
+        
         with col2:
-            # Filter locations based on project
-            proj_df = full_df[full_df['Project'] == sel_ex_proj]
-            all_locs = sorted(proj_df['Location'].unique())
-            sel_ex_loc = st.selectbox("Select Pipe/Location", ["All"] + all_locs)
+            all_locs = sorted([l for l in proj_df['Location'].unique() if l])
+            sel_ex_loc = st.selectbox("Select Pipe / Location", all_locs)
 
-        # 2. FILTER DATA
-        summary_df = proj_df.copy()
-        if sel_ex_loc != "All":
-            summary_df = summary_df[summary_df['Location'] == sel_ex_loc]
+        # 2. APPLY REACTIVE FILTER
+        # This is the "Engine" - it narrows the data to exactly what you selected
+        summary_df = proj_df[proj_df['Location'] == sel_ex_loc].copy()
 
-        # 3. KPI METRICS (Current Status)
-        latest_data = summary_df.sort_values('timestamp').groupby('nodenumber').last().reset_index()
-        
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Active Sensors", len(latest_data))
-        m2.metric("Avg Temp", f"{latest_data['value'].mean():.1f}°F")
-        m3.metric("Max Temp", f"{latest_data['value'].max():.1f}°F")
-        m4.metric("Min Temp", f"{latest_data['value'].min():.1f}°F")
+        if not summary_df.empty:
+            # 3. KPI METRICS (Now strictly for the selected Location)
+            # We get the most recent reading for each sensor in THIS location
+            latest_readings = summary_df.sort_values('timestamp').groupby('nodenumber').last()
+            
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Active Sensors", len(latest_readings))
+            m2.metric("Avg Temp", f"{latest_readings['value'].mean():.1f}°F")
+            m3.metric("Max Temp", f"{latest_readings['value'].max():.1f}°F")
+            m4.metric("Min Temp", f"{latest_readings['value'].min():.1f}°F")
 
-        st.divider()
+            st.divider()
 
-        # 4. QUICK VIEW CHART (6-Week Default, Solid Grid)
-        st.subheader(f"Thermal Overview: {sel_ex_loc}")
-        
-        # Calculate 6-week window
-        end_time = datetime.now(pytz.UTC)
-        start_time = end_time - timedelta(weeks=6)
-        
-        chart_df = summary_df[summary_df['timestamp'] >= start_time].copy()
-        chart_df['Label'] = chart_df['Depth'].astype(str) + "ft (" + chart_df['nodenumber'] + ")"
-        
-        fig_ex = px.line(chart_df, x='timestamp', y='value', color='Label', 
-                        range_y=[-20, 80], height=500, template="plotly_white")
-        
-        # Apply your Precision Grid (Solid Frame, No Cushion)
-        fig_ex.update_layout(
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis=dict(showgrid=True, gridcolor='LightGrey', range=[start_time, end_time]),
-            yaxis=dict(showgrid=True, gridcolor='LightGrey', range=[-20, 80]),
-            showlegend=False # Keep summary clean
-        )
-        st.plotly_chart(fig_ex, use_container_width=True)
+            # 4. OVERVIEW CHART (Precision 6-Week Grid)
+            st.subheader(f"Thermal Trend: {sel_ex_loc}")
+            
+            # Anchor to Monday Midnight
+            today_dt = datetime.now(pytz.UTC).date()
+            this_monday = today_dt - timedelta(days=today_dt.weekday())
+            start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=5)
+            end_time = start_time + timedelta(weeks=6)
+
+            chart_df = summary_df[summary_df['timestamp'] >= start_time].copy()
+            chart_df['Label'] = chart_df['Depth'].astype(str) + "ft (" + chart_df['nodenumber'] + ")"
+            
+            fig_ex = px.line(chart_df, x='timestamp', y='value', color='Label', 
+                            range_y=[-20, 80], height=500)
+            
+            # Apply your Precision Grid
+            fig_ex.update_layout(
+                plot_bgcolor='white',
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis=dict(showgrid=False, range=[start_time, end_time], linecolor='Black', mirror=True),
+                yaxis=dict(gridcolor='LightGrey', range=[-20, 80], linecolor='Black', mirror=True),
+                showlegend=False # Summary remains clean; use Diagnostics for details
+            )
+            
+            # Manual vertical lines for Mondays
+            for i in range(43): # 6 weeks of days
+                day = start_time + timedelta(days=i)
+                if day.weekday() == 0:
+                    fig_ex.add_vline(x=day.timestamp()*1000, line_width=1.5, line_color="DimGrey")
+
+            st.plotly_chart(fig_ex, use_container_width=True)
+            
+        else:
+            st.warning(f"⚠️ No data found for '{sel_ex_loc}' in Project '{sel_ex_proj}'. Check your Master Metadata mapping.")
 
     else:
-        st.error("⚠️ No data found in the Master Table. See 'Database Diagnostic' below.")
-
-    # 5. THE "WHY IS IT BLANK?" DIAGNOSTIC
-    with st.expander("🛠 Database Diagnostic (Find Missing Sensors)"):
-        st.write("Checking Raw Tables for sensors not in the Master Mapping...")
-        raw_sp = client.query("SELECT DISTINCT sensor_name FROM `sensorpush-export.sensor_data.raw_sensorpush`").to_dataframe()
-        master_meta = client.query("SELECT DISTINCT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`").to_dataframe()
+        st.error("Master Table is empty. Run 'Database Maintenance' to build it.")
         
-        missing = raw_sp[~raw_sp['sensor_name'].isin(master_meta['NodeNum'])]
-        if not missing.empty:
-            st.warning(f"Found {len(missing)} sensors with NO metadata mapping:")
-            st.dataframe(missing)
-            st.info("Update your 'SensorPushMasterSheet.xlsx' on the S: drive with these IDs to see them in the app.")
-        else:
-            st.success("All active sensors are correctly mapped to projects/pipes!")
 # --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
