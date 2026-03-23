@@ -1,0 +1,23 @@
+import requests
+import datetime
+
+def backfill_sensorpush(user, password):
+    # 1. Get the OAuth Token
+    auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
+    token_resp = requests.post(auth_url, json={"email": user, "password": password})
+    token = token_resp.json().get('accesstoken')
+
+    # 2. Define the "Weekend Gap" (From Friday 7pm to Now)
+    start_time = "2026-03-20T19:00:00Z" 
+    
+    # 3. Pull Samples
+    data_url = "https://api.sensorpush.com/api/v1/samples"
+    headers = {"Authorization": token, "accept": "application/json"}
+    params = {"startTime": start_time}
+    
+    samples = requests.post(data_url, headers=headers, json=params)
+    return samples.json()
+
+# In your app:
+# data_1 = backfill_sensorpush(creds['account_1']['user'], creds['account_1']['pass'])
+# data_2 = backfill_sensorpush(creds['account_2']['user'], creds['account_2']['pass'])
