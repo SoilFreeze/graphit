@@ -421,7 +421,7 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
                      file_name=f"{ex_proj}_thermal_data.csv")
 #
 #
-# --- SERVICE 5: DATA INTAKE LAB (PYARROW FIX) ---
+# --- SERVICE 5: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
     source_type = st.radio("Source", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
@@ -429,72 +429,50 @@ elif service == "📤 Data Intake Lab":
 
     if uploaded_file:
         try:
-            # 1. LOAD DATA
             if "Lord" in source_type:
                 file_lines = uploaded_file.getvalue().decode("utf-8").splitlines()
-                # Find exactly where the data starts
                 start_row = next((i for i, line in enumerate(file_lines) if "DATA_START" in line), 0)
                 uploaded_file.seek(0)
                 df_raw = pd.read_csv(uploaded_file, skiprows=start_row + 1)
                 
-                # Transform to Long Format
                 df_upload = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
                 df_upload = df_upload.rename(columns={df_raw.columns[0]: 'timestamp'})
+                # Convert colons to hyphens immediately
                 df_upload['nodenumber'] = df_upload['nodenumber'].str.replace(':', '-', regex=False)
                 val_col = 'value'
                 target_table = "sensorpush-export.sensor_data.raw_lord"
             else:
                 df_upload = pd.read_csv(uploaded_file)
                 df_upload = df_upload.rename(columns={'Timestamp':'timestamp', 'Temperature':'temperature', 'Sensor':'sensor_name'})
+                # Convert colons to hyphens immediately
+                df_upload['sensor_name'] = df_upload['sensor_name'].str.replace(':', '-', regex=False)
                 val_col = 'temperature'
                 target_table = "sensorpush-export.sensor_data.raw_sensorpush"
 
-            # ---------------------------------------------------------
-            # 2. CRITICAL TYPE ENFORCEMENT (FIXES PYARROW ERROR)
-            # ---------------------------------------------------------
-            # Force Timestamp to UTC Datetime (Drops junk strings to NaT)
+            # Type Enforcement
             df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'], errors='coerce', utc=True)
-            
-            # Force Value to Numeric (Drops junk text to NaN)
             df_upload[val_col] = pd.to_numeric(df_upload[val_col], errors='coerce')
-            
-            # Drop rows where Time or Value is now missing
             df_upload = df_upload.dropna(subset=['timestamp', val_col])
-            
-            # Apply Engineering Limit (90F)
             df_upload = df_upload[df_upload[val_col] <= 90]
-
-            # System Metadata
             df_upload['is_approved'] = False
             df_upload['engineer_note'] = f"Manual Upload {datetime.now().date()}"
-            
-            # LAST STEP: Ensure column names and types are clean for BigQuery
-            df_upload = df_upload.reset_index(drop=True)
-            # ---------------------------------------------------------
 
-            st.subheader("👀 Preview for Upload")
-            st.dataframe(df_upload.head(10), use_container_width=True)
+            st.dataframe(df_upload.head(5), use_container_width=True)
 
             if st.button("🚀 PUSH TO CLOUD", key="btn_push_data"):
-                with st.spinner("Uploading standardized data..."):
-                    job_config = bigquery.LoadJobConfig(
-                        write_disposition="WRITE_APPEND", 
-                        create_disposition="CREATE_NEVER"
-                    )
+                with st.spinner("Uploading..."):
+                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", create_disposition="CREATE_NEVER")
                     client.load_table_from_dataframe(df_upload, target_table, job_config=job_config).result()
-                    st.success(f"✅ Successfully uploaded {len(df_upload)} rows!")
+                    st.success("Uploaded!")
                     st.balloons()
-                    
         except Exception as e:
-            st.error(f"❌ Standardizing failed: {e}")
-            st.info("Check if your file has unusual characters or formatting.")
+            st.error(f"Upload error: {e}")
 #
 #
-# --- SERVICE 6: DATABASE MAINTENANCE (WITH PURGE TOOL) ---
+# --- SERVICE 6: DATABASE MAINTENANCE ---
 elif service == "⚙️ Database Maintenance":
-    st.header("⚙️ Database Maintenance & System Health")
+    st.header("⚙️ Database Maintenance")
     
-    # --- SECTION 1: MASTER SCRUB ---
     st.subheader("🚀 Master Data Scrub")
     if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub"):
         with st.spinner("Rebuilding Master Table..."):
@@ -502,80 +480,33 @@ elif service == "⚙️ Database Maintenance":
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
-                    SELECT CAST(timestamp AS TIMESTAMP) as ts, value, 
-                           REPLACE(nodenumber, ':', '-') as nodenumber, 
-                           CAST(is_approved AS BOOL) as is_approved, CAST(engineer_note AS STRING) as engineer_note 
+                    SELECT CAST(timestamp AS TIMESTAMP) as ts, value, REPLACE(nodenumber, ':', '-') as nodenumber
                     FROM `sensorpush-export.sensor_data.raw_lord` WHERE value <= 90
                     UNION ALL
-                    SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, 
-                           REPLACE(sensor_name, ':', '-') as nodenumber, 
-                           CAST(is_approved AS BOOL) as is_approved, CAST(engineer_note AS STRING) as engineer_note 
+                    SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, REPLACE(sensor_name, ':', '-') as nodenumber
                     FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE temperature <= 90
-                ),
-                HourlyAgg AS (
-                    SELECT 
-                        TIMESTAMP_TRUNC(ts, HOUR) as timestamp, 
-                        nodenumber, 
-                        AVG(value) as value, 
-                        LOGICAL_OR(is_approved) as is_approved, 
-                        ANY_VALUE(engineer_note) as engineer_note
-                    FROM UnifiedRaw 
-                    GROUP BY 1, 2
                 )
-                SELECT d.*, m.Project, m.Location, m.Depth
-                FROM HourlyAgg d
-                INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
-                ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
+                SELECT 
+                    TIMESTAMP_TRUNC(u.ts, HOUR) as timestamp, u.nodenumber, AVG(u.value) as value, 
+                    m.Project, m.Location, m.Depth
+                FROM UnifiedRaw u
+                INNER JOIN `sensorpush-export.sensor_data.master_metadata` m ON u.nodenumber = REPLACE(m.NodeNum, ':', '-')
+                GROUP BY 1, 2, 4, 5, 6
                 """
                 client.query(scrub_query).result()
                 st.success("✅ Master Table Rebuilt!")
-                st.balloons()
             except Exception as e:
-                st.error(f"❌ Scrub Failed: {e}")
+                st.error(f"Scrub error: {e}")
 
     st.divider()
-    
-    # --- SECTION 2: GHOST SENSOR CLEANUP ---
-    st.subheader("🕵️ Metadata Diagnostic & Purge")
-    st.markdown("Use this to find and remove data for sensors that are no longer part of your fleet.")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("🔍 SCAN FOR UNMAPPED NODES", key="btn_diagnostic_scan"):
-            ghost_query = """
-            SELECT DISTINCT nodenumber, 'Lord' as Source FROM `sensorpush-export.sensor_data.raw_lord` 
-            WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
-            UNION ALL
-            SELECT DISTINCT sensor_name as nodenumber, 'SensorPush' as Source FROM `sensorpush-export.sensor_data.raw_sensorpush`
-            WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
-            """
-            ghosts = client.query(ghost_query).to_dataframe()
-            if not ghosts.empty:
-                st.warning(f"Found {len(ghosts)} unmapped sensors:")
-                st.table(ghosts)
-            else:
-                st.success("Clean! All sensors in the database are mapped.")
-
-    with col2:
-        # THE ERASE BUTTON
-        if st.button("🗑️ PURGE UNMAPPED DATA", key="btn_purge_unmapped"):
-            with st.spinner("Deleting unmapped records..."):
-                try:
-                    # Logic: Delete from raw tables if the ID isn't in Metadata (checking both - and :)
-                    purge_lord = """
-                    DELETE FROM `sensorpush-export.sensor_data.raw_lord`
-                    WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
-                    """
-                    purge_sp = """
-                    DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush`
-                    WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
-                    """
-                    
-                    client.query(purge_lord).result()
-                    client.query(purge_sp).result()
-                    
-                    st.success("💥 Purge Complete! Ghost data has been erased.")
-                    st.info("Now run the 'Master Scrub' to refresh the dashboard.")
-                except Exception as e:
-                    st.error(f"Purge failed: {e}")
+    st.subheader("🗑️ Data Cleanup")
+    if st.button("🗑️ PURGE UNMAPPED DATA", key="btn_purge_unmapped"):
+        try:
+            # Delete logic
+            p_lord = "DELETE FROM `sensorpush-export.sensor_data.raw_lord` WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
+            p_sp = "DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
+            client.query(p_lord).result()
+            client.query(p_sp).result()
+            st.success("Ghost data erased.")
+        except Exception as e:
+            st.error(f"Purge error: {e}")
