@@ -158,10 +158,11 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
-# --- SERVICE 1: NODE DIAGNOSTICS (CLEANEST GRID) ---
+# --- SERVICE 1: NODE DIAGNOSTICS (PRECISION GRID + REF LINES) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
+    # 1. Selection UI
     col1, col2, col3 = st.columns(3)
     with col1:
         sel_proj = st.selectbox("Project", sorted(full_df['Project'].unique()))
@@ -171,7 +172,13 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=1)
 
-    # 1. TIME LOGIC: Strict Monday-to-Monday Window
+    # NEW: Reference Line Selector
+    ref_choice = st.sidebar.radio(
+        "Thermal Reference Line", 
+        ["None", "32°F (Frost)", "26.6°F (Brine)", "10.2°F (Deep Freeze)"]
+    )
+
+    # 2. TIME LOGIC: Strict Monday-to-Monday Window
     today_dt = datetime.now(pytz.UTC).date()
     this_monday = today_dt - timedelta(days=today_dt.weekday())
     start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
@@ -190,62 +197,56 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
                      range_y=[-20, 80], height=800)
 
-        # 2. Y-AXIS: Solid Frame & Solid Grid
+        # 3. Y-AXIS: Solid Frame & Solid Grid (Dark 20s, Light 5s)
         fig.update_yaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
             tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
-            minor=dict(dtick=5, gridcolor='#E5E5E5', showgrid=True), # Very light 5-degree lines
-            zeroline=True, zerolinecolor='Black', zerolinewidth=2,
-            title="Temperature (°F)", range=[-20, 80]
+            minor=dict(dtick=5, gridcolor='#E5E5E5', showgrid=True), 
+            zeroline=False, range=[-20, 80], title="Temperature (°F)"
         )
 
-        # 3. X-AXIS: Frame, Zero-Cushion, Kill ALL default grid
+        # 4. X-AXIS: Frame, Zero-Cushion, One-Line Midnight
         fig.update_xaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
-            showgrid=False, # KILL DEFAULT GRID (STOPS DOUBLE LINES)
-            zeroline=False, # KILL ZERO LINE (STOPS DOUBLE LINES)
+            showgrid=False, zeroline=False,
             tickformat="%a\n%b %d", title="",
-            range=[start_time, end_time],
-            dtick=86400000.0 # One tick per day
+            range=[start_time, end_time]
         )
         
-        # 4. MANUAL GRID: The "One Source of Truth" for vertical lines
+        # 5. REFERENCE LINE LOGIC
+        if ref_choice != "None":
+            ref_val = float(ref_choice.split("°F")[0])
+            fig.add_hline(y=ref_val, line_width=2, line_color="#003366", line_dash="solid", 
+                         annotation_text=f"Ref: {ref_val}°F", annotation_position="top left")
+
+        # 6. MANUAL GRID: Midnight (Grey) and 6-Hour (Lighter)
         num_days = (end_time - start_time).days
         for i in range(num_days + 1):
             midnight = start_time + timedelta(days=i)
             is_monday = (midnight.weekday() == 0)
             
-            # Midnight Lines (One per day)
+            # Vertical Midnight Line
             fig.add_vline(
                 x=midnight.timestamp() * 1000, 
                 line_width=1.5 if is_monday else 1, 
-                line_color="DimGrey" if is_monday else "#CCCCCC" # Grey for days
+                line_color="DimGrey" if is_monday else "#CCCCCC"
             )
             
-            # 6-Hour Intervals (Even lighter grey)
-            if i < num_days: # Don't draw past end_time
+            # Very Light 6-Hour Lines
+            if i < num_days:
                 for h in [6, 12, 18]:
-                    six_hour_mark = midnight + timedelta(hours=h)
-                    fig.add_vline(
-                        x=six_hour_mark.timestamp() * 1000,
-                        line_width=0.5,
-                        line_color="#F0F0F0" # Very light grey
-                    )
+                    mark = midnight + timedelta(hours=h)
+                    fig.add_vline(x=mark.timestamp() * 1000, line_width=0.5, line_color="#F0F0F0")
 
-        # 5. LAYOUT: External Legend
+        # 7. LAYOUT: Legend Outside Right
         fig.update_layout(
-            plot_bgcolor='white', 
-            hovermode="x unified", 
-            margin=dict(l=10, r=180, t=10, b=10), 
-            legend=dict(
-                x=1.02, y=1, bordercolor="Black", borderwidth=1
-            )
+            plot_bgcolor='white', hovermode="x unified",
+            margin=dict(l=10, r=200, t=10, b=10), 
+            legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1)
         )
         
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info(f"No data for {sel_loc}. Viewing week starting {start_time.strftime('%m/%d')}.")
-
+        
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
     st.header("📋 Engineering Approval Portal")
