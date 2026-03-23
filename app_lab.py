@@ -427,7 +427,7 @@ elif service == "📤 Data Intake Lab":
     source_type = st.radio("Source", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
     uploaded_file = st.file_uploader("Upload File", type=['csv', 'xlsx'], key="intake_uploader")
 
-   if uploaded_file:
+    if uploaded_file:
         try:
             # [Standardizing timestamp and values logic remains the same]
             df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'], errors='coerce', utc=True)
@@ -443,65 +443,42 @@ elif service == "📤 Data Intake Lab":
         except Exception as e:
             st.error(f"Error: {e}")
 
-# --- SERVICE 6: DATABASE MAINTENANCE ---
+# --- SERVICE 6: DATABASE MAINTENANCE (PLACEHOLDER VERSION) ---
 elif service == "⚙️ Database Maintenance":
-    st.header("⚙️ Database Maintenance")
-    
-    # 1. LIVE DATA MONITOR
-    st.subheader("📡 Connection Health (SensorPush to BigQuery)")
-    st.info("Since you have an online connection, this table shows when the 'handshake' last worked.")
-    
-    if st.button("🔍 Check Online Sync Status", key="btn_sync_check"):
-        # This query checks the absolute latest data in the raw table
-        check_q = """
-        SELECT 
-            sensor_name, 
-            FORMAT_TIMESTAMP('%m/%d %H:%M', MAX(timestamp), 'America/Los_Angeles') as last_reading_pst,
-            TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), MAX(timestamp), HOUR) as hours_ago
-        FROM `sensorpush-export.sensor_data.raw_sensorpush`
-        GROUP BY 1
-        ORDER BY MAX(timestamp) DESC
-        """
-        try:
-            sync_df = client.query(check_q).to_dataframe()
-            if sync_df.empty:
-                st.error("No data found in the raw table.")
-            else:
-                st.table(sync_df)
-                # Check if the gap is wide
-                max_lag = sync_df['hours_ago'].min()
-                if max_lag > 2:
-                    st.warning(f"⚠️ Data is {max_lag} hours behind. Your online connector may be paused or unauthorized.")
-        except Exception as e:
-            st.error(f"Could not connect to BigQuery: {e}")
-
-    st.divider()
-
-    # 2. THE MASTER SCRUB
     st.subheader("🚀 Master Data Scrub")
-    st.markdown("Run this to move 'Friday to Monday' data from the raw tables into your graphs.")
-    
     if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub"):
-        with st.spinner("Processing data..."):
+        with st.spinner("Rebuilding Master..."):
             try:
-                # This query pulls Lord + SensorPush and cleans IDs
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
+                    -- Pulling ONLY core data from Raw
                     SELECT CAST(timestamp AS TIMESTAMP) as ts, value, REPLACE(nodenumber, ':', '-') as nodenumber
                     FROM `sensorpush-export.sensor_data.raw_lord` WHERE value <= 90
                     UNION ALL
                     SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, REPLACE(sensor_name, ':', '-') as nodenumber
                     FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE temperature <= 90
+                ),
+                HourlyAgg AS (
+                    SELECT 
+                        TIMESTAMP_TRUNC(ts, HOUR) as timestamp, 
+                        nodenumber, 
+                        AVG(value) as value
+                    FROM UnifiedRaw 
+                    GROUP BY 1, 2
                 )
                 SELECT 
-                    TIMESTAMP_TRUNC(u.ts, HOUR) as timestamp, u.nodenumber, AVG(u.value) as value, 
-                    m.Project, m.Location, m.Depth
-                FROM UnifiedRaw u
-                INNER JOIN `sensorpush-export.sensor_data.master_metadata` m ON u.nodenumber = REPLACE(m.NodeNum, ':', '-')
-                GROUP BY 1, 2, 4, 5, 6
+                    d.*, 
+                    m.Project, m.Location, m.Depth,
+                    -- Create the note column here so it exists in the Master Table only
+                    CAST(NULL AS STRING) as engineer_note,
+                    CAST(FALSE AS BOOL) as is_approved
+                FROM HourlyAgg d
+                INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
+                    ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
                 """
                 client.query(scrub_query).result()
-                st.success("✅ Master Table Rebuilt! If data is in the raw tables, it is now in the graphs.")
+                st.success("✅ Master Table Rebuilt! Raw tables are now clean.")
             except Exception as e:
-                st.error(f"Scrub error: {e}")
+                st.error(f"Scrub failed: {e}")
+                
