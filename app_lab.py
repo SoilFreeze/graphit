@@ -26,12 +26,15 @@ apply_sf_style()
 # --- 1. AUTHENTICATION (SECRET MANAGER) ---
 @st.cache_resource
 def get_bq_client():
-    # Attempt to get from Secret Manager first (The "One Source of Truth" Plan)
+    # 1. TRY SECRET MANAGER (The "One Source" Plan)
     try:
+        from google.cloud import secretmanager
         sm_client = secretmanager.SecretManagerServiceClient()
-        # Ensure 'sensorpush-export' matches your GCP Project ID
+        # Ensure 'sensorpush-export' is your EXACT project ID
         name = "projects/sensorpush-export/secrets/BIGQUERY_SERVICE_ACCOUNT_JSON/versions/latest"
-        response = sm_client.access_secret_version(request={"name": name})
+        
+        # We add a 5-second timeout so it doesn't get "stuck"
+        response = sm_client.access_secret_version(request={"name": name}, timeout=5)
         info = json.loads(response.payload.data.decode("UTF-8"))
         credentials = service_account.Credentials.from_service_account_info(info)
         scoped_creds = credentials.with_scopes([
@@ -39,11 +42,21 @@ def get_bq_client():
             "https://www.googleapis.com/auth/bigquery"
         ])
         return bigquery.Client(credentials=scoped_creds, project=info["project_id"])
-    except Exception:
-        # Fallback to st.secrets for local/legacy setup
-        info = st.secrets["gcp_service_account"]
-        credentials = service_account.Credentials.from_service_account_info(info)
-        return bigquery.Client(credentials=credentials, project=info["project_id"])
+
+    except Exception as e:
+        # 2. FALLBACK TO LOCAL SECRETS (So you aren't stuck!)
+        st.sidebar.warning("⚠️ Secret Manager failed. Using local secrets.")
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            credentials = service_account.Credentials.from_service_account_info(info)
+            # Make sure we still add the Drive scope here for the Metadata join
+            scoped_creds = credentials.with_scopes([
+                "https://www.googleapis.com/auth/drive",
+                "https://www.googleapis.com/auth/bigquery"
+            ])
+            return bigquery.Client(credentials=scoped_creds, project=info["project_id"])
+        else:
+            raise Exception("No credentials found in Secret Manager or st.secrets")
 
 client = get_bq_client()
 
