@@ -250,13 +250,9 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
                          margin=dict(l=10, r=200, t=10, b=10),
                          legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1))
         
-# Replace your current plotly_chart line with this:
-st.plotly_chart(
-    fig, 
-    use_container_width=True, 
-    theme="streamlit", # Ensures it matches your app's dark/light mode
-    config={'responsive': True, 'displayModeBar': True}
-)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info(f"No data for {sel_loc} in the requested window.")
         
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
@@ -335,53 +331,46 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
     st.download_button("📥 Download CSV", data=export_df.to_csv(index=False), 
                      file_name=f"{ex_proj}_thermal_data.csv")
     
-# --- SERVICE 4: DATA INTAKE LAB (MANUAL UPLOAD) ---
+# --- SERVICE 5: DATA INTAKE LAB (MANUAL UPLOAD) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
-    st.markdown("Upload CSV or Excel files directly to the Raw BigQuery tables.")
+    st.markdown("Upload CSV or Excel files directly to the Raw BigQuery tables to fill gaps.")
 
-    target_table = st.radio("Target Raw Table", ["SensorPush (Raw)", "Lord (Raw)"])
+    # 1. Target Selection
+    target_table = st.radio("Target Raw Table", ["SensorPush (Raw)", "Lord (Raw)"], horizontal=True)
     uploaded_file = st.file_uploader("Choose a file", type=['csv', 'xlsx'])
 
     if uploaded_file is not None:
         # Load the data
-        if uploaded_file.name.endswith('.csv'):
-            up_df = pd.read_csv(uploaded_file)
-        else:
-            up_df = pd.read_excel(uploaded_file)
-
+        up_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+        
         st.subheader("Preview of Uploaded Data")
-        st.dataframe(up_df.head(5))
+        st.dataframe(up_df.head(5), use_container_width=True)
 
-        # --- MAPPING & CLEANING ---
+        # 2. Upload Logic
         if st.button("🚀 PUSH TO BIGQUERY"):
-            with st.spinner("Cleaning and Uploading..."):
+            with st.spinner("Processing..."):
                 try:
-                    # 1. Standardize Columns based on selection
+                    # Apply SoilFreeze 90°F Hard Limit immediately
                     if "SensorPush" in target_table:
-                        # Expecting columns: timestamp, temperature, sensor_name
-                        # We force the 90°F limit immediately
                         up_df = up_df[up_df['temperature'] <= 90]
                         table_id = "sensorpush-export.sensor_data.raw_sensorpush"
                     else:
-                        # Expecting columns: timestamp, value, nodenumber
                         up_df = up_df[up_df['value'] <= 90]
                         table_id = "sensorpush-export.sensor_data.raw_lord"
 
-                    # 2. Add empty approval/note columns if they don't exist in the file
+                    # Ensure standard columns exist
                     up_df['is_approved'] = False
                     up_df['engineer_note'] = "Manual Upload"
 
-                    # 3. Upload to BigQuery
-                    # 'if_exists=append' ensures we don't overwrite the whole table
+                    # Push to BigQuery (Append Mode)
                     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                     client.load_table_from_dataframe(up_df, table_id, job_config=job_config).result()
 
-                    st.success(f"✅ Successfully appended {len(up_df)} records to {target_table}.")
-                    st.info("💡 Pro-Tip: Now go to 'Database Maintenance' and run the 'Master Scrub' to see this data on the charts.")
+                    st.success(f"✅ Successfully added {len(up_df)} records. Go to 'Maintenance' to Scrub.")
                     st.balloons()
                 except Exception as e:
-                    st.error(f"Upload failed: {e}") 
+                    st.error(f"Upload failed: {e}. Check that your headers match the Raw table.")
                     
 # --- SERVICE: DATABASE MAINTENANCE (THE FIX-IT TAB) ---
 if service == "🧹 Database Maintenance":
