@@ -175,7 +175,7 @@ if service == "🏠 Executive Summary":
                         "24h Max": max_24h,
                         "24h Delta": delta_24h,
                         "Last Seen": last_seen,
-                        "Hours Lag": round(hours_since, 1)
+                        "Hours Lag": round(hours_since, 0)
                     })
 
 # 3. APPLY COLOR LOGIC (STYLING)
