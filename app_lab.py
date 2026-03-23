@@ -490,7 +490,7 @@ elif service == "⚙️ Database Maintenance":
     if st.button("🔄 EXECUTE MASTER SCRUB"):
         with st.spinner("Rebuilding Master Table... this may take 30 seconds..."):
             try:
-                # This SQL matches the 'Nuclear Reset' logic to ensure columns like engineer_note exist
+                # UPDATE THIS SECTION in your '⚙️ Database Maintenance' block
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
@@ -514,7 +514,9 @@ elif service == "⚙️ Database Maintenance":
                 )
                 SELECT d.*, m.Project, m.Location, m.Depth
                 FROM HourlyAgg d
-                INNER JOIN `sensorpush-export.sensor_data.master_metadata` m ON d.nodenumber = m.NodeNum;
+                INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
+                -- NEW: This line ignores the difference between : and -
+                ON REPLACE(d.nodenumber, ':', '-') = REPLACE(m.NodeNum, ':', '-')
                 """
                 
                 query_job = client.query(scrub_query)
