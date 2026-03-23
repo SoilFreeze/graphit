@@ -220,16 +220,6 @@ if service == "🏠 Executive Summary":
                 use_container_width=True
             )
 
-            # 4. DISPLAY STYLED TABLE
-            st.dataframe(
-                df_display.style.apply(style_summary, axis=1).format({
-                    "Current": "{:.1f}°F", "24h Min": "{:.1f}°F", 
-                    "24h Max": "{:.1f}°F", "24h Delta": "{:+.1f}°F",
-                    "Last Seen": lambda t: t.strftime("%m/%d %H:%M")
-                }),
-                use_container_width=True
-            )
-
             # 5. KPI SUMMARY
             c1, c2 = st.columns(2)
             with c1:
