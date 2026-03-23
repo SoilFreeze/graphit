@@ -129,131 +129,70 @@ elif service == "⚙️ Database Maintenance":
 
 #
 #
-# --- SERVICE 0: EXECUTIVE SUMMARY (WARNING SYSTEM) ---
-if service == "🏠 Executive Summary":
-    st.header("🏠 Engineering Executive Summary")
-
+# --- SERVICE 1: EXECUTIVE SUMMARY ---
+elif service == "🏠 Executive Summary":
+    st.header("🏠 Executive Summary")
     
-# --- UPDATE THIS IN YOUR EXECUTIVE SUMMARY SECTION ---
-            # 1. FETCH DATA (Safe Version)
-            query = f"""
-                SELECT 
-                    nodenumber, 
-                    MAX(timestamp) as last_seen,
-                    -- Use COALESCE to handle cases where the column might be missing during a rebuild
-                    AVG(value) as current_temp,
-                    'No Note' as engineer_note 
-                FROM `sensorpush-export.sensor_data.final_databoard_master`
-                WHERE Project = '{sel_ex_loc}'
-                GROUP BY nodenumber
-            """
-    if not full_df.empty:
-        # 1. DYNAMIC FILTERS
-        col1, col2 = st.columns(2)
-        with col1:
-            all_projs = sorted([p for p in full_df['Project'].unique() if p])
-            sel_ex_proj = st.selectbox("Select Project Scope", all_projs)
+    # 1. SETUP FILTERS
+    try:
+        # Get unique projects from metadata to avoid crashing if Master is empty
+        meta_query = "SELECT DISTINCT Project FROM `sensorpush-export.sensor_data.master_metadata` ORDER BY Project"
+        proj_list = client.query(meta_query).to_dataframe()['Project'].tolist()
+        sel_ex_loc = st.selectbox("Select Project Focus", proj_list if proj_list else ["Maltby"])
         
-        proj_df = full_df[full_df['Project'] == sel_ex_proj]
-        
-        with col2:
-            all_locs = sorted([l for l in proj_df['Location'].unique() if l])
-            sel_ex_loc = st.selectbox("Select Pipe to Inspect", all_locs)
+        # 2. FETCH DATA (SAFE QUERY)
+        # We use a subquery to handle the missing 'engineer_note' column gracefully
+        query = f"""
+            SELECT 
+                nodenumber, 
+                MAX(timestamp) as last_seen,
+                AVG(value) as current_temp,
+                '--' as engineer_note 
+            FROM `sensorpush-export.sensor_data.final_databoard_master`
+            WHERE Project = '{sel_ex_loc}'
+            GROUP BY nodenumber
+        """
+        df_exec = client.query(query).to_dataframe()
 
-        # 2. DATA ENGINE: 24h Window
-        summary_df = proj_df[proj_df['Location'] == sel_ex_loc].copy()
-        now_ts = datetime.now(pytz.UTC)
-        recent_df = summary_df[summary_df['timestamp'] >= (now_ts - timedelta(hours=24))]
-
-        if not summary_df.empty:
-            st.subheader(f"📊 24-Hour Performance: {sel_ex_loc}")
-            
-            node_stats = []
-            for node in summary_df['nodenumber'].unique():
-                n_df = summary_df[summary_df['nodenumber'] == node].sort_values('timestamp')
-                r_df = recent_df[recent_df['nodenumber'] == node]
-                
-                if not n_df.empty:
-                    latest_row = n_df.iloc[-1]
-                    last_seen = latest_row['timestamp']
-                    hours_since = (now_ts - last_seen).total_seconds() / 3600
-                    
-                    # 24h Stats
-                    min_24h = r_df['value'].min() if not r_df.empty else None
-                    max_24h = r_df['value'].max() if not r_df.empty else None
-                    delta_24h = max_24h - min_24h if min_24h is not None else 0
-                    
-                    node_stats.append({
-                        "Node ID": node,
-                        "Depth": latest_row['Depth'],
-                        "Current": latest_row['value'],
-                        "24h Min": min_24h,
-                        "24h Max": max_24h,
-                        "24h Delta": delta_24h,
-                        "Last Seen": last_seen,
-                        "Hours Lag": int(round(hours_since, 0))
-                    })
-
-# 3. APPLY COLOR LOGIC (STYLING)
-            df_display = pd.DataFrame(node_stats)
-            
-            # Fill missing values to prevent formatting crashes
-            df_display['24h Min'] = df_display['24h Min'].fillna(0)
-            df_display['24h Max'] = df_display['24h Max'].fillna(0)
-            df_display['24h Delta'] = df_display['24h Delta'].fillna(0)
-
-            def style_summary(row):
-                styles = [''] * len(row)
-                
-                # A. Color Logic for 'Last Seen' (Lag)
-                lag = row['Hours Lag']
-                if lag >= 24: color = "background-color: #FF4B4B; color: white" # Red
-                elif lag >= 12: color = "background-color: #FFA500; color: black" # Orange
-                elif lag >= 6: color = "background-color: #FFFF00; color: black" # Yellow
-                else: color = ""
-                styles[df_display.columns.get_loc("Last Seen")] = color
-
-                # B. Color Logic for '24h Delta'
-                d = row['24h Delta']
-                d_color = ""
-                if d >= 5: d_color = "background-color: #FF4B4B; color: white" # Red
-                elif d >= 2: d_color = "background-color: #FFFF00; color: black" # Yellow
-                elif d <= -2: d_color = "background-color: #00008B; color: white" # Dark Blue
-                elif d <= -0.5: d_color = "background-color: #ADD8E6; color: black" # Light Blue
-                styles[df_display.columns.get_loc("24h Delta")] = d_color
-                
-                return styles
-
-            # 4. DISPLAY AS STATIC TABLE (No Scrolling)
-            # We use st.table() here instead of st.dataframe()
-            st.subheader(f"Detailed Node Status: {sel_ex_loc}")
-            
-            styled_df = df_display.style.apply(style_summary, axis=1).format({
-                    "Current": "{:.1f}°F", 
-                    "24h Min": "{:.1f}°F", 
-                    "24h Max": "{:.1f}°F", 
-                    "24h Delta": "{:+.1f}°F",
-                    "Last Seen": lambda t: t.strftime("%m/%d %H:%M") if pd.notnull(t) else "N/A"
-                })
-            
-            st.table(styled_df)
-
-            # 5. KPI SUMMARY
-            c1, c2 = st.columns(2)
-            with c1:
-                # Greatest Change Logic
-                top_d = df_display.sort_values('24h Delta', ascending=False).iloc[0]
-                st.info(f"🚀 **Greatest 24h Change:** {top_d['Node ID']} ({top_d['24h Delta']:+.1f}°F)")
-            with c2:
-                # Total Lag Logic
-                stale = df_display[df_display['Hours Lag'] > 6]
-                if not stale.empty:
-                    st.warning(f"⚠️ **Offline Sensors (>6h):** {len(stale)}")
-                else:
-                    st.success("✅ All sensors reporting within 6 hours.")
-
+        if df_exec.empty:
+            st.warning(f"No active data found for {sel_ex_loc}. Run 'Master Scrub' in Database Maintenance.")
         else:
-            st.warning("No data found for this selection.")
+            # 3. CALCULATE METRICS
+            avg_system_temp = df_exec['current_temp'].mean()
+            active_count = len(df_exec)
+            
+            m1, m2 = st.columns(2)
+            m1.metric("Average System Temp", f"{avg_system_temp:.1f}°F")
+            m2.metric("Active Sensors", active_count)
+
+            st.divider()
+
+            # 4. FORMAT THE TABLE
+            # Rounding and cleaning up the display
+            df_display = df_exec.copy()
+            df_display['current_temp'] = df_display['current_temp'].round(1)
+            df_display['last_seen'] = pd.to_datetime(df_display['last_seen']).dt.strftime('%m/%d %H:%M')
+            
+            # Applying the "Maltby Color Logic"
+            def color_temp(val):
+                color = 'white'
+                if val > 32: color = '#ff4b4b' # Red for above freezing
+                if 28 <= val <= 32: color = '#ffa500' # Orange for near freezing
+                if val < 28: color = '#28a745' # Green for safe freeze
+                return f'color: {color}'
+
+            st.subheader(f"Latest Readings: {sel_ex_loc}")
+            st.dataframe(
+                df_display.style.applymap(color_temp, subset=['current_temp']),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    except Exception as e:
+        st.error(f"Executive Summary Error: {e}")
+        st.info("Try running 'Master Scrub' in the Database Maintenance tab to refresh the data tables.")
+
+# --- END OF EXECUTIVE SUMMARY ---
 #
 #
 # --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
