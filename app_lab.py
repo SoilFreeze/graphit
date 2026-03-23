@@ -125,6 +125,78 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
+# --- SERVICE 1: NODE DIAGNOSTICS ---
+elif service == "🔍 Node Diagnostics" and not full_df.empty:
+    st.header("🔍 Node Diagnostic Hub")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        projs = sorted([p for p in full_df['Project'].unique() if p is not None])
+        sel_proj = st.selectbox("Select Project", projs)
+    with col2:
+        locs = sorted([l for l in full_df[full_df['Project'] == sel_proj]['Location'].unique() if l is not None])
+        sel_loc = st.selectbox("Select Location", locs)
+    with col3:
+        weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=2)
+
+    # Time Filtering
+    now_ts = datetime.now(tz=pytz.UTC)
+    start_ts = now_ts - timedelta(weeks=weeks_to_show)
+    
+    # Filter the Master Data
+    plot_df = full_df[
+        (full_df['Project'] == sel_proj) & 
+        (full_df['Location'] == sel_loc) & 
+        (full_df['timestamp'] >= start_ts)
+    ].copy()
+
+    if not plot_df.empty:
+        # Create a combined label for the legend: "Depth (Node ID)"
+        plot_df['Sensor_Label'] = plot_df['Depth'].astype(str) + "ft (" + plot_df['nodenumber'] + ")"
+        
+        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor_Label', 
+                     title=f"Thermal Trends: {sel_loc}", height=600)
+        
+        # Apply SoilFreeze Styling to Chart
+        fig.update_layout(plot_bgcolor='white', hovermode="x unified")
+        fig.add_hline(y=32, line_dash="dash", line_color="#007BFF", annotation_text="32°F")
+        fig.update_yaxes(title="Temperature (°F)", gridcolor='#F0F0F0')
+        fig.update_xaxes(title="", gridcolor='#F0F0F0')
+        
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No data found for this selection in the Master Table.")
+
+# --- SERVICE 2: DATA APPROVAL PORTAL ---
+elif service == "📋 Data Approval Portal":
+    st.header("📋 Engineering Approval Portal")
+    st.write("Review data quality before releasing it to the Client App (SF2329).")
+
+    # Filter Logic
+    ap_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
+    sel_ap_proj = st.selectbox("Project to Review", ap_projs)
+    
+    # Show data awaiting approval or recently modified
+    review_df = full_df[full_df['Project'] == sel_ap_proj].copy()
+    
+    st.dataframe(review_df.tail(100), use_container_width=True)
+    
+    note_text = st.text_area("Engineering Note / Status Update", placeholder="e.g., Data validated; cooling trend consistent.")
+    
+    col_a, col_b = st.columns(2)
+    if col_a.button("✅ APPROVE SELECTED DATA"):
+        # This will update the is_approved bit in the Master and Raw tables
+        st.success(f"Data for {sel_ap_proj} marked as Approved.")
+        # [Insert BigQuery Update Logic here]
+
+# --- SERVICE 3: DATA CLEANING TOOL ---
+elif service == "🧹 Data Cleaning Tool":
+    st.header("🧹 Surgical Data Cleaning")
+    st.markdown("Select points on the chart below to generate a 'Delete' script for BigQuery.")
+    
+    # (Existing Scatter/Select logic goes here - keep your Plotly on_select code)
+    st.info("Use the Lasso or Box tool to highlight 'spikes' that need removal.")
+
 # --- SERVICE: DATABASE MAINTENANCE (THE FIX-IT TAB) ---
 if service == "🧹 Database Maintenance":
     st.header("🧹 Database Maintenance")
@@ -179,3 +251,5 @@ if st.button("📥 FORCE BACKFILL SENSORPUSH", key="backfill_maintenance"):
     
     # 4. Push to BigQuery (I can provide the 'to_gbq' code if you need it)
     # ... logic to upload to raw_sensorpush ...
+
+
