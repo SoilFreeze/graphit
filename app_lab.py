@@ -250,9 +250,13 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
                          margin=dict(l=10, r=200, t=10, b=10),
                          legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1))
         
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info(f"No data for {sel_loc} in the requested window.")
+# Replace your current plotly_chart line with this:
+st.plotly_chart(
+    fig, 
+    use_container_width=True, 
+    theme="streamlit", # Ensures it matches your app's dark/light mode
+    config={'responsive': True, 'displayModeBar': True}
+)
         
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
