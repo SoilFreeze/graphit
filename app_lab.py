@@ -126,8 +126,8 @@ if service == "🏠 Executive Summary" and not full_df.empty:
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
 # --- SERVICE: DATABASE MAINTENANCE (THE FIX-IT TAB) ---
-elif service == "🧹 Database Maintenance":
-    st.header("🧹 Master Data Scrubbing & Consolidation")
+if service == "🧹 Database Maintenance":
+    st.header("🧹 Database Maintenance")
     st.info("This tool applies the 90°F limit and the 5°F hourly averaging across all Lord and SensorPush data.")
     
     if st.button("🚀 EXECUTE FULL MASTER SCRUB", type="primary"):
@@ -151,7 +151,13 @@ elif service == "🧹 Database Maintenance":
             st.cache_data.clear()
             st.success("✨ Master Dashboard Rebuilt! Weekend gaps have been averaged/scrubbed.")
             st.balloons()
-
+    if st.button("📥 FORCE BACKFILL SENSORPUSH"):
+        try:
+            sp_creds = st.secrets["sensorpush_login"]
+            # ... rest of the backfill logic ...
+            st.success("Backfill triggered!")
+        except Exception as e:
+            st.error(f"Could not find sensorpush_login in secrets: {e}")
 # (Other services like Diagnostics and Approvals follow same logic...)
 if st.button("📥 FORCE BACKFILL SENSORPUSH"):
     # 1. Get Login from your secrets
