@@ -127,37 +127,76 @@ elif service == "⚙️ Database Maintenance":
     # (Insert the 'Execute Full Master Scrub' button code here)
     pass
 
-# --- SERVICE: EXECUTIVE SUMMARY ---
-if service == "🏠 Executive Summary" and not full_df.empty:
-    st.header("🏠 Site Health & Warming Alerts")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
-        sel_summary_proj = st.selectbox("1. Select Project", all_projs)
-    
-    proj_df = full_df[full_df['Project'] == sel_summary_proj].copy()
-    
-    with c2:
-        all_locs = sorted([l for l in proj_df['Location'].unique() if l is not None])
-        sel_summary_loc = st.selectbox("2. Select Pipe / Bank", all_locs)
+# --- SERVICE 0: EXECUTIVE SUMMARY (ENHANCED) ---
+if service == "🏠 Executive Summary":
+    st.header("🏠 Engineering Executive Summary")
 
-    # 24-Hour Performance Table logic...
-    now_ts = datetime.now(tz=pytz.UTC)
-    loc_recent = proj_df[(proj_df['Location'] == sel_summary_loc) & (proj_df['timestamp'] >= (now_ts - timedelta(hours=24)))].copy()
+    if not full_df.empty:
+        # 1. TOP LEVEL FILTERS
+        col1, col2 = st.columns(2)
+        with col1:
+            all_projs = sorted(full_df['Project'].unique())
+            sel_ex_proj = st.selectbox("Select Project Scope", all_projs)
+        with col2:
+            # Filter locations based on project
+            proj_df = full_df[full_df['Project'] == sel_ex_proj]
+            all_locs = sorted(proj_df['Location'].unique())
+            sel_ex_loc = st.selectbox("Select Pipe/Location", ["All"] + all_locs)
 
-    if not loc_recent.empty:
-        node_analysis = []
-        for node in loc_recent['nodenumber'].unique():
-            n_df = loc_recent[loc_recent['nodenumber'] == node].sort_values('timestamp')
-            if len(n_df) > 1:
-                node_analysis.append({
-                    "Depth": n_df['Depth'].iloc[0], "Node ID": node,
-                    "Min": n_df['value'].min(), "Max": n_df['value'].max(),
-                    "Current": n_df['value'].iloc[-1], "24h Change": n_df['value'].iloc[-1] - n_df['value'].iloc[0]
-                })
-        st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
+        # 2. FILTER DATA
+        summary_df = proj_df.copy()
+        if sel_ex_loc != "All":
+            summary_df = summary_df[summary_df['Location'] == sel_ex_loc]
 
+        # 3. KPI METRICS (Current Status)
+        latest_data = summary_df.sort_values('timestamp').groupby('nodenumber').last().reset_index()
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Active Sensors", len(latest_data))
+        m2.metric("Avg Temp", f"{latest_data['value'].mean():.1f}°F")
+        m3.metric("Max Temp", f"{latest_data['value'].max():.1f}°F")
+        m4.metric("Min Temp", f"{latest_data['value'].min():.1f}°F")
+
+        st.divider()
+
+        # 4. QUICK VIEW CHART (6-Week Default, Solid Grid)
+        st.subheader(f"Thermal Overview: {sel_ex_loc}")
+        
+        # Calculate 6-week window
+        end_time = datetime.now(pytz.UTC)
+        start_time = end_time - timedelta(weeks=6)
+        
+        chart_df = summary_df[summary_df['timestamp'] >= start_time].copy()
+        chart_df['Label'] = chart_df['Depth'].astype(str) + "ft (" + chart_df['nodenumber'] + ")"
+        
+        fig_ex = px.line(chart_df, x='timestamp', y='value', color='Label', 
+                        range_y=[-20, 80], height=500, template="plotly_white")
+        
+        # Apply your Precision Grid (Solid Frame, No Cushion)
+        fig_ex.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis=dict(showgrid=True, gridcolor='LightGrey', range=[start_time, end_time]),
+            yaxis=dict(showgrid=True, gridcolor='LightGrey', range=[-20, 80]),
+            showlegend=False # Keep summary clean
+        )
+        st.plotly_chart(fig_ex, use_container_width=True)
+
+    else:
+        st.error("⚠️ No data found in the Master Table. See 'Database Diagnostic' below.")
+
+    # 5. THE "WHY IS IT BLANK?" DIAGNOSTIC
+    with st.expander("🛠 Database Diagnostic (Find Missing Sensors)"):
+        st.write("Checking Raw Tables for sensors not in the Master Mapping...")
+        raw_sp = client.query("SELECT DISTINCT sensor_name FROM `sensorpush-export.sensor_data.raw_sensorpush`").to_dataframe()
+        master_meta = client.query("SELECT DISTINCT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`").to_dataframe()
+        
+        missing = raw_sp[~raw_sp['sensor_name'].isin(master_meta['NodeNum'])]
+        if not missing.empty:
+            st.warning(f"Found {len(missing)} sensors with NO metadata mapping:")
+            st.dataframe(missing)
+            st.info("Update your 'SensorPushMasterSheet.xlsx' on the S: drive with these IDs to see them in the app.")
+        else:
+            st.success("All active sensors are correctly mapped to projects/pipes!")
 # --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
