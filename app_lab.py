@@ -158,7 +158,7 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
-# --- SERVICE 1: NODE DIAGNOSTICS (PRECISION GRID) ---
+# --- SERVICE 1: NODE DIAGNOSTICS (CLEAN DAILY GRID) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
@@ -189,33 +189,41 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
 
         # 2. Y-AXIS: Frame, Dark 20s, Light 5s
         fig.update_yaxes(
-            showline=True, linewidth=2, linecolor='Black', mirror=True, # The Frame
-            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,     # Major 20s
-            minor=dict(dtick=5, gridcolor='LightGrey', showgrid=True), # Minor 5s
+            showline=True, linewidth=2, linecolor='Black', mirror=True,
+            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
+            minor=dict(dtick=5, gridcolor='LightGrey', showgrid=True),
             zeroline=True, zerolinecolor='Black', zerolinewidth=2,
             title="Temperature (°F)"
         )
 
-        # 3. X-AXIS: Frame, Monday Midnights, 6-Hour Minors
+        # 3. X-AXIS: Frame, Clean Labels, Minor 6-Hour Grid
         fig.update_xaxes(
-            showline=True, linewidth=2, linecolor='Black', mirror=True, # The Frame
-            dtick=604800000.0, # 1 Week in ms (Solid Monday lines)
-            gridcolor='DimGrey', gridwidth=1.5,
+            showline=True, linewidth=2, linecolor='Black', mirror=True,
+            showgrid=False, # We will draw the daily lines manually below
             minor=dict(dtick=21600000.0, gridcolor='LightGrey', showgrid=True), # 6 Hours
             tickformat="%a\n%b %d", title=""
         )
         
-        # 4. REMOVE DOTS, USE SOLID DAILY LINES
-        # Adding daily "Day" lines as solid but light to avoid clutter
-        for i in range((datetime.now(pytz.UTC) - start_time).days + 1):
-            day_ts = start_time + timedelta(days=i)
-            fig.add_vline(x=day_ts.timestamp() * 1000, line_width=1, line_color="LightGrey")
+        # 4. MANUAL DAILY LINES: One line at Midnight
+        # If weekday is 0 (Monday), use DimGrey. Otherwise, use LightGrey.
+        num_days = (datetime.now(pytz.UTC) - start_time).days + 1
+        for i in range(num_days):
+            current_date = start_time + timedelta(days=i)
+            # Monday = 0
+            line_color = "DimGrey" if current_date.weekday() == 0 else "LightGrey"
+            line_width = 1.5 if current_date.weekday() == 0 else 1
+            
+            fig.add_vline(
+                x=current_date.timestamp() * 1000, 
+                line_width=line_width, 
+                line_color=line_color
+            )
 
         fig.update_layout(
             plot_bgcolor='white', 
             hovermode="x unified", 
             margin=dict(l=40, r=40, t=40, b=40),
-            legend=dict(bordercolor="Black", borderwidth=1) # Boxed legend
+            legend=dict(bordercolor="Black", borderwidth=1)
         )
         
         st.plotly_chart(fig, use_container_width=True)
