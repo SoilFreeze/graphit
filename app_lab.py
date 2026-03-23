@@ -151,7 +151,7 @@ if service == "🧹 Database Maintenance":
             st.cache_data.clear()
             st.success("✨ Master Dashboard Rebuilt! Weekend gaps have been averaged/scrubbed.")
             st.balloons()
-    if st.button("📥 FORCE BACKFILL SENSORPUSH", key="backfill_main"):
+    if st.button("📥 FORCE BACKFILL SENSORPUSH", key="maintenance_backfill"):
         try:
             sp_creds = st.secrets["sensorpush_login"]
             # ... rest of the backfill logic ...
