@@ -412,64 +412,70 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
     st.download_button("📥 Download CSV", data=export_df.to_csv(index=False), 
                      file_name=f"{ex_proj}_thermal_data.csv")
     
-# --- SERVICE 5: DATA INTAKE LAB (MANUAL UPLOAD) ---
+# --- SERVICE 5: DATA INTAKE LAB (RUGGED UPLOAD) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
-    st.markdown("""
-    Use this tool to upload logger data (CSV/Excel) directly into the raw database. 
-    **Note:** Data will be automatically capped at 90°F per SoilFreeze standards.
-    """)
 
-    # 1. Select the Source
     source_type = st.radio("Select Data Source", ["SensorPush (CSV)", "Lord Logger (CSV/Excel)"], horizontal=True)
     uploaded_file = st.file_uploader("Upload Sensor File", type=['csv', 'xlsx'])
 
     if uploaded_file:
-        # Load data based on file type
-        if uploaded_file.name.endswith('.csv'):
-            df_upload = pd.read_csv(uploaded_file)
-        else:
-            df_upload = pd.read_excel(uploaded_file)
+        try:
+            # 1. RUGGED LOADING
+            if uploaded_file.name.endswith('.csv'):
+                # We use on_bad_lines to skip rows that are 'broken' or have extra commas
+                df_upload = pd.read_csv(uploaded_file, on_bad_lines='warn', engine='python')
+                
+                # If the first row looks like junk (common in Lord exports), 
+                # we try to re-read skipping the first few lines
+                if "Date" not in df_upload.columns[0] and "Timestamp" not in df_upload.columns[0]:
+                    uploaded_file.seek(0) # Reset file pointer
+                    df_upload = pd.read_csv(uploaded_file, skiprows=1, on_bad_lines='skip')
+            else:
+                df_upload = pd.read_excel(uploaded_file)
 
-        st.subheader("👀 Data Preview (First 5 Rows)")
-        st.dataframe(df_upload.head(5), use_container_width=True)
+            # Remove empty rows/cols that Excel often adds
+            df_upload = df_upload.dropna(how='all').dropna(axis=1, how='all')
 
-        # 2. Map Columns based on Source
-        if st.button("🚀 VALIDATE & PUSH TO CLOUD"):
-            try:
-                with st.spinner("Standardizing and Uploading..."):
-                    # Standardize SensorPush
+            st.subheader("👀 Data Preview")
+            st.dataframe(df_upload.head(5), use_container_width=True)
+
+            # 2. MAPPING & PUSH
+            if st.button("🚀 VALIDATE & PUSH TO CLOUD"):
+                with st.spinner("Processing..."):
+                    # Standardize Column Names (Add yours if different!)
                     if "SensorPush" in source_type:
-                        # Required: timestamp, temperature, sensor_name
-                        df_upload = df_upload.rename(columns={'Timestamp': 'timestamp', 'Temperature': 'temperature', 'Sensor': 'sensor_name'})
-                        df_upload = df_upload[df_upload['temperature'] <= 90]
-                        target_table = "sensorpush-export.sensor_data.raw_sensorpush"
-                    
-                    # Standardize Lord
+                        rename_map = {'Timestamp': 'timestamp', 'Temperature': 'temperature', 'Sensor': 'sensor_name'}
+                        target = "sensorpush-export.sensor_data.raw_sensorpush"
+                        val_col = 'temperature'
                     else:
-                        # Required: timestamp, value, nodenumber
-                        df_upload = df_upload.rename(columns={'Date/Time': 'timestamp', 'Value': 'value', 'Node': 'nodenumber'})
-                        df_upload = df_upload[df_upload['value'] <= 90]
-                        target_table = "sensorpush-export.sensor_data.raw_lord"
+                        rename_map = {'Date/Time': 'timestamp', 'Value': 'value', 'Node': 'nodenumber'}
+                        target = "sensorpush-export.sensor_data.raw_lord"
+                        val_col = 'value'
 
-                    # Add System Metadata
-                    df_upload['is_approved'] = False
-                    df_upload['engineer_note'] = f"Manual Upload: {datetime.now().strftime('%Y-%m-%d')}"
+                    df_upload = df_upload.rename(columns=rename_map)
                     
-                    # Ensure timestamp is actual datetime objects
-                    df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'])
+                    # Convert timestamp and drop rows where it failed
+                    df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'], errors='coerce')
+                    df_upload = df_upload.dropna(subset=['timestamp'])
 
-                    # 3. Push to BigQuery
+                    # Apply SoilFreeze 90°F Filter
+                    df_upload = df_upload[df_upload[val_col] <= 90]
+                    
+                    # System Columns
+                    df_upload['is_approved'] = False
+                    df_upload['engineer_note'] = f"Manual Upload {datetime.now().date()}"
+
+                    # Push to BigQuery
                     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                    client.load_table_from_dataframe(df_upload, target_table, job_config=job_config).result()
+                    client.load_table_from_dataframe(df_upload, target, job_config=job_config).result()
 
-                    st.success(f"✅ Successfully uploaded {len(df_upload)} rows to {source_type}!")
-                    st.info("💡 Next Step: Go to 'Database Maintenance' and run the 'Master Scrub' to update your charts.")
+                    st.success(f"✅ Uploaded {len(df_upload)} rows!")
                     st.balloons()
 
-            except Exception as e:
-                st.error(f"❌ Upload Failed: {e}")
-                st.info("Check that your CSV headers match the expected names (e.g., Temperature, Timestamp).")
+        except Exception as e:
+            st.error(f"❌ Parser Error: {e}")
+            st.info("💡 Try opening the CSV in Excel and 'Saving As' a new CSV to clean the formatting.")
                     
 # --- SERVICE: DATABASE MAINTENANCE (THE FIX-IT TAB) ---
 if service == "🧹 Database Maintenance":
