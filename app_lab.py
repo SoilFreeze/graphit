@@ -127,7 +127,7 @@ elif service == "⚙️ Database Maintenance":
     # (Insert the 'Execute Full Master Scrub' button code here)
     pass
 
-# --- SERVICE 0: EXECUTIVE SUMMARY (DETAILED PIPE ANALYSIS) ---
+# --- SERVICE 0: EXECUTIVE SUMMARY (WARNING SYSTEM) ---
 if service == "🏠 Executive Summary":
     st.header("🏠 Engineering Executive Summary")
 
@@ -144,19 +144,14 @@ if service == "🏠 Executive Summary":
             all_locs = sorted([l for l in proj_df['Location'].unique() if l])
             sel_ex_loc = st.selectbox("Select Pipe to Inspect", all_locs)
 
-        # 2. DATA ENGINE: Filter to Selection
+        # 2. DATA ENGINE: 24h Window
         summary_df = proj_df[proj_df['Location'] == sel_ex_loc].copy()
+        now_ts = datetime.now(pytz.UTC)
+        recent_df = summary_df[summary_df['timestamp'] >= (now_ts - timedelta(hours=24))]
 
         if not summary_df.empty:
-            st.subheader(f"📊 Performance Metrics: {sel_ex_loc}")
+            st.subheader(f"📊 24-Hour Performance: {sel_ex_loc}")
             
-            # 3. CALCULATE PIPE-LEVEL STATS
-            # We need the most recent 24 hours to calculate "Greatest Change"
-            now_ts = datetime.now(pytz.UTC)
-            one_day_ago = now_ts - timedelta(hours=24)
-            recent_df = summary_df[summary_df['timestamp'] >= one_day_ago]
-
-            # Group by Node to get individual performance
             node_stats = []
             for node in summary_df['nodenumber'].unique():
                 n_df = summary_df[summary_df['nodenumber'] == node].sort_values('timestamp')
@@ -164,47 +159,76 @@ if service == "🏠 Executive Summary":
                 
                 if not n_df.empty:
                     latest_row = n_df.iloc[-1]
-                    # Calculate 24h Change (Max - Min in last 24 hours)
-                    delta_24h = r_df['value'].max() - r_df['value'].min() if not r_df.empty else 0
+                    last_seen = latest_row['timestamp']
+                    hours_since = (now_ts - last_seen).total_seconds() / 3600
+                    
+                    # 24h Stats
+                    min_24h = r_df['value'].min() if not r_df.empty else None
+                    max_24h = r_df['value'].max() if not r_df.empty else None
+                    delta_24h = max_24h - min_24h if min_24h is not None else 0
                     
                     node_stats.append({
                         "Node ID": node,
-                        "Depth": f"{latest_row['Depth']}ft",
-                        "Current Temp": f"{latest_row['value']:.1f}°F",
-                        "Min (All Time)": f"{n_df['value'].min():.1f}°F",
-                        "Max (All Time)": f"{n_df['value'].max():.1f}°F",
-                        "24h Delta": f"{delta_24h:.1f}°F",
-                        "Last Reported": latest_row['timestamp'].strftime("%m/%d %H:%M")
+                        "Depth": latest_row['Depth'],
+                        "Current": latest_row['value'],
+                        "24h Min": min_24h,
+                        "24h Max": max_24h,
+                        "24h Delta": delta_24h,
+                        "Last Seen": last_seen,
+                        "Hours Lag": round(hours_since, 1)
                     })
 
-            # 4. DISPLAY THE TABLE
-            status_table = pd.DataFrame(node_stats)
-            st.table(status_table) # Using st.table for a clean, static look
+            # 3. APPLY COLOR LOGIC (STYLING)
+            df_display = pd.DataFrame(node_stats)
 
-            # 5. FIND THE "GREATEST CHANGE" OUTLIER
-            if not status_table.empty:
-                # Convert strings back to floats for sorting
-                status_table['delta_float'] = status_table['24h Delta'].str.replace('°F','').astype(float)
-                top_change = status_table.sort_values('delta_float', ascending=False).iloc[0]
+            def style_summary(row):
+                styles = [''] * len(row)
                 
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.info(f"**Greatest 24h Change:** {top_change['24h Delta']}")
-                with c2:
-                    st.info(f"**Target Node:** {top_change['Node ID']} ({top_change['Depth']})")
+                # A. Color Logic for 'Last Seen' (Lag)
+                lag = row['Hours Lag']
+                if lag >= 24: color = "background-color: #FF4B4B; color: white" # Red
+                elif lag >= 12: color = "background-color: #FFA500; color: black" # Orange
+                elif lag >= 6: color = "background-color: #FFFF00; color: black" # Yellow
+                else: color = ""
+                styles[df_display.columns.get_loc("Last Seen")] = color
 
-            # 6. MINI OVERVIEW CHART (6-Week Frame)
-            st.divider()
-            chart_df = summary_df[summary_df['timestamp'] >= (now_ts - timedelta(weeks=6))]
-            fig_ex = px.line(chart_df, x='timestamp', y='value', color='nodenumber', 
-                            range_y=[-20, 80], height=400, template="plotly_white")
-            fig_ex.update_layout(showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig_ex, use_container_width=True)
-            
+                # B. Color Logic for '24h Delta'
+                d = row['24h Delta']
+                d_color = ""
+                if d >= 5: d_color = "background-color: #FF4B4B; color: white" # Red
+                elif d >= 2: d_color = "background-color: #FFFF00; color: black" # Yellow
+                elif d <= -2: d_color = "background-color: #00008B; color: white" # Dark Blue
+                elif d <= -0.5: d_color = "background-color: #ADD8E6; color: black" # Light Blue
+                styles[df_display.columns.get_loc("24h Delta")] = d_color
+                
+                return styles
+
+            # 4. DISPLAY STYLED TABLE
+            st.dataframe(
+                df_display.style.apply(style_summary, axis=1).format({
+                    "Current": "{:.1f}°F", "24h Min": "{:.1f}°F", 
+                    "24h Max": "{:.1f}°F", "24h Delta": "{:+.1f}°F",
+                    "Last Seen": lambda t: t.strftime("%m/%d %H:%M")
+                }),
+                use_container_width=True
+            )
+
+            # 5. KPI SUMMARY
+            c1, c2 = st.columns(2)
+            with c1:
+                # Greatest Change Logic
+                top_d = df_display.sort_values('24h Delta', ascending=False).iloc[0]
+                st.info(f"🚀 **Greatest 24h Change:** {top_d['Node ID']} ({top_d['24h Delta']:+.1f}°F)")
+            with c2:
+                # Total Lag Logic
+                stale = df_display[df_display['Hours Lag'] > 6]
+                if not stale.empty:
+                    st.warning(f"⚠️ **Offline Sensors (>6h):** {len(stale)}")
+                else:
+                    st.success("✅ All sensors reporting within 6 hours.")
+
         else:
-            st.warning(f"No data found for {sel_ex_loc}. Verify the Node IDs in your Master Sheet.")
-    else:
-        st.error("Master Table is missing. Run Database Maintenance.")
+            st.warning("No data found for this selection.")
         
 # --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
