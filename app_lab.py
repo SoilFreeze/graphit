@@ -162,6 +162,7 @@ if service == "🏠 Executive Summary" and not full_df.empty:
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
+    # 1. Selection UI
     col1, col2, col3 = st.columns(3)
     with col1:
         sel_proj = st.selectbox("Project", sorted(full_df['Project'].unique()))
@@ -171,7 +172,7 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=2)
 
-    # 1. TIME LOGIC: Align to Monday Midnight
+    # 2. Time Logic: Anchor to Monday Midnight
     today = datetime.now(pytz.UTC).date()
     last_monday = today - timedelta(days=today.weekday())
     start_time = datetime.combine(last_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
@@ -179,7 +180,7 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     plot_df = full_df[
         (full_df['Project'] == sel_proj) & 
         (full_df['Location'] == sel_loc) & 
-        (full_df['timestamp'] >= start_ts)
+        (full_df['timestamp'] >= start_time)
     ].copy().sort_values(['nodenumber', 'timestamp'])
 
     if not plot_df.empty:
@@ -187,31 +188,28 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
                      range_y=[-20, 80], height=800)
 
-        # 2. TEMPERATURE GRID (Darker 20s, Lighter 5s)
+        # 3. Y-AXIS: Lock -20 to 80, Dark lines at 20s, Light at 5s
         fig.update_yaxes(
-            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
+            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=2,
             minor=dict(dtick=5, gridcolor='LightGrey', showgrid=True),
-            zeroline=True, zerolinecolor='Black', zerolinewidth=2
+            zeroline=True, zerolinecolor='Black', zerolinewidth=2, title="Temperature (°F)"
         )
 
-        # 3. TIME GRID (Monday Midnights, Daily, 6-Hour)
+        # 4. X-AXIS: Weekly Monday Lines, Daily Dotted, 6-Hour Minors
         fig.update_xaxes(
-            dtick=604800000.0, # 1 Week in ms (Monday lines)
+            dtick=604800000.0, # 1 Week in ms
             gridcolor='Black', gridwidth=2,
             minor=dict(dtick=21600000.0, gridcolor='LightGrey', showgrid=True), # 6 Hours
-            tickformat="%a\n%b %d",
-            hoverformat="%m/%d %H:%M"
+            tickformat="%a\n%b %d", title=""
         )
         
-        # Add Daily Lines (Dashed)
+        # Add Dotted Daily Lines
         for i in range((datetime.now(pytz.UTC) - start_time).days + 1):
             day_line = start_time + timedelta(days=i)
             fig.add_vline(x=day_line.timestamp() * 1000, line_width=1, line_dash="dot", line_color="Grey")
 
-        fig.update_layout(plot_bgcolor='white', hovermode="x unified", margin=dict(l=20, r=20, t=40, b=20))
+        fig.update_layout(plot_bgcolor='white', hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No data found for this selection.")
 
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
