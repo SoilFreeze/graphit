@@ -127,6 +127,8 @@ elif service == "⚙️ Database Maintenance":
     # (Insert the 'Execute Full Master Scrub' button code here)
     pass
 
+#
+#
 # --- SERVICE 0: EXECUTIVE SUMMARY (WARNING SYSTEM) ---
 if service == "🏠 Executive Summary":
     st.header("🏠 Engineering Executive Summary")
@@ -238,7 +240,8 @@ if service == "🏠 Executive Summary":
 
         else:
             st.warning("No data found for this selection.")
-        
+#
+#
 # --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
@@ -334,7 +337,8 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
         st.plotly_chart(fig, use_container_width=True, config={'responsive': True})
     else:
         st.info(f"No data for {sel_loc}. Viewing 6-week grid starting {start_time.strftime('%m/%d')}.")
-        
+#
+#
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
     st.header("📋 Engineering Approval Portal")
@@ -364,6 +368,8 @@ elif service == "📋 Data Approval Portal":
         client.query(sync_sql).result()
         st.success(f"Updated status for {ap_proj} on {ap_date}")
 
+#
+#
 # --- SERVICE 3: DATA CLEANING TOOL (SURGICAL DELETE) ---
 elif service == "🧹 Data Cleaning Tool":
     st.header("🧹 Surgical Data Cleaning")
@@ -401,7 +407,9 @@ elif service == "🧹 Data Cleaning Tool":
             # client.query(sql).result() # Uncomment to go live
             st.code(sql)
             st.success("Points removed from raw table. Run 'Master Scrub' to update charts.")
-            
+
+#
+#
 # --- SERVICE: DATA EXPORT LAB (FIXED) ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
     st.header("📥 Data Export Lab")
@@ -411,7 +419,8 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
     st.dataframe(export_df, use_container_width=True)
     st.download_button("📥 Download CSV", data=export_df.to_csv(index=False), 
                      file_name=f"{ex_proj}_thermal_data.csv")
-    
+#
+#
 # --- SERVICE 5: DATA INTAKE LAB (SENSORCONNECT READY) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
@@ -421,18 +430,15 @@ elif service == "📤 Data Intake Lab":
     if uploaded_file:
         try:
             # 1. SPECIAL LOADING FOR LORD/SENSORCONNECT
+            # UPDATE THIS SECTION in your '📤 Data Intake Lab' block
             if "Lord" in source_type:
-                # We search for the line 'DATA_START' to know where to begin
-                file_lines = uploaded_file.getvalue().decode("utf-8").splitlines()
-                start_row = next((i for i, line in enumerate(file_lines) if "DATA_START" in line), 0)
-                
-                # Re-read skipping the metadata junk
-                uploaded_file.seek(0)
-                df_raw = pd.read_csv(uploaded_file, skiprows=start_row + 1)
-                
-                # LORD WIDE-TO-LONG TRANSFORMATION
-                # This turns [Time, Ch1, Ch2] into [timestamp, nodenumber, value]
+                # ... [Keep your existing loading/melting code here] ...
                 df_upload = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
+                
+                # NEW: Convert colons to hyphens immediately
+                df_upload['nodenumber'] = df_upload['nodenumber'].str.replace(':', '-', regex=False)
+                
+                            
                 df_upload = df_upload.rename(columns={df_raw.columns[0]: 'timestamp'})
                 target_table = "sensorpush-export.sensor_data.raw_lord"
                 val_col = 'value'
@@ -474,6 +480,8 @@ elif service == "📤 Data Intake Lab":
         except Exception as e:
             st.error(f"❌ Upload Failed: {e}")
                     
+#
+#
 # --- SERVICE 6: DATABASE MAINTENANCE ---
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance & System Health")
@@ -529,6 +537,8 @@ elif service == "⚙️ Database Maintenance":
 
     st.divider()
 
+    #
+    #
     # --- DIAGNOSTIC: FIND MISSING SENSORS ---
     st.subheader("🕵️ Metadata 'Ghost' Finder")
     st.info("This tool finds sensors that are sending data but aren't in your Excel Master Sheet.")
