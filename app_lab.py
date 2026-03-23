@@ -457,15 +457,15 @@ elif service == "📤 Data Intake Lab":
             st.error(f"Error: {e}")
 #
 #
-# --- SERVICE 6: DATABASE MAINTENANCE ---
+# --- SERVICE 6: DATABASE MAINTENANCE (UNIQUE KEYS) ---
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance & System Health")
     
     st.subheader("🚀 Master Data Scrub")
-    if st.button("🔄 EXECUTE MASTER SCRUB"):
+    # Added key="btn_execute_scrub"
+    if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub"):
         with st.spinner("Rebuilding Master Table..."):
             try:
-                # This is the indented block Python was looking for:
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
@@ -494,51 +494,28 @@ elif service == "⚙️ Database Maintenance":
                 INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
                 ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
                 """
-                # This line must also be indented under 'try'
                 client.query(scrub_query).result()
-                st.success("✅ Master Table Rebuilt! IDs merged to hyphens.")
+                st.success("✅ Master Table Rebuilt! Data merged using hyphens.")
                 st.balloons()
-                
             except Exception as e:
-                # This handles the error if the 'try' block fails
                 st.error(f"❌ Scrub Failed: {e}")
 
     st.divider()
     
-    # Optional: Metadata check logic can go here, following the same indentation
     st.subheader("🕵️ Metadata Diagnostic")
-    if st.button("🔍 SCAN FOR UNMAPPED NODES"):
-        ghost_query = "SELECT DISTINCT nodenumber FROM `sensorpush-export.sensor_data.raw_lord` WHERE nodenumber NOT IN (SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata` UNION ALL SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
-        ghosts = client.query(ghost_query).to_dataframe()
-        st.write(ghosts)
-
-    #
-    #
-    # --- DIAGNOSTIC: FIND MISSING SENSORS ---
-    st.subheader("🕵️ Metadata 'Ghost' Finder")
-    st.info("This tool finds sensors that are sending data but aren't in your Excel Master Sheet.")
-    
-    if st.button("🔍 SCAN FOR UNMAPPED NODES"):
-        ghost_query = """
-        SELECT DISTINCT nodenumber, 'Lord' as Source 
-        FROM `sensorpush-export.sensor_data.raw_lord`
-        WHERE nodenumber NOT IN (SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`)
-        UNION ALL
-        SELECT DISTINCT sensor_name as nodenumber, 'SensorPush' as Source 
-        FROM `sensorpush-export.sensor_data.raw_sensorpush`
-        WHERE sensor_name NOT IN (SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`)
-        """
-        ghost_df = client.query(ghost_query).to_dataframe()
-        
-        if not ghost_df.empty:
-            st.warning(f"⚠️ Found {len(ghost_df)} sensors with NO metadata mapping:")
-            st.table(ghost_df)
-            st.markdown("""
-            **How to fix:**
-            1. Copy the IDs above.
-            2. Add them to your **SensorPushMasterSheet.xlsx**.
-            3. Upload that sheet to BigQuery (or wait for the sync).
-            4. Run the **Master Scrub** again.
-            """)
-        else:
-            st.success("✅ All active sensors are correctly mapped to Projects!")
+    # Added key="btn_diagnostic_scan"
+    if st.button("🔍 SCAN FOR UNMAPPED NODES", key="btn_diagnostic_scan"):
+        try:
+            ghost_query = """
+            SELECT DISTINCT nodenumber FROM `sensorpush-export.sensor_data.raw_lord` 
+            WHERE nodenumber NOT IN (SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata` 
+            UNION ALL SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
+            """
+            ghosts = client.query(ghost_query).to_dataframe()
+            if not ghosts.empty:
+                st.warning("Found unmapped sensors:")
+                st.table(ghosts)
+            else:
+                st.success("All sensors mapped!")
+        except Exception as e:
+            st.error(f"Diagnostic failed: {e}")
