@@ -421,40 +421,73 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
                      file_name=f"{ex_proj}_thermal_data.csv")
 #
 #
-# --- SERVICE 5: DATA INTAKE LAB (UNIQUE KEYS) ---
+# --- SERVICE 5: DATA INTAKE LAB (PYARROW FIX) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
     source_type = st.radio("Source", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
-    uploaded_file = st.file_uploader("Upload", type=['csv'], key="intake_uploader")
+    uploaded_file = st.file_uploader("Upload", type=['csv', 'xlsx'], key="intake_uploader")
 
     if uploaded_file:
         try:
+            # 1. LOAD DATA
             if "Lord" in source_type:
                 file_lines = uploaded_file.getvalue().decode("utf-8").splitlines()
+                # Find exactly where the data starts
                 start_row = next((i for i, line in enumerate(file_lines) if "DATA_START" in line), 0)
                 uploaded_file.seek(0)
                 df_raw = pd.read_csv(uploaded_file, skiprows=start_row + 1)
                 
+                # Transform to Long Format
                 df_upload = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
                 df_upload = df_upload.rename(columns={df_raw.columns[0]: 'timestamp'})
                 df_upload['nodenumber'] = df_upload['nodenumber'].str.replace(':', '-', regex=False)
-                target_table = "sensorpush-export.sensor_data.raw_lord"
                 val_col = 'value'
+                target_table = "sensorpush-export.sensor_data.raw_lord"
             else:
                 df_upload = pd.read_csv(uploaded_file)
                 df_upload = df_upload.rename(columns={'Timestamp':'timestamp', 'Temperature':'temperature', 'Sensor':'sensor_name'})
-                target_table = "sensorpush-export.sensor_data.raw_sensorpush"
                 val_col = 'temperature'
+                target_table = "sensorpush-export.sensor_data.raw_sensorpush"
 
-            # Add a unique key to this button
+            # ---------------------------------------------------------
+            # 2. CRITICAL TYPE ENFORCEMENT (FIXES PYARROW ERROR)
+            # ---------------------------------------------------------
+            # Force Timestamp to UTC Datetime (Drops junk strings to NaT)
+            df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'], errors='coerce', utc=True)
+            
+            # Force Value to Numeric (Drops junk text to NaN)
+            df_upload[val_col] = pd.to_numeric(df_upload[val_col], errors='coerce')
+            
+            # Drop rows where Time or Value is now missing
+            df_upload = df_upload.dropna(subset=['timestamp', val_col])
+            
+            # Apply Engineering Limit (90F)
+            df_upload = df_upload[df_upload[val_col] <= 90]
+
+            # System Metadata
+            df_upload['is_approved'] = False
+            df_upload['engineer_note'] = f"Manual Upload {datetime.now().date()}"
+            
+            # LAST STEP: Ensure column names and types are clean for BigQuery
+            df_upload = df_upload.reset_index(drop=True)
+            # ---------------------------------------------------------
+
+            st.subheader("👀 Preview for Upload")
+            st.dataframe(df_upload.head(10), use_container_width=True)
+
             if st.button("🚀 PUSH TO CLOUD", key="btn_push_data"):
-                with st.spinner("Uploading..."):
-                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", create_disposition="CREATE_NEVER")
+                with st.spinner("Uploading standardized data..."):
+                    job_config = bigquery.LoadJobConfig(
+                        write_disposition="WRITE_APPEND", 
+                        create_disposition="CREATE_NEVER"
+                    )
                     client.load_table_from_dataframe(df_upload, target_table, job_config=job_config).result()
-                    st.success("Uploaded!")
+                    st.success(f"✅ Successfully uploaded {len(df_upload)} rows!")
                     st.balloons()
+                    
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"❌ Standardizing failed: {e}")
+            st.info("Check if your file has unusual characters or formatting.")
 #
 #
 # --- SERVICE 6: DATABASE MAINTENANCE (WITH PURGE TOOL) ---
