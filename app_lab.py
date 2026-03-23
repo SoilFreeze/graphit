@@ -133,64 +133,64 @@ elif service == "⚙️ Database Maintenance":
 elif service == "🏠 Executive Summary":
     st.header("🏠 Executive Summary")
     
-    # 1. SETUP FILTERS
     try:
-        # Get unique projects from metadata to avoid crashing if Master is empty
+        # 1. GET PROJECT LIST FROM METADATA (Stable Source)
         meta_query = "SELECT DISTINCT Project FROM `sensorpush-export.sensor_data.master_metadata` ORDER BY Project"
         proj_list = client.query(meta_query).to_dataframe()['Project'].tolist()
-        sel_ex_loc = st.selectbox("Select Project Focus", proj_list if proj_list else ["Maltby"])
         
-        # 2. FETCH DATA (SAFE QUERY)
-        # We use a subquery to handle the missing 'engineer_note' column gracefully
-        query = f"""
-            SELECT 
-                nodenumber, 
-                MAX(timestamp) as last_seen,
-                AVG(value) as current_temp,
-                '--' as engineer_note 
-            FROM `sensorpush-export.sensor_data.final_databoard_master`
-            WHERE Project = '{sel_ex_loc}'
-            GROUP BY nodenumber
-        """
-        df_exec = client.query(query).to_dataframe()
-
-        if df_exec.empty:
-            st.warning(f"No active data found for {sel_ex_loc}. Run 'Master Scrub' in Database Maintenance.")
+        if not proj_list:
+            st.error("No projects found in Master Metadata. Please upload your Excel sheet.")
         else:
-            # 3. CALCULATE METRICS
-            avg_system_temp = df_exec['current_temp'].mean()
-            active_count = len(df_exec)
+            sel_ex_loc = st.selectbox("Select Project Focus", proj_list)
+
+            # 2. FETCH DATA (SAFE QUERY)
+            # We hardcode 'No Note' so BigQuery doesn't look for a missing column
+            query = f"""
+                SELECT 
+                    nodenumber, 
+                    MAX(timestamp) as last_seen,
+                    AVG(value) as current_temp,
+                    '--' as engineer_note 
+                FROM `sensorpush-export.sensor_data.final_databoard_master`
+                WHERE Project = '{sel_ex_loc}'
+                GROUP BY nodenumber
+            """
             
-            m1, m2 = st.columns(2)
-            m1.metric("Average System Temp", f"{avg_system_temp:.1f}°F")
-            m2.metric("Active Sensors", active_count)
+            df_exec = client.query(query).to_dataframe()
 
-            st.divider()
+            if df_exec.empty:
+                st.warning(f"⚠️ No active data for {sel_ex_loc}. Go to 'Database Maintenance' and run the 'Master Scrub'.")
+            else:
+                # 3. METRICS
+                avg_temp = df_exec['current_temp'].mean()
+                col1, col2 = st.columns(2)
+                col1.metric("Avg Project Temp", f"{avg_temp:.1f}°F")
+                col2.metric("Sensors Online", len(df_exec))
 
-            # 4. FORMAT THE TABLE
-            # Rounding and cleaning up the display
-            df_display = df_exec.copy()
-            df_display['current_temp'] = df_display['current_temp'].round(1)
-            df_display['last_seen'] = pd.to_datetime(df_display['last_seen']).dt.strftime('%m/%d %H:%M')
-            
-            # Applying the "Maltby Color Logic"
-            def color_temp(val):
-                color = 'white'
-                if val > 32: color = '#ff4b4b' # Red for above freezing
-                if 28 <= val <= 32: color = '#ffa500' # Orange for near freezing
-                if val < 28: color = '#28a745' # Green for safe freeze
-                return f'color: {color}'
+                # 4. TABLE FORMATTING
+                df_display = df_exec.copy()
+                df_display['current_temp'] = df_display['current_temp'].round(1)
+                df_display['last_seen'] = pd.to_datetime(df_display['last_seen']).dt.strftime('%m/%d %H:%M')
 
-            st.subheader(f"Latest Readings: {sel_ex_loc}")
-            st.dataframe(
-                df_display.style.applymap(color_temp, subset=['current_temp']),
-                use_container_width=True,
-                hide_index=True
-            )
+                def color_temp(val):
+                    if val > 32: color = '#ff4b4b' # Red
+                    elif 28 <= val <= 32: color = '#ffa500' # Orange
+                    else: color = '#28a745' # Green
+                    return f'color: {color}'
+
+                st.dataframe(
+                    df_display.style.applymap(color_temp, subset=['current_temp']),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
     except Exception as e:
-        st.error(f"Executive Summary Error: {e}")
-        st.info("Try running 'Master Scrub' in the Database Maintenance tab to refresh the data tables.")
+        # If the table is missing entirely, show a helpful message instead of a crash
+        if "Not found" in str(e) or "400" in str(e):
+            st.warning("⚡ The Master Table is being rebuilt or is missing columns.")
+            st.info("Please go to the **⚙️ Database Maintenance** tab and click **🔄 EXECUTE MASTER SCRUB**.")
+        else:
+            st.error(f"Executive Summary Error: {e}")
 
 # --- END OF EXECUTIVE SUMMARY ---
 #
