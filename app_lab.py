@@ -105,23 +105,25 @@ service = st.sidebar.selectbox("Select Service", [
     "⚙️ Database Maintenance"
 ])
 
-# --- SERVICE 1: EXECUTIVE SUMMARY ---
+# --- SERVICE 1: EXECUTIVE SUMMARY (RESTORED) ---
 if service == "🏠 Executive Summary":
     st.header("🏠 Executive Summary")
     try:
-        # Get projects from Metadata to ensure stability
+        # Get Project List
         m_q = "SELECT DISTINCT Project FROM `sensorpush-export.sensor_data.master_metadata` ORDER BY Project"
         p_list = client.query(m_q).to_dataframe()['Project'].tolist()
-        sel_proj = st.selectbox("Select Project", p_list if p_list else ["Maltby"])
+        sel_proj = st.selectbox("Select Project Focus", p_list if p_list else ["Maltby"])
 
-        # SAFE QUERY: We 'fake' the columns so it never crashes on missing data
+        # Restored Query with Min/Max and Latest Temp
         exec_q = f"""
             SELECT 
                 nodenumber, 
                 MAX(timestamp) as last_seen,
-                AVG(value) as current_temp,
-                '--' as engineer_note,
-                FALSE as is_approved
+                MIN(value) as min_temp,
+                MAX(value) as max_temp,
+                -- Get the actual most recent reading
+                ARRAY_AGG(value ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
+                '--' as engineer_note
             FROM `sensorpush-export.sensor_data.final_databoard_master`
             WHERE Project = '{sel_proj}'
             GROUP BY nodenumber
@@ -129,28 +131,77 @@ if service == "🏠 Executive Summary":
         df_ex = client.query(exec_q).to_dataframe()
 
         if df_ex.empty:
-            st.warning("No data in Master Table. Run 'Master Scrub' in Maintenance.")
+            st.warning("Master Table is empty. Run 'Master Scrub' in Maintenance.")
         else:
+            # Metrics
             avg_t = df_ex['current_temp'].mean()
-            st.metric("Avg Project Temp", f"{avg_t:.1f}°F")
-            
+            m1, m2 = st.columns(2)
+            m1.metric("Project Avg", f"{avg_t:.1f}°F")
+            m2.metric("Sensors Online", len(df_ex))
+
+            # Styling logic
             df_disp = df_ex.copy()
             df_disp['current_temp'] = df_disp['current_temp'].round(1)
-            
+            df_disp['min_temp'] = df_disp['min_temp'].round(1)
+            df_disp['max_temp'] = df_disp['max_temp'].round(1)
+            df_disp['last_seen'] = pd.to_datetime(df_disp['last_seen']).dt.strftime('%m/%d %H:%M')
+
             def color_t(v):
                 if v > 32: return 'color: #ff4b4b'
                 if 28 <= v <= 32: return 'color: #ffa500'
                 return 'color: #28a745'
 
-            st.dataframe(df_disp.style.applymap(color_t, subset=['current_temp']), use_container_width=True)
+            st.dataframe(
+                df_disp.style.applymap(color_t, subset=['current_temp', 'min_temp', 'max_temp']),
+                use_container_width=True,
+                hide_index=True
+            )
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
 
-# --- SERVICE 2: NODE DIAGNOSTICS ---
+
+# --- SERVICE 2: NODE DIAGNOSTICS (RESTORED) ---
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
-    st.info("Check individual sensor trends here.")
-    # (Placeholder for your diagnostic charts - keeps the app from crashing)
+    
+    # Filters
+    col_a, col_b = st.columns(2)
+    with col_a:
+        m_q = "SELECT DISTINCT Project FROM `sensorpush-export.sensor_data.master_metadata`"
+        projects = client.query(m_q).to_dataframe()['Project'].tolist()
+        sel_projects = st.multiselect("Filter Projects", projects, default=projects[:1])
+    
+    with col_b:
+        weeks = st.slider("Weeks to Display", 1, 12, 6)
+
+    if sel_projects:
+        try:
+            # Graph Query
+            graph_q = f"""
+                SELECT timestamp, value, nodenumber, Location, Depth
+                FROM `sensorpush-export.sensor_data.final_databoard_master`
+                WHERE Project IN UNNEST({sel_projects})
+                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {weeks} WEEK)
+                ORDER BY timestamp ASC
+            """
+            df_graph = client.query(graph_q).to_dataframe()
+
+            if not df_graph.empty:
+                import plotly.express as px
+                # Create a combined label for the legend
+                df_graph['label'] = df_graph['Location'] + " (" + df_graph['Depth'] + ")"
+                
+                fig = px.line(df_graph, x='timestamp', y='value', color='label',
+                             title=f"Temperature Trends - Last {weeks} Weeks")
+                
+                # Add the Freezing Line
+                fig.add_hline(y=32, line_dash="dash", line_color="red", annotation_text="Freezing (32°F)")
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data found for the selected timeframe.")
+        except Exception as e:
+            st.error(f"Graph Error: {e}")
 
 # --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
