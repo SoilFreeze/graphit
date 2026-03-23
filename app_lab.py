@@ -160,79 +160,101 @@ if service == "🏠 Executive Summary":
         st.error(f"Executive Summary Error: {e}")
 
 
-# --- SERVICE 2: NODE DIAGNOSTICS (NULL-SAFE VERSION) ---
-elif service == "📈 Node Diagnostics":
-    st.header("📈 Node Diagnostics")
+# --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
+elif service == "🔍 Node Diagnostics" and not full_df.empty:
+    st.header("🔍 Node Diagnostic Hub")
     
-    # 1. SIDE-BY-SIDE FILTERS
-    col_filt1, col_filt2, col_filt3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        sel_proj = st.selectbox("Project", sorted(full_df['Project'].unique()))
+    with col2:
+        locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].unique())
+        sel_loc = st.selectbox("Location", locs)
+    with col3:
+        # UPDATED: Default value is now 6
+        weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=6)
+
+    # SIDEBAR REFERENCE LINES
+    st.sidebar.subheader("Thermal Reference Lines")
+    ref_options = {"32°F (Frost)": 32.0, "26.6°F (Brine)": 26.6, "10.2°F (Deep)": 10.2}
+    selected_refs = [label for label, val in ref_options.items() if st.sidebar.checkbox(label)]
+
+    # 1. TIME LOGIC: Strict Monday-to-Monday 6-Week Window
+    today_dt = datetime.now(pytz.UTC).date()
+    this_monday = today_dt - timedelta(days=today_dt.weekday())
+    # Start time is anchored to Monday 00:00, looking back 6 weeks
+    start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
+    end_time = start_time + timedelta(weeks=weeks_to_show)
     
-    with col_filt1:
-        # Project Filter
-        m_q = "SELECT DISTINCT Project FROM `sensorpush-export.sensor_data.master_metadata` ORDER BY Project"
-        projects = client.query(m_q).to_dataframe()['Project'].tolist()
-        sel_projects = st.multiselect("Filter Projects", projects)
-    
-    with col_filt2:
-        # Location Filter - only populates if projects are selected
-        if sel_projects:
-            loc_q = f"SELECT DISTINCT Location FROM `sensorpush-export.sensor_data.master_metadata` WHERE Project IN UNNEST({sel_projects}) ORDER BY Location"
-            locations = client.query(loc_q).to_dataframe()['Location'].tolist()
-            sel_locations = st.multiselect("Filter Specific Pipes", locations, default=locations)
-        else:
-            sel_locations = []
-            st.info("👈 Select a project to see pipes.")
+    plot_df = full_df[
+        (full_df['Project'] == sel_proj) & 
+        (full_df['Location'] == sel_loc) & 
+        (full_df['timestamp'] >= start_time) &
+        (full_df['timestamp'] <= end_time)
+    ].copy().sort_values(['nodenumber', 'timestamp'])
 
-    with col_filt3:
-        weeks = st.slider("Weeks to Display", 1, 12, 6)
+    if not plot_df.empty:
+        # GAP LOGIC: Insert None for breaks > 6 hours
+        processed_dfs = []
+        for node in plot_df['nodenumber'].unique():
+            node_df = plot_df[plot_df['nodenumber'] == node].copy()
+            node_df['diff'] = node_df['timestamp'].diff().dt.total_seconds() / 3600
+            gaps = node_df[node_df['diff'] > 6.0].copy()
+            if not gaps.empty:
+                gaps['value'] = None
+                gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
+                node_df = pd.concat([node_df, gaps]).sort_values('timestamp')
+            processed_dfs.append(node_df)
+        
+        plot_df = pd.concat(processed_dfs)
+        plot_df['Sensor'] = plot_df['Depth'].astype(str) + "ft (" + plot_df['nodenumber'] + ")"
+        
+        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
+                     range_y=[-20, 80], height=850)
+        fig.update_traces(connectgaps=False) 
 
-    # 2. THE GRAPHING ENGINE - Only runs if BOTH filters have values
-    if sel_projects and sel_locations:
-        try:
-            days = weeks * 7
-            # Use tuple() to format the lists correctly for BigQuery's 'IN' clause
-            # This avoids the 'None' error
-            graph_q = f"""
-                SELECT timestamp, value, nodenumber, Location, Depth
-                FROM `sensorpush-export.sensor_data.final_databoard_master`
-                WHERE Project IN UNNEST({list(sel_projects)})
-                AND Location IN UNNEST({list(sel_locations)})
-                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-                ORDER BY timestamp ASC
-            """
-            df_graph = client.query(graph_q).to_dataframe()
+        # 2. GRID & AXES (Zero-Cushion & Frame)
+        fig.update_yaxes(
+            showline=True, linewidth=2, linecolor='Black', mirror=True,
+            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
+            minor=dict(dtick=5, gridcolor='#E5E5E5', showgrid=True), 
+            zeroline=False, range=[-20, 80]
+        )
+        fig.update_xaxes(
+            showline=True, linewidth=2, linecolor='Black', mirror=True,
+            showgrid=False, zeroline=False, tickformat="%b %d", title="",
+            range=[start_time, end_time]
+        )
+        
+        # 3. DYNAMIC REFERENCE LINES
+        for label in selected_refs:
+            val = ref_options[label]
+            fig.add_hline(y=val, line_width=2, line_color="#003366", annotation_text=f"{val}°F")
 
-            if not df_graph.empty:
-                import plotly.express as px
-                df_graph['label'] = df_graph['Location'] + " (" + df_graph['Depth'] + ")"
-                
-                fig = px.line(
-                    df_graph, 
-                    x='timestamp', 
-                    y='value', 
-                    color='label',
-                    title=f"Temperature Trends: Last {weeks} Weeks",
-                    labels={'value': 'Temp (°F)', 'timestamp': 'Time', 'label': 'Pipe'}
-                )
-                
-                # Restore Reference Lines
-                fig.add_hline(y=32, line_dash="dash", line_color="#ff4b4b", annotation_text="32°F")
-                fig.add_hline(y=28, line_dash="dot", line_color="#28a745", annotation_text="28°F")
-                
-                fig.update_layout(hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Stats Table
-                st.subheader("Sensor Summary")
-                stats = df_graph.groupby('label')['value'].agg(['min', 'max', 'mean']).round(1)
-                st.table(stats)
-            else:
-                st.info("No data found for these specific pipes in the last few weeks.")
-        except Exception as e:
-            st.error(f"Graph Error: {e}")
+        # 4. MANUAL VERTICAL GRID (Darker Mondays)
+        num_days = (end_time - start_time).days
+        for i in range(num_days + 1):
+            midnight = start_time + timedelta(days=i)
+            is_monday = (midnight.weekday() == 0)
+            fig.add_vline(x=midnight.timestamp()*1000, 
+                         line_width=1.5 if is_monday else 1, 
+                         line_color="DimGrey" if is_monday else "#CCCCCC")
+            # 6-Hour Intervals
+            if i < num_days:
+                for h in [6, 12, 18]:
+                    fig.add_vline(x=(midnight+timedelta(hours=h)).timestamp()*1000, 
+                                 line_width=0.5, line_color="#F0F0F0")
+
+        # 5. LAYOUT: External Legend & Wide Margin
+        fig.update_layout(
+            plot_bgcolor='white', hovermode="x unified",
+            margin=dict(l=10, r=200, t=10, b=10),
+            legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True, config={'responsive': True})
     else:
-        st.info("Please select both a Project and at least one Pipe to view the data.")
-
+        st.info(f"No data for {sel_loc}. Viewing 6-week grid starting {start_time.strftime('%m/%d')}.")
 # --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
