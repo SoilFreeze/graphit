@@ -151,7 +151,7 @@ if service == "🧹 Database Maintenance":
             st.cache_data.clear()
             st.success("✨ Master Dashboard Rebuilt! Weekend gaps have been averaged/scrubbed.")
             st.balloons()
-    if st.button("📥 FORCE BACKFILL SENSORPUSH"):
+    if st.button("📥 FORCE BACKFILL SENSORPUSH", key="backfill_main"):
         try:
             sp_creds = st.secrets["sensorpush_login"]
             # ... rest of the backfill logic ...
@@ -159,7 +159,7 @@ if service == "🧹 Database Maintenance":
         except Exception as e:
             st.error(f"Could not find sensorpush_login in secrets: {e}")
 # (Other services like Diagnostics and Approvals follow same logic...)
-if st.button("📥 FORCE BACKFILL SENSORPUSH"):
+if st.button("📥 FORCE BACKFILL SENSORPUSH", key="backfill_maintenance"):
     # 1. Get Login from your secrets
     sp_creds = st.secrets["sensorpush_login"] # Assuming you have this in st.secrets
     
