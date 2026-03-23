@@ -127,78 +127,84 @@ elif service == "⚙️ Database Maintenance":
     # (Insert the 'Execute Full Master Scrub' button code here)
     pass
 
-# --- SERVICE 0: EXECUTIVE SUMMARY (REACTIVE FILTERS) ---
+# --- SERVICE 0: EXECUTIVE SUMMARY (DETAILED PIPE ANALYSIS) ---
 if service == "🏠 Executive Summary":
     st.header("🏠 Engineering Executive Summary")
 
     if not full_df.empty:
-        # 1. PRIMARY FILTERS
+        # 1. DYNAMIC FILTERS
         col1, col2 = st.columns(2)
         with col1:
             all_projs = sorted([p for p in full_df['Project'].unique() if p])
-            sel_ex_proj = st.selectbox("Select Project", all_projs)
+            sel_ex_proj = st.selectbox("Select Project Scope", all_projs)
         
-        # Filter data to the Project first
         proj_df = full_df[full_df['Project'] == sel_ex_proj]
         
         with col2:
             all_locs = sorted([l for l in proj_df['Location'].unique() if l])
-            sel_ex_loc = st.selectbox("Select Pipe / Location", all_locs)
+            sel_ex_loc = st.selectbox("Select Pipe to Inspect", all_locs)
 
-        # 2. APPLY REACTIVE FILTER
-        # This is the "Engine" - it narrows the data to exactly what you selected
+        # 2. DATA ENGINE: Filter to Selection
         summary_df = proj_df[proj_df['Location'] == sel_ex_loc].copy()
 
         if not summary_df.empty:
-            # 3. KPI METRICS (Now strictly for the selected Location)
-            # We get the most recent reading for each sensor in THIS location
-            latest_readings = summary_df.sort_values('timestamp').groupby('nodenumber').last()
+            st.subheader(f"📊 Performance Metrics: {sel_ex_loc}")
             
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Active Sensors", len(latest_readings))
-            m2.metric("Avg Temp", f"{latest_readings['value'].mean():.1f}°F")
-            m3.metric("Max Temp", f"{latest_readings['value'].max():.1f}°F")
-            m4.metric("Min Temp", f"{latest_readings['value'].min():.1f}°F")
+            # 3. CALCULATE PIPE-LEVEL STATS
+            # We need the most recent 24 hours to calculate "Greatest Change"
+            now_ts = datetime.now(pytz.UTC)
+            one_day_ago = now_ts - timedelta(hours=24)
+            recent_df = summary_df[summary_df['timestamp'] >= one_day_ago]
 
+            # Group by Node to get individual performance
+            node_stats = []
+            for node in summary_df['nodenumber'].unique():
+                n_df = summary_df[summary_df['nodenumber'] == node].sort_values('timestamp')
+                r_df = recent_df[recent_df['nodenumber'] == node]
+                
+                if not n_df.empty:
+                    latest_row = n_df.iloc[-1]
+                    # Calculate 24h Change (Max - Min in last 24 hours)
+                    delta_24h = r_df['value'].max() - r_df['value'].min() if not r_df.empty else 0
+                    
+                    node_stats.append({
+                        "Node ID": node,
+                        "Depth": f"{latest_row['Depth']}ft",
+                        "Current Temp": f"{latest_row['value']:.1f}°F",
+                        "Min (All Time)": f"{n_df['value'].min():.1f}°F",
+                        "Max (All Time)": f"{n_df['value'].max():.1f}°F",
+                        "24h Delta": f"{delta_24h:.1f}°F",
+                        "Last Reported": latest_row['timestamp'].strftime("%m/%d %H:%M")
+                    })
+
+            # 4. DISPLAY THE TABLE
+            status_table = pd.DataFrame(node_stats)
+            st.table(status_table) # Using st.table for a clean, static look
+
+            # 5. FIND THE "GREATEST CHANGE" OUTLIER
+            if not status_table.empty:
+                # Convert strings back to floats for sorting
+                status_table['delta_float'] = status_table['24h Delta'].str.replace('°F','').astype(float)
+                top_change = status_table.sort_values('delta_float', ascending=False).iloc[0]
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.info(f"**Greatest 24h Change:** {top_change['24h Delta']}")
+                with c2:
+                    st.info(f"**Target Node:** {top_change['Node ID']} ({top_change['Depth']})")
+
+            # 6. MINI OVERVIEW CHART (6-Week Frame)
             st.divider()
-
-            # 4. OVERVIEW CHART (Precision 6-Week Grid)
-            st.subheader(f"Thermal Trend: {sel_ex_loc}")
-            
-            # Anchor to Monday Midnight
-            today_dt = datetime.now(pytz.UTC).date()
-            this_monday = today_dt - timedelta(days=today_dt.weekday())
-            start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=5)
-            end_time = start_time + timedelta(weeks=6)
-
-            chart_df = summary_df[summary_df['timestamp'] >= start_time].copy()
-            chart_df['Label'] = chart_df['Depth'].astype(str) + "ft (" + chart_df['nodenumber'] + ")"
-            
-            fig_ex = px.line(chart_df, x='timestamp', y='value', color='Label', 
-                            range_y=[-20, 80], height=500)
-            
-            # Apply your Precision Grid
-            fig_ex.update_layout(
-                plot_bgcolor='white',
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis=dict(showgrid=False, range=[start_time, end_time], linecolor='Black', mirror=True),
-                yaxis=dict(gridcolor='LightGrey', range=[-20, 80], linecolor='Black', mirror=True),
-                showlegend=False # Summary remains clean; use Diagnostics for details
-            )
-            
-            # Manual vertical lines for Mondays
-            for i in range(43): # 6 weeks of days
-                day = start_time + timedelta(days=i)
-                if day.weekday() == 0:
-                    fig_ex.add_vline(x=day.timestamp()*1000, line_width=1.5, line_color="DimGrey")
-
+            chart_df = summary_df[summary_df['timestamp'] >= (now_ts - timedelta(weeks=6))]
+            fig_ex = px.line(chart_df, x='timestamp', y='value', color='nodenumber', 
+                            range_y=[-20, 80], height=400, template="plotly_white")
+            fig_ex.update_layout(showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig_ex, use_container_width=True)
             
         else:
-            st.warning(f"⚠️ No data found for '{sel_ex_loc}' in Project '{sel_ex_proj}'. Check your Master Metadata mapping.")
-
+            st.warning(f"No data found for {sel_ex_loc}. Verify the Node IDs in your Master Sheet.")
     else:
-        st.error("Master Table is empty. Run 'Database Maintenance' to build it.")
+        st.error("Master Table is missing. Run Database Maintenance.")
         
 # --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
