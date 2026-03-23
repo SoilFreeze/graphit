@@ -499,19 +499,23 @@ elif service == "⚙️ Database Maintenance":
         with st.spinner("Rebuilding Master Table... this may take 30 seconds..."):
             try:
                 # UPDATE THIS SECTION in your '⚙️ Database Maintenance' block
-                # UPDATE THIS SECTION in your '⚙️ Database Maintenance' block
+                # --- SERVICE 6: DATABASE MAINTENANCE ---
+elif service == "⚙️ Database Maintenance":
+    st.header("⚙️ Database Maintenance & System Health")
+    
+    st.subheader("🚀 Master Data Scrub")
+    if st.button("🔄 EXECUTE MASTER SCRUB"):
+        with st.spinner("Rebuilding Master Table..."):
+            try:
+                # Standardizing to Hyphens (-) for all IDs
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
-                    -- 1. Standardize Lord IDs to use hyphens during the union
                     SELECT CAST(timestamp AS TIMESTAMP) as ts, value, 
                            REPLACE(nodenumber, ':', '-') as nodenumber, 
                            CAST(is_approved AS BOOL) as is_approved, CAST(engineer_note AS STRING) as engineer_note 
                     FROM `sensorpush-export.sensor_data.raw_lord` WHERE value <= 90
-    
                     UNION ALL
-    
-                    -- 2. Standardize SensorPush IDs to use hyphens
                     SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, 
                            REPLACE(sensor_name, ':', '-') as nodenumber, 
                            CAST(is_approved AS BOOL) as is_approved, CAST(engineer_note AS STRING) as engineer_note 
@@ -527,20 +531,13 @@ elif service == "⚙️ Database Maintenance":
                     FROM UnifiedRaw 
                     GROUP BY 1, 2
                 )
-                -- 3. Final Join using standardized hyphens on BOTH sides
                 SELECT d.*, m.Project, m.Location, m.Depth
-                                FROM HourlyAgg d
+                FROM HourlyAgg d
                 INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
                 ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
                 """
-
-
-                
-                query_job = client.query(scrub_query)
-                query_job.result() # Wait for it to finish
-                
-                st.success("✅ Master Table Rebuilt Successfully! Your graphs are now up to date.")
-                st.balloons()
+                client.query(scrub_query).result()
+                st.success("✅ Master Table Rebuilt! Data merged using hyphens.")
             except Exception as e:
                 st.error(f"❌ Scrub Failed: {e}")
 
