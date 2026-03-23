@@ -181,7 +181,7 @@ if service == "🏠 Executive Summary":
 # 3. APPLY COLOR LOGIC (STYLING)
             df_display = pd.DataFrame(node_stats)
             
-            # CRITICAL FIX: Fill missing values so the formatter doesn't crash
+            # Fill missing values to prevent formatting crashes
             df_display['24h Min'] = df_display['24h Min'].fillna(0)
             df_display['24h Max'] = df_display['24h Max'].fillna(0)
             df_display['24h Delta'] = df_display['24h Delta'].fillna(0)
@@ -208,17 +208,19 @@ if service == "🏠 Executive Summary":
                 
                 return styles
 
-            # 4. DISPLAY STYLED TABLE (With safe formatting)
-            st.dataframe(
-                df_display.style.apply(style_summary, axis=1).format({
+            # 4. DISPLAY AS STATIC TABLE (No Scrolling)
+            # We use st.table() here instead of st.dataframe()
+            st.subheader(f"Detailed Node Status: {sel_ex_loc}")
+            
+            styled_df = df_display.style.apply(style_summary, axis=1).format({
                     "Current": "{:.1f}°F", 
                     "24h Min": "{:.1f}°F", 
                     "24h Max": "{:.1f}°F", 
                     "24h Delta": "{:+.1f}°F",
                     "Last Seen": lambda t: t.strftime("%m/%d %H:%M") if pd.notnull(t) else "N/A"
-                }),
-                use_container_width=True
-            )
+                })
+            
+            st.table(styled_df)
 
             # 5. KPI SUMMARY
             c1, c2 = st.columns(2)
