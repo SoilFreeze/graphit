@@ -158,11 +158,11 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
-# --- SERVICE 1: NODE DIAGNOSTICS (PRECISION GRID + REF LINES) ---
+# --- SERVICE 1: NODE DIAGNOSTIC HUB (MULTI-REF CHECKBOXES) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
-    # 1. Selection UI
+    # 1. TOP UI SELECTION
     col1, col2, col3 = st.columns(3)
     with col1:
         sel_proj = st.selectbox("Project", sorted(full_df['Project'].unique()))
@@ -172,13 +172,17 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=1)
 
-    # NEW: Reference Line Selector
-    ref_choice = st.sidebar.radio(
-        "Thermal Reference Line", 
-        ["None", "32°F (Frost)", "26.6°F (Brine)", "10.2°F (Deep Freeze)"]
-    )
+    # 2. SIDEBAR MULTI-SELECT (The Checkboxes)
+    st.sidebar.subheader("Thermal Reference Lines")
+    ref_options = {
+        "32°F (Frost)": 32.0,
+        "26.6°F (Brine)": 26.6,
+        "10.2°F (Deep)": 10.2
+    }
+    # Create the checkboxes and store which ones are True
+    selected_refs = [label for label, val in ref_options.items() if st.sidebar.checkbox(label)]
 
-    # 2. TIME LOGIC: Strict Monday-to-Monday Window
+    # 3. TIME LOGIC: Strict Monday-to-Monday Window
     today_dt = datetime.now(pytz.UTC).date()
     this_monday = today_dt - timedelta(days=today_dt.weekday())
     start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
@@ -197,7 +201,7 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
                      range_y=[-20, 80], height=800)
 
-        # 3. Y-AXIS: Solid Frame & Solid Grid (Dark 20s, Light 5s)
+        # 4. Y-AXIS: Solid Frame & Solid Grid (Dark 20s, Light 5s)
         fig.update_yaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
             tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
@@ -205,7 +209,7 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
             zeroline=False, range=[-20, 80], title="Temperature (°F)"
         )
 
-        # 4. X-AXIS: Frame, Zero-Cushion, One-Line Midnight
+        # 5. X-AXIS: Frame, Zero-Cushion, One-Line Midnight
         fig.update_xaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
             showgrid=False, zeroline=False,
@@ -213,13 +217,19 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
             range=[start_time, end_time]
         )
         
-        # 5. REFERENCE LINE LOGIC
-        if ref_choice != "None":
-            ref_val = float(ref_choice.split("°F")[0])
-            fig.add_hline(y=ref_val, line_width=2, line_color="#003366", line_dash="solid", 
-                         annotation_text=f"Ref: {ref_val}°F", annotation_position="top left")
+        # 6. DYNAMIC REFERENCE LINES (Loop through selected)
+        for label in selected_refs:
+            val = ref_options[label]
+            fig.add_hline(
+                y=val, 
+                line_width=2, 
+                line_color="#003366", # SoilFreeze Navy
+                line_dash="solid", 
+                annotation_text=f"{val}°F", 
+                annotation_position="top left"
+            )
 
-        # 6. MANUAL GRID: Midnight (Grey) and 6-Hour (Lighter)
+        # 7. MANUAL VERTICAL GRID: Midnight and 6-Hour
         num_days = (end_time - start_time).days
         for i in range(num_days + 1):
             midnight = start_time + timedelta(days=i)
@@ -232,13 +242,13 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
                 line_color="DimGrey" if is_monday else "#CCCCCC"
             )
             
-            # Very Light 6-Hour Lines
+            # Very Light 6-Hour Lines (faded to not distract from data)
             if i < num_days:
                 for h in [6, 12, 18]:
                     mark = midnight + timedelta(hours=h)
                     fig.add_vline(x=mark.timestamp() * 1000, line_width=0.5, line_color="#F0F0F0")
 
-        # 7. LAYOUT: Legend Outside Right
+        # 8. LAYOUT: Legend Outside Right
         fig.update_layout(
             plot_bgcolor='white', hovermode="x unified",
             margin=dict(l=10, r=200, t=10, b=10), 
@@ -246,6 +256,8 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
         )
         
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info(f"No data for {sel_loc}. Starting Monday {start_time.strftime('%m/%d')}.")
         
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
