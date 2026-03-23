@@ -134,7 +134,7 @@ if service == "🏠 Executive Summary":
     st.header("🏠 Engineering Executive Summary")
 
     
-    # --- UPDATE THIS IN YOUR EXECUTIVE SUMMARY SECTION ---
+# --- UPDATE THIS IN YOUR EXECUTIVE SUMMARY SECTION ---
             # 1. FETCH DATA (Safe Version)
             query = f"""
                 SELECT 
