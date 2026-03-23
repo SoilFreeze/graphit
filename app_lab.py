@@ -177,11 +177,16 @@ elif service == "📈 Node Diagnostics":
     if sel_projects:
         try:
             # Graph Query
+           # --- UPDATE THIS IN YOUR NODE DIAGNOSTICS SECTION ---
+            # We convert 'weeks' to 'DAY' by multiplying by 7
+            days = weeks * 7
+            
             graph_q = f"""
                 SELECT timestamp, value, nodenumber, Location, Depth
                 FROM `sensorpush-export.sensor_data.final_databoard_master`
                 WHERE Project IN UNNEST({sel_projects})
-                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {weeks} WEEK)
+                -- Use DAY instead of WEEK
+                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
                 ORDER BY timestamp ASC
             """
             df_graph = client.query(graph_q).to_dataframe()
