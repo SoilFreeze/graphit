@@ -80,19 +80,52 @@ try:
 except Exception as e:
     st.error(f"⚠️ Master Table Missing or Error: {e}. Run 'Database Maintenance' to build it.")
 
-# --- 3. SIDEBAR & HEALTH CHECK ---
-st.sidebar.title("❄️ SoilFreeze Lab")
+# --- 3. SIDEBAR NAVIGATION ---
+st.sidebar.title("🛠 Engineering Hub")
 
-if not full_df.empty:
-    last_ts = full_df['timestamp'].max()
-    st.sidebar.metric("Last Data Sync", last_ts.strftime('%m/%d %H:%M'))
-    if (datetime.now(pytz.UTC) - last_ts).total_seconds() > 7200:
-        st.sidebar.error("🚨 ALERT: Data is > 2 hours old!")
-
+# Update this list to include all your new tools
 service = st.sidebar.selectbox(
     "Select Service", 
-    ["🏠 Executive Summary", "🔍 Node Diagnostics", "📋 Data Approval Portal", "📥 Data Export Lab", "🧹 Database Maintenance"]
+    [
+        "🏠 Executive Summary", 
+        "🔍 Node Diagnostics", 
+        "📋 Data Approval Portal",
+        "📥 Data Export Lab", 
+        "📤 Data Intake Lab",      # New: For Manual Uploads
+        "🧹 Data Cleaning Tool",   # New: For Surgical Deletes
+        "⚙️ Database Maintenance"   # New: For the Master Scrub
+    ]
 )
+
+# --- SERVICE ROUTING ---
+
+if service == "🏠 Executive Summary":
+    # (Insert your Executive Summary code here)
+    pass
+
+elif service == "🔍 Node Diagnostics":
+    # (Insert the Node Diagnostic code with the .sort_values fix here)
+    pass
+
+elif service == "📋 Data Approval Portal":
+    # (Insert the Approval Portal code with Project/Pipe/Date filters here)
+    pass
+
+elif service == "📥 Data Export Lab":
+    # (Insert the Export Lab code here)
+    pass
+
+elif service == "📤 Data Intake Lab":
+    # (Insert the Manual Upload code for CSV/Excel here)
+    pass
+
+elif service == "🧹 Data Cleaning Tool":
+    # (Insert the Plotly Lasso/Scatter Delete tool here)
+    pass
+
+elif service == "⚙️ Database Maintenance":
+    # (Insert the 'Execute Full Master Scrub' button code here)
+    pass
 
 # --- SERVICE: EXECUTIVE SUMMARY ---
 if service == "🏠 Executive Summary" and not full_df.empty:
@@ -197,7 +230,55 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
     
     csv = export_df.to_csv(index=False).encode('utf-8')
     st.download_button("📥 Download Full Project CSV", data=csv, file_name=f"{ex_proj}_export.csv", mime="text/csv")
+    
+# --- SERVICE 4: DATA INTAKE LAB (MANUAL UPLOAD) ---
+elif service == "📤 Data Intake Lab":
+    st.header("📤 Manual Data Ingestion")
+    st.markdown("Upload CSV or Excel files directly to the Raw BigQuery tables.")
 
+    target_table = st.radio("Target Raw Table", ["SensorPush (Raw)", "Lord (Raw)"])
+    uploaded_file = st.file_uploader("Choose a file", type=['csv', 'xlsx'])
+
+    if uploaded_file is not None:
+        # Load the data
+        if uploaded_file.name.endswith('.csv'):
+            up_df = pd.read_csv(uploaded_file)
+        else:
+            up_df = pd.read_excel(uploaded_file)
+
+        st.subheader("Preview of Uploaded Data")
+        st.dataframe(up_df.head(5))
+
+        # --- MAPPING & CLEANING ---
+        if st.button("🚀 PUSH TO BIGQUERY"):
+            with st.spinner("Cleaning and Uploading..."):
+                try:
+                    # 1. Standardize Columns based on selection
+                    if "SensorPush" in target_table:
+                        # Expecting columns: timestamp, temperature, sensor_name
+                        # We force the 90°F limit immediately
+                        up_df = up_df[up_df['temperature'] <= 90]
+                        table_id = "sensorpush-export.sensor_data.raw_sensorpush"
+                    else:
+                        # Expecting columns: timestamp, value, nodenumber
+                        up_df = up_df[up_df['value'] <= 90]
+                        table_id = "sensorpush-export.sensor_data.raw_lord"
+
+                    # 2. Add empty approval/note columns if they don't exist in the file
+                    up_df['is_approved'] = False
+                    up_df['engineer_note'] = "Manual Upload"
+
+                    # 3. Upload to BigQuery
+                    # 'if_exists=append' ensures we don't overwrite the whole table
+                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                    client.load_table_from_dataframe(up_df, table_id, job_config=job_config).result()
+
+                    st.success(f"✅ Successfully appended {len(up_df)} records to {target_table}.")
+                    st.info("💡 Pro-Tip: Now go to 'Database Maintenance' and run the 'Master Scrub' to see this data on the charts.")
+                    st.balloons()
+                except Exception as e:
+                    st.error(f"Upload failed: {e}") 
+                    
 # --- SERVICE: DATABASE MAINTENANCE (THE FIX-IT TAB) ---
 if service == "🧹 Database Maintenance":
     st.header("🧹 Database Maintenance")
