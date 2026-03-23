@@ -415,43 +415,61 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
 # --- SERVICE 5: DATA INTAKE LAB (MANUAL UPLOAD) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
-    st.markdown("Upload CSV or Excel files directly to the Raw BigQuery tables to fill gaps.")
+    st.markdown("""
+    Use this tool to upload logger data (CSV/Excel) directly into the raw database. 
+    **Note:** Data will be automatically capped at 90°F per SoilFreeze standards.
+    """)
 
-    # 1. Target Selection
-    target_table = st.radio("Target Raw Table", ["SensorPush (Raw)", "Lord (Raw)"], horizontal=True)
-    uploaded_file = st.file_uploader("Choose a file", type=['csv', 'xlsx'])
+    # 1. Select the Source
+    source_type = st.radio("Select Data Source", ["SensorPush (CSV)", "Lord Logger (CSV/Excel)"], horizontal=True)
+    uploaded_file = st.file_uploader("Upload Sensor File", type=['csv', 'xlsx'])
 
-    if uploaded_file is not None:
-        # Load the data
-        up_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-        
-        st.subheader("Preview of Uploaded Data")
-        st.dataframe(up_df.head(5), use_container_width=True)
+    if uploaded_file:
+        # Load data based on file type
+        if uploaded_file.name.endswith('.csv'):
+            df_upload = pd.read_csv(uploaded_file)
+        else:
+            df_upload = pd.read_excel(uploaded_file)
 
-        # 2. Upload Logic
-        if st.button("🚀 PUSH TO BIGQUERY"):
-            with st.spinner("Processing..."):
-                try:
-                    # Apply SoilFreeze 90°F Hard Limit immediately
-                    if "SensorPush" in target_table:
-                        up_df = up_df[up_df['temperature'] <= 90]
-                        table_id = "sensorpush-export.sensor_data.raw_sensorpush"
+        st.subheader("👀 Data Preview (First 5 Rows)")
+        st.dataframe(df_upload.head(5), use_container_width=True)
+
+        # 2. Map Columns based on Source
+        if st.button("🚀 VALIDATE & PUSH TO CLOUD"):
+            try:
+                with st.spinner("Standardizing and Uploading..."):
+                    # Standardize SensorPush
+                    if "SensorPush" in source_type:
+                        # Required: timestamp, temperature, sensor_name
+                        df_upload = df_upload.rename(columns={'Timestamp': 'timestamp', 'Temperature': 'temperature', 'Sensor': 'sensor_name'})
+                        df_upload = df_upload[df_upload['temperature'] <= 90]
+                        target_table = "sensorpush-export.sensor_data.raw_sensorpush"
+                    
+                    # Standardize Lord
                     else:
-                        up_df = up_df[up_df['value'] <= 90]
-                        table_id = "sensorpush-export.sensor_data.raw_lord"
+                        # Required: timestamp, value, nodenumber
+                        df_upload = df_upload.rename(columns={'Date/Time': 'timestamp', 'Value': 'value', 'Node': 'nodenumber'})
+                        df_upload = df_upload[df_upload['value'] <= 90]
+                        target_table = "sensorpush-export.sensor_data.raw_lord"
 
-                    # Ensure standard columns exist
-                    up_df['is_approved'] = False
-                    up_df['engineer_note'] = "Manual Upload"
+                    # Add System Metadata
+                    df_upload['is_approved'] = False
+                    df_upload['engineer_note'] = f"Manual Upload: {datetime.now().strftime('%Y-%m-%d')}"
+                    
+                    # Ensure timestamp is actual datetime objects
+                    df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'])
 
-                    # Push to BigQuery (Append Mode)
+                    # 3. Push to BigQuery
                     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                    client.load_table_from_dataframe(up_df, table_id, job_config=job_config).result()
+                    client.load_table_from_dataframe(df_upload, target_table, job_config=job_config).result()
 
-                    st.success(f"✅ Successfully added {len(up_df)} records. Go to 'Maintenance' to Scrub.")
+                    st.success(f"✅ Successfully uploaded {len(df_upload)} rows to {source_type}!")
+                    st.info("💡 Next Step: Go to 'Database Maintenance' and run the 'Master Scrub' to update your charts.")
                     st.balloons()
-                except Exception as e:
-                    st.error(f"Upload failed: {e}. Check that your headers match the Raw table.")
+
+            except Exception as e:
+                st.error(f"❌ Upload Failed: {e}")
+                st.info("Check that your CSV headers match the expected names (e.g., Temperature, Timestamp).")
                     
 # --- SERVICE: DATABASE MAINTENANCE (THE FIX-IT TAB) ---
 if service == "🧹 Database Maintenance":
