@@ -133,6 +133,20 @@ elif service == "⚙️ Database Maintenance":
 if service == "🏠 Executive Summary":
     st.header("🏠 Engineering Executive Summary")
 
+    
+    # --- UPDATE THIS IN YOUR EXECUTIVE SUMMARY SECTION ---
+            # 1. FETCH DATA (Safe Version)
+            query = f"""
+                SELECT 
+                    nodenumber, 
+                    MAX(timestamp) as last_seen,
+                    -- Use COALESCE to handle cases where the column might be missing during a rebuild
+                    AVG(value) as current_temp,
+                    'No Note' as engineer_note 
+                FROM `sensorpush-export.sensor_data.final_databoard_master`
+                WHERE Project = '{sel_ex_loc}'
+                GROUP BY nodenumber
+            """
     if not full_df.empty:
         # 1. DYNAMIC FILTERS
         col1, col2 = st.columns(2)
