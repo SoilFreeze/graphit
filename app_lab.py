@@ -158,7 +158,7 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
-# --- SERVICE 1: NODE DIAGNOSTIC HUB (MULTI-REF CHECKBOXES) ---
+# --- SERVICE 1: NODE DIAGNOSTIC HUB (DATA GAPS ENABLED) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
@@ -172,14 +172,9 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=1)
 
-    # 2. SIDEBAR MULTI-SELECT (The Checkboxes)
+    # 2. SIDEBAR REFERENCE LINES
     st.sidebar.subheader("Thermal Reference Lines")
-    ref_options = {
-        "32°F (Frost)": 32.0,
-        "26.6°F (Brine)": 26.6,
-        "10.2°F (Deep)": 10.2
-    }
-    # Create the checkboxes and store which ones are True
+    ref_options = {"32°F (Frost)": 32.0, "26.6°F (Brine)": 26.6, "10.2°F (Deep)": 10.2}
     selected_refs = [label for label, val in ref_options.items() if st.sidebar.checkbox(label)]
 
     # 3. TIME LOGIC: Strict Monday-to-Monday Window
@@ -196,68 +191,68 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     ].copy().sort_values(['nodenumber', 'timestamp'])
 
     if not plot_df.empty:
+        # CRITICAL: Identify gaps > 6 hours and insert a None row to break the line
+        # We do this per sensor to avoid mixing data
+        processed_dfs = []
+        for node in plot_df['nodenumber'].unique():
+            node_df = plot_df[plot_df['nodenumber'] == node].copy()
+            # Calculate time difference between rows
+            node_df['diff'] = node_df['timestamp'].diff().dt.total_seconds() / 3600
+            
+            # Create "Gap" rows where diff > 6 hours
+            gaps = node_df[node_df['diff'] > 6.0].copy()
+            if not gaps.empty:
+                gaps['value'] = None  # This breaks the Plotly line
+                gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
+                node_df = pd.concat([node_df, gaps]).sort_values('timestamp')
+            
+            processed_dfs.append(node_df)
+        
+        plot_df = pd.concat(processed_dfs)
         plot_df['Sensor'] = plot_df['Depth'].astype(str) + "ft (" + plot_df['nodenumber'] + ")"
         
+        # 4. PLOT: connectgaps=False is the key here
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
                      range_y=[-20, 80], height=800)
+        fig.update_traces(connectgaps=False) 
 
-        # 4. Y-AXIS: Solid Frame & Solid Grid (Dark 20s, Light 5s)
+        # 5. Y-AXIS & X-AXIS (Same Precision Grid as requested)
         fig.update_yaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
             tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
             minor=dict(dtick=5, gridcolor='#E5E5E5', showgrid=True), 
             zeroline=False, range=[-20, 80], title="Temperature (°F)"
         )
-
-        # 5. X-AXIS: Frame, Zero-Cushion, One-Line Midnight
         fig.update_xaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
-            showgrid=False, zeroline=False,
-            tickformat="%a\n%b %d", title="",
+            showgrid=False, zeroline=False, tickformat="%a\n%b %d", title="",
             range=[start_time, end_time]
         )
         
-        # 6. DYNAMIC REFERENCE LINES (Loop through selected)
+        # 6. DYNAMIC REFERENCE LINES
         for label in selected_refs:
             val = ref_options[label]
-            fig.add_hline(
-                y=val, 
-                line_width=2, 
-                line_color="#003366", # SoilFreeze Navy
-                line_dash="solid", 
-                annotation_text=f"{val}°F", 
-                annotation_position="top left"
-            )
+            fig.add_hline(y=val, line_width=2, line_color="#003366", annotation_text=f"{val}°F")
 
-        # 7. MANUAL VERTICAL GRID: Midnight and 6-Hour
+        # 7. MANUAL VERTICAL GRID
         num_days = (end_time - start_time).days
         for i in range(num_days + 1):
             midnight = start_time + timedelta(days=i)
             is_monday = (midnight.weekday() == 0)
-            
-            # Vertical Midnight Line
-            fig.add_vline(
-                x=midnight.timestamp() * 1000, 
-                line_width=1.5 if is_monday else 1, 
-                line_color="DimGrey" if is_monday else "#CCCCCC"
-            )
-            
-            # Very Light 6-Hour Lines (faded to not distract from data)
+            fig.add_vline(x=midnight.timestamp()*1000, line_width=1.5 if is_monday else 1, 
+                         line_color="DimGrey" if is_monday else "#CCCCCC")
             if i < num_days:
                 for h in [6, 12, 18]:
-                    mark = midnight + timedelta(hours=h)
-                    fig.add_vline(x=mark.timestamp() * 1000, line_width=0.5, line_color="#F0F0F0")
+                    fig.add_vline(x=(midnight+timedelta(hours=h)).timestamp()*1000, 
+                                 line_width=0.5, line_color="#F0F0F0")
 
-        # 8. LAYOUT: Legend Outside Right
-        fig.update_layout(
-            plot_bgcolor='white', hovermode="x unified",
-            margin=dict(l=10, r=200, t=10, b=10), 
-            legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1)
-        )
+        fig.update_layout(plot_bgcolor='white', hovermode="x unified",
+                         margin=dict(l=10, r=200, t=10, b=10),
+                         legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1))
         
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info(f"No data for {sel_loc}. Starting Monday {start_time.strftime('%m/%d')}.")
+        st.info(f"No data for {sel_loc} in the requested window.")
         
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
