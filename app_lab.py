@@ -396,21 +396,32 @@ elif service == "📤 Data Intake Lab":
         except Exception as e:
             st.error(f"Error: {e}")
 
-# --- SERVICE 6: DATABASE MAINTENANCE (PLACEHOLDER VERSION) ---
+# --- SERVICE 6: DATABASE MAINTENANCE (FINAL CLEAN VERSION) ---
 elif service == "⚙️ Database Maintenance":
-    st.subheader("🚀 Master Data Scrub")
-    if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub"):
-        with st.spinner("Rebuilding Master..."):
+    st.header("⚙️ Database Maintenance")
+    
+    st.info("This tool will rebuild your Master Table from scratch using clean raw data.")
+
+    # THE ONLY BUTTON THAT MATTERS RIGHT NOW
+    if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub_final"):
+        with st.spinner("Rebuilding Master Table..."):
             try:
+                # This query pulls ONLY core data (Time, Temp, ID)
+                # It manually creates 'engineer_note' so the rest of the app doesn't crash
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
-                    -- Pulling ONLY core data from Raw
+                    -- Pull from Lord
                     SELECT CAST(timestamp AS TIMESTAMP) as ts, value, REPLACE(nodenumber, ':', '-') as nodenumber
-                    FROM `sensorpush-export.sensor_data.raw_lord` WHERE value <= 90
+                    FROM `sensorpush-export.sensor_data.raw_lord` 
+                    WHERE value <= 90
+                    
                     UNION ALL
+                    
+                    -- Pull from SensorPush
                     SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, REPLACE(sensor_name, ':', '-') as nodenumber
-                    FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE temperature <= 90
+                    FROM `sensorpush-export.sensor_data.raw_sensorpush` 
+                    WHERE temperature <= 90
                 ),
                 HourlyAgg AS (
                     SELECT 
@@ -423,15 +434,34 @@ elif service == "⚙️ Database Maintenance":
                 SELECT 
                     d.*, 
                     m.Project, m.Location, m.Depth,
-                    -- Create the note column here so it exists in the Master Table only
+                    -- This line creates the missing column as a blank 'placeholder'
                     CAST(NULL AS STRING) as engineer_note,
                     CAST(FALSE AS BOOL) as is_approved
                 FROM HourlyAgg d
                 INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
                     ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
                 """
-                client.query(scrub_query).result()
-                st.success("✅ Master Table Rebuilt! Raw tables are now clean.")
-            except Exception as e:
-                st.error(f"Scrub failed: {e}")
                 
+                # Execute the rebuild
+                client.query(scrub_query).result()
+                
+                st.success("✅ SUCCESS! The Master Table has been rebuilt with all required columns.")
+                st.balloons()
+                st.info("You can now safely go back to the Executive Summary.")
+                
+            except Exception as e:
+                st.error(f"❌ Scrub failed: {e}")
+                st.info("If it still says 'Unrecognized name', make sure no other parts of your app are running queries in the background.")
+
+    st.divider()
+    
+    # Simple Cleanup Tool
+    if st.button("🗑️ PURGE GHOST DATA", key="btn_purge_final"):
+        try:
+            p_lord = "DELETE FROM `sensorpush-export.sensor_data.raw_lord` WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
+            p_sp = "DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
+            client.query(p_lord).result()
+            client.query(p_sp).result()
+            st.success("Cleaned!")
+        except Exception as e:
+            st.error(f"Purge error: {e}")
