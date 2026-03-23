@@ -158,7 +158,7 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
-# --- SERVICE 1: NODE DIAGNOSTICS (ZERO-CUSHION GRID) ---
+# --- SERVICE 1: NODE DIAGNOSTICS (EXTERNAL LEGEND & ZERO CUSHION) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
@@ -171,14 +171,11 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     with col3:
         weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=1)
 
-    # 1. TIME LOGIC: Strict Monday Midnight to Monday Midnight
+    # 1. TIME LOGIC: Strict Monday Midnight to Monday Midnight (Full Week)
     today_dt = datetime.now(pytz.UTC).date()
-    # Calculate this past Monday
     this_monday = today_dt - timedelta(days=today_dt.weekday())
-    # Start Date: Move back based on weeks requested
     start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
-    # End Date: Exactly 7 days after the 'most recent' Monday in the view
-    end_time = start_time + timedelta(weeks=weeks_to_show)
+    end_time = start_time + timedelta(weeks=weeks_to_show) # Forces the full week view
     
     plot_df = full_df[
         (full_df['Project'] == sel_proj) & 
@@ -190,33 +187,31 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
     if not plot_df.empty:
         plot_df['Sensor'] = plot_df['Depth'].astype(str) + "ft (" + plot_df['nodenumber'] + ")"
         
-        # Lock the X-axis range to remove the "cushion"
         fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
-                     range_y=[-20, 80], range_x=[start_time, end_time], height=800)
+                     range_y=[-20, 80], height=800)
 
-        # 2. Y-AXIS: Frame, Dark 20s, Light 5s
+        # 2. Y-AXIS: Frame, Solid Grid (20s DimGrey, 5s LightGrey)
         fig.update_yaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
             tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
             minor=dict(dtick=5, gridcolor='LightGrey', showgrid=True),
             zeroline=True, zerolinecolor='Black', zerolinewidth=2,
-            title="Temperature (°F)", constraintoward='bottom'
+            title="Temperature (°F)", range=[-20, 80]
         )
 
-        # 3. X-AXIS: Frame, No Default Grid (to stop double lines)
+        # 3. X-AXIS: Frame, No Default Grid, Strict Range
         fig.update_xaxes(
             showline=True, linewidth=2, linecolor='Black', mirror=True,
-            showgrid=False, # STOP DOUBLE LINES
+            showgrid=False, # Stop double lines
             minor=dict(dtick=21600000.0, gridcolor='LightGrey', showgrid=True), # 6 Hours
             tickformat="%a\n%b %d", title="",
-            range=[start_time, end_time] # REMOVE CUSHION
+            range=[start_time, end_time] # Forces data/grid to hit frame
         )
         
-        # 4. MANUAL DAILY LINES: One solid line at Midnight
+        # 4. MANUAL DAILY LINES: Midnight Solid Lines
         num_days = (end_time - start_time).days
         for i in range(num_days + 1):
             current_date = start_time + timedelta(days=i)
-            # Monday = 0
             is_monday = (current_date.weekday() == 0)
             fig.add_vline(
                 x=current_date.timestamp() * 1000, 
@@ -224,16 +219,27 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
                 line_color="DimGrey" if is_monday else "LightGrey"
             )
 
+        # 5. LAYOUT: External Legend & Zero Cushion
         fig.update_layout(
             plot_bgcolor='white', 
             hovermode="x unified", 
-            margin=dict(l=10, r=10, t=10, b=10), # Tighten frame to edge
-            legend=dict(bordercolor="Black", borderwidth=1, yanchor="top", y=0.99, xanchor="left", x=0.01)
+            margin=dict(l=10, r=150, t=10, b=10), # Added right margin for legend space
+            showlegend=True,
+            legend=dict(
+                title="Sensors",
+                orientation="v",
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02, # Positioned exactly outside the right frame line
+                bordercolor="Black",
+                borderwidth=1
+            )
         )
         
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info(f"No data found for {sel_loc}. The chart is set to show the week starting {start_time.strftime('%m/%d')}.")
+        st.info(f"No data found. Grid set for week of {start_time.strftime('%m/%d')}.")
 
 # --- SERVICE 2: DATA APPROVAL PORTAL (WITH EXCLUSIONS) ---
 elif service == "📋 Data Approval Portal":
