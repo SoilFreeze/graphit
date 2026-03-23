@@ -457,12 +457,12 @@ elif service == "📤 Data Intake Lab":
             st.error(f"Error: {e}")
 #
 #
-# --- SERVICE 6: DATABASE MAINTENANCE (UNIQUE KEYS) ---
+# --- SERVICE 6: DATABASE MAINTENANCE (WITH PURGE TOOL) ---
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance & System Health")
     
+    # --- SECTION 1: MASTER SCRUB ---
     st.subheader("🚀 Master Data Scrub")
-    # Added key="btn_execute_scrub"
     if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub"):
         with st.spinner("Rebuilding Master Table..."):
             try:
@@ -495,27 +495,54 @@ elif service == "⚙️ Database Maintenance":
                 ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
                 """
                 client.query(scrub_query).result()
-                st.success("✅ Master Table Rebuilt! Data merged using hyphens.")
+                st.success("✅ Master Table Rebuilt!")
                 st.balloons()
             except Exception as e:
                 st.error(f"❌ Scrub Failed: {e}")
 
     st.divider()
     
-    st.subheader("🕵️ Metadata Diagnostic")
-    # Added key="btn_diagnostic_scan"
-    if st.button("🔍 SCAN FOR UNMAPPED NODES", key="btn_diagnostic_scan"):
-        try:
+    # --- SECTION 2: GHOST SENSOR CLEANUP ---
+    st.subheader("🕵️ Metadata Diagnostic & Purge")
+    st.markdown("Use this to find and remove data for sensors that are no longer part of your fleet.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🔍 SCAN FOR UNMAPPED NODES", key="btn_diagnostic_scan"):
             ghost_query = """
-            SELECT DISTINCT nodenumber FROM `sensorpush-export.sensor_data.raw_lord` 
-            WHERE nodenumber NOT IN (SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata` 
-            UNION ALL SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
+            SELECT DISTINCT nodenumber, 'Lord' as Source FROM `sensorpush-export.sensor_data.raw_lord` 
+            WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
+            UNION ALL
+            SELECT DISTINCT sensor_name as nodenumber, 'SensorPush' as Source FROM `sensorpush-export.sensor_data.raw_sensorpush`
+            WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
             """
             ghosts = client.query(ghost_query).to_dataframe()
             if not ghosts.empty:
-                st.warning("Found unmapped sensors:")
+                st.warning(f"Found {len(ghosts)} unmapped sensors:")
                 st.table(ghosts)
             else:
-                st.success("All sensors mapped!")
-        except Exception as e:
-            st.error(f"Diagnostic failed: {e}")
+                st.success("Clean! All sensors in the database are mapped.")
+
+    with col2:
+        # THE ERASE BUTTON
+        if st.button("🗑️ PURGE UNMAPPED DATA", key="btn_purge_unmapped"):
+            with st.spinner("Deleting unmapped records..."):
+                try:
+                    # Logic: Delete from raw tables if the ID isn't in Metadata (checking both - and :)
+                    purge_lord = """
+                    DELETE FROM `sensorpush-export.sensor_data.raw_lord`
+                    WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
+                    """
+                    purge_sp = """
+                    DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush`
+                    WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata`)
+                    """
+                    
+                    client.query(purge_lord).result()
+                    client.query(purge_sp).result()
+                    
+                    st.success("💥 Purge Complete! Ghost data has been erased.")
+                    st.info("Now run the 'Master Scrub' to refresh the dashboard.")
+                except Exception as e:
+                    st.error(f"Purge failed: {e}")
