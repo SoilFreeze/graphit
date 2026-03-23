@@ -160,7 +160,7 @@ if service == "🏠 Executive Summary":
         st.error(f"Executive Summary Error: {e}")
 
 
-# --- SERVICE 2: NODE DIAGNOSTICS (RESTORED FEATURES) ---
+# --- SERVICE 2: NODE DIAGNOSTICS (NULL-SAFE VERSION) ---
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
@@ -168,34 +168,35 @@ elif service == "📈 Node Diagnostics":
     col_filt1, col_filt2, col_filt3 = st.columns(3)
     
     with col_filt1:
-        # Project Filter (Multi-select)
+        # Project Filter
         m_q = "SELECT DISTINCT Project FROM `sensorpush-export.sensor_data.master_metadata` ORDER BY Project"
         projects = client.query(m_q).to_dataframe()['Project'].tolist()
-        sel_projects = st.multiselect("Filter Projects", projects, default=[projects[0]] if projects else [])
+        sel_projects = st.multiselect("Filter Projects", projects)
     
     with col_filt2:
-        # Location/Pipe Filter (The "Look at one pipe" feature)
+        # Location Filter - only populates if projects are selected
         if sel_projects:
             loc_q = f"SELECT DISTINCT Location FROM `sensorpush-export.sensor_data.master_metadata` WHERE Project IN UNNEST({sel_projects}) ORDER BY Location"
             locations = client.query(loc_q).to_dataframe()['Location'].tolist()
-            sel_locations = st.multiselect("Filter Specific Pipes/Locations", locations, default=locations)
+            sel_locations = st.multiselect("Filter Specific Pipes", locations, default=locations)
         else:
             sel_locations = []
-            st.warning("Select a project first.")
+            st.info("👈 Select a project to see pipes.")
 
     with col_filt3:
-        # Time Window
         weeks = st.slider("Weeks to Display", 1, 12, 6)
 
-    # 2. THE GRAPHING ENGINE
+    # 2. THE GRAPHING ENGINE - Only runs if BOTH filters have values
     if sel_projects and sel_locations:
         try:
             days = weeks * 7
+            # Use tuple() to format the lists correctly for BigQuery's 'IN' clause
+            # This avoids the 'None' error
             graph_q = f"""
                 SELECT timestamp, value, nodenumber, Location, Depth
                 FROM `sensorpush-export.sensor_data.final_databoard_master`
-                WHERE Project IN UNNEST({sel_projects})
-                AND Location IN UNNEST({sel_locations})
+                WHERE Project IN UNNEST({list(sel_projects)})
+                AND Location IN UNNEST({list(sel_locations)})
                 AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
                 ORDER BY timestamp ASC
             """
@@ -203,46 +204,34 @@ elif service == "📈 Node Diagnostics":
 
             if not df_graph.empty:
                 import plotly.express as px
-                
-                # Create a clean label for the legend
                 df_graph['label'] = df_graph['Location'] + " (" + df_graph['Depth'] + ")"
                 
-                # Build the Line Chart
                 fig = px.line(
                     df_graph, 
                     x='timestamp', 
                     y='value', 
                     color='label',
                     title=f"Temperature Trends: Last {weeks} Weeks",
-                    labels={'value': 'Temperature (°F)', 'timestamp': 'Date/Time', 'label': 'Sensor Location'}
+                    labels={'value': 'Temp (°F)', 'timestamp': 'Time', 'label': 'Pipe'}
                 )
                 
-                # --- ADD REFERENCE LINES ---
-                # Red Dash for Freezing
-                fig.add_hline(y=32, line_dash="dash", line_color="#ff4b4b", 
-                             annotation_text="Freezing (32°F)", annotation_position="top left")
+                # Restore Reference Lines
+                fig.add_hline(y=32, line_dash="dash", line_color="#ff4b4b", annotation_text="32°F")
+                fig.add_hline(y=28, line_dash="dot", line_color="#28a745", annotation_text="28°F")
                 
-                # Green Dash for Safe Zone (28°F)
-                fig.add_hline(y=28, line_dash="dot", line_color="#28a745", 
-                             annotation_text="Target Freeze (28°F)", annotation_position="bottom left")
-
-                # Format the X-Axis for readability
                 fig.update_layout(hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-                
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # 3. STATISTICAL SUMMARY
-                st.subheader("Quick Stats for Selected Pipes")
-                stats_df = df_graph.groupby('label')['value'].agg(['min', 'max', 'mean']).round(1)
-                st.dataframe(stats_df, use_container_width=True)
-
+                # Stats Table
+                st.subheader("Sensor Summary")
+                stats = df_graph.groupby('label')['value'].agg(['min', 'max', 'mean']).round(1)
+                st.table(stats)
             else:
-                st.info("No data found for these pipes in the selected timeframe.")
-                
+                st.info("No data found for these specific pipes in the last few weeks.")
         except Exception as e:
             st.error(f"Graph Error: {e}")
     else:
-        st.info("Please select at least one Project and one Location to view the graph.")
+        st.info("Please select both a Project and at least one Pipe to view the data.")
 
 # --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
