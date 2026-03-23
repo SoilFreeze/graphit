@@ -466,28 +466,44 @@ elif service == "📤 Data Intake Lab":
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance")
     
-    # NEW: Diagnostic Tool to see if SensorPush data is even reaching BigQuery
-    st.subheader("📡 Raw Data Health Check")
-    if st.button("🔍 Scan Raw SensorPush Table", key="check_sp_raw"):
-        check_q = "SELECT sensor_name, MAX(timestamp) as last_seen, COUNT(*) as row_count FROM `sensorpush-export.sensor_data.raw_sensorpush` GROUP BY 1 ORDER BY last_seen DESC LIMIT 10"
+    # 1. LIVE DATA MONITOR
+    st.subheader("📡 Connection Health (SensorPush to BigQuery)")
+    st.info("Since you have an online connection, this table shows when the 'handshake' last worked.")
+    
+    if st.button("🔍 Check Online Sync Status", key="btn_sync_check"):
+        # This query checks the absolute latest data in the raw table
+        check_q = """
+        SELECT 
+            sensor_name, 
+            FORMAT_TIMESTAMP('%m/%d %H:%M', MAX(timestamp), 'America/Los_Angeles') as last_reading_pst,
+            TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), MAX(timestamp), HOUR) as hours_ago
+        FROM `sensorpush-export.sensor_data.raw_sensorpush`
+        GROUP BY 1
+        ORDER BY MAX(timestamp) DESC
+        """
         try:
-            sp_raw_df = client.query(check_q).to_dataframe()
-            if sp_raw_df.empty:
-                st.warning("No data found in the raw SensorPush table for the last 24 hours.")
+            sync_df = client.query(check_q).to_dataframe()
+            if sync_df.empty:
+                st.error("No data found in the raw table.")
             else:
-                st.write("Latest data received in the cloud:")
-                st.table(sp_raw_df)
+                st.table(sync_df)
+                # Check if the gap is wide
+                max_lag = sync_df['hours_ago'].min()
+                if max_lag > 2:
+                    st.warning(f"⚠️ Data is {max_lag} hours behind. Your online connector may be paused or unauthorized.")
         except Exception as e:
-            st.error(f"Could not read raw table: {e}")
+            st.error(f"Could not connect to BigQuery: {e}")
 
     st.divider()
+
+    # 2. THE MASTER SCRUB
     st.subheader("🚀 Master Data Scrub")
-    st.info("This moves data from 'Raw' to 'Graphs'. If this isn't run, your charts stay empty.")
+    st.markdown("Run this to move 'Friday to Monday' data from the raw tables into your graphs.")
     
     if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub"):
-        with st.spinner("Merging data and updating IDs..."):
+        with st.spinner("Processing data..."):
             try:
-                # This query fixes the colon/hyphen issue globally
+                # This query pulls Lord + SensorPush and cleans IDs
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
@@ -505,18 +521,6 @@ elif service == "⚙️ Database Maintenance":
                 GROUP BY 1, 2, 4, 5, 6
                 """
                 client.query(scrub_query).result()
-                st.success("✅ Master Table Rebuilt! Check your graphs now.")
+                st.success("✅ Master Table Rebuilt! If data is in the raw tables, it is now in the graphs.")
             except Exception as e:
                 st.error(f"Scrub error: {e}")
-
-    st.divider()
-    st.subheader("🗑️ Data Cleanup")
-    if st.button("🗑️ PURGE UNMAPPED DATA", key="btn_purge_unmapped"):
-        try:
-            p_lord = "DELETE FROM `sensorpush-export.sensor_data.raw_lord` WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
-            p_sp = "DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
-            client.query(p_lord).result()
-            client.query(p_sp).result()
-            st.success("Unmapped ghost data erased.")
-        except Exception as e:
-            st.error(f"Purge error: {e}")
