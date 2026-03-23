@@ -474,59 +474,84 @@ elif service == "📤 Data Intake Lab":
         except Exception as e:
             st.error(f"❌ Upload Failed: {e}")
                     
-# --- SERVICE: DATABASE MAINTENANCE (THE FIX-IT TAB) ---
-if service == "🧹 Database Maintenance":
-    st.header("🧹 Database Maintenance")
-    st.info("This tool applies the 90°F limit and the 5°F hourly averaging across all Lord and SensorPush data.")
+# --- SERVICE 6: DATABASE MAINTENANCE ---
+elif service == "⚙️ Database Maintenance":
+    st.header("⚙️ Database Maintenance & System Health")
     
-    if st.button("🚀 EXECUTE FULL MASTER SCRUB", type="primary"):
-        with st.spinner("Rebuilding Master Dashboard..."):
-            scrub_sql = """
-            CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
-            WITH UnifiedRaw AS (
-                SELECT CAST(timestamp AS TIMESTAMP) as ts, value, nodenumber, is_approved, engineer_note FROM `sensorpush-export.sensor_data.raw_lord` WHERE value <= 90
-                UNION ALL
-                SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, sensor_name AS nodenumber, is_approved, engineer_note FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE temperature <= 90
-            ),
-            HourlyAgg AS (
-                SELECT TIMESTAMP_TRUNC(ts, HOUR) as timestamp, nodenumber, AVG(value) as value, (MAX(value) - MIN(value)) as spread, LOGICAL_OR(is_approved) as is_approved, ANY_VALUE(engineer_note) as engineer_note
-                FROM UnifiedRaw GROUP BY 1, 2 HAVING spread <= 5.0
-            )
-            SELECT d.*, m.Project, m.Location, m.Depth
-            FROM HourlyAgg d
-            INNER JOIN `sensorpush-export.sensor_data.master_metadata` m ON d.nodenumber = m.NodeNum
-            """
-            client.query(scrub_sql).result()
-            st.cache_data.clear()
-            st.success("✨ Master Dashboard Rebuilt! Weekend gaps have been averaged/scrubbed.")
-            st.balloons()
-    if st.button("📥 FORCE BACKFILL SENSORPUSH", key="maintenance_backfill"):
-        try:
-            sp_creds = st.secrets["sensorpush_login"]
-            # ... rest of the backfill logic ...
-            st.success("Backfill triggered!")
-        except Exception as e:
-            st.error(f"Could not find sensorpush_login in secrets: {e}")
-# (Other services like Diagnostics and Approvals follow same logic...)
-if st.button("📥 FORCE BACKFILL SENSORPUSH", key="backfill_maintenance"):
-    # 1. Get Login from your secrets
-    sp_creds = st.secrets["sensorpush_login"] # Assuming you have this in st.secrets
-    
-    # 2. Authenticate
-    auth_resp = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", 
-                              json={"email": sp_creds['user'], "password": sp_creds['pass']})
-    token = auth_resp.json().get('accesstoken')
-    
-    # 3. Request "Weekend Gap" (Since Friday 7pm UTC)
-    start_time = "2026-03-20T19:00:00Z"
-    data_resp = requests.post("https://api.sensorpush.com/api/v1/samples", 
-                              headers={"Authorization": token}, 
-                              json={"startTime": start_time})
-    
-    samples = data_resp.json()
-    st.write(f"Found {len(samples)} new records from the weekend!")
-    
-    # 4. Push to BigQuery (I can provide the 'to_gbq' code if you need it)
-    # ... logic to upload to raw_sensorpush ...
+    st.subheader("🚀 Master Data Scrub")
+    st.markdown("""
+    Running the Master Scrub will:
+    1. Pull all data from **SensorPush** and **Lord** raw tables.
+    2. Filter out any readings above **90°F**.
+    3. Aggregate data into **Hourly averages**.
+    4. Link sensors to their **Project, Location, and Depth** using your Metadata sheet.
+    """)
 
+    if st.button("🔄 EXECUTE MASTER SCRUB"):
+        with st.spinner("Rebuilding Master Table... this may take 30 seconds..."):
+            try:
+                # This SQL matches the 'Nuclear Reset' logic to ensure columns like engineer_note exist
+                scrub_query = """
+                CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
+                WITH UnifiedRaw AS (
+                    SELECT CAST(timestamp AS TIMESTAMP) as ts, value, nodenumber, 
+                           CAST(is_approved AS BOOL) as is_approved, CAST(engineer_note AS STRING) as engineer_note 
+                    FROM `sensorpush-export.sensor_data.raw_lord` WHERE value <= 90
+                    UNION ALL
+                    SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, sensor_name AS nodenumber, 
+                           CAST(is_approved AS BOOL) as is_approved, CAST(engineer_note AS STRING) as engineer_note 
+                    FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE temperature <= 90
+                ),
+                HourlyAgg AS (
+                    SELECT 
+                        TIMESTAMP_TRUNC(ts, HOUR) as timestamp, 
+                        nodenumber, 
+                        AVG(value) as value, 
+                        LOGICAL_OR(is_approved) as is_approved, 
+                        ANY_VALUE(engineer_note) as engineer_note
+                    FROM UnifiedRaw 
+                    GROUP BY 1, 2
+                )
+                SELECT d.*, m.Project, m.Location, m.Depth
+                FROM HourlyAgg d
+                INNER JOIN `sensorpush-export.sensor_data.master_metadata` m ON d.nodenumber = m.NodeNum;
+                """
+                
+                query_job = client.query(scrub_query)
+                query_job.result() # Wait for it to finish
+                
+                st.success("✅ Master Table Rebuilt Successfully! Your graphs are now up to date.")
+                st.balloons()
+            except Exception as e:
+                st.error(f"❌ Scrub Failed: {e}")
 
+    st.divider()
+
+    # --- DIAGNOSTIC: FIND MISSING SENSORS ---
+    st.subheader("🕵️ Metadata 'Ghost' Finder")
+    st.info("This tool finds sensors that are sending data but aren't in your Excel Master Sheet.")
+    
+    if st.button("🔍 SCAN FOR UNMAPPED NODES"):
+        ghost_query = """
+        SELECT DISTINCT nodenumber, 'Lord' as Source 
+        FROM `sensorpush-export.sensor_data.raw_lord`
+        WHERE nodenumber NOT IN (SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`)
+        UNION ALL
+        SELECT DISTINCT sensor_name as nodenumber, 'SensorPush' as Source 
+        FROM `sensorpush-export.sensor_data.raw_sensorpush`
+        WHERE sensor_name NOT IN (SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata`)
+        """
+        ghost_df = client.query(ghost_query).to_dataframe()
+        
+        if not ghost_df.empty:
+            st.warning(f"⚠️ Found {len(ghost_df)} sensors with NO metadata mapping:")
+            st.table(ghost_df)
+            st.markdown("""
+            **How to fix:**
+            1. Copy the IDs above.
+            2. Add them to your **SensorPushMasterSheet.xlsx**.
+            3. Upload that sheet to BigQuery (or wait for the sync).
+            4. Run the **Master Scrub** again.
+            """)
+        else:
+            st.success("✅ All active sensors are correctly mapped to Projects!")
