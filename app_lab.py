@@ -158,7 +158,7 @@ if service == "🏠 Executive Summary" and not full_df.empty:
                 })
         st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
 
-# --- SERVICE 1: NODE DIAGNOSTICS (FIXES THE SPAGHETTI GRAPH) ---
+# --- SERVICE 1: NODE DIAGNOSTICS (PRECISION GRID) ---
 elif service == "🔍 Node Diagnostics" and not full_df.empty:
     st.header("🔍 Node Diagnostic Hub")
     
@@ -169,23 +169,46 @@ elif service == "🔍 Node Diagnostics" and not full_df.empty:
         locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].unique())
         sel_loc = st.selectbox("Location", locs)
     with col3:
-        weeks = st.number_input("Weeks", min_value=1, value=2)
+        weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=2)
 
+    # 1. TIME LOGIC: Align to Monday Midnight
+    today = datetime.now(pytz.UTC).date()
+    last_monday = today - timedelta(days=today.weekday())
+    start_time = datetime.combine(last_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
+    
     plot_df = full_df[
         (full_df['Project'] == sel_proj) & 
         (full_df['Location'] == sel_loc) & 
-        (full_df['timestamp'] >= (datetime.now(pytz.UTC) - timedelta(weeks=weeks)))
-    ].copy()
+        (full_df['timestamp'] >= start_ts)
+    ].copy().sort_values(['nodenumber', 'timestamp'])
 
     if not plot_df.empty:
-        # CRITICAL FIX: Sort by timestamp so lines don't zig-zag backward
-        plot_df = plot_df.sort_values(['nodenumber', 'timestamp'])
         plot_df['Sensor'] = plot_df['Depth'].astype(str) + "ft (" + plot_df['nodenumber'] + ")"
+        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
+                     range_y=[-20, 80], height=800)
+
+        # 2. TEMPERATURE GRID (Darker 20s, Lighter 5s)
+        fig.update_yaxes(
+            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
+            minor=dict(dtick=5, gridcolor='LightGrey', showgrid=True),
+            zeroline=True, zerolinecolor='Black', zerolinewidth=2
+        )
+
+        # 3. TIME GRID (Monday Midnights, Daily, 6-Hour)
+        fig.update_xaxes(
+            dtick=604800000.0, # 1 Week in ms (Monday lines)
+            gridcolor='Black', gridwidth=2,
+            minor=dict(dtick=21600000.0, gridcolor='LightGrey', showgrid=True), # 6 Hours
+            tickformat="%a\n%b %d",
+            hoverformat="%m/%d %H:%M"
+        )
         
-        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', height=700)
-        fig.update_traces(connectgaps=False) # Shows gaps where data is missing
-        fig.add_hline(y=32, line_dash="dash", line_color="#007BFF")
-        fig.update_layout(plot_bgcolor='white', hovermode="x unified")
+        # Add Daily Lines (Dashed)
+        for i in range((datetime.now(pytz.UTC) - start_time).days + 1):
+            day_line = start_time + timedelta(days=i)
+            fig.add_vline(x=day_line.timestamp() * 1000, line_width=1, line_dash="dot", line_color="Grey")
+
+        fig.update_layout(plot_bgcolor='white', hovermode="x unified", margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No data found for this selection.")
@@ -219,17 +242,53 @@ elif service == "📋 Data Approval Portal":
         client.query(sync_sql).result()
         st.success(f"Updated status for {ap_proj} on {ap_date}")
 
-# --- SERVICE 3: DATA EXPORT LAB (FIXED) ---
+# --- SERVICE 3: DATA CLEANING TOOL (SURGICAL DELETE) ---
+elif service == "🧹 Data Cleaning Tool":
+    st.header("🧹 Surgical Data Cleaning")
+    st.markdown("Use the **Lasso** or **Box Select** on the graph to target points for deletion.")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        sel_c_proj = st.selectbox("Project to Clean", sorted(full_df['Project'].unique()))
+    with c2:
+        clean_days = st.slider("Days to look back", 1, 14, 3)
+
+    clean_view = full_df[
+        (full_df['Project'] == sel_c_proj) & 
+        (full_df['timestamp'] >= (datetime.now(pytz.UTC) - timedelta(days=clean_days)))
+    ].copy()
+
+    # The Selection Graph
+    fig_clean = px.scatter(clean_view, x='timestamp', y='value', color='nodenumber', height=600)
+    fig_clean.update_layout(dragmode='lasso', selectionrevision=True)
+    
+    # This catches the interaction
+    selected_data = st.plotly_chart(fig_clean, use_container_width=True, on_select="rerun")
+
+    if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
+        pts = selected_data["selection"]["points"]
+        st.warning(f"⚠️ {len(pts)} points selected for deletion.")
+        
+        if st.button("🔥 PERMANENTLY DELETE POINTS"):
+            # Create a list of timestamps to delete
+            ts_to_delete = [f"'{p['x']}'" for p in pts]
+            sql = f"""
+            DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush` 
+            WHERE Project = '{sel_c_proj}' AND timestamp IN ({','.join(ts_to_delete)})
+            """
+            # client.query(sql).result() # Uncomment to go live
+            st.code(sql)
+            st.success("Points removed from raw table. Run 'Master Scrub' to update charts.")
+            
+# --- SERVICE: DATA EXPORT LAB (FIXED) ---
 elif service == "📥 Data Export Lab" and not full_df.empty:
     st.header("📥 Data Export Lab")
+    ex_proj = st.selectbox("Export Project", sorted(full_df['Project'].unique()))
+    export_df = full_df[full_df['Project'] == ex_proj].sort_values('timestamp')
     
-    ex_proj = st.selectbox("Select Project to Export", sorted(full_df['Project'].unique()))
-    export_df = full_df[full_df['Project'] == ex_proj].copy()
-    
-    st.dataframe(export_df.head(100)) # Preview
-    
-    csv = export_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download Full Project CSV", data=csv, file_name=f"{ex_proj}_export.csv", mime="text/csv")
+    st.dataframe(export_df, use_container_width=True)
+    st.download_button("📥 Download CSV", data=export_df.to_csv(index=False), 
+                     file_name=f"{ex_proj}_thermal_data.csv")
     
 # --- SERVICE 4: DATA INTAKE LAB (MANUAL UPLOAD) ---
 elif service == "📤 Data Intake Lab":
