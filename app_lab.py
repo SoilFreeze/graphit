@@ -6,6 +6,8 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta, time, date
 import pytz
 import json
+import requests
+
 
 # --- 0. PAGE CONFIG & SOILFREEZE PALETTE ---
 st.set_page_config(layout="wide", page_title="SoilFreeze Engineering Hub")
@@ -151,3 +153,23 @@ elif service == "🧹 Database Maintenance":
             st.balloons()
 
 # (Other services like Diagnostics and Approvals follow same logic...)
+if st.button("📥 FORCE BACKFILL SENSORPUSH"):
+    # 1. Get Login from your secrets
+    sp_creds = st.secrets["sensorpush_login"] # Assuming you have this in st.secrets
+    
+    # 2. Authenticate
+    auth_resp = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", 
+                              json={"email": sp_creds['user'], "password": sp_creds['pass']})
+    token = auth_resp.json().get('accesstoken')
+    
+    # 3. Request "Weekend Gap" (Since Friday 7pm UTC)
+    start_time = "2026-03-20T19:00:00Z"
+    data_resp = requests.post("https://api.sensorpush.com/api/v1/samples", 
+                              headers={"Authorization": token}, 
+                              json={"startTime": start_time})
+    
+    samples = data_resp.json()
+    st.write(f"Found {len(samples)} new records from the weekend!")
+    
+    # 4. Push to BigQuery (I can provide the 'to_gbq' code if you need it)
+    # ... logic to upload to raw_sensorpush ...
