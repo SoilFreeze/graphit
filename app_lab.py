@@ -193,14 +193,14 @@ elif service == "📈 Node Diagnostics":
 
             if not df_graph.empty:
                 import plotly.express as px
-                # Create a combined label for the legend
+                # Combined label for the legend
                 df_graph['label'] = df_graph['Location'] + " (" + df_graph['Depth'] + ")"
                 
                 fig = px.line(df_graph, x='timestamp', y='value', color='label',
                              title=f"Temperature Trends - Last {weeks} Weeks")
                 
-                # Add the Freezing Line
-                fig.add_hline(y=32, line_dash="dash", line_color="red", annotation_text="Freezing (32°F)")
+                # Freezing Line
+                fig.add_hline(y=32, line_dash="dash", line_color="red")
                 
                 st.plotly_chart(fig, use_container_width=True)
             else:
