@@ -425,7 +425,7 @@ elif service == "📥 Data Export Lab" and not full_df.empty:
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
     source_type = st.radio("Source", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
-    uploaded_file = st.file_uploader("Upload", type=['csv', 'xlsx'], key="intake_uploader")
+    uploaded_file = st.file_uploader("Upload File", type=['csv', 'xlsx'], key="intake_uploader")
 
     if uploaded_file:
         try:
@@ -434,22 +434,17 @@ elif service == "📤 Data Intake Lab":
                 start_row = next((i for i, line in enumerate(file_lines) if "DATA_START" in line), 0)
                 uploaded_file.seek(0)
                 df_raw = pd.read_csv(uploaded_file, skiprows=start_row + 1)
-                
                 df_upload = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
                 df_upload = df_upload.rename(columns={df_raw.columns[0]: 'timestamp'})
-                # Convert colons to hyphens immediately
                 df_upload['nodenumber'] = df_upload['nodenumber'].str.replace(':', '-', regex=False)
-                val_col = 'value'
-                target_table = "sensorpush-export.sensor_data.raw_lord"
+                val_col, target_table = 'value', "sensorpush-export.sensor_data.raw_lord"
             else:
                 df_upload = pd.read_csv(uploaded_file)
                 df_upload = df_upload.rename(columns={'Timestamp':'timestamp', 'Temperature':'temperature', 'Sensor':'sensor_name'})
-                # Convert colons to hyphens immediately
                 df_upload['sensor_name'] = df_upload['sensor_name'].str.replace(':', '-', regex=False)
-                val_col = 'temperature'
-                target_table = "sensorpush-export.sensor_data.raw_sensorpush"
+                val_col, target_table = 'temperature', "sensorpush-export.sensor_data.raw_sensorpush"
 
-            # Type Enforcement
+            # Clean and Force Types
             df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'], errors='coerce', utc=True)
             df_upload[val_col] = pd.to_numeric(df_upload[val_col], errors='coerce')
             df_upload = df_upload.dropna(subset=['timestamp', val_col])
@@ -467,8 +462,7 @@ elif service == "📤 Data Intake Lab":
                     st.balloons()
         except Exception as e:
             st.error(f"Upload error: {e}")
-#
-#
+
 # --- SERVICE 6: DATABASE MAINTENANCE ---
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance")
@@ -502,7 +496,6 @@ elif service == "⚙️ Database Maintenance":
     st.subheader("🗑️ Data Cleanup")
     if st.button("🗑️ PURGE UNMAPPED DATA", key="btn_purge_unmapped"):
         try:
-            # Delete logic
             p_lord = "DELETE FROM `sensorpush-export.sensor_data.raw_lord` WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
             p_sp = "DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
             client.query(p_lord).result()
