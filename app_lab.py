@@ -178,8 +178,13 @@ if service == "🏠 Executive Summary":
                         "Hours Lag": round(hours_since, 1)
                     })
 
-            # 3. APPLY COLOR LOGIC (STYLING)
+# 3. APPLY COLOR LOGIC (STYLING)
             df_display = pd.DataFrame(node_stats)
+            
+            # CRITICAL FIX: Fill missing values so the formatter doesn't crash
+            df_display['24h Min'] = df_display['24h Min'].fillna(0)
+            df_display['24h Max'] = df_display['24h Max'].fillna(0)
+            df_display['24h Delta'] = df_display['24h Delta'].fillna(0)
 
             def style_summary(row):
                 styles = [''] * len(row)
@@ -202,6 +207,18 @@ if service == "🏠 Executive Summary":
                 styles[df_display.columns.get_loc("24h Delta")] = d_color
                 
                 return styles
+
+            # 4. DISPLAY STYLED TABLE (With safe formatting)
+            st.dataframe(
+                df_display.style.apply(style_summary, axis=1).format({
+                    "Current": "{:.1f}°F", 
+                    "24h Min": "{:.1f}°F", 
+                    "24h Max": "{:.1f}°F", 
+                    "24h Delta": "{:+.1f}°F",
+                    "Last Seen": lambda t: t.strftime("%m/%d %H:%M") if pd.notnull(t) else "N/A"
+                }),
+                use_container_width=True
+            )
 
             # 4. DISPLAY STYLED TABLE
             st.dataframe(
