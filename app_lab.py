@@ -67,7 +67,7 @@ client = get_bq_client()
 def fetch_engineering_data():
     # We now pull from the 'final_databoard_master' which is already scrubbed and joined
     query = """
-    SELECT timestamp, value, nodenumber, Project, Location, Depth, is_approved#, engineer_note
+    SELECT timestamp, value, nodenumber, Project, Location, Depth, is_approved
     FROM `sensorpush-export.sensor_data.final_databoard_master`
     """
     df = client.query(query).to_dataframe()
@@ -150,7 +150,7 @@ elif service == "🏠 Executive Summary":
                     nodenumber, 
                     MAX(timestamp) as last_seen,
                     AVG(value) as current_temp,
-                    #'--' as engineer_note 
+                    
                 FROM `sensorpush-export.sensor_data.final_databoard_master`
                 WHERE Project = '{sel_ex_loc}'
                 GROUP BY nodenumber
@@ -314,7 +314,7 @@ elif service == "📋 Data Approval Portal":
         # This SQL targets exactly what you asked for: Job, Pipe, and Time
         sync_sql = f"""
         UPDATE `sensorpush-export.sensor_data.final_databoard_master`
-        SET is_approved = {is_app}#, engineer_note = '{note}'
+        SET is_approved = {is_app}
         WHERE Project = '{ap_proj}' {loc_filter} 
         AND CAST(timestamp AS DATE) = '{ap_date}'
         """
