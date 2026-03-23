@@ -1,4 +1,4 @@
-import streamlit as st
+    import streamlit as st
 import pandas as pd
 import plotly.express as px
 from google.cloud import bigquery, secretmanager
@@ -462,7 +462,11 @@ elif service == "📤 Data Intake Lab":
             # 3. PUSH TO BIGQUERY
             if st.button("🚀 PUSH TO CLOUD"):
                 with st.spinner("Uploading..."):
-                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                    # Change this line in your Data Intake Lab
+                    job_config = bigquery.LoadJobConfig(
+                        write_disposition="WRITE_APPEND",
+                        create_disposition="CREATE_NEVER", # This tells Google 'The table is already there, don't try to create it'
+                    )
                     client.load_table_from_dataframe(df_upload, target_table, job_config=job_config).result()
                     st.success(f"✅ Successfully uploaded {len(df_upload)} readings!")
                     st.balloons()
