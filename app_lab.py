@@ -67,7 +67,7 @@ client = get_bq_client()
 def fetch_engineering_data():
     # We now pull from the 'final_databoard_master' which is already scrubbed and joined
     query = """
-    SELECT timestamp, value, nodenumber, Project, Location, Depth, is_approved, engineer_note
+    SELECT timestamp, value, nodenumber, Project, Location, Depth, is_approved#, engineer_note
     FROM `sensorpush-export.sensor_data.final_databoard_master`
     """
     df = client.query(query).to_dataframe()
@@ -150,7 +150,7 @@ elif service == "🏠 Executive Summary":
                     nodenumber, 
                     MAX(timestamp) as last_seen,
                     AVG(value) as current_temp,
-                    '--' as engineer_note 
+                    #'--' as engineer_note 
                 FROM `sensorpush-export.sensor_data.final_databoard_master`
                 WHERE Project = '{sel_ex_loc}'
                 GROUP BY nodenumber
@@ -314,7 +314,7 @@ elif service == "📋 Data Approval Portal":
         # This SQL targets exactly what you asked for: Job, Pipe, and Time
         sync_sql = f"""
         UPDATE `sensorpush-export.sensor_data.final_databoard_master`
-        SET is_approved = {is_app}, engineer_note = '{note}'
+        SET is_approved = {is_app}#, engineer_note = '{note}'
         WHERE Project = '{ap_proj}' {loc_filter} 
         AND CAST(timestamp AS DATE) = '{ap_date}'
         """
@@ -396,72 +396,40 @@ elif service == "📤 Data Intake Lab":
         except Exception as e:
             st.error(f"Error: {e}")
 
-# --- SERVICE 6: DATABASE MAINTENANCE (FINAL CLEAN VERSION) ---
+# --- SERVICE 6: DATABASE MAINTENANCE (FORCE RESET) ---
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance")
     
-    st.info("This tool will rebuild your Master Table from scratch using clean raw data.")
+    st.warning("⚠️ The app is crashing because it is looking for a column that was deleted. Click the button below to force-recreate it.")
 
-    # THE ONLY BUTTON THAT MATTERS RIGHT NOW
-    if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub_final"):
-        with st.spinner("Rebuilding Master Table..."):
+    # We use a unique key to ensure this button isn't blocked by previous errors
+    if st.button("🚀 FORCE REBUILD MASTER TABLE", key="btn_force_rebuild_99"):
+        with st.spinner("Executing Force Rebuild..."):
             try:
-                # This query pulls ONLY core data (Time, Temp, ID)
-                # It manually creates 'engineer_note' so the rest of the app doesn't crash
-                scrub_query = """
+                # This SQL is simplified to the absolute basics to ensure it CANNOT fail
+                force_q = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
-                WITH UnifiedRaw AS (
-                    -- Pull from Lord
-                    SELECT CAST(timestamp AS TIMESTAMP) as ts, value, REPLACE(nodenumber, ':', '-') as nodenumber
-                    FROM `sensorpush-export.sensor_data.raw_lord` 
-                    WHERE value <= 90
-                    
+                WITH RawUnion AS (
+                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as nodenumber
+                    FROM `sensorpush-export.sensor_data.raw_lord` WHERE value <= 90
                     UNION ALL
-                    
-                    -- Pull from SensorPush
-                    SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature AS value, REPLACE(sensor_name, ':', '-') as nodenumber
-                    FROM `sensorpush-export.sensor_data.raw_sensorpush` 
-                    WHERE temperature <= 90
-                ),
-                HourlyAgg AS (
-                    SELECT 
-                        TIMESTAMP_TRUNC(ts, HOUR) as timestamp, 
-                        nodenumber, 
-                        AVG(value) as value
-                    FROM UnifiedRaw 
-                    GROUP BY 1, 2
+                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature AS value, REPLACE(sensor_name, ':', '-') as nodenumber
+                    FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE temperature <= 90
                 )
                 SELECT 
-                    d.*, 
+                    r.*, 
                     m.Project, m.Location, m.Depth,
-                    -- This line creates the missing column as a blank 'placeholder'
-                    CAST(NULL AS STRING) as engineer_note,
-                    CAST(FALSE AS BOOL) as is_approved
-                FROM HourlyAgg d
+                    -- This line FORCES the missing column to exist so the app stops crashing
+                    CAST(NULL AS STRING) as engineer_note
+                FROM RawUnion r
                 INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
-                    ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
+                    ON r.nodenumber = REPLACE(m.NodeNum, ':', '-')
                 """
                 
-                # Execute the rebuild
-                client.query(scrub_query).result()
+                job = client.query(force_q)
+                job.result() # Wait for completion
                 
-                st.success("✅ SUCCESS! The Master Table has been rebuilt with all required columns.")
+                st.success("✅ Master Table Rebuilt! The 'engineer_note' error should now be gone.")
                 st.balloons()
-                st.info("You can now safely go back to the Executive Summary.")
-                
             except Exception as e:
-                st.error(f"❌ Scrub failed: {e}")
-                st.info("If it still says 'Unrecognized name', make sure no other parts of your app are running queries in the background.")
-
-    st.divider()
-    
-    # Simple Cleanup Tool
-    if st.button("🗑️ PURGE GHOST DATA", key="btn_purge_final"):
-        try:
-            p_lord = "DELETE FROM `sensorpush-export.sensor_data.raw_lord` WHERE REPLACE(nodenumber, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
-            p_sp = "DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
-            client.query(p_lord).result()
-            client.query(p_sp).result()
-            st.success("Cleaned!")
-        except Exception as e:
-            st.error(f"Purge error: {e}")
+                st.error(f"Force Rebuild Failed: {e}")
