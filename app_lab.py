@@ -444,7 +444,7 @@ elif service == "📤 Data Intake Lab":
                 df_upload['sensor_name'] = df_upload['sensor_name'].str.replace(':', '-', regex=False)
                 val_col, target_table = 'temperature', "sensorpush-export.sensor_data.raw_sensorpush"
 
-            # Clean and Force Types
+            # Clean and Force Types (Solves Pyarrow Error)
             df_upload['timestamp'] = pd.to_datetime(df_upload['timestamp'], errors='coerce', utc=True)
             df_upload[val_col] = pd.to_numeric(df_upload[val_col], errors='coerce')
             df_upload = df_upload.dropna(subset=['timestamp', val_col])
@@ -459,7 +459,6 @@ elif service == "📤 Data Intake Lab":
                     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", create_disposition="CREATE_NEVER")
                     client.load_table_from_dataframe(df_upload, target_table, job_config=job_config).result()
                     st.success("Uploaded!")
-                    st.balloons()
         except Exception as e:
             st.error(f"Upload error: {e}")
 
@@ -467,10 +466,28 @@ elif service == "📤 Data Intake Lab":
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance")
     
+    # NEW: Diagnostic Tool to see if SensorPush data is even reaching BigQuery
+    st.subheader("📡 Raw Data Health Check")
+    if st.button("🔍 Scan Raw SensorPush Table", key="check_sp_raw"):
+        check_q = "SELECT sensor_name, MAX(timestamp) as last_seen, COUNT(*) as row_count FROM `sensorpush-export.sensor_data.raw_sensorpush` GROUP BY 1 ORDER BY last_seen DESC LIMIT 10"
+        try:
+            sp_raw_df = client.query(check_q).to_dataframe()
+            if sp_raw_df.empty:
+                st.warning("No data found in the raw SensorPush table for the last 24 hours.")
+            else:
+                st.write("Latest data received in the cloud:")
+                st.table(sp_raw_df)
+        except Exception as e:
+            st.error(f"Could not read raw table: {e}")
+
+    st.divider()
     st.subheader("🚀 Master Data Scrub")
+    st.info("This moves data from 'Raw' to 'Graphs'. If this isn't run, your charts stay empty.")
+    
     if st.button("🔄 EXECUTE MASTER SCRUB", key="btn_execute_scrub"):
-        with st.spinner("Rebuilding Master Table..."):
+        with st.spinner("Merging data and updating IDs..."):
             try:
+                # This query fixes the colon/hyphen issue globally
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
@@ -488,7 +505,7 @@ elif service == "⚙️ Database Maintenance":
                 GROUP BY 1, 2, 4, 5, 6
                 """
                 client.query(scrub_query).result()
-                st.success("✅ Master Table Rebuilt!")
+                st.success("✅ Master Table Rebuilt! Check your graphs now.")
             except Exception as e:
                 st.error(f"Scrub error: {e}")
 
@@ -500,6 +517,6 @@ elif service == "⚙️ Database Maintenance":
             p_sp = "DELETE FROM `sensorpush-export.sensor_data.raw_sensorpush` WHERE REPLACE(sensor_name, ':', '-') NOT IN (SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
             client.query(p_lord).result()
             client.query(p_sp).result()
-            st.success("Ghost data erased.")
+            st.success("Unmapped ghost data erased.")
         except Exception as e:
             st.error(f"Purge error: {e}")
