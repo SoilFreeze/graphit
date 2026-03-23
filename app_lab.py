@@ -487,27 +487,10 @@ elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance & System Health")
     
     st.subheader("🚀 Master Data Scrub")
-    st.markdown("""
-    Running the Master Scrub will:
-    1. Pull all data from **SensorPush** and **Lord** raw tables.
-    2. Filter out any readings above **90°F**.
-    3. Aggregate data into **Hourly averages**.
-    4. Link sensors to their **Project, Location, and Depth** using your Metadata sheet.
-    """)
-
-    if st.button("🔄 EXECUTE MASTER SCRUB"):
-        with st.spinner("Rebuilding Master Table... this may take 30 seconds..."):
-            try:
-                # UPDATE THIS SECTION in your '⚙️ Database Maintenance' block
-                # --- SERVICE 6: DATABASE MAINTENANCE ---
-elif service == "⚙️ Database Maintenance":
-    st.header("⚙️ Database Maintenance & System Health")
-    
-    st.subheader("🚀 Master Data Scrub")
     if st.button("🔄 EXECUTE MASTER SCRUB"):
         with st.spinner("Rebuilding Master Table..."):
             try:
-                # Standardizing to Hyphens (-) for all IDs
+                # This is the indented block Python was looking for:
                 scrub_query = """
                 CREATE OR REPLACE TABLE `sensorpush-export.sensor_data.final_databoard_master` AS
                 WITH UnifiedRaw AS (
@@ -536,12 +519,23 @@ elif service == "⚙️ Database Maintenance":
                 INNER JOIN `sensorpush-export.sensor_data.master_metadata` m 
                 ON d.nodenumber = REPLACE(m.NodeNum, ':', '-')
                 """
+                # This line must also be indented under 'try'
                 client.query(scrub_query).result()
-                st.success("✅ Master Table Rebuilt! Data merged using hyphens.")
+                st.success("✅ Master Table Rebuilt! IDs merged to hyphens.")
+                st.balloons()
+                
             except Exception as e:
+                # This handles the error if the 'try' block fails
                 st.error(f"❌ Scrub Failed: {e}")
 
     st.divider()
+    
+    # Optional: Metadata check logic can go here, following the same indentation
+    st.subheader("🕵️ Metadata Diagnostic")
+    if st.button("🔍 SCAN FOR UNMAPPED NODES"):
+        ghost_query = "SELECT DISTINCT nodenumber FROM `sensorpush-export.sensor_data.raw_lord` WHERE nodenumber NOT IN (SELECT NodeNum FROM `sensorpush-export.sensor_data.master_metadata` UNION ALL SELECT REPLACE(NodeNum, ':', '-') FROM `sensorpush-export.sensor_data.master_metadata` )"
+        ghosts = client.query(ghost_query).to_dataframe()
+        st.write(ghosts)
 
     #
     #
