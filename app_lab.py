@@ -106,6 +106,8 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
 st.sidebar.title("❄️ SoilFreeze Lab")
 service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📈 Node Diagnostics", "📤 Data Intake Lab", "⚙️ Database Maintenance"])
 
+
+#################################################################
 if service == "🏠 Executive Summary":
     st.header("🏠 Site Health & Warming Alerts")
 
@@ -223,7 +225,7 @@ if service == "🏠 Executive Summary":
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
 
-
+##########################################
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
@@ -266,87 +268,120 @@ elif service == "📈 Node Diagnostics":
             fig = build_standard_sf_graph(df_g, f"Trend: {sel_proj} - {sel_loc}", start_view, end_view, unit=temp_unit, active_refs=ref_list)
             st.plotly_chart(fig, width='stretch')
 
+################################################
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     
-    tab1, tab2 = st.tabs(["Manual File Upload", "API Data Recovery"])
+    # Create Tabs to separate Manual vs API methods
+    tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
 
     with tab1:
-        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"])
+        st.subheader("Manual CSV Ingestion")
+        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
         u_file = st.file_uploader("Upload Logger File", type=['csv'])
+
         if u_file:
-            # ... (Existing CSV logic from previous steps) ...
-            pass
+            try:
+                # Read file content for parsing
+                content = u_file.getvalue().decode("utf-8").splitlines()
+                
+                if "Lord" in source:
+                    # Lord files have a 'DATA_START' marker
+                    start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
+                    u_file.seek(0)
+                    # Skip metadata rows to reach headers
+                    df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
+                    # Melt from Wide (multiple columns) to Long (timestamp, node, value)
+                    df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
+                    df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                else:
+                    # Standard SensorPush CSV Export
+                    df_up = pd.read_csv(u_file).rename(columns={
+                        'Timestamp': 'timestamp', 
+                        'Temperature': 'value', 
+                        'Sensor': 'nodenumber'
+                    })
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                
+                # Standardize Node IDs (Replace colons with hyphens)
+                df_up['nodenumber'] = df_up['nodenumber'].astype(str).str.replace(':', '-', regex=False)
+                df_up['timestamp'] = pd.to_datetime(df_up['timestamp'])
+
+                if st.button("🚀 PUSH FILE TO BIGQUERY"):
+                    with st.spinner("Uploading to BigQuery..."):
+                        job = client.load_table_from_dataframe(df_up, table_ref)
+                        job.result() # Wait for upload to finish
+                        st.success(f"✅ Success! Uploaded {len(df_up)} records to {table_ref}.")
+                        st.balloons()
+            except Exception as e:
+                st.error(f"File Intake Error: {e}")
 
     with tab2:
-    st.subheader("📡 SensorPush API Backfill")
-    st.info("Force-pull data directly from the SensorPush Cloud for a specific window.")
-    
-    col_date1, col_date2 = st.columns(2)
-    with col_date1:
-        start_date = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
-        start_time = st.time_input("Start Time UTC", datetime.strptime("00:00", "%H:%M").time())
-    with col_date2:
-        end_date = st.date_input("Recovery End", datetime.now())
-        end_time = st.time_input("End Time UTC", datetime.now().time())
+        st.subheader("SensorPush Cloud Recovery")
+        st.info("Pull data directly from the SensorPush API if the gateway was offline.")
+        
+        import requests # Ensure requests is available for the API call
 
-    # Combine into UTC ISO format strings (required by SensorPush API)
-    start_iso = datetime.combine(start_date, start_time).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_iso = datetime.combine(end_date, end_time).strftime("%Y-%m-%dT%H:%M:%SZ")
+        c_api1, c_api2 = st.columns(2)
+        with c_api1:
+            start_d = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
+            start_t = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
+        with c_api2:
+            end_d = st.date_input("Recovery End", datetime.now())
+            end_t = st.time_input("End Time (UTC)", datetime.now().time())
 
-    if st.button("🛰️ RUN CLOUD RECOVERY"):
-        try:
-            creds = st.secrets["sensorpush"]
-            
-            with st.spinner("Authenticating with SensorPush..."):
-                # STEP 1: Get Access Token
-                auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
-                auth_payload = {"email": creds["email"], "password": creds["password"]}
-                auth_res = requests.post(auth_url, json=auth_payload)
-                auth_res.raise_for_status()
-                token = auth_res.json()["accesstoken"]
+        # Format ISO strings for the API request
+        start_iso = datetime.combine(start_d, start_t).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_iso = datetime.combine(end_d, end_t).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            with st.spinner("Fetching Samples..."):
-                # STEP 2: Request Samples for the Time Range
-                sample_url = "https://api.sensorpush.com/api/v1/samples"
-                headers = {"accept": "application/json", "Authorization": token}
-                # We leave 'sensors' and 'gateways' empty to pull EVERYTHING in the account
-                sample_payload = {
-                    "startTime": start_iso,
-                    "endTime": end_iso,
-                    "measures": ["temperature"]
-                }
-                
-                sample_res = requests.post(sample_url, headers=headers, json=sample_payload)
-                sample_res.raise_for_status()
-                raw_data = sample_res.json()
-
-                # STEP 3: Process JSON into BigQuery Format
-                records = []
-                # SensorPush returns data grouped by sensor ID
-                for sensor_id, samples in raw_data.get("sensors", {}).items():
-                    for s in samples:
-                        records.append({
-                            "timestamp": s["observed"], # SensorPush uses ISO string for observed
-                            "value": s["value"],
-                            "nodenumber": sensor_id.replace(':', '-') # Standardize ID
-                        })
-                
-                if records:
-                    df_recovered = pd.DataFrame(records)
-                    df_recovered['timestamp'] = pd.to_datetime(df_recovered['timestamp'])
-                    
-                    # Push to the raw_sensorpush table
-                    job = client.load_table_from_dataframe(
-                        df_recovered, 
-                        f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                    )
-                    job.result()
-                    
-                    st.success(f"✅ Recovery Complete! Pulled {len(df_recovered)} points for {len(raw_data.get('sensors', {}))} sensors.")
-                    st.balloons()
+        if st.button("🛰️ RUN CLOUD RECOVERY"):
+            try:
+                if "sensorpush" not in st.secrets:
+                    st.error("Missing 'sensorpush' credentials in Streamlit Secrets.")
                 else:
-                    st.warning("API returned 0 records for this time range. Check if the gateway uploaded data for these dates.")
+                    creds = st.secrets["sensorpush"]
+                    
+                    with st.spinner("Authenticating with SensorPush Cloud..."):
+                        # Step 1: OAuth Authorization
+                        auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
+                        auth_res = requests.post(auth_url, json={"email": creds["email"], "password": creds["password"]})
+                        auth_res.raise_for_status()
+                        token = auth_res.json()["accesstoken"]
 
-        except Exception as e:
-            st.error(f"Recovery Failed: {e}")
+                    with st.spinner(f"Fetching Samples from {start_iso}..."):
+                        # Step 2: Fetch Samples
+                        sample_url = "https://api.sensorpush.com/api/v1/samples"
+                        headers = {"accept": "application/json", "Authorization": token}
+                        payload = {
+                            "startTime": start_iso,
+                            "endTime": end_iso,
+                            "measures": ["temperature"]
+                        }
+                        sample_res = requests.post(sample_url, headers=headers, json=payload)
+                        sample_res.raise_for_status()
+                        raw_json = sample_res.json()
+
+                        # Step 3: Process JSON to DataFrame
+                        api_records = []
+                        for sensor_id, samples in raw_json.get("sensors", {}).items():
+                            for s in samples:
+                                api_records.append({
+                                    "timestamp": s["observed"],
+                                    "value": s["value"],
+                                    "nodenumber": sensor_id.replace(':', '-')
+                                })
+                        
+                        if api_records:
+                            df_rec = pd.DataFrame(api_records)
+                            df_rec['timestamp'] = pd.to_datetime(df_rec['timestamp'])
+                            
+                            # Push to BigQuery
+                            client.load_table_from_dataframe(df_rec, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                            st.success(f"✅ Recovery Complete! Pulled {len(df_rec)} data points.")
+                            st.balloons()
+                        else:
+                            st.warning("No data found for this time range. The Gateway may not have synced yet.")
+            
+            except Exception as e:
+                st.error(f"Recovery Failed: {e}")
