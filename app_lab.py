@@ -34,14 +34,10 @@ client = get_bq_client()
 
 # --- 2. STANDARDIZED GRAPH ENGINE ---
 def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
-    """
-    Standardized SF Engine: Handles 6hr gaps, C/F units, custom grid, 
-    and 'Right Now' red line with numeric timestamp fix.
-    """
     if active_refs is None: 
         active_refs = []
     
-    # 1. Unit Conversion Logic
+    # 1. Unit Conversion
     display_df = df.copy()
     if unit == "Celsius":
         display_df['value'] = (display_df['value'] - 32) * 5/9
@@ -49,7 +45,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     else:
         y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # 2. Gap Logic: Insert None if data gap > 6 hours
+    # 2. Gap Logic (6hr break)
     processed_dfs = []
     for sensor in display_df['Sensor'].unique():
         s_df = display_df[display_df['Sensor'] == sensor].copy().sort_values('timestamp')
@@ -62,37 +58,43 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
         processed_dfs.append(s_df)
     
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
-    fig = px.line(clean_df, x='timestamp', y='value', color='Sensor')
 
-    # 3. Grid & Axis Styling: Dark Gray every 20, Medium every 5
+    # 3. CRITICAL FIX: Use go.Scatter to prevent area-shading/stacking
+    fig = go.Figure()
+    for sensor in clean_df['Sensor'].unique():
+        sensor_df = clean_df[clean_df['Sensor'] == sensor]
+        fig.add_trace(go.Scatter(
+            x=sensor_df['timestamp'], 
+            y=sensor_df['value'],
+            name=sensor,
+            mode='lines',
+            fill=None,  # Explicitly disable the blue shading in your screenshot
+            connectgaps=False
+        ))
+
+    # 4. Grid & Axis Styling
     fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
+    
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # 4. Custom Vertical Grid (Mon/Mid/6hr) using numeric timestamps
+    # 5. Vertical Gridlines (Numeric Fix)
     shapes = []
     curr = start_view.replace(hour=0, minute=0, second=0)
     while curr <= end_view:
         for h in [0, 6, 12, 18]:
             t = curr + timedelta(hours=h)
-            if t < start_view or t > end_view: 
-                continue
+            if t < start_view or t > end_view: continue
             t_ms = t.timestamp() * 1000
-            if t.weekday() == 0 and h == 0: 
-                c, w = "DimGray", 2 # Monday
-            elif h == 0: 
-                c, w = "DarkGray", 1 # Midnight
-            else: 
-                c, w = "LightGray", 0.5 # 6-Hour
+            c, w = ("DimGray", 2) if (t.weekday() == 0 and h == 0) else (("DarkGray", 1) if h == 0 else ("LightGray", 0.5))
             shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, line=dict(color=c, width=w), layer="below"))
         curr += timedelta(days=1)
 
-    # 5. Markers: 'Right Now' Red Line (Numeric Timestamp)
+    # 6. NOW Line & Layout
     now_ms = datetime.now(pytz.UTC).timestamp() * 1000
     fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="NOW")
     
-    # 6. Reference Lines
     for ref_f, label in active_refs:
         val = (ref_f - 32) * 5/9 if unit == "Celsius" else ref_f
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {round(val,1)}°")
@@ -183,16 +185,14 @@ if service == "🏠 Executive Summary":
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
-    # 1. Sidebar Controls
-    temp_unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
+    # 1. Filters (Same as before)
+    temp_unit = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
     ref_list = []
     if st.sidebar.checkbox("32°F (Frost)"): ref_list.append((32.0, "Frost"))
     if st.sidebar.checkbox("26.6°F (Brine)"): ref_list.append((26.6, "Brine"))
     if st.sidebar.checkbox("10.2°F (Deep)"): ref_list.append((10.2, "Deep"))
 
-    # 2. Metadata Filtering (Null-Safe)
     meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
-    
     c1, c2, c3 = st.columns(3)
     with c1: 
         projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
@@ -200,17 +200,17 @@ elif service == "📈 Node Diagnostics":
     with c2: 
         raw_locs = meta_df[meta_df['Project'].isin(sel_projs)]['Location'].unique() if sel_projs else []
         locs = sorted([l for l in raw_locs if l is not None])
-        sel_locs = st.multiselect("Pipes / Banks", locs)
+        sel_locs = st.multiselect("Pipes", locs)
     with c3: 
-        weeks = st.slider("Duration (Weeks)", 1, 12, 6)
+        weeks = st.slider("Duration", 1, 12, 6)
 
-    # 3. Data Processing and Graphing
+    # 2. Data Fetch & Unique Labeling
     if sel_projs and sel_locs:
         now_utc = datetime.now(pytz.UTC)
         end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks)
         
-        # Pull nodenumber to allow unique line separation
+        # Ensure nodenumber is in the SELECT
         q = f"""
             SELECT timestamp, value, Location, Depth, nodenumber 
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
@@ -221,23 +221,20 @@ elif service == "📈 Node Diagnostics":
         df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
         
         if not df_g.empty:
-            # FIX: Unique labels to separate Bank sensors: "Bank 1 - 15ft (00-1E)"
+            # FIX: Force unique names for every sensor to stop the "Blob" effect
+            # Result: "15ft (00-1E)" or "Bank1 (00-2C)"
             df_g['Sensor'] = df_g.apply(
-                lambda x: f"{x['Location']} - {x['Depth']}ft ({x['nodenumber']})" 
+                lambda x: f"{x['Depth']}ft ({x['nodenumber']})" 
                 if str(x['Depth']).replace('.','',1).isdigit() 
                 else f"{x['Location']} ({x['nodenumber']})", axis=1
             )
             
-            # Sort by Sensor and Time for clean lines
-            df_g = df_g.sort_values(by=['Sensor', 'timestamp'], ascending=[True, True])
+            df_g = df_g.sort_values(by=['Sensor', 'timestamp'])
             
-            title = f"Temperature: {', '.join(sel_locs)} | {weeks} Week Trend"
-            fig = build_standard_sf_graph(df_g, title, start_view, end_view, unit=temp_unit, active_refs=ref_list)
+            fig = build_standard_sf_graph(df_g, f"Trends: {', '.join(sel_locs)}", start_view, end_view, unit=temp_unit, active_refs=ref_list)
             st.plotly_chart(fig, width='stretch')
-        else:
-            st.info("No data found for selection.")
-    else:
-        st.info("Please select a Project and Pipe.")
+
+
 # --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
