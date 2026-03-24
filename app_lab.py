@@ -8,11 +8,11 @@ import io
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
-# Change to "sensor_data_dev" for your experimental dev app
-DATASET_ID = "sensor_data" 
+# Set these variables to toggle between environments
+DATASET_ID = "sensor_data"  # Set to "sensor_data_dev" for your dev app
 PROJECT_ID = "sensorpush-export"
 
-# --- 2. AUTHENTICATION ENGINE (The "Plumbing") ---
+# --- 2. AUTHENTICATION ENGINE ---
 @st.cache_resource
 def get_bq_client():
     """Retrieves credentials from Secrets to prevent TransportErrors."""
@@ -20,7 +20,6 @@ def get_bq_client():
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             credentials = service_account.Credentials.from_service_account_info(info)
-            # Scopes allow BigQuery to read Metadata from Google Sheets
             scoped_creds = credentials.with_scopes([
                 "https://www.googleapis.com/auth/drive",
                 "https://www.googleapis.com/auth/bigquery"
@@ -47,7 +46,6 @@ service = st.sidebar.selectbox("Select Service", [
 if service == "🏠 Executive Summary":
     st.header("🏠 Executive Summary")
     
-    # Logic: Status at a glance with thermal color-coding
     query = f"""
         SELECT 
             nodenumber, Project, Location, Depth,
@@ -67,7 +65,6 @@ if service == "🏠 Executive Summary":
             c1.metric("Project Avg Temp", f"{avg_t:.1f}°F")
             c2.metric("Active Sensors", len(df_ex))
 
-            # Maltby Engineering Requirements: Red (>32), Orange (28-32), Green (<28)
             def thermal_style(v):
                 if v > 32: return 'background-color: #ff4b4b; color: white' 
                 if 28 <= v <= 32: return 'background-color: #ffa500'        
@@ -77,50 +74,104 @@ if service == "🏠 Executive Summary":
     except Exception as e:
         st.error(f"Error loading summary: {e}")
 
-# --- SERVICE 3: DATA INTAKE LAB (LORD PARSER) ---
+# --- SERVICE 2: NODE DIAGNOSTICS (THE MISSING PIECE) ---
+elif service == "📈 Node Diagnostics":
+    st.header("📈 Node Diagnostics")
+    
+    try:
+        # 1. Fetch metadata for the dynamic filters
+        meta_q = f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata` ORDER BY Project"
+        meta_df = client.query(meta_q).to_dataframe()
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            all_projs = sorted(meta_df['Project'].unique())
+            sel_projs = st.multiselect("1. Filter Projects", all_projs)
+        
+        with col2:
+            # Only show locations for the selected projects
+            available_locs = meta_df[meta_df['Project'].isin(sel_projs)]['Location'].unique() if sel_projs else []
+            sel_locs = st.multiselect("2. Filter Specific Pipes", sorted(available_locs))
+            
+        with col3:
+            weeks = st.slider("3. Trend Duration (Weeks)", 1, 12, 6)
+
+        # 2. Query and Graphing Logic
+        if sel_projs and sel_locs:
+            days = weeks * 7
+            graph_q = f"""
+                SELECT timestamp, value, Location, Depth
+                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+                WHERE Project IN UNNEST({list(sel_projs)})
+                AND Location IN UNNEST({list(sel_locs)})
+                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+                ORDER BY timestamp ASC
+            """
+            df_g = client.query(graph_q).to_dataframe()
+
+            if not df_g.empty:
+                # Combine Location and Depth for a clear legend: "Pipe 4 (15ft)"
+                df_g['Sensor'] = df_g['Location'] + " (" + df_g['Depth'].astype(str) + "ft)"
+                
+                fig = px.line(df_g, x='timestamp', y='value', color='Sensor', 
+                             title=f"Thermal Trends: Last {weeks} Weeks")
+                
+                # Maltby engineering reference lines
+                fig.add_hline(y=32, line_dash="dash", line_color="#ff4b4b", annotation_text="32°F Warning")
+                fig.add_hline(y=28, line_dash="dot", line_color="#28a745", annotation_text="28°F Target")
+                
+                fig.update_layout(hovermode="x unified", legend=dict(orientation="h", y=-0.2))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data found for the selected projects/pipes within this timeframe.")
+        else:
+            st.info("Please select at least one Project and one Pipe to view diagnostics.")
+            
+    except Exception as e:
+        st.error(f"Diagnostics Error: {e}")
+
+# --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
     source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"])
     u_file = st.file_uploader("Upload Logger File", type=['csv'])
 
     if u_file:
-        if "Lord" in source:
-            # specialized parser to find the DATA_START marker
-            lines = u_file.getvalue().decode("utf-8").splitlines()
-            start_idx = next((i for i, l in enumerate(lines) if "DATA_START" in l), 0)
-            u_file.seek(0)
-            df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
-            
-            # Melt wide columns (Sensors) into long rows
-            df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
-            df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
-            
-            # Standardization: Ensure IDs use Hyphens for BigQuery Joins
-            df_up['nodenumber'] = df_up['nodenumber'].str.replace(':', '-', regex=False)
-            table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+        try:
+            if "Lord" in source:
+                content = u_file.getvalue().decode("utf-8").splitlines()
+                start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
+                u_file.seek(0)
+                df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
+                df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
+                df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
+                df_up['nodenumber'] = df_up['nodenumber'].str.replace(':', '-', regex=False)
+                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
             
             if st.button("🚀 PUSH TO BIGQUERY"):
                 client.load_table_from_dataframe(df_up, table_ref).result()
-                st.success("Lord Data Ingested!")
+                st.success("Data ingested successfully!")
+        except Exception as e:
+            st.error(f"Intake Error: {e}")
 
-# --- SERVICE 4: DATABASE MAINTENANCE (THE ENGINE ROOM) ---
+# --- SERVICE 4: DATABASE MAINTENANCE ---
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance")
-    st.info("This merges manual logs and online data into a single clean table.")
-    
     if st.button("🔄 EXECUTE MASTER SCRUB"):
         with st.spinner("Rebuilding Master Table..."):
-            # This query joins Raw data with Metadata based on standardized IDs
-            scrub_q = f"""
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS
-            WITH Unified AS (
-                SELECT timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                UNION ALL
-                SELECT timestamp, temperature as value, REPLACE(sensor_name, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            )
-            SELECT u.*, m.Project, m.Location, m.Depth
-            FROM Unified u
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
-            """
-            client.query(scrub_q).result()
-            st.success("Master Table Rebuilt & Standardized!")
+            try:
+                scrub_q = f"""
+                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS
+                WITH Unified AS (
+                    SELECT timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                    UNION ALL
+                    SELECT timestamp, temperature as value, REPLACE(sensor_name, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                )
+                SELECT u.*, m.Project, m.Location, m.Depth
+                FROM Unified u
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
+                """
+                client.query(scrub_q).result()
+                st.success("Master Table Rebuilt & Standardized!")
+            except Exception as e:
+                st.error(f"Scrub Error: {e}")
