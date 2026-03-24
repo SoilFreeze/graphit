@@ -144,65 +144,65 @@ if service == "🏠 Executive Summary":
                 n_df = df_summary[df_summary['nodenumber'] == node].sort_values('timestamp')
                 
                 current_temp = n_df['value'].iloc[-1]
-                min_24h = n_df['value'].min()
-                max_24h = n_df['value'].max()
-                max_change = max_24h - min_24h # Positive change (warming)
-                
-                # Logic for Cooling (if current is lower than start of 24h window)
-                net_change = current_temp - n_df['value'].iloc[0]
+                net_change = current_temp - n_df['value'].iloc[0] # Heating (+) vs Cooling (-)
                 
                 last_seen_dt = n_df['timestamp'].iloc[-1]
                 hours_ago = (now_ts - last_seen_dt).total_seconds() / 3600
                 hours_int = int(round(hours_ago, 0))
                 
-                last_seen_str = f"{last_seen_dt.strftime('%m/%d %H:%M')} ({hours_int}h ago)"
-
                 summary_stats.append({
                     "Location": n_df['Location'].iloc[0],
                     "Depth": f"{n_df['Depth'].iloc[0]}ft",
                     "Node ID": node,
-                    "Status / Last Seen": last_seen_str,
+                    "Status / Last Seen": f"{last_seen_dt.strftime('%m/%d %H:%M')} ({hours_int}h ago)",
                     "hours_raw": hours_ago,
-                    "Min (24h)": round(float(min_24h), 1),
-                    "Max (24h)": round(float(max_24h), 1),
-                    "24h Change": round(float(net_change), 1), # Tracks heating vs cooling
+                    "Min (24h)": round(float(n_df['value'].min()), 1),
+                    "Max (24h)": round(float(n_df['value'].max()), 1),
+                    "24h Change": round(float(net_change), 1),
                     "Current": round(float(current_temp), 1)
                 })
 
-            df_display = pd.DataFrame(summary_stats)
-            df_display['d_sort'] = df_display['Depth'].str.extract('(\d+)').astype(float)
-            df_display = df_display.sort_values(['Location', 'd_sort']).drop(columns=['d_sort'])
+            # --- 3. SORTING LOGIC: Warming Highest at Top ---
+            df_full = pd.DataFrame(summary_stats)
+            df_full = df_full.sort_values(by="24h Change", ascending=False)
 
-            # 3. ADVANCED STYLING LOGIC
+            # --- 4. PAGINATION LOGIC: 20 Rows per Page ---
+            rows_per_page = 20
+            total_pages = (len(df_full) // rows_per_page) + (1 if len(df_full) % rows_per_page > 0 else 0)
+            
+            # Simple Navigation UI
+            col_nav1, col_nav2 = st.columns([1, 4])
+            with col_nav1:
+                page_num = st.number_input(f"Page (1 of {total_pages})", min_value=1, max_value=total_pages, step=1)
+            
+            start_idx = (page_num - 1) * rows_per_page
+            end_idx = start_idx + rows_per_page
+            df_display = df_full.iloc[start_idx:end_idx]
+
+            # 5. ADVANCED STYLING (Age of Data & Thermal Delta)
             def apply_row_styles(row):
                 styles = [''] * len(row)
                 
-                # --- A. Status Column (Age of Data) ---
+                # Age Coloring
                 h = row['hours_raw']
                 status_idx = row.index.get_loc("Status / Last Seen")
-                if h >= 24: styles[status_idx] = 'background-color: #ff4b4b; color: white' # Red
-                elif h >= 12: styles[status_idx] = 'background-color: #ffa500; color: black' # Orange
-                elif h >= 6: styles[status_idx] = 'background-color: #ffff00; color: black' # Yellow
+                if h >= 24: styles[status_idx] = 'background-color: #ff4b4b; color: white'
+                elif h >= 12: styles[status_idx] = 'background-color: #ffa500; color: black'
+                elif h >= 6: styles[status_idx] = 'background-color: #ffff00; color: black'
                 
-                # --- B. 24h Change Column (Thermal Delta) ---
+                # Thermal Delta Coloring
                 change = row['24h Change']
                 chg_idx = row.index.get_loc("24h Change")
-                
-                # Warming Logic
-                if change >= 5.0: styles[chg_idx] = 'background-color: #ff4b4b; color: white' # Red
-                elif change >= 2.0: styles[chg_idx] = 'background-color: #ffa500; color: black' # Orange
-                elif change >= 1.0: styles[chg_idx] = 'background-color: #ffff00; color: black' # Yellow
-                # Cooling Logic
-                elif change <= -1.0: styles[chg_idx] = 'background-color: #00008b; color: white' # Dark Blue
-                elif change <= -0.5: styles[chg_idx] = 'background-color: #0000ff; color: white' # Blue
-                elif change <= -0.25: styles[chg_idx] = 'background-color: #add8e6; color: black' # Light Blue
+                if change >= 5.0: styles[chg_idx] = 'background-color: #ff4b4b; color: white'
+                elif change >= 2.0: styles[chg_idx] = 'background-color: #ffa500; color: black'
+                elif change >= 1.0: styles[chg_idx] = 'background-color: #ffff00; color: black'
+                elif change <= -1.0: styles[chg_idx] = 'background-color: #00008b; color: white'
+                elif change <= -0.5: styles[chg_idx] = 'background-color: #0000ff; color: white'
+                elif change <= -0.25: styles[chg_idx] = 'background-color: #add8e6; color: black'
                 
                 return styles
 
-            # 4. Display (Using height to remove internal scroll window)
-            # 35px per row + 40px for header is a good estimate for full visibility
-            calc_height = (len(df_display) + 1) * 35 + 5
-
+            # 6. Final Display (Height set for 20 rows to avoid internal scroll)
             st.dataframe(
                 df_display.style.apply(apply_row_styles, axis=1),
                 column_config={
@@ -213,12 +213,14 @@ if service == "🏠 Executive Summary":
                     "hours_raw": None
                 },
                 width='stretch',
-                height=calc_height, 
+                height=780, # Fits approx 20 rows comfortably
                 hide_index=True
             )
 
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
+
+
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
