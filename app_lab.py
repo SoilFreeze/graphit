@@ -313,46 +313,94 @@ elif service == "📤 Data Intake Lab":
                         job = client.load_table_from_dataframe(df_up, table_ref)
                         job.result() # Wait for upload to finish
                         st.success(f"✅ Success! Uploaded {len(df_up)} records to {table_ref}.")
+                        st.info("💡 Remember to run the 'Master Scrub' in Database Maintenance to update the graphs.")
                         st.balloons()
             except Exception as e:
                 st.error(f"File Intake Error: {e}")
 
     with tab2:
         st.subheader("SensorPush Cloud Recovery")
+        st.info("Pull data directly from the SensorPush API if the gateway was offline.")
         
-        # ... (keep the date/time input columns from the previous version) ...
+        import requests
+
+        c_api1, c_api2 = st.columns(2)
+        with c_api1:
+            start_d = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
+            start_t = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
+        with c_api2:
+            end_d = st.date_input("Recovery End", datetime.now())
+            end_t = st.time_input("End Time (UTC)", datetime.now().time())
+
+        # Format ISO strings for the API request
+        start_iso = datetime.combine(start_d, start_t).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_iso = datetime.combine(end_d, end_t).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         if st.button("🛰️ RUN CLOUD RECOVERY"):
             try:
                 if "sensorpush" not in st.secrets:
-                    st.error("Missing 'sensorpush' section in Secrets.")
+                    st.error("Missing 'sensorpush' credentials in Streamlit Secrets.")
                 else:
                     creds = st.secrets["sensorpush"]
                     
                     with st.spinner("Authenticating with SensorPush Cloud..."):
+                        # Step 1: OAuth Authorization
                         auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
-                        headers = {"accept": "application/json", "Content-Type": "application/json"}
                         auth_payload = {"email": creds["email"], "password": creds["password"]}
+                        auth_res = requests.post(auth_url, json=auth_payload)
                         
-                        auth_res = requests.post(auth_url, headers=headers, json=auth_payload)
-                        
-                        # Handle specific error codes
-                        if auth_res.status_code == 401:
-                            st.error("❌ Login Failed: Incorrect Email or Password. Check your Secrets.")
-                            st.stop()
-                        elif auth_res.status_code != 200:
-                            st.error(f"❌ API Error {auth_res.status_code}: {auth_res.text}")
+                        if auth_res.status_code != 200:
+                            st.error(f"Authentication Failed ({auth_res.status_code}): {auth_res.text}")
                             st.stop()
                             
                         auth_json = auth_res.json()
-                        if "accesstoken" not in auth_json:
-                            st.error(f"❌ Unexpected API Response: {auth_json}")
+                        token = auth_json.get("accesstoken")
+                        
+                        if not token:
+                            st.error("API did not return an access token. Check credentials.")
+                            st.stop()
+
+                    with st.spinner(f"Fetching Samples from {start_iso}..."):
+                        # Step 2: Fetch Samples
+                        sample_url = "https://api.sensorpush.com/api/v1/samples"
+                        headers = {"accept": "application/json", "Authorization": token}
+                        payload = {
+                            "startTime": start_iso,
+                            "endTime": end_iso,
+                            "measures": ["temperature"]
+                        }
+                        sample_res = requests.post(sample_url, headers=headers, json=payload)
+                        
+                        if sample_res.status_code != 200:
+                            st.error(f"Data Fetch Failed ({sample_res.status_code}): {sample_res.text}")
                             st.stop()
                             
-                        token = auth_json["accesstoken"]
+                        raw_json = sample_res.json()
 
-                    with st.spinner(f"Fetching Samples..."):
-                        # ... (The rest of the sample fetching and BigQuery logic remains the same) ...
-                        sample_url = "https://api.sensorpush.com/api/v1/samples"
-                        sample_headers = {"accept": "application/json", "Authorization": token}
-                        # [rest of the sample pull logic from previous step]
+                        # Step 3: Process JSON to DataFrame
+                        api_records = []
+                        sensors_found = raw_json.get("sensors", {})
+                        
+                        for sensor_id, samples in sensors_found.items():
+                            for s in samples:
+                                api_records.append({
+                                    "timestamp": s["observed"],
+                                    "value": s["value"],
+                                    "nodenumber": sensor_id.replace(':', '-')
+                                })
+                        
+                        if api_records:
+                            df_rec = pd.DataFrame(api_records)
+                            df_rec['timestamp'] = pd.to_datetime(df_rec['timestamp'])
+                            
+                            # Push to BigQuery
+                            with st.spinner("Pushing recovered data to BigQuery..."):
+                                bq_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                                client.load_table_from_dataframe(df_rec, bq_ref).result()
+                                st.success(f"✅ Recovery Complete! Pulled {len(df_rec)} data points.")
+                                st.balloons()
+                        else:
+                            st.warning("No data found for this time range. The Gateway may not have synced yet.")
+            
+            except Exception as e:
+                st.error(f"Recovery Failed: {e}")
