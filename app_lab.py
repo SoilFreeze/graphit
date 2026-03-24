@@ -4,6 +4,81 @@ import plotly.express as px
 from google.cloud import bigquery
 from google.oauth2 import service_account
 import io
+import plotly.graph_objects as go
+from datetime import timedelta
+
+# --- STANDARDIZED GRAPHING FUNCTION ---
+def build_standard_sf_graph(df, title, start_time, end_time):
+    # 1. DATA GAP LOGIC: Insert None for breaks > 6 hours
+    # This prevents the line from "stretching" across missing data periods
+    processed_dfs = []
+    for sensor in df['Sensor'].unique():
+        s_df = df[df['Sensor'] == sensor].copy().sort_values('timestamp')
+        s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gaps = s_df[s_df['gap'] > 6.0].copy()
+        if not gaps.empty:
+            gaps['value'] = None
+            gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+        processed_dfs.append(s_df)
+    
+    clean_df = pd.concat(processed_dfs) if processed_dfs else df
+
+    # 2. CREATE BASE CHART
+    fig = px.line(clean_df, x='timestamp', y='value', color='Sensor',
+                 hover_data={'timestamp': '|%b %d, %H:%M'},
+                 range_y=[-20, 80])
+    
+    # 3. Y-AXIS: Temperature Labeling & 20/5 Degree Grid
+    fig.update_yaxes(
+        title="Temperature (°F)",
+        tickmode='array',
+        tickvals=[-20, 0, 20, 40, 60, 80],
+        gridcolor='DimGray', gridwidth=1.5, # Dark gray at 20° increments
+        minor=dict(dtick=5, gridcolor='Silver', showgrid=True), # Medium gray at 5°
+        range=[-20, 80],
+        mirror=True, showline=True, linecolor='black', linewidth=2
+    )
+
+    # 4. X-AXIS: Custom Time Grid (Monday/Midnight/6-Hour)
+    # We remove default grid to draw our own
+    fig.update_xaxes(showgrid=False, range=[start_time, end_time], 
+                     mirror=True, showline=True, linecolor='black', linewidth=2)
+
+    # Generate the Custom Gridlines
+    shapes = []
+    curr = start_time.replace(hour=0, minute=0, second=0)
+    while curr <= end_time:
+        for h in [0, 6, 12, 18]:
+            check_time = curr + timedelta(hours=h)
+            if check_time < start_time or check_time > end_time: continue
+            
+            # Monday Midnight = Dark Gray
+            if check_time.weekday() == 0 and h == 0:
+                color, width = "DimGray", 2
+            # Daily Midnight = Medium Gray
+            elif h == 0:
+                color, width = "DarkGray", 1
+            # 6-Hour = Light Gray
+            else:
+                color, width = "LightGray", 0.5
+            
+            shapes.append(dict(type="line", xref="x", yref="paper",
+                               x0=check_time, y0=0, x1=check_time, y1=1,
+                               line=dict(color=color, width=width), layer="below"))
+        curr += timedelta(days=1)
+
+    # 5. FINAL LAYOUT: Centered Title & Right Legend
+    fig.update_layout(
+        title={'text': title, 'x': 0.5, 'xanchor': 'center'},
+        shapes=shapes,
+        plot_bgcolor='white',
+        legend=dict(title="Depth / Location", x=1.02, y=1, bordercolor="Black", borderwidth=1),
+        margin=dict(l=60, r=150, t=80, b=60),
+        height=700
+    )
+    
+    return fig
 
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
@@ -129,6 +204,20 @@ elif service == "📈 Node Diagnostics":
             
     except Exception as e:
         st.error(f"Diagnostics Error: {e}")
+
+# --- IMPLEMENTATION IN NODE DIAGNOSTICS ---
+if service == "📈 Node Diagnostics":
+    # ... (Keep your filter code from before) ...
+    
+    if sel_projs and sel_locs:
+        # Define window and fetch df...
+        # Ensure Depth has 'ft' and Node Location (S1, R3) is clean
+        df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft" if str(x['Depth']).isdigit() else x['Location'], axis=1)
+        
+        graph_title = f"Temperature: {', '.join(sel_locs)} | {weeks} Week Trend"
+        
+        fig = build_standard_sf_graph(df_g, graph_title, start_time, end_time)
+        st.plotly_chart(fig, use_container_width=True)
 
 # --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
