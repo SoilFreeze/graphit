@@ -8,14 +8,16 @@ from datetime import datetime, timedelta
 import pytz
 import io
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
+
+# Constants for BigQuery
 DATASET_ID = "sensor_data" 
 PROJECT_ID = "sensorpush-export"
 
 @st.cache_resource
 def get_bq_client():
-    """Authenticates via Streamlit Secrets to prevent TransportErrors."""
+    """Consistent auth engine to prevent TransportErrors."""
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
@@ -34,10 +36,10 @@ client = get_bq_client()
 
 # --- 2. STANDARDIZED GRAPH ENGINE ---
 def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
-    if active_refs is None: 
-        active_refs = []
+    """Handles 6hr gaps, C/F units, custom grid, and 'Right Now' red line."""
+    if active_refs is None: active_refs = []
     
-    # 1. Unit Conversion
+    # Unit Conversion Logic
     display_df = df.copy()
     if unit == "Celsius":
         display_df['value'] = (display_df['value'] - 32) * 5/9
@@ -45,23 +47,36 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     else:
         y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # 2. Trace Creation (Explicitly No Fill to prevent Blobs)
+    # Gap Logic (Line breaks > 6hrs)
+    processed_dfs = []
+    for sensor in display_df['Sensor'].unique():
+        s_df = display_df[display_df['Sensor'] == sensor].copy().sort_values('timestamp')
+        s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gaps = s_df[s_df['gap'] > 6.0].copy()
+        if not gaps.empty:
+            gaps['value'] = None
+            gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+        processed_dfs.append(s_df)
+    
+    clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
+    
+    # Trace Creation: Explicitly No Fill to prevent 'Blobs'
     fig = go.Figure()
-    for sensor in sorted(display_df['Sensor'].unique()):
-        sensor_df = display_df[display_df['Sensor'] == sensor]
+    for sensor in clean_df['Sensor'].unique():
+        sensor_df = clean_df[clean_df['Sensor'] == sensor]
         fig.add_trace(go.Scatter(
             x=sensor_df['timestamp'], y=sensor_df['value'],
             name=sensor, mode='lines', fill=None, connectgaps=False, line=dict(width=2)
         ))
 
-    # 3. Grid & Axis Styling (20° Dark, 5° Medium)
+    # Grid & Axis Styling
     fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
-    
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # 4. Vertical Gridlines (Monday Dark, Midnight Medium, 6hr Light)
+    # Custom Vertical Grid (Mon/Mid/6hr)
     shapes = []
     curr = start_view.replace(hour=0, minute=0, second=0)
     while curr <= end_view:
@@ -73,7 +88,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
             shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, line=dict(color=c, width=w), layer="below"))
         curr += timedelta(days=1)
 
-    # 5. NOW Line & Reference Lines
+    # NOW Line & Reference Lines
     now_ms = datetime.now(pytz.UTC).timestamp() * 1000
     fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="NOW")
     for ref_f, label in active_refs:
@@ -83,8 +98,9 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     fig.update_layout(title={'text': title, 'x': 0.5}, shapes=shapes, plot_bgcolor='white',
                       legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), margin=dict(r=150), height=750)
     return fig
-    
+
 # --- 3. SERVICE ROUTING ---
+st.sidebar.title("❄️ SoilFreeze Lab")
 service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📈 Node Diagnostics", "📤 Data Intake Lab", "⚙️ Database Maintenance"])
 
 if service == "🏠 Executive Summary":
@@ -97,141 +113,50 @@ if service == "🏠 Executive Summary":
                 if v > 32: return 'background-color: #ff4b4b; color: white' 
                 return 'background-color: #ffa500' if 28 <= v <= 32 else 'background-color: #28a745; color: white'
             st.dataframe(df_ex.style.map(thermal_style, subset=['current_temp']), width='stretch')
-    except Exception as e: 
-        st.error(f"Summary Error: {e}")
+    except Exception as e: st.error(f"Summary Error: {e}")
 
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
-    # Sidebar Options
+    # Sidebar Settings
     temp_unit = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
     ref_list = []
     if st.sidebar.checkbox("32°F (Frost)"): ref_list.append((32.0, "Frost"))
     if st.sidebar.checkbox("26.6°F (Brine)"): ref_list.append((26.6, "Brine"))
     if st.sidebar.checkbox("10.2°F (Deep)"): ref_list.append((10.2, "Deep"))
 
-    # Metadata filters with Null-Safe Sorting
-    meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
-    c1, c2, c3 = st.columns(3)
-    with c1: 
-        projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
-        sel_projs = st.multiselect("Projects", projs)
-    with c2: 
-        raw_locs = meta_df[meta_df['Project'].isin(sel_projs)]['Location'].unique() if sel_projs else []
-        locs = sorted([l for l in raw_locs if l is not None])
-        sel_locs = st.multiselect("Pipes", locs)
-    with c3: 
-        weeks = st.slider("Duration (Weeks)", 1, 12, 6)
-
-    if sel_projs and sel_locs:
-        now_utc = datetime.now(pytz.UTC)
-        end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        start_view = end_view - timedelta(weeks=weeks)
-        
-        q = f"SELECT timestamp, value, Location, Depth FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE Project IN UNNEST({list(sel_projs)}) AND Location IN UNNEST({list(sel_locs)}) AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'"
-        df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
-        
-        if not df_g.empty:
-            # Legend Logic: Depth gets 'ft', node locations (S1, R3) stay as-is
-            df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft" if str(x['Depth']).replace('.','',1).isdigit() else x['Location'], axis=1)
-            fig = build_standard_sf_graph(df_g, f"Trends: {', '.join(sel_locs)}", start_view, end_view, unit=temp_unit, active_refs=ref_list)
-            st.plotly_chart(fig, width='stretch')
-
-elif service == "📤 Data Intake Lab":
-    st.header("📤 Manual Data Ingestion")
-    # ... (Lord Parser Logic goes here, ensure same indentation level as above) ...
-    pass
-
-elif service == "⚙️ Database Maintenance":
-    st.header("⚙️ Database Maintenance")
-    # ... (Master Scrub Logic goes here, ensure same indentation level as above) ...
-    pass
-                                  
-# --- SERVICE 1: EXECUTIVE SUMMARY ---
-if service == "🏠 Executive Summary":
-    st.header("🏠 Executive Summary")
-    try:
-        query = f"SELECT nodenumber, Project, Location, Depth, MAX(timestamp) as last_seen, AVG(value) as current_temp FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` GROUP BY 1, 2, 3, 4"
-        df_ex = client.query(query).to_dataframe(create_bqstorage_client=False)
-        
-        if not df_ex.empty:
-            def thermal_style(v):
-                if v > 32: return 'background-color: #ff4b4b; color: white' 
-                return 'background-color: #ffa500' if 28 <= v <= 32 else 'background-color: #28a745; color: white'
-            
-            st.dataframe(df_ex.style.map(thermal_style, subset=['current_temp']), width='stretch')
-    except Exception as e: st.error(f"Summary Error: {e}")
-
-# --- SERVICE 2: NODE DIAGNOSTICS ---
-elif service == "📈 Node Diagnostics":
-    # The header is ONLY inside the elif block to prevent doubling
-    st.header("📈 Node Diagnostics")
-    
-    # 1. Sidebar Controls (Thermal References)
-    temp_unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
-    ref_list = []
-    if st.sidebar.checkbox("32°F (Frost)"): ref_list.append((32.0, "Frost"))
-    if st.sidebar.checkbox("26.6°F (Brine)"): ref_list.append((26.6, "Brine"))
-    if st.sidebar.checkbox("10.2°F (Deep)"): ref_list.append((10.2, "Deep"))
-
-    # 2. Main Filters: Using Selectbox for Single-Entry Dropdowns
+    # Single-Selection Filters
     meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
     
     c1, c2, c3 = st.columns(3)
-    with c1: 
+    with c1:
         all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
-        # Default to 'Office' if available, otherwise first item
         default_idx = all_projs.index("Office") if "Office" in all_projs else 0
         sel_proj = st.selectbox("Project", all_projs, index=default_idx)
-        
-    with c2: 
-        # Narrow location list to the single selected project
+    with c2:
         raw_locs = meta_df[meta_df['Project'] == sel_proj]['Location'].unique()
         avail_locs = sorted([l for l in raw_locs if l is not None])
-        # Swapped to selectbox for a clean dropdown
         sel_loc = st.selectbox("Pipe / Bank", avail_locs)
-        
-    with c3: 
+    with c3:
         weeks = st.slider("Duration (Weeks)", 1, 12, 6)
 
-    # 3. Data Fetching & Numerical Sorting
+    # Data & Plotting
     if sel_proj and sel_loc:
         now_utc = datetime.now(pytz.UTC)
         end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks)
         
-        q = f"""
-            SELECT timestamp, value, Location, Depth, nodenumber 
-            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
-            WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' 
-            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'
-        """
+        q = f"SELECT timestamp, value, Location, Depth, nodenumber FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'"
         df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
         
         if not df_g.empty:
-            # Add a numeric depth column for correct sorting (e.g. 12 < 100)
             df_g['depth_num'] = pd.to_numeric(df_g['Depth'], errors='coerce').fillna(0)
-
-            # Standardize Legend: "12ft (S1)"
-            def label_sensor(row):
-                d = str(row['Depth'])
-                label = f"{d}ft" if d.replace('.','',1).isdigit() else d
-                return f"{label} ({row['nodenumber']})"
-
-            df_g['Sensor'] = df_g.apply(label_sensor, axis=1)
-            
-            # SORT LOGIC: First by Depth (numerical), then by timestamp
+            df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft ({x['nodenumber']})" if str(x['Depth']).replace('.','',1).isdigit() else f"{x['Depth']} ({x['nodenumber']})", axis=1)
             df_g = df_g.sort_values(by=['depth_num', 'timestamp'])
             
-            # Generate Graph with Standard SF Engine
-            title = f"Trend: {sel_proj} - {sel_loc}"
-            fig = build_standard_sf_graph(df_g, title, start_view, end_view, unit=temp_unit, active_refs=ref_list)
+            fig = build_standard_sf_graph(df_g, f"Trend: {sel_proj} - {sel_loc}", start_view, end_view, unit=temp_unit, active_refs=ref_list)
             st.plotly_chart(fig, width='stretch')
-        else:
-            st.info(f"No data available for {sel_loc}.")
 
-
-# --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Manual Data Ingestion")
     source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"])
@@ -243,37 +168,24 @@ elif service == "📤 Data Intake Lab":
             if "Lord" in source:
                 start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
                 u_file.seek(0)
-                df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
-                df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
-                df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
-                df_up['nodenumber'] = df_up['nodenumber'].str.replace(':', '-', regex=False)
+                df_up = pd.read_csv(u_file, skiprows=start_idx + 1).melt(id_vars=["Timestamp"], var_name='nodenumber', value_name='value').rename(columns={"Timestamp": "timestamp"})
                 table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
             else:
                 df_up = pd.read_csv(u_file).rename(columns={'Timestamp':'timestamp','Temperature':'value','Sensor':'nodenumber'})
-                df_up['nodenumber'] = df_up['nodenumber'].str.replace(':', '-', regex=False)
                 table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
             
+            df_up['nodenumber'] = df_up['nodenumber'].str.replace(':', '-', regex=False)
             if st.button("🚀 PUSH TO BIGQUERY"):
                 client.load_table_from_dataframe(df_up, table_ref).result()
                 st.success("Data ingested!")
         except Exception as e: st.error(f"Intake Error: {e}")
 
-# --- SERVICE 4: DATABASE MAINTENANCE ---
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance")
     if st.button("🔄 EXECUTE MASTER SCRUB"):
-        with st.spinner("Rebuilding Master Table..."):
+        with st.spinner("Rebuilding..."):
             try:
-                scrub_q = f"""
-                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS
-                WITH Unified AS (
-                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                    UNION ALL
-                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                )
-                SELECT u.*, m.Project, m.Location, m.Depth FROM Unified u
-                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
-                """
+                scrub_q = f"CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS WITH Unified AS (SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` UNION ALL SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`) SELECT u.*, m.Project, m.Location, m.Depth FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')"
                 client.query(scrub_q).result()
-                st.success("Master Table Rebuilt & Standardized!")
+                st.success("Master Table Rebuilt!")
             except Exception as e: st.error(f"Scrub Error: {e}")
