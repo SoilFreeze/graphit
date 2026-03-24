@@ -116,3 +116,51 @@ elif service == "📈 Node Diagnostics":
             df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft" if str(x['Depth']).replace('.','',1).isdigit() else x['Location'], axis=1)
             fig = build_standard_sf_graph(df_g, f"Temperature: {', '.join(sel_locs)}", start_view, end_view)
             st.plotly_chart(fig, width='stretch')
+
+# --- SERVICE 1: EXECUTIVE SUMMARY ---
+if service == "🏠 Executive Summary":
+    st.header("🏠 Executive Summary")
+    
+    query = f"""
+        SELECT 
+            nodenumber, Project, Location, Depth,
+            MAX(timestamp) as last_seen,
+            AVG(value) as current_temp
+        FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+        GROUP BY 1, 2, 3, 4
+    """
+    try:
+        # Added create_bqstorage_client=False to bypass the 403 Permission error
+        df_ex = client.query(query).to_dataframe(create_bqstorage_client=False)
+        
+        if df_ex.empty:
+            st.warning("Master Table is empty. Run 'Database Maintenance' first.")
+        else:
+            avg_t = df_ex['current_temp'].mean()
+            c1, c2 = st.columns(2)
+            c1.metric("Project Avg Temp", f"{avg_t:.1f}°F")
+            c2.metric("Active Sensors", len(df_ex))
+
+            # Maltby Engineering Requirements: Red (>32), Orange (28-32), Green (<28)
+            def thermal_style(v):
+                if v > 32: return 'background-color: #ff4b4b; color: white' 
+                if 28 <= v <= 32: return 'background-color: #ffa500'        
+                return 'background-color: #28a745; color: white'           
+            
+            # Using .map() for Pandas 2.x+ and width='stretch' for Streamlit 2026 standards
+            st.dataframe(df_ex.style.map(thermal_style, subset=['current_temp']), width='stretch')
+    except Exception as e:
+        st.error(f"Summary Error: {e}")
+
+# --- SERVICE 2: NODE DIAGNOSTICS ---
+elif service == "📈 Node Diagnostics":
+    # ... (Filter logic here) ...
+    if sel_projs and sel_locs:
+        # (Time boundary logic here) ...
+        
+        # Apply the same 403 fix to the Diagnostic query
+        df_g = client.query(graph_q).to_dataframe(create_bqstorage_client=False)
+        
+        if not df_g.empty:
+            # (Graphing logic here) ...
+            st.plotly_chart(fig, width='stretch')
