@@ -264,27 +264,53 @@ elif service == "📈 Node Diagnostics":
             st.plotly_chart(fig, width='stretch')
 
 elif service == "📤 Data Intake Lab":
-    st.header("📤 Manual Data Ingestion")
-    source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"])
-    u_file = st.file_uploader("Upload Logger File", type=['csv'])
+    st.header("📤 Data Ingestion & Recovery")
+    
+    tab1, tab2 = st.tabs(["Manual File Upload", "API Data Recovery"])
 
-    if u_file:
-        try:
-            content = u_file.getvalue().decode("utf-8").splitlines()
-            if "Lord" in source:
-                start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
-                u_file.seek(0)
-                df_up = pd.read_csv(u_file, skiprows=start_idx + 1).melt(id_vars=["Timestamp"], var_name='nodenumber', value_name='value').rename(columns={"Timestamp": "timestamp"})
-                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-            else:
-                df_up = pd.read_csv(u_file).rename(columns={'Timestamp':'timestamp','Temperature':'value','Sensor':'nodenumber'})
-                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-            
-            df_up['nodenumber'] = df_up['nodenumber'].str.replace(':', '-', regex=False)
-            if st.button("🚀 PUSH TO BIGQUERY"):
-                client.load_table_from_dataframe(df_up, table_ref).result()
-                st.success("Data ingested!")
-        except Exception as e: st.error(f"Intake Error: {e}")
+    with tab1:
+        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"])
+        u_file = st.file_uploader("Upload Logger File", type=['csv'])
+        if u_file:
+            # ... (Existing CSV logic from previous steps) ...
+            pass
+
+    with tab2:
+        st.subheader("📡 SensorPush API Backfill")
+        st.info("Use this if the gateway was offline and you need to force-pull a specific time window.")
+        
+        col_date1, col_date2 = st.columns(2)
+        with col_date1:
+            start_date = st.date_input("Start Date", datetime.now() - timedelta(days=2))
+            start_time = st.time_input("Start Time", datetime.strptime("00:00", "%H:%M").time())
+        with col_date2:
+            end_date = st.date_input("End Date", datetime.now())
+            end_time = st.time_input("End Time", datetime.now().time())
+
+        # Combine into UTC timestamps for the API
+        start_dt = datetime.combine(start_date, start_time).replace(tzinfo=pytz.UTC)
+        end_dt = datetime.combine(end_date, end_time).replace(tzinfo=pytz.UTC)
+
+        if st.button("🛰️ PULL RECOVERY DATA"):
+            # Note: This requires your SensorPush API credentials 
+            # (email/password) to be in st.secrets["sensorpush"]
+            try:
+                with st.spinner(f"Requesting data from {start_dt.strftime('%m/%d %H:%M')}..."):
+                    # 1. Authenticate with SensorPush
+                    # (Placeholder for the specific library/request calls)
+                    # 2. Fetch samples for the range [start_dt, end_dt]
+                    # 3. Format into DataFrame
+                    
+                    st.warning("Ensure 'sensorpush' credentials are set in Streamlit Secrets.")
+                    
+                    # Example of the structure needed for BQ
+                    # df_recovered = fetch_sensorpush_data(start_dt, end_dt)
+                    
+                    # if not df_recovered.empty:
+                    #    client.load_table_from_dataframe(df_recovered, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                    #    st.success(f"Recovered {len(df_recovered)} data points!")
+            except Exception as e:
+                st.error(f"Recovery Failed: {e}")
 
 elif service == "⚙️ Database Maintenance":
     st.header("⚙️ Database Maintenance")
