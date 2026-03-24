@@ -7,6 +7,9 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
 import io
+import requests
+import json
+
 
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
@@ -276,48 +279,74 @@ elif service == "📤 Data Intake Lab":
             pass
 
     with tab2:
-        st.subheader("📡 SensorPush API Backfill")
-        st.info("Use this if the gateway was offline and you need to force-pull a specific time window.")
-        
-        col_date1, col_date2 = st.columns(2)
-        with col_date1:
-            start_date = st.date_input("Start Date", datetime.now() - timedelta(days=2))
-            start_time = st.time_input("Start Time", datetime.strptime("00:00", "%H:%M").time())
-        with col_date2:
-            end_date = st.date_input("End Date", datetime.now())
-            end_time = st.time_input("End Time", datetime.now().time())
+    st.subheader("📡 SensorPush API Backfill")
+    st.info("Force-pull data directly from the SensorPush Cloud for a specific window.")
+    
+    col_date1, col_date2 = st.columns(2)
+    with col_date1:
+        start_date = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
+        start_time = st.time_input("Start Time UTC", datetime.strptime("00:00", "%H:%M").time())
+    with col_date2:
+        end_date = st.date_input("Recovery End", datetime.now())
+        end_time = st.time_input("End Time UTC", datetime.now().time())
 
-        # Combine into UTC timestamps for the API
-        start_dt = datetime.combine(start_date, start_time).replace(tzinfo=pytz.UTC)
-        end_dt = datetime.combine(end_date, end_time).replace(tzinfo=pytz.UTC)
+    # Combine into UTC ISO format strings (required by SensorPush API)
+    start_iso = datetime.combine(start_date, start_time).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = datetime.combine(end_date, end_time).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        if st.button("🛰️ PULL RECOVERY DATA"):
-            # Note: This requires your SensorPush API credentials 
-            # (email/password) to be in st.secrets["sensorpush"]
-            try:
-                with st.spinner(f"Requesting data from {start_dt.strftime('%m/%d %H:%M')}..."):
-                    # 1. Authenticate with SensorPush
-                    # (Placeholder for the specific library/request calls)
-                    # 2. Fetch samples for the range [start_dt, end_dt]
-                    # 3. Format into DataFrame
-                    
-                    st.warning("Ensure 'sensorpush' credentials are set in Streamlit Secrets.")
-                    
-                    # Example of the structure needed for BQ
-                    # df_recovered = fetch_sensorpush_data(start_dt, end_dt)
-                    
-                    # if not df_recovered.empty:
-                    #    client.load_table_from_dataframe(df_recovered, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    #    st.success(f"Recovered {len(df_recovered)} data points!")
-            except Exception as e:
-                st.error(f"Recovery Failed: {e}")
+    if st.button("🛰️ RUN CLOUD RECOVERY"):
+        try:
+            creds = st.secrets["sensorpush"]
+            
+            with st.spinner("Authenticating with SensorPush..."):
+                # STEP 1: Get Access Token
+                auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
+                auth_payload = {"email": creds["email"], "password": creds["password"]}
+                auth_res = requests.post(auth_url, json=auth_payload)
+                auth_res.raise_for_status()
+                token = auth_res.json()["accesstoken"]
 
-elif service == "⚙️ Database Maintenance":
-    st.header("⚙️ Database Maintenance")
-    if st.button("🔄 EXECUTE MASTER SCRUB"):
-        with st.spinner("Rebuilding..."):
-            try:
-                scrub_q = f"CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS WITH Unified AS (SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` UNION ALL SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`) SELECT u.*, m.Project, m.Location, m.Depth FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')"
-                client.query(scrub_q).result()
-                st.success("Master Table Rebuilt!")
-            except Exception as e: st.error(f"Scrub Error: {e}")
+            with st.spinner("Fetching Samples..."):
+                # STEP 2: Request Samples for the Time Range
+                sample_url = "https://api.sensorpush.com/api/v1/samples"
+                headers = {"accept": "application/json", "Authorization": token}
+                # We leave 'sensors' and 'gateways' empty to pull EVERYTHING in the account
+                sample_payload = {
+                    "startTime": start_iso,
+                    "endTime": end_iso,
+                    "measures": ["temperature"]
+                }
+                
+                sample_res = requests.post(sample_url, headers=headers, json=sample_payload)
+                sample_res.raise_for_status()
+                raw_data = sample_res.json()
+
+                # STEP 3: Process JSON into BigQuery Format
+                records = []
+                # SensorPush returns data grouped by sensor ID
+                for sensor_id, samples in raw_data.get("sensors", {}).items():
+                    for s in samples:
+                        records.append({
+                            "timestamp": s["observed"], # SensorPush uses ISO string for observed
+                            "value": s["value"],
+                            "nodenumber": sensor_id.replace(':', '-') # Standardize ID
+                        })
+                
+                if records:
+                    df_recovered = pd.DataFrame(records)
+                    df_recovered['timestamp'] = pd.to_datetime(df_recovered['timestamp'])
+                    
+                    # Push to the raw_sensorpush table
+                    job = client.load_table_from_dataframe(
+                        df_recovered, 
+                        f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    )
+                    job.result()
+                    
+                    st.success(f"✅ Recovery Complete! Pulled {len(df_recovered)} points for {len(raw_data.get('sensors', {}))} sensors.")
+                    st.balloons()
+                else:
+                    st.warning("API returned 0 records for this time range. Check if the gateway uploaded data for these dates.")
+
+        except Exception as e:
+            st.error(f"Recovery Failed: {e}")
