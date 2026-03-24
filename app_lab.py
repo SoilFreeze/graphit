@@ -35,12 +35,32 @@ def get_bq_client():
 client = get_bq_client()
 
 # --- 2. STANDARDIZED GRAPH ENGINE ---
-def build_standard_sf_graph(df, title, start_view, end_view):
-    """Handles 6hr gaps, custom gridlines (Mon/Mid/6hr), and Maltby labeling."""
+def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
+    """
+    Standardized SF Engine: Handles 6hr gaps, C/F conversion, 
+    and 'Right Now' red line.
+    """
+    if active_refs is None:
+        active_refs = []
+
+    # 1. UNIT CONVERSION LOGIC
+    display_df = df.copy()
+    if unit == "Celsius":
+        display_df['value'] = (display_df['value'] - 32) * 5/9
+        y_range = [-30, 30]
+        y_ticks = [-30, -20, -10, 0, 10, 20, 30]
+        y_label = "Temperature (°C)"
+        minor_step = 2.5
+    else:
+        y_range = [-20, 80]
+        y_ticks = [-20, 0, 20, 40, 60, 80]
+        y_label = "Temperature (°F)"
+        minor_step = 5
+
+    # 2. DATA GAP LOGIC (6-hour break)
     processed_dfs = []
-    for sensor in df['Sensor'].unique():
-        s_df = df[df['Sensor'] == sensor].copy().sort_values('timestamp')
-        # Logic: Break line if gap > 6 hours
+    for sensor in display_df['Sensor'].unique():
+        s_df = display_df[display_df['Sensor'] == sensor].copy().sort_values('timestamp')
         s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gaps = s_df[s_df['gap'] > 6.0].copy()
         if not gaps.empty:
@@ -49,49 +69,101 @@ def build_standard_sf_graph(df, title, start_view, end_view):
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
         processed_dfs.append(s_df)
     
-    clean_df = pd.concat(processed_dfs) if processed_dfs else df
+    clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     fig = px.line(clean_df, x='timestamp', y='value', color='Sensor')
-    
-    # Y-Axis: 80 to -20 F, Dark Gray every 20, Medium every 5
-    fig.update_yaxes(
-        title="Temperature (°F)", tickmode='array', tickvals=[-20, 0, 20, 40, 60, 80],
-        gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
-        range=[-20, 80], mirror=True, showline=True, linecolor='black', linewidth=2
-    )
 
-    # X-Axis: Remove default grid to draw custom Monday/Midnight/6hr lines
+    # 3. Y-AXIS & X-AXIS STYLING
+    fig.update_yaxes(
+        title=y_label, tickmode='array', tickvals=y_ticks,
+        gridcolor='DimGray', gridwidth=1.5, 
+        minor=dict(dtick=minor_step, gridcolor='Silver', showgrid=True),
+        range=y_range, mirror=True, showline=True, linecolor='black', linewidth=2
+    )
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], 
                      mirror=True, showline=True, linecolor='black', linewidth=2)
 
+    # 4. CUSTOM GRIDLINES (Monday/Midnight/6hr)
     shapes = []
     curr = start_view.replace(hour=0, minute=0, second=0)
     while curr <= end_view:
         for h in [0, 6, 12, 18]:
             check_time = curr + timedelta(hours=h)
             if check_time < start_view or check_time > end_view: continue
-            
-            # Monday Midnight (Dark), Daily Midnight (Medium), 6-Hour (Light)
             if check_time.weekday() == 0 and h == 0: color, width = "DimGray", 2
             elif h == 0: color, width = "DarkGray", 1
             else: color, width = "LightGray", 0.5
-            
             shapes.append(dict(type="line", xref="x", yref="paper", x0=check_time, y0=0, x1=check_time, y1=1,
                                line=dict(color=color, width=width), layer="below"))
         curr += timedelta(days=1)
 
+    # 5. "RIGHT NOW" INDICATOR (Solid Red Line)
+    now_ts = datetime.now(pytz.UTC)
+    fig.add_vline(x=now_ts, line_width=2, line_color="red", annotation_text="Current Time")
+
+    # 6. OPTIONAL REFERENCE LINES
+    for ref_f, label in active_refs:
+        val = (ref_f - 32) * 5/9 if unit == "Celsius" else ref_f
+        fig.add_hline(y=val, line_dash="dash", line_color="blue", 
+                      annotation_text=f"{label} ({round(val,1)}°)")
+
     fig.update_layout(
-        title={'text': title, 'x': 0.5, 'xanchor': 'center'}, shapes=shapes, plot_bgcolor='white',
+        title={'text': title, 'x': 0.5, 'xanchor': 'center'},
+        shapes=shapes, plot_bgcolor='white',
         legend=dict(title="Depth / Location", x=1.02, y=1, bordercolor="Black", borderwidth=1),
         margin=dict(l=60, r=150, t=80, b=60), height=750
     )
-    fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F")
     return fig
 
 # --- 3. UI NAVIGATION ---
 service = st.sidebar.selectbox("Select Service", [
     "🏠 Executive Summary", "📈 Node Diagnostics", "📤 Data Intake Lab", "⚙️ Database Maintenance"
 ])
+elif service == "📈 Node Diagnostics":
+    st.header("📈 Node Diagnostics")
+    
+    # Sidebar Controls for Graph Customization
+    st.sidebar.subheader("Graph Settings")
+    temp_unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
+    
+    st.sidebar.subheader("Reference Lines")
+    ref_list = []
+    if st.sidebar.checkbox("32°F (Frost Line)"): ref_list.append((32.0, "Frost"))
+    if st.sidebar.checkbox("26.6°F (Brine Line)"): ref_list.append((26.6, "Brine"))
+    if st.sidebar.checkbox("10.2°F (Target Deep)"): ref_list.append((10.2, "Deep"))
 
+    # Filter Logic with NULL-SAFE sorting
+    meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
+    
+    c1, c2, c3 = st.columns(3)
+    with c1: 
+        all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
+        sel_projs = st.multiselect("Projects", all_projs)
+    with c2: 
+        raw_locs = meta_df[meta_df['Project'].isin(sel_projs)]['Location'].unique() if sel_projs else []
+        avail_locs = sorted([l for l in raw_locs if l is not None]) # Fix for NoneType error
+        sel_locs = st.multiselect("Pipes", avail_locs)
+    with c3: weeks = st.slider("Trend Duration (Weeks)", 1, 12, 6)
+
+    if sel_projs and sel_locs:
+        # Time and Query Logic...
+        now_utc = datetime.now(pytz.UTC)
+        end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_view = end_view - timedelta(weeks=weeks)
+        
+        query = f"SELECT timestamp, value, Location, Depth FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE Project IN UNNEST({list(sel_projs)}) AND Location IN UNNEST({list(sel_locs)}) AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'"
+        df_g = client.query(query).to_dataframe(create_bqstorage_client=False)
+        
+        if not df_g.empty:
+            df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft" if str(x['Depth']).replace('.','',1).isdigit() else x['Location'], axis=1)
+            
+            fig = build_standard_sf_graph(
+                df_g, 
+                f"Temperature: {', '.join(sel_locs)}", 
+                start_view, end_view, 
+                unit=temp_unit, 
+                active_refs=ref_list
+            )
+            st.plotly_chart(fig, width='stretch')
 # --- SERVICE 1: EXECUTIVE SUMMARY ---
 if service == "🏠 Executive Summary":
     st.header("🏠 Executive Summary")
