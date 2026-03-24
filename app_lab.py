@@ -106,7 +106,7 @@ service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "�
 if service == "🏠 Executive Summary":
     st.header("🏠 Site Health & Warming Alerts")
 
-    # 1. Project Selection (Single Dropdown)
+    # 1. Project Selection
     meta_df = client.query(
         f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`"
     ).to_dataframe(create_bqstorage_client=False)
@@ -115,7 +115,7 @@ if service == "🏠 Executive Summary":
     default_idx = all_projs.index("Office") if "Office" in all_projs else 0
     sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=default_idx)
 
-    # 2. SQL: Pull the last 24 hours of data for each node based on its OWN last reading
+    # 2. SQL Query (Last known 24h window per node)
     query = f"""
         WITH NodeLimits AS (
             SELECT nodenumber, MAX(timestamp) as max_ts
@@ -143,45 +143,65 @@ if service == "🏠 Executive Summary":
             for node in df_summary['nodenumber'].unique():
                 n_df = df_summary[df_summary['nodenumber'] == node].sort_values('timestamp')
                 
-                # Temperature Metrics (One Decimal Point)
+                # Temperature Metrics
                 current_temp = n_df['value'].iloc[-1]
                 min_24h = n_df['value'].min()
                 max_24h = n_df['value'].max()
                 max_change = max_24h - min_24h
                 
-                # Time Metric: Hours Since Last Seen (One Decimal Point)
+                # Time Metric: Integer rounding for hours
                 last_seen_dt = n_df['timestamp'].iloc[-1]
                 hours_ago = (now_ts - last_seen_dt).total_seconds() / 3600
+                hours_int = int(round(hours_ago, 0))
                 
-                # Format "Last Seen" string for the table
-                last_seen_str = f"{last_seen_dt.strftime('%m/%d %H:%M')} ({round(hours_ago, 1)}h ago)"
-                if hours_ago > 24:
-                    last_seen_str = f"⚠️ {last_seen_str}"
+                # Format string for display
+                last_seen_str = f"{last_seen_dt.strftime('%m/%d %H:%M')} ({hours_int}h ago)"
 
                 summary_stats.append({
                     "Location": n_df['Location'].iloc[0],
                     "Depth": f"{n_df['Depth'].iloc[0]}ft",
                     "Node ID": node,
                     "Status / Last Seen": last_seen_str,
-                    "Min (24h)": round(min_24h, 1),
-                    "Max (24h)": round(max_24h, 1),
-                    "24h Change": round(max_change, 1),
-                    "Current": round(current_temp, 1)
+                    "hours_raw": hours_ago, # Hidden column for styling
+                    "Min (24h)": round(float(min_24h), 1),
+                    "Max (24h)": round(float(max_24h), 1),
+                    "24h Change": round(float(max_change), 1),
+                    "Current": round(float(current_temp), 1)
                 })
 
-            # 3. Create DataFrame and Numeric Sort by Depth
             df_display = pd.DataFrame(summary_stats)
+            
+            # Numeric sort for depths
             df_display['d_sort'] = df_display['Depth'].str.extract('(\d+)').astype(float)
             df_display = df_display.sort_values(['Location', 'd_sort']).drop(columns=['d_sort'])
 
-            # 4. Maltby Engineering Color Logic
-            def thermal_color_logic(v):
-                if v > 32: return 'background-color: #ff4b4b; color: white' # Red
-                if 28 <= v <= 32: return 'background-color: #ffa500; color: black' # Orange
-                return 'background-color: #28a745; color: white' # Green
+            # 3. CUSTOM STYLING LOGIC
+            def status_color_logic(row):
+                """Colors the 'Status' column based on data age."""
+                h = row['hours_raw']
+                styles = [''] * len(row)
+                # Find index of the Status column
+                status_idx = row.index.get_loc("Status / Last Seen")
+                
+                if h >= 24:
+                    styles[status_idx] = 'background-color: #ff4b4b; color: white' # Red
+                elif h >= 12:
+                    styles[status_idx] = 'background-color: #ffa500; color: black' # Orange
+                elif h >= 6:
+                    styles[status_idx] = 'background-color: #ffff00; color: black' # Yellow
+                
+                return styles
 
+            # 4. Display with explicit column formatting to kill the trailing zeros
             st.dataframe(
-                df_display.style.map(thermal_color_logic, subset=['Current', 'Max (24h)', 'Min (24h)']),
+                df_display.style.apply(status_color_logic, axis=1),
+                column_config={
+                    "Min (24h)": st.column_config.NumberColumn(format="%.1f"),
+                    "Max (24h)": st.column_config.NumberColumn(format="%.1f"),
+                    "24h Change": st.column_config.NumberColumn(format="%.1f"),
+                    "Current": st.column_config.NumberColumn(format="%.1f"),
+                    "hours_raw": None # Hide this helper column
+                },
                 width='stretch',
                 hide_index=True
             )
