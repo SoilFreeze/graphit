@@ -106,7 +106,7 @@ service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "�
 if service == "🏠 Executive Summary":
     st.header("🏠 Site Health & Warming Alerts")
 
-    # 1. Project Selection
+    # 1. Project Selection (Single Dropdown)
     meta_df = client.query(
         f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`"
     ).to_dataframe(create_bqstorage_client=False)
@@ -115,8 +115,7 @@ if service == "🏠 Executive Summary":
     default_idx = all_projs.index("Office") if "Office" in all_projs else 0
     sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=default_idx)
 
-    # 2. Optimized SQL Logic: Find the last 24 hours of data per node, regardless of "Now"
-    # This CTE finds the max timestamp per node and pulls everything within 24 hours of that peak
+    # 2. SQL: Pull the last 24 hours of data for each node based on its OWN last reading
     query = f"""
         WITH NodeLimits AS (
             SELECT nodenumber, MAX(timestamp) as max_ts
@@ -138,45 +137,48 @@ if service == "🏠 Executive Summary":
         if df_summary.empty:
             st.warning(f"No historical data found for project: {sel_summary_proj}")
         else:
+            now_ts = datetime.now(pytz.UTC)
             summary_stats = []
+            
             for node in df_summary['nodenumber'].unique():
                 n_df = df_summary[df_summary['nodenumber'] == node].sort_values('timestamp')
                 
-                # Metrics from the node's specific last 24-hour window
+                # Temperature Metrics (One Decimal Point)
                 current_temp = n_df['value'].iloc[-1]
                 min_24h = n_df['value'].min()
                 max_24h = n_df['value'].max()
                 max_change = max_24h - min_24h
                 
-                # Format Last Seen with a warning if it's older than 24 hours from "Now"
+                # Time Metric: Hours Since Last Seen (One Decimal Point)
                 last_seen_dt = n_df['timestamp'].iloc[-1]
-                is_stale = (datetime.now(pytz.UTC) - last_seen_dt) > timedelta(hours=24)
-                last_seen_str = last_seen_dt.strftime('%m/%d %H:%M')
-                if is_stale:
+                hours_ago = (now_ts - last_seen_dt).total_seconds() / 3600
+                
+                # Format "Last Seen" string for the table
+                last_seen_str = f"{last_seen_dt.strftime('%m/%d %H:%M')} ({round(hours_ago, 1)}h ago)"
+                if hours_ago > 24:
                     last_seen_str = f"⚠️ {last_seen_str}"
 
                 summary_stats.append({
                     "Location": n_df['Location'].iloc[0],
                     "Depth": f"{n_df['Depth'].iloc[0]}ft",
                     "Node ID": node,
-                    "Last Seen": last_seen_str,
+                    "Status / Last Seen": last_seen_str,
                     "Min (24h)": round(min_24h, 1),
                     "Max (24h)": round(max_24h, 1),
-                    "Max Change": round(max_change, 1),
+                    "24h Change": round(max_change, 1),
                     "Current": round(current_temp, 1)
                 })
 
-            # Create DataFrame and Sort by Location then Depth (Numeric)
+            # 3. Create DataFrame and Numeric Sort by Depth
             df_display = pd.DataFrame(summary_stats)
-            # Numeric sort for Depth string '15ft' -> 15
             df_display['d_sort'] = df_display['Depth'].str.extract('(\d+)').astype(float)
             df_display = df_display.sort_values(['Location', 'd_sort']).drop(columns=['d_sort'])
 
-            # 3. Styling Logic (Maltby engineering color requirements)
+            # 4. Maltby Engineering Color Logic
             def thermal_color_logic(v):
-                if v > 32: return 'background-color: #ff4b4b; color: white' # Red: Active Thaw
-                if 28 <= v <= 32: return 'background-color: #ffa500; color: black' # Orange: Transition
-                return 'background-color: #28a745; color: white' # Green: Target achieved
+                if v > 32: return 'background-color: #ff4b4b; color: white' # Red
+                if 28 <= v <= 32: return 'background-color: #ffa500; color: black' # Orange
+                return 'background-color: #28a745; color: white' # Green
 
             st.dataframe(
                 df_display.style.map(thermal_color_logic, subset=['Current', 'Max (24h)', 'Min (24h)']),
