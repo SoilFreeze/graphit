@@ -45,36 +45,23 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     else:
         y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # 2. Gap Logic (6hr break)
-    processed_dfs = []
-    for sensor in display_df['Sensor'].unique():
-        s_df = display_df[display_df['Sensor'] == sensor].copy().sort_values('timestamp')
-        s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gaps = s_df[s_df['gap'] > 6.0].copy()
-        if not gaps.empty:
-            gaps['value'] = None
-            gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
-            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-        processed_dfs.append(s_df)
-    
-    clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
-
-    # 3. Trace Creation (Explicitly No Fill)
+    # 2. Trace Creation (Explicitly No Fill to prevent Blobs)
     fig = go.Figure()
-    for sensor in sorted(clean_df['Sensor'].unique()):
-        sensor_df = clean_df[clean_df['Sensor'] == sensor]
+    for sensor in sorted(display_df['Sensor'].unique()):
+        sensor_df = display_df[display_df['Sensor'] == sensor]
         fig.add_trace(go.Scatter(
             x=sensor_df['timestamp'], y=sensor_df['value'],
             name=sensor, mode='lines', fill=None, connectgaps=False, line=dict(width=2)
         ))
 
-    # 4. Grid & Axis Styling
+    # 3. Grid & Axis Styling (20° Dark, 5° Medium)
     fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
+    
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # 5. Vertical Gridlines
+    # 4. Vertical Gridlines (Monday Dark, Midnight Medium, 6hr Light)
     shapes = []
     curr = start_view.replace(hour=0, minute=0, second=0)
     while curr <= end_view:
@@ -86,7 +73,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
             shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, line=dict(color=c, width=w), layer="below"))
         curr += timedelta(days=1)
 
-    # 6. NOW Line & Reference Lines
+    # 5. NOW Line & Reference Lines
     now_ms = datetime.now(pytz.UTC).timestamp() * 1000
     fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="NOW")
     for ref_f, label in active_refs:
@@ -179,36 +166,40 @@ if service == "🏠 Executive Summary":
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
-    # 1. Sidebar Controls (Kept in Sidebar to reduce main screen clutter)
+    # 1. Sidebar Controls (Kept in Sidebar for reference lines)
     temp_unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
     ref_list = []
     if st.sidebar.checkbox("32°F (Frost)"): ref_list.append((32.0, "Frost"))
     if st.sidebar.checkbox("26.6°F (Brine)"): ref_list.append((26.6, "Brine"))
     if st.sidebar.checkbox("10.2°F (Deep)"): ref_list.append((10.2, "Deep"))
 
-    # 2. Main Filters (Single Select Only)
+    # 2. Main Filters (STRICT SINGLE SELECTION)
+    # create_bqstorage_client=False prevents the 403 error
     meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
     
     c1, c2, c3 = st.columns(3)
     with c1: 
+        # Clean list of projects, defaulting to "Office"
         all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
         default_idx = all_projs.index("Office") if "Office" in all_projs else 0
-        sel_proj = st.selectbox("Project", all_projs, index=default_idx)
+        sel_proj = st.selectbox("Select Project", all_projs, index=default_idx)
         
     with c2: 
+        # Filter pipes for ONLY the chosen project
         raw_locs = meta_df[meta_df['Project'] == sel_proj]['Location'].unique()
         avail_locs = sorted([l for l in raw_locs if l is not None])
-        sel_loc = st.selectbox("Pipe / Bank", avail_locs)
+        sel_loc = st.selectbox("Select Pipe / Bank", avail_locs)
         
     with c3: 
         weeks = st.slider("Duration (Weeks)", 1, 12, 6)
 
-    # 3. Data Fetching & unique Labeling
+    # 3. Data Processing & unique Labeling
     if sel_proj and sel_loc:
         now_utc = datetime.now(pytz.UTC)
         end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks)
         
+        # Pull nodenumber to split Bank 1 into S1, R1, etc.
         q = f"""
             SELECT timestamp, value, Location, Depth, nodenumber 
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
@@ -218,10 +209,11 @@ elif service == "📈 Node Diagnostics":
         df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
         
         if not df_g.empty:
-            # FIX: Ensure Bank 1 S1, R1, etc. are separated by nodenumber
+            # FIX: Separate S1, R1, etc. in the legend and chart
             def label_sensor(row):
-                depth_str = str(row['Depth'])
-                label = f"{depth_str}ft" if depth_str.replace('.','',1).isdigit() else depth_str
+                d = str(row['Depth'])
+                # If numeric, add 'ft'. If string (S1/R1), use as-is.
+                label = f"{d}ft" if d.replace('.','',1).isdigit() else d
                 return f"{label} ({row['nodenumber']})"
 
             df_g['Sensor'] = df_g.apply(label_sensor, axis=1)
@@ -230,43 +222,7 @@ elif service == "📈 Node Diagnostics":
             fig = build_standard_sf_graph(df_g, f"Trend: {sel_proj} - {sel_loc}", start_view, end_view, unit=temp_unit, active_refs=ref_list)
             st.plotly_chart(fig, width='stretch')
         else:
-            st.info(f"No data found for {sel_loc}.")
-
-    # 3. Data Processing and Graphing
-    if sel_proj and sel_loc:
-        now_utc = datetime.now(pytz.UTC)
-        end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        start_view = end_view - timedelta(weeks=weeks)
-        
-        # Query for the single selected pipe
-        q = f"""
-            SELECT timestamp, value, Location, Depth, nodenumber 
-            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
-            WHERE Project = '{sel_proj}' 
-            AND Location = '{sel_loc}' 
-            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'
-        """
-        df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
-        
-        if not df_g.empty:
-            # THE FIX: Ensure S1, R1, etc. are separated by combining Depth/Location with Node ID
-            # This forces Plotly to see them as different traces even if Location is the same
-            def label_sensor(row):
-                depth_val = str(row['Depth'])
-                # If Depth is numeric (e.g. 15), add "ft". If it's "S1", just use the name.
-                label = f"{depth_val}ft" if depth_val.replace('.','',1).isdigit() else depth_val
-                return f"{label} ({row['nodenumber']})"
-
-            df_g['Sensor'] = df_g.apply(label_sensor, axis=1)
-            
-            # Sort by Sensor and Time for clean plotting
-            df_g = df_g.sort_values(by=['Sensor', 'timestamp'])
-            
-            title = f"Temperature Trend: {sel_proj} - {sel_loc} ({weeks} Weeks)"
-            fig = build_standard_sf_graph(df_g, title, start_view, end_view, unit=temp_unit, active_refs=ref_list)
-            st.plotly_chart(fig, width='stretch')
-        else:
-            st.info(f"No data found for {sel_loc} in this timeframe.")
+            st.info(f"No data available for {sel_loc} in the selected timeframe.")
 
 
 # --- SERVICE 3: DATA INTAKE LAB ---
