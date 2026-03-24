@@ -164,42 +164,42 @@ if service == "🏠 Executive Summary":
 
 # --- SERVICE 2: NODE DIAGNOSTICS ---
 elif service == "📈 Node Diagnostics":
+    # The header is ONLY inside the elif block to prevent doubling
     st.header("📈 Node Diagnostics")
     
-    # 1. Sidebar Controls (Kept in Sidebar for reference lines)
+    # 1. Sidebar Controls (Thermal References)
     temp_unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
     ref_list = []
     if st.sidebar.checkbox("32°F (Frost)"): ref_list.append((32.0, "Frost"))
     if st.sidebar.checkbox("26.6°F (Brine)"): ref_list.append((26.6, "Brine"))
     if st.sidebar.checkbox("10.2°F (Deep)"): ref_list.append((10.2, "Deep"))
 
-    # 2. Main Filters (STRICT SINGLE SELECTION)
-    # create_bqstorage_client=False prevents the 403 error
+    # 2. Main Filters: Using Selectbox for Single-Entry Dropdowns
     meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
     
     c1, c2, c3 = st.columns(3)
     with c1: 
-        # Clean list of projects, defaulting to "Office"
         all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
+        # Default to 'Office' if available, otherwise first item
         default_idx = all_projs.index("Office") if "Office" in all_projs else 0
-        sel_proj = st.selectbox("Select Project", all_projs, index=default_idx)
+        sel_proj = st.selectbox("Project", all_projs, index=default_idx)
         
     with c2: 
-        # Filter pipes for ONLY the chosen project
+        # Narrow location list to the single selected project
         raw_locs = meta_df[meta_df['Project'] == sel_proj]['Location'].unique()
         avail_locs = sorted([l for l in raw_locs if l is not None])
-        sel_loc = st.selectbox("Select Pipe / Bank", avail_locs)
+        # Swapped to selectbox for a clean dropdown
+        sel_loc = st.selectbox("Pipe / Bank", avail_locs)
         
     with c3: 
         weeks = st.slider("Duration (Weeks)", 1, 12, 6)
 
-    # 3. Data Processing & unique Labeling
+    # 3. Data Fetching & Numerical Sorting
     if sel_proj and sel_loc:
         now_utc = datetime.now(pytz.UTC)
         end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks)
         
-        # Pull nodenumber to split Bank 1 into S1, R1, etc.
         q = f"""
             SELECT timestamp, value, Location, Depth, nodenumber 
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
@@ -209,20 +209,26 @@ elif service == "📈 Node Diagnostics":
         df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
         
         if not df_g.empty:
-            # FIX: Separate S1, R1, etc. in the legend and chart
+            # Add a numeric depth column for correct sorting (e.g. 12 < 100)
+            df_g['depth_num'] = pd.to_numeric(df_g['Depth'], errors='coerce').fillna(0)
+
+            # Standardize Legend: "12ft (S1)"
             def label_sensor(row):
                 d = str(row['Depth'])
-                # If numeric, add 'ft'. If string (S1/R1), use as-is.
                 label = f"{d}ft" if d.replace('.','',1).isdigit() else d
                 return f"{label} ({row['nodenumber']})"
 
             df_g['Sensor'] = df_g.apply(label_sensor, axis=1)
-            df_g = df_g.sort_values(by=['Sensor', 'timestamp'])
             
-            fig = build_standard_sf_graph(df_g, f"Trend: {sel_proj} - {sel_loc}", start_view, end_view, unit=temp_unit, active_refs=ref_list)
+            # SORT LOGIC: First by Depth (numerical), then by timestamp
+            df_g = df_g.sort_values(by=['depth_num', 'timestamp'])
+            
+            # Generate Graph with Standard SF Engine
+            title = f"Trend: {sel_proj} - {sel_loc}"
+            fig = build_standard_sf_graph(df_g, title, start_view, end_view, unit=temp_unit, active_refs=ref_list)
             st.plotly_chart(fig, width='stretch')
         else:
-            st.info(f"No data available for {sel_loc} in the selected timeframe.")
+            st.info(f"No data available for {sel_loc}.")
 
 
 # --- SERVICE 3: DATA INTAKE LAB ---
