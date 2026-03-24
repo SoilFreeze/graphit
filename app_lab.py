@@ -110,28 +110,56 @@ if service == "🏠 Executive Summary":
 # --- SERVICE 2: NODE DIAGNOSTICS ---
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
+    
+    # 1. Fetch metadata and ensure we handle the '403' permission fix
     meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
     
     c1, c2, c3 = st.columns(3)
-    with c1: sel_projs = st.multiselect("Projects", sorted(meta_df['Project'].unique()))
+    
+    with c1:
+        # Filter out None projects and sort
+        all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
+        sel_projs = st.multiselect("Projects", all_projs)
+    
     with c2: 
-        avail_locs = meta_df[meta_df['Project'].isin(sel_projs)]['Location'].unique() if sel_projs else []
-        sel_locs = st.multiselect("Pipes", sorted(avail_locs))
-    with c3: weeks = st.slider("Trend Duration (Weeks)", 1, 12, 6)
+        # THE FIX: Filter out None locations so sorted() doesn't crash
+        if sel_projs:
+            raw_locs = meta_df[meta_df['Project'].isin(sel_projs)]['Location'].unique()
+            avail_locs = sorted([l for l in raw_locs if l is not None])
+        else:
+            avail_locs = []
+            
+        sel_locs = st.multiselect("Pipes", avail_locs)
+        
+    with c3:
+        weeks = st.slider("Trend Duration (Weeks)", 1, 12, 6)
 
+    # 2. Time Logic & Graphing (Remains the same as our standard engine)
     if sel_projs and sel_locs:
         now_utc = datetime.now(pytz.UTC)
         end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks)
         
-        query = f"SELECT timestamp, value, Location, Depth FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE Project IN UNNEST({list(sel_projs)}) AND Location IN UNNEST({list(sel_locs)}) AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'"
+        # Pull data using the list of selected pipes
+        query = f"""
+            SELECT timestamp, value, Location, Depth 
+            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
+            WHERE Project IN UNNEST({list(sel_projs)}) 
+            AND Location IN UNNEST({list(sel_locs)}) 
+            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'
+        """
         df_g = client.query(query).to_dataframe(create_bqstorage_client=False)
         
         if not df_g.empty:
             # Legend Logic: Depth gets 'ft', node locations (S1, R3) stay as-is
             df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft" if str(x['Depth']).replace('.','',1).isdigit() else x['Location'], axis=1)
-            fig = build_standard_sf_graph(df_g, f"Temperature: {', '.join(sel_locs)}", start_view, end_view)
+            
+            # Use our Standardized Graph Engine
+            title = f"Temperature: {', '.join(sel_locs)} | {weeks} Week Trend"
+            fig = build_standard_sf_graph(df_g, title, start_view, end_view)
             st.plotly_chart(fig, width='stretch')
+        else:
+            st.info("No data found for the selected timeframe.")
 
 # --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
