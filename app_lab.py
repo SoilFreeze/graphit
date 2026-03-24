@@ -6,6 +6,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
+import io
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
@@ -34,7 +35,8 @@ client = get_bq_client()
 # --- 2. STANDARDIZED GRAPH ENGINE ---
 def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
     """Handles 6hr gaps, C/F units, custom grid, and 'Right Now' red line."""
-    if active_refs is None: active_refs = []
+    if active_refs is None: 
+        active_refs = []
     
     # Unit Conversion Logic
     display_df = df.copy()
@@ -44,7 +46,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     else:
         y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # Gap Logic (Line breaks > 6hrs)
+    # Gap Logic: Insert None if data gap > 6 hours
     processed_dfs = []
     for sensor in display_df['Sensor'].unique():
         s_df = display_df[display_df['Sensor'] == sensor].copy().sort_values('timestamp')
@@ -59,26 +61,39 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     fig = px.line(clean_df, x='timestamp', y='value', color='Sensor')
 
-    # Grid & Axis Styling
+    # Grid & Axis Styling: Dark Gray every 20, Medium every 5
     fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # Custom Vertical Grid (Mon/Mid/6hr)
+    # Custom Vertical Grid (Mon/Mid/6hr) using numeric timestamps for stability
     shapes = []
     curr = start_view.replace(hour=0, minute=0, second=0)
     while curr <= end_view:
         for h in [0, 6, 12, 18]:
             t = curr + timedelta(hours=h)
-            if t < start_view or t > end_view: continue
-            c, w = ("DimGray", 2) if (t.weekday() == 0 and h == 0) else (("DarkGray", 1) if h == 0 else ("LightGray", 0.5))
-            shapes.append(dict(type="line", xref="x", yref="paper", x0=t, y0=0, x1=t, y1=1, line=dict(color=c, width=w), layer="below"))
+            if t < start_view or t > end_view: 
+                continue
+            
+            # Numeric conversion to prevent Plotly Sum errors
+            t_ms = t.timestamp() * 1000
+            
+            if t.weekday() == 0 and h == 0: 
+                c, w = "DimGray", 2 # Monday
+            elif h == 0: 
+                c, w = "DarkGray", 1 # Midnight
+            else: 
+                c, w = "LightGray", 0.5 # 6-Hour
+            
+            shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, line=dict(color=c, width=w), layer="below"))
         curr += timedelta(days=1)
 
-    # Markers: "Right Now" Red Line and Reference Lines
-    now_ts = datetime.now(pytz.UTC)
-    fig.add_vline(x=now_ts, line_width=2, line_color="red", annotation_text="NOW")
+    # Markers: "Right Now" Red Line
+    now_ms = datetime.now(pytz.UTC).timestamp() * 1000
+    fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="NOW")
+    
+    # Reference Lines
     for ref_f, label in active_refs:
         val = (ref_f - 32) * 5/9 if unit == "Celsius" else ref_f
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {round(val,1)}°")
@@ -93,7 +108,6 @@ service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "�
 if service == "🏠 Executive Summary":
     st.header("🏠 Executive Summary")
     try:
-        # Fixed 403 Permission error by disabling BQ Storage Client
         q = f"SELECT nodenumber, Project, Location, Depth, MAX(timestamp) as last_seen, AVG(value) as current_temp FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` GROUP BY 1, 2, 3, 4"
         df_ex = client.query(q).to_dataframe(create_bqstorage_client=False)
         if not df_ex.empty:
@@ -101,7 +115,8 @@ if service == "🏠 Executive Summary":
                 if v > 32: return 'background-color: #ff4b4b; color: white' 
                 return 'background-color: #ffa500' if 28 <= v <= 32 else 'background-color: #28a745; color: white'
             st.dataframe(df_ex.style.map(thermal_style, subset=['current_temp']), width='stretch')
-    except Exception as e: st.error(f"Summary Error: {e}")
+    except Exception as e: 
+        st.error(f"Summary Error: {e}")
 
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
@@ -123,10 +138,10 @@ elif service == "📈 Node Diagnostics":
         raw_locs = meta_df[meta_df['Project'].isin(sel_projs)]['Location'].unique() if sel_projs else []
         locs = sorted([l for l in raw_locs if l is not None])
         sel_locs = st.multiselect("Pipes", locs)
-    with c3: weeks = st.slider("Duration (Weeks)", 1, 12, 6)
+    with c3: 
+        weeks = st.slider("Duration (Weeks)", 1, 12, 6)
 
     if sel_projs and sel_locs:
-        # Time Boundaries
         now_utc = datetime.now(pytz.UTC)
         end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks)
@@ -135,9 +150,20 @@ elif service == "📈 Node Diagnostics":
         df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
         
         if not df_g.empty:
+            # Legend Logic: Depth gets 'ft', node locations (S1, R3) stay as-is
             df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft" if str(x['Depth']).replace('.','',1).isdigit() else x['Location'], axis=1)
             fig = build_standard_sf_graph(df_g, f"Trends: {', '.join(sel_locs)}", start_view, end_view, unit=temp_unit, active_refs=ref_list)
             st.plotly_chart(fig, width='stretch')
+
+elif service == "📤 Data Intake Lab":
+    st.header("📤 Manual Data Ingestion")
+    # ... (Lord Parser Logic goes here, ensure same indentation level as above) ...
+    pass
+
+elif service == "⚙️ Database Maintenance":
+    st.header("⚙️ Database Maintenance")
+    # ... (Master Scrub Logic goes here, ensure same indentation level as above) ...
+    pass
                                   
 # --- SERVICE 1: EXECUTIVE SUMMARY ---
 if service == "🏠 Executive Summary":
