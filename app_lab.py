@@ -35,8 +35,8 @@ client = get_bq_client()
 # --- 2. STANDARDIZED GRAPH ENGINE ---
 def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
     """
-    Standardized SF Engine: Handles 6hr gaps, C/F units, custom grid, 
-    and 'Right Now' red line. Explicitly disables line filling.
+    Standardized SF Engine: Handles 6hr gaps, C/F units, and 'Right Now' red line.
+    Explicitly uses go.Scatter with fill=None to prevent overlapping blobs.
     """
     if active_refs is None: 
         active_refs = []
@@ -63,7 +63,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
 
-    # 3. TRACE CREATION: Use go.Scatter to prevent the "Blob" (area filling)
+    # 3. TRACE CREATION: Explicitly separate lines and disable fills
     fig = go.Figure()
     for sensor in sorted(clean_df['Sensor'].unique()):
         sensor_df = clean_df[clean_df['Sensor'] == sensor]
@@ -72,7 +72,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
             y=sensor_df['value'],
             name=sensor,
             mode='lines',
-            fill=None,  # This stops the blue/red shading between lines
+            fill=None,  # CRITICAL: Prevents the color shading between lines
             connectgaps=False,
             line=dict(width=2)
         ))
@@ -83,7 +83,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
                      mirror=True, showline=True, linecolor='black', linewidth=2)
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # 5. Custom Vertical Grid (Mon/Mid/6hr)
+    # 5. Custom Vertical Grid (Mon/Mid/6hr) using numeric timestamps
     shapes = []
     curr = start_view.replace(hour=0, minute=0, second=0)
     while curr <= end_view:
@@ -95,7 +95,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
             shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, line=dict(color=c, width=w), layer="below"))
         curr += timedelta(days=1)
 
-    # 6. Markers: 'Right Now' Red Line
+    # 6. 'Right Now' Red Line
     now_ms = datetime.now(pytz.UTC).timestamp() * 1000
     fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="NOW")
     
@@ -106,7 +106,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     fig.update_layout(title={'text': title, 'x': 0.5}, shapes=shapes, plot_bgcolor='white',
                       legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), margin=dict(r=150), height=750)
     return fig
-
+    
 # --- 3. SERVICE ROUTING ---
 service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📈 Node Diagnostics", "📤 Data Intake Lab", "⚙️ Database Maintenance"])
 
@@ -189,31 +189,66 @@ if service == "🏠 Executive Summary":
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
-    # 1. Sidebar Controls
-    temp_unit = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
+    # Sidebar Controls for Customization
+    temp_unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
     ref_list = []
     if st.sidebar.checkbox("32°F (Frost)"): ref_list.append((32.0, "Frost"))
     if st.sidebar.checkbox("26.6°F (Brine)"): ref_list.append((26.6, "Brine"))
-    if st.sidebar.checkbox("10.2°F (Deep)"): ref_list.append((10.2, "Deep"))
+    if st.sidebar.checkbox("10.2°F (Target Deep)"): ref_list.append((10.2, "Deep"))
 
-    # 2. Metadata Filtering (Single Select Logic)
+    # 1. METADATA FILTERS (Single Selection swapped from Multiselect)
     meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
     
     c1, c2, c3 = st.columns(3)
     with c1: 
-        # Default to "Office" if it exists in the list
+        # Default project to 'Office'
         all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
         default_idx = all_projs.index("Office") if "Office" in all_projs else 0
         sel_proj = st.selectbox("1. Select Project", all_projs, index=default_idx)
         
     with c2: 
-        # Filter for the single selected project
+        # Filter pipes based on the single selected project
         raw_locs = meta_df[meta_df['Project'] == sel_proj]['Location'].unique()
         avail_locs = sorted([l for l in raw_locs if l is not None])
         sel_loc = st.selectbox("2. Select Pipe / Bank", avail_locs)
         
     with c3: 
         weeks = st.slider("3. Trend Duration (Weeks)", 1, 12, 6)
+
+    # 2. DATA FETCHING & UNIQUE LABELING
+    if sel_proj and sel_loc:
+        now_utc = datetime.now(pytz.UTC)
+        end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_view = end_view - timedelta(weeks=weeks)
+        
+        # Pull nodenumber to ensure each physical sensor in a Bank is separated
+        q = f"""
+            SELECT timestamp, value, Location, Depth, nodenumber 
+            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
+            WHERE Project = '{sel_proj}' 
+            AND Location = '{sel_loc}' 
+            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'
+        """
+        df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
+        
+        if not df_g.empty:
+            # UNIQUE LABELER: Ensures S1, R1, etc. are treated as separate traces
+            def format_sensor_label(row):
+                depth_str = str(row['Depth'])
+                # If numeric (15), add ft. If location name (S1), use as-is.
+                base_label = f"{depth_str}ft" if depth_str.replace('.','',1).isdigit() else depth_str
+                return f"{base_label} ({row['nodenumber']})"
+
+            df_g['Sensor'] = df_g.apply(format_sensor_label, axis=1)
+            
+            # Sort to keep the lines and legend sequential
+            df_g = df_g.sort_values(by=['Sensor', 'timestamp'])
+            
+            title = f"Temperature Trend: {sel_proj} - {sel_loc} ({weeks} Weeks)"
+            fig = build_standard_sf_graph(df_g, title, start_view, end_view, unit=temp_unit, active_refs=ref_list)
+            st.plotly_chart(fig, width='stretch')
+        else:
+            st.info(f"No data found for {sel_loc} in the requested timeframe.")
 
     # 3. Data Processing and Graphing
     if sel_proj and sel_loc:
