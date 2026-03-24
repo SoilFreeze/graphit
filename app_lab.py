@@ -104,16 +104,79 @@ st.sidebar.title("❄️ SoilFreeze Lab")
 service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📈 Node Diagnostics", "📤 Data Intake Lab", "⚙️ Database Maintenance"])
 
 if service == "🏠 Executive Summary":
-    st.header("🏠 Executive Summary")
+    st.header("🏠 Site Health & Warming Alerts")
+
+    # 1. Project Selection (Single Dropdown, Default to Office)
+    meta_df = client.query(
+        f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`"
+    ).to_dataframe(create_bqstorage_client=False)
+    
+    all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
+    default_idx = all_projs.index("Office") if "Office" in all_projs else 0
+    sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=default_idx)
+
+    # 2. 24-Hour Performance Logic
+    # We pull data from the last 24 hours for the selected project
+    now_ts = datetime.now(pytz.UTC)
+    yesterday_ts = now_ts - timedelta(hours=24)
+
+    query = f"""
+        SELECT 
+            timestamp, value, Location, Depth, nodenumber
+        FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+        WHERE Project = '{sel_summary_proj}'
+        AND timestamp >= '{yesterday_ts.strftime('%Y-%m-%d %H:%M:%S')}'
+        ORDER BY timestamp DESC
+    """
+    
     try:
-        q = f"SELECT nodenumber, Project, Location, Depth, MAX(timestamp) as last_seen, AVG(value) as current_temp FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` GROUP BY 1, 2, 3, 4"
-        df_ex = client.query(q).to_dataframe(create_bqstorage_client=False)
-        if not df_ex.empty:
-            def thermal_style(v):
-                if v > 32: return 'background-color: #ff4b4b; color: white' 
-                return 'background-color: #ffa500' if 28 <= v <= 32 else 'background-color: #28a745; color: white'
-            st.dataframe(df_ex.style.map(thermal_style, subset=['current_temp']), width='stretch')
-    except Exception as e: st.error(f"Summary Error: {e}")
+        df_24h = client.query(query).to_dataframe(create_bqstorage_client=False)
+
+        if df_24h.empty:
+            st.warning(f"No data recorded for {sel_summary_proj} in the last 24 hours.")
+        else:
+            # 3. Aggregate Metrics per Node
+            # We group by nodenumber to get the specific health of each sensor
+            summary_stats = []
+            for node in df_24h['nodenumber'].unique():
+                n_df = df_24h[df_24h['nodenumber'] == node].sort_values('timestamp')
+                
+                # Calculations for the requested columns
+                current_temp = n_df['value'].iloc[-1]
+                min_24h = n_df['value'].min()
+                max_24h = n_df['value'].max()
+                max_change = max_24h - min_24h
+                last_seen = n_df['timestamp'].iloc[-1].strftime('%m/%d %H:%M')
+
+                summary_stats.append({
+                    "Location": n_df['Location'].iloc[0],
+                    "Depth": f"{n_df['Depth'].iloc[0]}ft",
+                    "Node ID": node,
+                    "Last Seen": last_seen,
+                    "Min (24h)": round(min_24h, 1),
+                    "Max (24h)": round(max_24h, 1),
+                    "Max Change": round(max_change, 1),
+                    "Current": round(current_temp, 1)
+                })
+
+            # Create DataFrame and Sort by Location then Depth
+            df_display = pd.DataFrame(summary_stats).sort_values(['Location', 'Depth'])
+
+            # 4. Thermal Color-Coding (Maltby Engineering Req)
+            def thermal_color_logic(v):
+                if v > 32: return 'background-color: #ff4b4b; color: white' # Red: Active Thaw
+                if 28 <= v <= 32: return 'background-color: #ffa500; color: black' # Orange: Transition
+                return 'background-color: #28a745; color: white' # Green: Target achieved
+
+            # Apply styling and display
+            st.dataframe(
+                df_display.style.map(thermal_color_logic, subset=['Current', 'Max (24h)', 'Min (24h)']),
+                width='stretch',
+                hide_index=True
+            )
+
+    except Exception as e:
+        st.error(f"Executive Summary Error: {e}")
 
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
