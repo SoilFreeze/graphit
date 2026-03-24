@@ -2,8 +2,6 @@ streamlit
 pandas
 plotly
 google-cloud-bigquery
-google-auth
-db-dtypes
-google-cloud-bigquery-storage
-pyarrow
-db-dtypes
+pandas-gbq
+requests
+pytz
