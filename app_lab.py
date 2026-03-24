@@ -115,7 +115,7 @@ if service == "🏠 Executive Summary":
     default_idx = all_projs.index("Office") if "Office" in all_projs else 0
     sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=default_idx)
 
-    # 2. SQL Query (Last known 24h window per node)
+    # 2. SQL Query
     query = f"""
         WITH NodeLimits AS (
             SELECT nodenumber, MAX(timestamp) as max_ts
@@ -143,18 +143,18 @@ if service == "🏠 Executive Summary":
             for node in df_summary['nodenumber'].unique():
                 n_df = df_summary[df_summary['nodenumber'] == node].sort_values('timestamp')
                 
-                # Temperature Metrics
                 current_temp = n_df['value'].iloc[-1]
                 min_24h = n_df['value'].min()
                 max_24h = n_df['value'].max()
-                max_change = max_24h - min_24h
+                max_change = max_24h - min_24h # Positive change (warming)
                 
-                # Time Metric: Integer rounding for hours
+                # Logic for Cooling (if current is lower than start of 24h window)
+                net_change = current_temp - n_df['value'].iloc[0]
+                
                 last_seen_dt = n_df['timestamp'].iloc[-1]
                 hours_ago = (now_ts - last_seen_dt).total_seconds() / 3600
                 hours_int = int(round(hours_ago, 0))
                 
-                # Format string for display
                 last_seen_str = f"{last_seen_dt.strftime('%m/%d %H:%M')} ({hours_int}h ago)"
 
                 summary_stats.append({
@@ -162,53 +162,63 @@ if service == "🏠 Executive Summary":
                     "Depth": f"{n_df['Depth'].iloc[0]}ft",
                     "Node ID": node,
                     "Status / Last Seen": last_seen_str,
-                    "hours_raw": hours_ago, # Hidden column for styling
+                    "hours_raw": hours_ago,
                     "Min (24h)": round(float(min_24h), 1),
                     "Max (24h)": round(float(max_24h), 1),
-                    "24h Change": round(float(max_change), 1),
+                    "24h Change": round(float(net_change), 1), # Tracks heating vs cooling
                     "Current": round(float(current_temp), 1)
                 })
 
             df_display = pd.DataFrame(summary_stats)
-            
-            # Numeric sort for depths
             df_display['d_sort'] = df_display['Depth'].str.extract('(\d+)').astype(float)
             df_display = df_display.sort_values(['Location', 'd_sort']).drop(columns=['d_sort'])
 
-            # 3. CUSTOM STYLING LOGIC
-            def status_color_logic(row):
-                """Colors the 'Status' column based on data age."""
-                h = row['hours_raw']
+            # 3. ADVANCED STYLING LOGIC
+            def apply_row_styles(row):
                 styles = [''] * len(row)
-                # Find index of the Status column
-                status_idx = row.index.get_loc("Status / Last Seen")
                 
-                if h >= 24:
-                    styles[status_idx] = 'background-color: #ff4b4b; color: white' # Red
-                elif h >= 12:
-                    styles[status_idx] = 'background-color: #ffa500; color: black' # Orange
-                elif h >= 6:
-                    styles[status_idx] = 'background-color: #ffff00; color: black' # Yellow
+                # --- A. Status Column (Age of Data) ---
+                h = row['hours_raw']
+                status_idx = row.index.get_loc("Status / Last Seen")
+                if h >= 24: styles[status_idx] = 'background-color: #ff4b4b; color: white' # Red
+                elif h >= 12: styles[status_idx] = 'background-color: #ffa500; color: black' # Orange
+                elif h >= 6: styles[status_idx] = 'background-color: #ffff00; color: black' # Yellow
+                
+                # --- B. 24h Change Column (Thermal Delta) ---
+                change = row['24h Change']
+                chg_idx = row.index.get_loc("24h Change")
+                
+                # Warming Logic
+                if change >= 5.0: styles[chg_idx] = 'background-color: #ff4b4b; color: white' # Red
+                elif change >= 2.0: styles[chg_idx] = 'background-color: #ffa500; color: black' # Orange
+                elif change >= 1.0: styles[chg_idx] = 'background-color: #ffff00; color: black' # Yellow
+                # Cooling Logic
+                elif change <= -1.0: styles[chg_idx] = 'background-color: #00008b; color: white' # Dark Blue
+                elif change <= -0.5: styles[chg_idx] = 'background-color: #0000ff; color: white' # Blue
+                elif change <= -0.25: styles[chg_idx] = 'background-color: #add8e6; color: black' # Light Blue
                 
                 return styles
 
-            # 4. Display with explicit column formatting to kill the trailing zeros
+            # 4. Display (Using height to remove internal scroll window)
+            # 35px per row + 40px for header is a good estimate for full visibility
+            calc_height = (len(df_display) + 1) * 35 + 5
+
             st.dataframe(
-                df_display.style.apply(status_color_logic, axis=1),
+                df_display.style.apply(apply_row_styles, axis=1),
                 column_config={
                     "Min (24h)": st.column_config.NumberColumn(format="%.1f"),
                     "Max (24h)": st.column_config.NumberColumn(format="%.1f"),
                     "24h Change": st.column_config.NumberColumn(format="%.1f"),
                     "Current": st.column_config.NumberColumn(format="%.1f"),
-                    "hours_raw": None # Hide this helper column
+                    "hours_raw": None
                 },
                 width='stretch',
+                height=calc_height, 
                 hide_index=True
             )
 
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
-
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
