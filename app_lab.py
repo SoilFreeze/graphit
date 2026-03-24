@@ -184,36 +184,51 @@ if service == "🏠 Executive Summary":
 elif service == "📈 Node Diagnostics":
     st.header("📈 Node Diagnostics")
     
-    # 1. Fetch metadata and ensure we handle the '403' permission fix
-    meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
+    # 1. SIDEBAR OPTIONS (Reference Lines & Units)
+    st.sidebar.subheader("Graph Settings")
+    temp_unit = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
+    
+    st.sidebar.subheader("Thermal Reference Lines")
+    ref_list = []
+    if st.sidebar.checkbox("32°F (Frost Line)"): 
+        ref_list.append((32.0, "Frost"))
+    if st.sidebar.checkbox("26.6°F (Brine Line)"): 
+        ref_list.append((26.6, "Brine"))
+    if st.sidebar.checkbox("10.2°F (Target Deep)"): 
+        ref_list.append((10.2, "Deep"))
+
+    # 2. METADATA FILTERS (Null-Safe & Sorted)
+    # create_bqstorage_client=False prevents the 403 Permission error
+    meta_df = client.query(
+        f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`"
+    ).to_dataframe(create_bqstorage_client=False)
     
     c1, c2, c3 = st.columns(3)
-    
-    with c1:
-        # Filter out None projects and sort
+    with c1: 
         all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
-        sel_projs = st.multiselect("Projects", all_projs)
-    
+        sel_projs = st.multiselect("1. Select Projects", all_projs)
+        
     with c2: 
-        # THE FIX: Filter out None locations so sorted() doesn't crash
         if sel_projs:
             raw_locs = meta_df[meta_df['Project'].isin(sel_projs)]['Location'].unique()
             avail_locs = sorted([l for l in raw_locs if l is not None])
         else:
             avail_locs = []
-            
-        sel_locs = st.multiselect("Pipes", avail_locs)
+        sel_locs = st.multiselect("2. Select Pipes / Banks", avail_locs)
         
-    with c3:
-        weeks = st.slider("Trend Duration (Weeks)", 1, 12, 6)
+    with c3: 
+        weeks = st.slider("3. Trend Duration (Weeks)", 1, 12, 6)
 
-    # 2. Time Logic & Graphing (Remains the same as our standard engine)
+    # 3. DATA FETCHING & GRAPHING
     if sel_projs and sel_locs:
+        # Define Monday-to-Monday time boundaries
         now_utc = datetime.now(pytz.UTC)
-        end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         start_view = end_view - timedelta(weeks=weeks)
         
-        # Pull data using the list of selected pipes
+        # Query the Master Table
         query = f"""
             SELECT timestamp, value, Location, Depth 
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
@@ -224,15 +239,33 @@ elif service == "📈 Node Diagnostics":
         df_g = client.query(query).to_dataframe(create_bqstorage_client=False)
         
         if not df_g.empty:
-            # Legend Logic: Depth gets 'ft', node locations (S1, R3) stay as-is
-            df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft" if str(x['Depth']).replace('.','',1).isdigit() else x['Location'], axis=1)
+            # A. Standardize Legend Labels (Depth ft vs Location)
+            df_g['Sensor'] = df_g.apply(
+                lambda x: f"{x['Depth']}ft" if str(x['Depth']).replace('.','',1).isdigit() else x['Location'], 
+                axis=1
+            )
             
-            # Use our Standardized Graph Engine
-            title = f"Temperature: {', '.join(sel_locs)} | {weeks} Week Trend"
-            fig = build_standard_sf_graph(df_g, title, start_view, end_view)
+            # B. CRITICAL SORT: Group by Sensor then sequence by Time
+            # This ensures lines are continuous and the legend is organized
+            df_g = df_g.sort_values(by=['Sensor', 'timestamp'], ascending=[True, True])
+            
+            # C. Generate the Graph using the Standardized Engine
+            title = f"Temperature Trends: {', '.join(sel_locs)} ({weeks} Weeks)"
+            fig = build_standard_sf_graph(
+                df_g, 
+                title, 
+                start_view, 
+                end_view, 
+                unit=temp_unit, 
+                active_refs=ref_list
+            )
+            
+            # D. Render with 'stretch' to use full wide-layout width
             st.plotly_chart(fig, width='stretch')
         else:
-            st.info("No data found for the selected timeframe.")
+            st.info(f"No data found for the selected timeframe ({start_view.date()} to {end_view.date()}).")
+    else:
+        st.info("Select a Project and at least one Pipe to generate the diagnostic graph.")
 
 # --- SERVICE 3: DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
