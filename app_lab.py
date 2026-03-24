@@ -272,138 +272,95 @@ elif service == "📈 Node Diagnostics":
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     
-    # Create Tabs for the two different intake methods
+    # 1. Tab Setup
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
 
+    # --- TAB 1: MANUAL FILE UPLOAD ---
     with tab1:
         st.subheader("Manual CSV Ingestion")
         source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
-        u_file = st.file_uploader("Upload Logger File", type=['csv'])
+        u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
 
-        if u_file:
+        if u_file is not None:
             try:
-                # 1. Parse File Content
                 content = u_file.getvalue().decode("utf-8").splitlines()
                 
                 if "Lord" in source:
-                    # Find Lord DATA_START marker
                     start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
                     u_file.seek(0)
                     df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
-                    # Convert Wide to Long format
                     df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
                     df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
                 else:
-                    # Standard SensorPush Format
-                    df_up = pd.read_csv(u_file).rename(columns={
-                        'Timestamp': 'timestamp', 
-                        'Temperature': 'value', 
-                        'Sensor': 'nodenumber'
-                    })
+                    df_up = pd.read_csv(u_file).rename(columns={'Timestamp':'timestamp', 'Temperature':'value', 'Sensor':'nodenumber'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                 
-                # Standardize IDs and Timestamps
                 df_up['nodenumber'] = df_up['nodenumber'].astype(str).str.replace(':', '-', regex=False)
                 df_up['timestamp'] = pd.to_datetime(df_up['timestamp'])
 
                 if st.button("🚀 PUSH FILE TO BIGQUERY"):
-                    with st.spinner("Uploading to BigQuery..."):
+                    with st.spinner("Uploading..."):
                         client.load_table_from_dataframe(df_up, table_ref).result()
-                    
-                    # AUTO-SCRUB: Sync raw data to the master table immediately
-                    with st.spinner("🔄 Syncing to Master Table..."):
-                        scrub_q = f"""
-                            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                            WITH Unified AS (
-                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                                UNION ALL 
-                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                            ) 
-                            SELECT u.*, m.Project, m.Location, m.Depth FROM Unified u 
-                            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
-                        """
-                        client.query(scrub_q).result()
-                        st.success("✅ Success! File uploaded and Master Table synced.")
+                        # Run Auto-Scrub
+                        scrub_sql = f"CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS WITH Unified AS (SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` UNION ALL SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`) SELECT u.*, m.Project, m.Location, m.Depth FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')"
+                        client.query(scrub_sql).result()
+                        st.success("✅ File Uploaded & Master Table Synced!")
                         st.balloons()
             except Exception as e:
-                st.error(f"File Intake Error: {e}")
+                st.error(f"File Error: {e}")
 
+    # --- TAB 2: API CLOUD RECOVERY ---
     with tab2:
         st.subheader("SensorPush Cloud Recovery")
-        st.info("Pull data directly from the SensorPush API if the gateway was offline.")
+        import requests # Imported here to prevent startup crash if missing
         
-        import requests
+        c1, c2 = st.columns(2)
+        with c1:
+            s_d = st.date_input("Start Date", datetime.now() - timedelta(days=1))
+            s_t = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
+        with c2:
+            e_d = st.date_input("End Date", datetime.now())
+            e_t = st.time_input("End Time (UTC)", datetime.now().time())
 
-        c_api1, c_api2 = st.columns(2)
-        with c_api1:
-            start_d = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
-            start_t = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
-        with c_api2:
-            end_d = st.date_input("Recovery End", datetime.now())
-            end_t = st.time_input("End Time (UTC)", datetime.now().time())
-
-        # Format ISO strings for API
-        start_iso = datetime.combine(start_d, start_t).strftime("%Y-%m-%dT%H:%M:%SZ")
-        end_iso = datetime.combine(end_d, end_t).strftime("%Y-%m-%dT%H:%M:%SZ")
+        s_iso = datetime.combine(s_d, s_t).strftime("%Y-%m-%dT%H:%M:%SZ")
+        e_iso = datetime.combine(e_d, e_t).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         if st.button("🛰️ RUN CLOUD RECOVERY"):
-            try:
-                if "sensorpush" not in st.secrets:
-                    st.error("Missing 'sensorpush' credentials in Secrets.")
-                else:
+            if "sensorpush" not in st.secrets:
+                st.error("Missing 'sensorpush' credentials in Secrets.")
+            else:
+                try:
                     creds = st.secrets["sensorpush"]
+                    # 1. Authenticate
+                    auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json={"email": creds["email"], "password": creds["password"]})
+                    auth_res.raise_for_status()
+                    token = auth_res.json().get("accesstoken")
+
+                    # 2. Fetch
+                    h = {"accept": "application/json", "Authorization": token}
+                    p = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
+                    data_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=h, json=p)
+                    data_res.raise_for_status()
+                    raw_json = data_res.json()
+
+                    # 3. Process
+                    recs = []
+                    for sid, samples in raw_json.get("sensors", {}).items():
+                        for s in samples:
+                            recs.append({"timestamp": s["observed"], "value": s["value"], "nodenumber": sid.replace(':', '-')})
                     
-                    # STEP 1: AUTHENTICATE
-                    with st.spinner("Authenticating..."):
-                        auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
-                        auth_res = requests.post(auth_url, json={"email": creds["email"], "password": creds["password"]})
-                        auth_res.raise_for_status()
-                        token = auth_res.json().get("accesstoken")
-
-                    # STEP 2: FETCH SAMPLES
-                    with st.spinner(f"Fetching samples from Cloud..."):
-                        sample_url = "https://api.sensorpush.com/api/v1/samples"
-                        headers = {"accept": "application/json", "Authorization": token}
-                        payload = {"startTime": start_iso, "endTime": end_iso, "measures": ["temperature"]}
-                        sample_res = requests.post(sample_url, headers=headers, json=payload)
-                        sample_res.raise_for_status()
-                        raw_json = sample_res.json()
-
-                        api_records = []
-                        for sensor_id, samples in raw_json.get("sensors", {}).items():
-                            for s in samples:
-                                api_records.append({
-                                    "timestamp": s["observed"],
-                                    "value": s["value"],
-                                    "nodenumber": sensor_id.replace(':', '-')
-                                })
-                        
-                        if api_records:
-                            df_rec = pd.DataFrame(api_records)
-                            df_rec['timestamp'] = pd.to_datetime(df_rec['timestamp'])
-                            
-                            # STEP 3: PUSH RAW & SCRUB MASTER
-                            with st.spinner("Pushing to BQ and Syncing Master..."):
-                                raw_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                                client.load_table_from_dataframe(df_rec, raw_ref).result()
-                                
-                                # Run the Scrub Query immediately
-                                scrub_q = f"""
-                                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                                    WITH Unified AS (
-                                        SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                                        UNION ALL 
-                                        SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                                    ) 
-                                    SELECT u.*, m.Project, m.Location, m.Depth FROM Unified u 
-                                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
-                                """
-                                client.query(scrub_q).result()
-                                st.success(f"✅ Recovery Successful! Pulled {len(df_rec)} records and synced Master Table.")
-                                st.balloons()
-                        else:
-                            st.warning("No new data found for this window.")
-            
-            except Exception as e:
-                st.error(f"Recovery Failed: {e}")
+                    if recs:
+                        df_api = pd.DataFrame(recs)
+                        df_api['timestamp'] = pd.to_datetime(df_api['timestamp'])
+                        # Push Raw
+                        client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                        # Run Master Scrub
+                        scrub_sql = f"CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS WITH Unified AS (SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` UNION ALL SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`) SELECT u.*, m.Project, m.Location, m.Depth FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')"
+                        client.query(scrub_sql).result()
+                        st.success(f"✅ Recovery Successful! Pulled {len(recs)} records.")
+                        st.balloons()
+                    else:
+                        st.warning("No data found for this window.")
+                except Exception as e:
+                    st.error(f"API Error: {e}")
