@@ -2,6 +2,5 @@ streamlit
 pandas
 plotly
 google-cloud-bigquery
-google-cloud-secret-manager
 google-auth
-pytz
+db-dtypes
