@@ -149,68 +149,92 @@ if service == "🏠 Executive Summary":
 # 4B. CLIENT PORTAL
 # --- 4B. CLIENT PORTAL ---
 # --- 4B. CLIENT PORTAL ---
+# --- 4B. CLIENT PORTAL ---
+# --- 4B. CLIENT PORTAL ---
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
+        # Only show approved data
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
         meta_df = client.query(meta_q).to_dataframe()
         
         if meta_df.empty:
-            st.warning("No approved data available.")
+            st.warning("No approved data available. Please approve data in Admin Tools.")
         else:
             c1, c2 = st.columns(2)
-            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
+            with c1: 
+                sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
             with c2: 
                 locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
                 sel_loc = st.selectbox("Pipe / Bank", locs)
             
-            data_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE ORDER BY timestamp ASC"
+            data_q = f"""
+                SELECT timestamp, temperature, depth, engineer_note 
+                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
+                WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE 
+                ORDER BY timestamp ASC
+            """
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
-            # --- NEW LOGIC: Only show Depth Profile if NOT a Bank ---
+            # --- 1. TEMP VS DEPTH (Only for non-Bank locations) ---
             if "bank" not in sel_loc.lower():
                 st.subheader("🌡️ Soil Temperature Profile (Weekly Snapshots)")
                 snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
                 
                 if not snapshot.empty:
                     snapshot['depth_num'] = snapshot['depth'].str.extract('(\d+)').astype(float)
-                    snapshot['Date'] = snapshot['timestamp'].dt.strftime('%Y-%m-%d')
+                    snapshot['Date'] = snapshot['timestamp'].dt.strftime('%m/%d')
                     
                     fig_profile = px.line(
                         snapshot.sort_values('depth_num'), 
-                        x='temperature', 
-                        y='depth_num', 
-                        color='Date',
-                        markers=True,
+                        x='temperature', y='depth_num', color='Date', markers=True,
                         title="Temperature by Depth (Monday 6:00 AM)",
-                        # Fixed X-Axis Range: -20 to 80
-                        range_x=[-20, 80],
                         labels={'temperature': 'Temperature (°F)', 'depth_num': 'Depth (ft)'}
                     )
-                    fig_profile.update_yaxes(autorange="reversed")
+                    
+                    # Standard Grid Look for Profile: -20 to 80, 20° lines, 5° minor
+                    fig_profile.update_xaxes(
+                        tickmode='array', tickvals=[-20, 0, 20, 40, 60, 80], range=[-20, 80],
+                        gridcolor='DimGray', gridwidth=1.5,
+                        minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
+                        mirror=True, showline=True, linecolor='black', linewidth=2
+                    )
+                    fig_profile.update_yaxes(autorange="reversed", gridcolor='LightGray')
                     fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="Freezing (32°F)")
+                    fig_profile.update_layout(plot_bgcolor='white', height=600)
                     st.plotly_chart(fig_profile, width='stretch')
-                else:
-                    st.info("No Monday 6:00 AM data points found.")
-            else:
-                st.info("ℹ️ Depth profiles are disabled for individual Bank sensor readings.")
-
-            # --- HISTORICAL TREND (Already limited to -20 to 80 via build_standard_sf_graph) ---
-            st.subheader("📈 Historical Trends")
-            st.plotly_chart(build_standard_sf_graph(df_c, f"Timeline: {sel_loc}", df_c['timestamp'].min(), df_c['timestamp'].max()), width='stretch')
             
-            # --- LATEST READINGS ---
+            # --- 2. STANDARD TIMELINE TREND (1-Week Window) ---
+            st.subheader("📈 Historical Trends")
+            
+            # CALCULATE: Full week starting on last Monday
+            now_utc = datetime.now(pytz.UTC)
+            # weekday() is 0 for Monday. Subtracting it gets us back to Monday.
+            start_week = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_week = start_week + timedelta(days=7)
+            
+            # Pass our calculated start_week and end_week to the graph engine
+            st.plotly_chart(
+                build_standard_sf_graph(df_c, f"Weekly View: {sel_loc}", start_week, end_week), 
+                width='stretch'
+            )
+            
+            # --- 3. LATEST READINGS TABLE ---
             st.subheader("⏱️ Most Recent Readings")
             latest = df_c.sort_values('timestamp').groupby('depth').tail(1).copy()
-            st.dataframe(latest[['depth', 'temperature', 'timestamp']].style.format({'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}'}), width='stretch', hide_index=True)
+            st.dataframe(
+                latest[['depth', 'temperature', 'timestamp']].style.format({'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}'}), 
+                width='stretch', hide_index=True
+            )
 
+            # --- 4. ENGINEER NOTES ---
             latest_note = df_c.sort_values('timestamp', ascending=False)['engineer_note'].dropna()
             if not latest_note.empty and latest_note.iloc[0]:
                 st.info(f"**Field Engineer Note:** {latest_note.iloc[0]}")
 
-    except Exception as e: st.error(f"Portal Error: {e}")
-
+    except Exception as e: 
+        st.error(f"Portal Error: {e}")
 # 4C. NODE DIAGNOSTICS
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
