@@ -276,21 +276,75 @@ elif service == "📤 Data Intake Lab":
                     st.balloons()
 
 # 4E. ADMIN TOOLS
+# --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
 elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Admin Tools")
-    tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Engineer Approval"])
+    st.header("🛠️ Engineering Admin Tools")
+    tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Bulk Approval"])
+    
     with tab_scrub:
-        sc_proj = st.text_input("Project Name")
-        sc_loc = st.text_input("Location")
-        sc_start = st.text_input("Start (YYYY-MM-DD HH:MM:SS)")
-        sc_end = st.text_input("End (YYYY-MM-DD HH:MM:SS)")
-        if st.button("🗑️ DELETE POINTS"):
-            scrub_q = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sc_proj}' AND location='{sc_loc}' AND timestamp BETWEEN '{sc_start}' AND '{sc_end}'"
-            client.query(scrub_q).result()
-            st.success("Data Scrubbed.")
+        st.subheader("Delete Bad Data")
+        sc_proj = st.text_input("Project Name", key="scrub_p")
+        sc_loc = st.text_input("Location / Pipe", key="scrub_l")
+        col1, col2 = st.columns(2)
+        with col1:
+            sc_start = st.text_input("Start (YYYY-MM-DD HH:MM:SS)", value="2026-01-01 00:00:00")
+        with col2:
+            sc_end = st.text_input("End (YYYY-MM-DD HH:MM:SS)", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            
+        if st.button("🗑️ PERMANENTLY DELETE POINTS"):
+            if sc_proj and sc_loc:
+                scrub_q = f"""
+                    DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
+                    WHERE project='{sc_proj}' AND location='{sc_loc}' 
+                    AND timestamp BETWEEN '{sc_start}' AND '{sc_end}'
+                """
+                client.query(scrub_q).result()
+                st.success(f"✅ Deleted points for {sc_loc} in {sc_proj}")
+            else:
+                st.error("Please enter both Project and Location.")
+
     with tab_approve:
-        review_q = f"SELECT timestamp, sensor_name, project, location, temperature, is_approved, engineer_note FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved IS FALSE OR is_approved IS NULL ORDER BY timestamp DESC LIMIT 100"
-        df_review = client.query(review_q).to_dataframe()
-        if not df_review.empty:
-            st.data_editor(df_review, width='stretch')
-            st.button("💾 SAVE CHANGES")
+        st.subheader("Bulk Approve Data")
+        st.write("This will set `is_approved = TRUE` for all data points in the selected range.")
+        
+        # 1. Get list of projects/locations that have unapproved data
+        try:
+            unapproved_meta_q = f"""
+                SELECT DISTINCT project, location 
+                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
+                WHERE is_approved IS FALSE OR is_approved IS NULL
+            """
+            un_meta = client.query(unapproved_meta_q).to_dataframe()
+            
+            if un_meta.empty:
+                st.success("🎉 All data is currently approved!")
+            else:
+                app_proj = st.selectbox("Select Project to Approve", sorted(un_meta['project'].unique()))
+                app_loc = st.selectbox("Select Location/Pipe", sorted(un_meta[un_meta['project'] == app_proj]['location'].unique()))
+                
+                app_note = st.text_area("Engineer Note (Will be applied to this bulk set)", 
+                                        placeholder="e.g., Data verified against manual loggers. All trends normal.")
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    t_start = st.text_input("Start Time", value="2026-01-01 00:00:00", key="app_start")
+                with c2:
+                    t_end = st.text_input("End Time", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), key="app_end")
+
+                if st.button("🚀 BULK APPROVE NOW"):
+                    # This query updates all rows at once for that specific site/time
+                    bulk_q = f"""
+                        UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+                        SET is_approved = TRUE,
+                            engineer_note = '{app_note}'
+                        WHERE project = '{app_proj}' 
+                        AND location = '{app_loc}'
+                        AND timestamp BETWEEN '{t_start}' AND '{t_end}'
+                    """
+                    with st.spinner("Updating BigQuery..."):
+                        client.query(bulk_q).result()
+                    st.success(f"✅ Bulk Approved {app_loc}!")
+                    st.balloons()
+                    
+        except Exception as e:
+            st.error(f"Approval Error: {e}")
