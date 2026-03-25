@@ -29,25 +29,19 @@ def get_bq_client():
         return None
 
 client = get_bq_client()
-#############################################
-# --- 1. RESTORED GRAPH ENGINE (STABLE) ---
-# --- 1. CLEANED GRAPH ENGINE (STOPS THE OPERAND ERROR) ---
-# --- 2. STANDARDIZED GRAPH ENGINE ---
+
+# --- 2. GRAPH ENGINE ---
 def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
-    """Restored: 6hr gaps, Custom Grid, and 'Right Now' line. Fixed for Timezone math."""
     if active_refs is None: active_refs = []
     display_df = df.copy()
     
-    # 1. Unit Conversion
     if unit == "Celsius":
         display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
         y_range, y_ticks, y_label, m_step = [-30, 30], [-30, -20, -10, 0, 10, 20, 30], "Temp (°C)", 2.5
     else:
         y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # 2. Gap Logic (Line breaks > 6hrs)
     processed_dfs = []
-    # Using 'depth' as the identifier
     for d in display_df['depth'].unique():
         s_df = display_df[display_df['depth'] == d].copy().sort_values('timestamp')
         s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
@@ -60,7 +54,6 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
     
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     
-    # 3. Trace Creation
     fig = go.Figure()
     depths = sorted(clean_df['depth'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x)) or 0))
     for d in depths:
@@ -70,38 +63,25 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
             name=d, mode='lines', fill=None, connectgaps=False, line=dict(width=2)
         ))
 
-    # 4. Grid & Axis Styling
     fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # 5. FIXED Custom Vertical Grid (Handles the datetime crash)
     shapes = []
-    # Ensure curr is timezone aware to match start_view
     curr = start_view.replace(hour=0, minute=0, second=0, microsecond=0)
-    
     while curr <= end_view:
         for h in [0, 6, 12, 18]:
             t = curr + timedelta(hours=h)
             if t < start_view or t > end_view: continue
-            
-            # Convert to milliseconds for Plotly shapes
             t_ms = t.timestamp() * 1000
-            
-            # Formatting for Monday Midnights vs Regular Midnights vs 6hr marks
-            if t.weekday() == 0 and h == 0:
-                c, w = "DimGray", 2  # Monday Midnight
-            elif h == 0:
-                c, w = "DarkGray", 1 # Regular Midnight
-            else:
-                c, w = "LightGray", 0.5 # 6hr increments
-                
+            if t.weekday() == 0 and h == 0: c, w = "DimGray", 2
+            elif h == 0: c, w = "DarkGray", 1
+            else: c, w = "LightGray", 0.5
             shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, 
                                line=dict(color=c, width=w), layer="below"))
         curr += timedelta(days=1)
 
-    # 6. NOW Line & Reference Lines
     now_ms = datetime.now(pytz.UTC).timestamp() * 1000
     fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="RIGHT NOW")
     
@@ -113,11 +93,9 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
                       hovermode="x unified", legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), 
                       margin=dict(r=150), height=750)
     return fig
-###############################
-# --- 3. SIDEBAR NAVIGATION ---
+
 # --- 3. SIDEBAR NAVIGATION ---
 st.sidebar.title("❄️ SoilFreeze Lab")
-# Added "📊 Client Portal" and "🛠️ Admin Tools" to the list
 service = st.sidebar.selectbox("Select Service", [
     "🏠 Executive Summary", 
     "📊 Client Portal",
@@ -126,7 +104,6 @@ service = st.sidebar.selectbox("Select Service", [
     "🛠️ Admin Tools"
 ])
 
-# --- 4. SERVICE ROUTING ---
 # --- 4. SERVICE ROUTING ---
 
 # 4A. EXECUTIVE SUMMARY
@@ -156,21 +133,14 @@ if service == "🏠 Executive Summary":
                 n_df = df_summary[df_summary['sensor_id'] == node].sort_values('timestamp')
                 curr_t = n_df['temperature'].iloc[-1]
                 chg = curr_t - n_df['temperature'].iloc[0]
-                # Ensure timezone awareness for math
                 last_ts = n_df['timestamp'].iloc[-1]
                 if last_ts.tzinfo is None: last_ts = last_ts.replace(tzinfo=pytz.UTC)
-                
                 hrs = (now_ts - last_ts).total_seconds() / 3600
-                
                 summary_stats.append({
-                    "Location": n_df['location'].iloc[0], 
-                    "Depth": f"{n_df['depth'].iloc[0]}ft", 
-                    "Node ID": node,
+                    "Location": n_df['location'].iloc[0], "Depth": f"{n_df['depth'].iloc[0]}ft", "Node ID": node,
                     "Status": f"{last_ts.strftime('%m/%d %H:%M')} ({int(round(hrs, 0))}h ago)",
-                    "Change": round(float(chg), 1), 
-                    "Current": round(float(curr_t), 1)
+                    "Change": round(float(chg), 1), "Current": round(float(curr_t), 1)
                 })
-            # Updated width syntax
             st.dataframe(pd.DataFrame(summary_stats), width='stretch', hide_index=True)
     except Exception as e: st.error(f"Summary Error: {e}")
 
@@ -178,12 +148,10 @@ if service == "🏠 Executive Summary":
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
-        # Filter for approved data only
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
         meta_df = client.query(meta_q).to_dataframe()
-        
         if meta_df.empty:
-            st.warning("No approved data available for display yet. Use Admin Tools to approve data.")
+            st.warning("No approved data available.")
         else:
             c1, c2 = st.columns(2)
             with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
@@ -195,28 +163,19 @@ elif service == "📊 Client Portal":
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
-            # 1. Weekly Snapshot (Monday 6AM)
             st.subheader("🗓️ Weekly Snapshot (Mondays 6:00 AM)")
             snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
             if not snapshot.empty:
                 fig_snap = px.bar(snapshot, x='timestamp', y='temperature', color='depth', barmode='group')
                 st.plotly_chart(fig_snap, width='stretch')
-            else:
-                st.info("Insufficient data for Monday 6AM snapshots.")
 
-            # 2. Trend Graph
             st.subheader("📈 Temperature Trends")
             st.plotly_chart(build_standard_sf_graph(df_c, f"Site Trend: {sel_loc}", df_c['timestamp'].min(), df_c['timestamp'].max()), width='stretch')
             
-            # 3. Current Conditions Table
             st.subheader("🌡️ Current Conditions")
             latest = df_c.sort_values('timestamp').groupby('depth').tail(1).copy()
-            st.dataframe(
-                latest[['depth', 'temperature', 'timestamp']].style.format({'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}'}), 
-                width='stretch', hide_index=True
-            )
+            st.dataframe(latest[['depth', 'temperature', 'timestamp']].style.format({'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}'}), width='stretch', hide_index=True)
 
-            # 4. Engineer Notes
             latest_note = df_c.sort_values('timestamp', ascending=False)['engineer_note'].dropna()
             if not latest_note.empty and latest_note.iloc[0]:
                 st.info(f"**Engineer's Note:** {latest_note.iloc[0]}")
@@ -246,7 +205,7 @@ elif service == "📉 Node Diagnostics":
             st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v), width='stretch')
     except Exception as e: st.error(f"Diagnostics Error: {e}")
 
-# 4D. DATA INTAKE (MULTI-ACCOUNT)
+# 4D. DATA INTAKE
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
@@ -256,234 +215,24 @@ elif service == "📤 Data Intake Lab":
         source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
         u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
         if u_file is not None:
-             st.info("Manual file processing logic is ready.") # Reference your original upload code here
-
-    with tab2:
-        st.subheader("SensorPush Multi-Account Recovery")
-        c1, c2 = st.columns(2)
-        with c1:
-            sd = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
-            st_time = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
-        with c2:
-            ed = st.date_input("Recovery End", datetime.now())
-            et_time = st.time_input("End Time (UTC)", datetime.now().time())
-
-        if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
-            # Defined inside trigger to prevent scope errors
-            s_iso = datetime.combine(sd, st_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            e_iso = datetime.combine(ed, et_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-            if "sensorpush_accounts" not in st.secrets:
-                st.error("Missing 'sensorpush_accounts' in Streamlit Secrets.")
-            else:
-                accounts = st.secrets["sensorpush_accounts"]
-                all_api_recs = []
-                for acc_id, creds in accounts.items():
-                    try:
-                        with st.spinner(f"Processing {acc_id}..."):
-                            # dict(creds) fixes AttrDict serialization error
-                            auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", 
-                                                     json=dict(creds), headers={"accept": "application/json"})
-                            
-                            if auth_res.status_code != 200:
-                                st.error(f"❌ {acc_id} Login Failed: {auth_res.text}")
-                                continue 
-                            
-                            token = auth_res.json().get("accesstoken")
-                            headers = {"accept": "application/json", "Authorization": token, "Content-Type": "application/json"}
-                            payload = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
-                            
-                            sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=payload)
-                            
-                            if sample_res.status_code == 200:
-                                raw_json = sample_res.json()
-                                for sid, samples in raw_json.get("sensors", {}).items():
-                                    for s in samples:
-                                        all_api_recs.append({"timestamp": s["observed"], "temperature": s["value"], "sensor_id": sid.replace(':', '-')})
-                            else: 
-                                st.warning(f"⚠️ {acc_id} Sample Error: {sample_res.text}")
-                    except Exception as e: 
-                        st.error(f"Failure on {acc_id}: {e}")
+             try:
+                content = u_file.getvalue().decode("utf-8").splitlines()
+                if "Lord" in source:
+                    start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
+                    u_file.seek(0)
+                    df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
+                    df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='temperature')
+                    df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                else:
+                    df_up = pd.read_csv(u_file).rename(columns={'Timestamp':'timestamp', 'Temperature':'temperature', 'Sensor':'sensor_id'})
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                 
-                if all_api_recs:
-                    df_api = pd.DataFrame(all_api_recs)
-                    df_api['timestamp'] = pd.to_datetime(df_api['timestamp'])
-                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    st.success(f"✅ Success! Pulled {len(all_api_recs)} points.")
-                    st.balloons()
-
-# 4E. ADMIN TOOLS (SCRUBBER & APPROVAL)
-elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
-    tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Engineer Approval"])
-    
-    with tab_scrub:
-        st.subheader("Delete Bad Data")
-        sc_proj = st.text_input("Project Name")
-        sc_loc = st.text_input("Location")
-        sc_start = st.text_input("Start (YYYY-MM-DD HH:MM:SS)")
-        sc_end = st.text_input("End (YYYY-MM-DD HH:MM:SS)")
-        if st.button("🗑️ DELETE POINTS"):
-            scrub_q = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sc_proj}' AND location='{sc_loc}' AND timestamp BETWEEN '{sc_start}' AND '{sc_end}'"
-            client.query(scrub_q).result()
-            st.success("Data Scrubbed.")
-
-    with tab_approve:
-        st.subheader("Data Approval Review")
-        review_q = f"SELECT timestamp, sensor_name, project, location, temperature, is_approved, engineer_note FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved IS FALSE OR is_approved IS NULL ORDER BY timestamp DESC LIMIT 100"
-        df_review = client.query(review_q).to_dataframe()
-        if not df_review.empty:
-            st.data_editor(df_review, width='stretch')
-            st.button("💾 SAVE CHANGES")
-        else:
-            st.success("No pending data approvals.")
-
-# SERVICE 3: NODE DIAGNOSTICS
-elif service == "📉 Node Diagnostics":
-    st.header("📉 High-Resolution Node Diagnostics")
-    try:
-        meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
-        meta_df = client.query(meta_q).to_dataframe()
-        
-        c1, c2, c3 = st.columns(3)
-        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
-        with c2: 
-            locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
-            sel_loc = st.selectbox("Pipe / Bank", locs)
-        with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
-
-        days_back = weeks * 7
-        data_q = f"""
-            SELECT timestamp, temperature, depth, sensor_name FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-            WHERE project = '{sel_proj}' AND location = '{sel_loc}'
-            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
-            ORDER BY timestamp ASC
-        """
-        df_g = client.query(data_q).to_dataframe()
-        
-        if not df_g.empty:
-            df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-            end_v = datetime.now(pytz.UTC)
-            start_v = end_v - timedelta(days=days_back)
-            st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v), use_container_width=True)
-    except Exception as e: st.error(f"Diagnostics Error: {e}")
-
-# SERVICE 4: DATA INTAKE (WITH MULTI-ACCOUNT API)
-# --- 4. SERVICE ROUTING ---
-
-# 4A. EXECUTIVE SUMMARY
-if service == "🏠 Executive Summary":
-    st.header("🏠 Site Health & Warming Alerts")
-    try:
-        proj_q = f"SELECT DISTINCT project FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
-        meta_df = client.query(proj_q).to_dataframe()
-        all_projs = sorted(meta_df['project'].unique())
-        sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=0)
-
-        query = f"""
-            WITH NodeLimits AS (
-                SELECT sensor_id, MAX(timestamp) as max_ts FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-                WHERE project = '{sel_summary_proj}' GROUP BY sensor_id
-            )
-            SELECT m.timestamp, m.temperature, m.location, m.depth, m.sensor_id, m.sensor_name
-            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` m
-            JOIN NodeLimits nl ON m.sensor_id = nl.sensor_id
-            WHERE m.timestamp >= TIMESTAMP_SUB(nl.max_ts, INTERVAL 24 HOUR)
-        """
-        df_summary = client.query(query).to_dataframe()
-        if not df_summary.empty:
-            now_ts = datetime.now(pytz.UTC)
-            summary_stats = []
-            for node in df_summary['sensor_id'].unique():
-                n_df = df_summary[df_summary['sensor_id'] == node].sort_values('timestamp')
-                curr_t = n_df['temperature'].iloc[-1]
-                chg = curr_t - n_df['temperature'].iloc[0]
-                # Calculate hours since last check-in
-                last_ts = n_df['timestamp'].iloc[-1].replace(tzinfo=pytz.UTC)
-                hrs = (now_ts - last_ts).total_seconds() / 3600
-                
-                summary_stats.append({
-                    "Location": n_df['location'].iloc[0], 
-                    "Depth": f"{n_df['depth'].iloc[0]}ft", 
-                    "Node ID": node,
-                    "Status": f"{last_ts.strftime('%m/%d %H:%M')} ({int(round(hrs, 0))}h ago)",
-                    "Change": round(float(chg), 1), 
-                    "Current": round(float(curr_t), 1)
-                })
-            st.dataframe(pd.DataFrame(summary_stats), use_container_width=True, hide_index=True)
-    except Exception as e: st.error(f"Summary Error: {e}")
-
-# 4B. CLIENT PORTAL
-elif service == "📊 Client Portal":
-    st.header("📊 Project Status Report")
-    try:
-        # Filter for approved data only
-        meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
-        meta_df = client.query(meta_q).to_dataframe()
-        
-        if meta_df.empty:
-            st.warning("No approved data available for display.")
-        else:
-            c1, c2 = st.columns(2)
-            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
-            with c2: 
-                locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
-                sel_loc = st.selectbox("Pipe / Bank", locs)
-            
-            data_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE ORDER BY timestamp ASC"
-            df_c = client.query(data_q).to_dataframe()
-            df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
-
-            # Weekly Snapshot (Monday 6AM)
-            st.subheader("🗓️ Weekly Snapshot (Mondays 6:00 AM)")
-            snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
-            if not snapshot.empty:
-                fig_snap = px.bar(snapshot, x='timestamp', y='temperature', color='depth', barmode='group')
-                st.plotly_chart(fig_snap, use_container_width=True)
-
-            # Trend Graph
-            st.subheader("📈 Temperature Trends")
-            st.plotly_chart(build_standard_sf_graph(df_c, f"Site Trend: {sel_loc}", df_c['timestamp'].min(), df_c['timestamp'].max()), use_container_width=True)
-            
-            # Engineer Notes
-            latest_note = df_c.sort_values('timestamp', ascending=False)['engineer_note'].dropna()
-            if not latest_note.empty:
-                st.info(f"**Engineer's Note:** {latest_note.iloc[0]}")
-    except Exception as e: st.error(f"Portal Error: {e}")
-
-# 4C. NODE DIAGNOSTICS
-elif service == "📉 Node Diagnostics":
-    st.header("📉 High-Resolution Node Diagnostics")
-    try:
-        meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
-        meta_df = client.query(meta_q).to_dataframe()
-        c1, c2, c3 = st.columns(3)
-        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
-        with c2: 
-            locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
-            sel_loc = st.selectbox("Pipe / Bank", locs)
-        with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
-
-        days_back = weeks * 7
-        data_q = f"SELECT timestamp, temperature, depth, sensor_name FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY) ORDER BY timestamp ASC"
-        df_g = client.query(data_q).to_dataframe()
-        
-        if not df_g.empty:
-            df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-            end_v = datetime.now(pytz.UTC)
-            start_v = end_v - timedelta(days=days_back)
-            st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v), use_container_width=True)
-    except Exception as e: st.error(f"Diagnostics Error: {e}")
-
-# 4D. DATA INTAKE (MULTI-ACCOUNT)
-elif service == "📤 Data Intake Lab":
-    st.header("📤 Data Ingestion & Recovery")
-    tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
-
-    with tab1:
-        st.subheader("Manual CSV Ingestion")
-        # [Keep your existing manual upload code here if needed]
-        st.info("Manual file logic is active.")
+                df_up['timestamp'] = pd.to_datetime(df_up['timestamp'])
+                if st.button("🚀 PUSH FILE TO BIGQUERY"):
+                    client.load_table_from_dataframe(df_up, table_ref).result()
+                    st.success("File uploaded to Raw storage.")
+             except Exception as e: st.error(f"Upload error: {e}")
 
     with tab2:
         st.subheader("SensorPush Multi-Account Recovery")
@@ -498,43 +247,37 @@ elif service == "📤 Data Intake Lab":
         if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
             s_iso = datetime.combine(sd, st_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             e_iso = datetime.combine(ed, et_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
             if "sensorpush_accounts" not in st.secrets:
-                st.error("Missing 'sensorpush_accounts' in Streamlit Secrets.")
+                st.error("Missing accounts in Secrets.")
             else:
                 accounts = st.secrets["sensorpush_accounts"]
                 all_api_recs = []
                 for acc_id, creds in accounts.items():
                     try:
                         with st.spinner(f"Processing {acc_id}..."):
-                            auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", 
-                                                     json=dict(creds), headers={"accept": "application/json"})
-                            if auth_res.status_code != 200:
-                                st.error(f"❌ {acc_id} Login Failed: {auth_res.text}")
-                                continue 
-                            token = auth_res.json().get("accesstoken")
-                            
-                            headers = {"accept": "application/json", "Authorization": token, "Content-Type": "application/json"}
-                            payload = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
-                            sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=payload)
-                            
-                            if sample_res.status_code == 200:
-                                raw_json = sample_res.json()
-                                for sid, samples in raw_json.get("sensors", {}).items():
-                                    for s in samples:
-                                        all_api_recs.append({"timestamp": s["observed"], "temperature": s["value"], "sensor_id": sid.replace(':', '-')})
-                            else: st.warning(f"⚠️ {acc_id} Sample Error: {sample_res.text}")
+                            auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json=dict(creds), headers={"accept": "application/json"})
+                            if auth_res.status_code == 200:
+                                token = auth_res.json().get("accesstoken")
+                                h = {"accept": "application/json", "Authorization": token, "Content-Type": "application/json"}
+                                p = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
+                                sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=h, json=p)
+                                if sample_res.status_code == 200:
+                                    raw_json = sample_res.json()
+                                    for sid, samples in raw_json.get("sensors", {}).items():
+                                        for s in samples:
+                                            all_api_recs.append({"timestamp": s["observed"], "temperature": s["value"], "sensor_id": sid.replace(':', '-')})
                     except Exception as e: st.error(f"Failure on {acc_id}: {e}")
                 
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
                     df_api['timestamp'] = pd.to_datetime(df_api['timestamp'])
                     client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    st.success(f"✅ Success! Pulled {len(all_api_recs)} points.")
+                    st.success(f"✅ Pulled {len(all_api_recs)} points.")
+                    st.balloons()
 
-# 4E. ADMIN TOOLS (SCRUBBER)
+# 4E. ADMIN TOOLS
 elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
+    st.header("🛠️ Admin Tools")
     tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Engineer Approval"])
     with tab_scrub:
         sc_proj = st.text_input("Project Name")
@@ -545,41 +288,9 @@ elif service == "🛠️ Admin Tools":
             scrub_q = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sc_proj}' AND location='{sc_loc}' AND timestamp BETWEEN '{sc_start}' AND '{sc_end}'"
             client.query(scrub_q).result()
             st.success("Data Scrubbed.")
-
-# SERVICE 5: ADMIN TOOLS (SCRUBBER & APPROVAL)
-elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
-    tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Engineer Approval"])
-
-    with tab_scrub:
-        st.subheader("Delete Bad Data")
-        sc_proj = st.text_input("Project Name (Exact)")
-        sc_loc = st.text_input("Location (Exact)")
-        sc_start = st.text_input("Start Time (YYYY-MM-DD HH:MM:SS)")
-        sc_end = st.text_input("End Time (YYYY-MM-DD HH:MM:SS)")
-        
-        if st.button("🗑️ PERMANENTLY DELETE POINTS"):
-            if sc_proj and sc_loc and sc_start and sc_end:
-                scrub_q = f"""DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
-                             WHERE project='{sc_proj}' AND location='{sc_loc}' 
-                             AND timestamp BETWEEN '{sc_start}' AND '{sc_end}'"""
-                client.query(scrub_q).result()
-                st.success("Points successfully erased.")
-            else: st.error("Please fill all fields.")
-
     with tab_approve:
-        st.subheader("Approve Data & Add Notes")
-        # Fetch the most recent 100 points that are not approved
-        review_q = f"SELECT timestamp, sensor_name, project, location, temperature, is_approved, engineer_note FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved IS FALSE OR is_approved IS NULL ORDER BY timestamp DESC LIMIT 200"
+        review_q = f"SELECT timestamp, sensor_name, project, location, temperature, is_approved, engineer_note FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved IS FALSE OR is_approved IS NULL ORDER BY timestamp DESC LIMIT 100"
         df_review = client.query(review_q).to_dataframe()
-        
         if not df_review.empty:
-            st.write("Edit the 'is_approved' checkbox and 'engineer_note' columns below:")
-            edited_df = st.data_editor(df_review, use_container_width=True)
-            
-            if st.button("💾 SAVE CHANGES TO DATABASE"):
-                # Note: Bulk updates in BigQuery are best done via a MERGE or by reloading the table.
-                # For this lab, we will use a quick 'Set all to approved' for the selected project/location as an example.
-                st.warning("Bulk saving requires a MERGE query. For now, use the Scrubber to remove bad data and verify the master sync logic.")
-        else:
-            st.success("All current data is approved!")
+            st.data_editor(df_review, width='stretch')
+            st.button("💾 SAVE CHANGES")
