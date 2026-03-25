@@ -216,8 +216,9 @@ if service == "🏠 Executive Summary":
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
 
-    # 1. Fetch Metadata (lowercase project/location)
+    # 1. Fetch Projects for Dropdown
     try:
+        # Schema Check: uses lowercase 'project' and 'location'
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe(create_bqstorage_client=False)
     except Exception as e:
@@ -225,46 +226,45 @@ elif service == "📉 Node Diagnostics":
         st.stop()
 
     if meta_df.empty:
-        st.warning("Master Table is empty. Run 'Master Scrub' first.")
+        st.warning("No data found in Master Table. Run 'Master Scrub' first.")
         st.stop()
 
     # 2. UI Layout
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    col1, col2, col3 = st.columns(3)
+    with col1:
         sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
-    with c2:
+    with col2:
         locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
         sel_loc = st.selectbox("Pipe / Bank", locs)
-    with c3:
-        weeks = st.slider("Duration (Weeks)", 1, 12, 4)
+    with col3:
+        duration_weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
 
-    # 3. Data Query (Strictly using 'temperature')
+    # 3. Main Data Query (Schema Check: 'temperature')
+    # Removed all references to 'value'
     data_q = f"""
         SELECT timestamp, temperature, depth, sensor_name 
         FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
         WHERE project = '{sel_proj}' 
           AND location = '{sel_loc}'
-          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {weeks} WEEK)
+          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {duration_weeks} WEEK)
         ORDER BY timestamp ASC
     """
 
     try:
         df_g = client.query(data_q).to_dataframe(create_bqstorage_client=False)
     except Exception as e:
-        # This will catch if BigQuery still sees the old 'value' name
-        st.error(f"SQL Error: {e}")
+        st.error(f"BigQuery Error: {e}")
         st.stop()
 
     if df_g.empty:
-        st.info(f"No data for {sel_loc} in the last {weeks} weeks.")
+        st.info(f"No records found for {sel_loc} in the last {duration_weeks} weeks.")
         st.stop()
 
-    # 4. Data Formatting (Addressing the \d Syntax Warning)
+    # 4. Data Processing
+    # FIX: Use r'(\d+)' to avoid SyntaxWarnings/Crashes
     df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
     df_g['temperature'] = df_g['temperature'].astype(float).round(1)
-    
-    # We use r'(\d+)' to prevent "invalid escape sequence" warnings
-    df_g['d_sort'] = df_g['depth'].str.extract(r'(\d+)').astype(float)
+    df_g['d_sort'] = df_g['depth'].str.extract(r'(\d+)').fillna(0).astype(float)
     df_g = df_g.sort_values(['d_sort', 'timestamp'])
 
     # 5. Graphing
@@ -284,7 +284,7 @@ elif service == "📉 Node Diagnostics":
         latest[['depth', 'sensor_name', 'temperature']].style.format({'temperature': '{:.1f}'}),
         use_container_width=True, hide_index=True
     )
-
+    
 ################################################
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
