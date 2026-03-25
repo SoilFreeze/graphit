@@ -32,49 +32,69 @@ client = get_bq_client()
 
 # --- 1. RESTORED GRAPH ENGINE (STABLE) ---
 # --- 1. CLEANED GRAPH ENGINE (STOPS THE OPERAND ERROR) ---
-def build_standard_sf_graph(df, title, start_view, end_view):
-    display_df = df.copy()
-    processed_dfs = []
+# --- 2. STANDARDIZED GRAPH ENGINE ---
+def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
+    """Handles 6hr gaps, C/F units, custom grid, and 'Right Now' red line."""
+    if active_refs is None: active_refs = []
     
+    # Unit Conversion Logic
+    display_df = df.copy()
+    if unit == "Celsius":
+        display_df['value'] = (display_df['value'] - 32) * 5/9
+        y_range, y_ticks, y_label, m_step = [-30, 30], [-30, -20, -10, 0, 10, 20, 30], "Temp (°C)", 2.5
+    else:
+        y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
+
     # Gap Logic (Line breaks > 6hrs)
-    for d in display_df['depth'].unique():
-        s_df = display_df[display_df['depth'] == d].copy().sort_values('timestamp')
+    processed_dfs = []
+    for sensor in display_df['Sensor'].unique():
+        s_df = display_df[display_df['Sensor'] == sensor].copy().sort_values('timestamp')
         s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gaps = s_df[s_df['gap'] > 6.0].copy()
         if not gaps.empty:
-            gaps['temperature'] = None  
-            # Use timedelta to avoid the "int + datetime" error
+            gaps['value'] = None
             gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
         processed_dfs.append(s_df)
     
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
+    
+    # Trace Creation: Explicitly No Fill to prevent 'Blobs'
     fig = go.Figure()
-    
-    # Sort depths numerically for the legend
-    depths = sorted(clean_df['depth'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x)) or 0))
-    
-    for d in depths:
-        sensor_df = clean_df[clean_df['depth'] == d]
+    for sensor in clean_df['Sensor'].unique():
+        sensor_df = clean_df[clean_df['Sensor'] == sensor]
         fig.add_trace(go.Scatter(
-            x=sensor_df['timestamp'], y=sensor_df['temperature'].round(1),
-            name=d, mode='lines', connectgaps=False, line=dict(width=2.5),
-            hovertemplate='%{x}<br>Temp: %{y:.1f}°F'
+            x=sensor_df['timestamp'], y=sensor_df['value'],
+            name=sensor, mode='lines', fill=None, connectgaps=False, line=dict(width=2)
         ))
 
-    # Grid Styling (No math loops here)
-    fig.update_yaxes(gridcolor='DimGray', gridwidth=1, minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
-                     mirror=True, showline=True, linecolor='black', linewidth=2, title="Temperature (°F)")
+    # Grid & Axis Styling
+    fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
+                     gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
+                     mirror=True, showline=True, linecolor='black', linewidth=2)
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # NOW Line & 32°F Reference
-    now_ts = datetime.now(pytz.UTC)
-    fig.add_vline(x=now_ts, line_width=2, line_color="red", annotation_text="RIGHT NOW")
-    fig.add_hline(y=32, line_dash="dash", line_color="cyan", annotation_text="32°F")
+    # Custom Vertical Grid (Mon/Mid/6hr)
+    shapes = []
+    curr = start_view.replace(hour=0, minute=0, second=0)
+    while curr <= end_view:
+        for h in [0, 6, 12, 18]:
+            t = curr + timedelta(hours=h)
+            if t < start_view or t > end_view: continue
+            t_ms = t.timestamp() * 1000
+            c, w = ("DimGray", 2) if (t.weekday() == 0 and h == 0) else (("DarkGray", 1) if h == 0 else ("LightGray", 0.5))
+            shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, line=dict(color=c, width=w), layer="below"))
+        curr += timedelta(days=1)
 
-    fig.update_layout(title={'text': title, 'x': 0.5, 'font': {'size': 24}}, plot_bgcolor='white',
-                      hovermode="x unified", legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), 
-                      margin=dict(r=150, t=80), height=800)
+    # NOW Line & Reference Lines
+    now_ms = datetime.now(pytz.UTC).timestamp() * 1000
+    fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="NOW")
+    for ref_f, label in active_refs:
+        val = (ref_f - 32) * 5/9 if unit == "Celsius" else ref_f
+        fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {round(val,1)}°")
+
+    fig.update_layout(title={'text': title, 'x': 0.5}, shapes=shapes, plot_bgcolor='white',
+                      legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), margin=dict(r=150), height=750)
     return fig
 
 # --- 3. SIDEBAR NAVIGATION ---
