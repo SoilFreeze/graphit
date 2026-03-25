@@ -285,19 +285,33 @@ elif service == "📤 Data Intake Lab":
                 for acc_id, creds in accounts.items():
                     try:
                         with st.spinner(f"Fetching {acc_id}..."):
-                            auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json=creds)
+                            # Convert AttrDict to a regular dict for JSON serialization
+                            auth_res = requests.post(
+                                "https://api.sensorpush.com/api/v1/oauth/authorize", 
+                                json=dict(creds) 
+                            )
+                            auth_res.raise_for_status()
+                            
                             token = auth_res.json().get("accesstoken")
                             headers = {"accept": "application/json", "Authorization": token}
                             payload = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
+                            
                             sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=payload)
                             raw_json = sample_res.json()
+                            
                             for sid, samples in raw_json.get("sensors", {}).items():
                                 for s in samples:
-                                    all_api_recs.append({"timestamp": s["observed"], "temperature": s["value"], "sensor_id": sid.replace(':', '-')})
-                    except Exception as e: st.warning(f"Failed {acc_id}: {e}")
+                                    all_api_recs.append({
+                                        "timestamp": s["observed"], 
+                                        "temperature": s["value"], 
+                                        "sensor_id": sid.replace(':', '-')
+                                    })
+                    except Exception as e: 
+                        st.warning(f"Failed {acc_id}: {e}")
                 
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
+                    # This pushes to your raw table before the master scrub runs
                     client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
                     st.success(f"✅ Success! Pulled {len(all_api_recs)} points total.")
 
