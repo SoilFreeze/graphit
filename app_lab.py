@@ -151,6 +151,7 @@ if service == "🏠 Executive Summary":
 # --- 4B. CLIENT PORTAL ---
 # --- 4B. CLIENT PORTAL ---
 # --- 4B. CLIENT PORTAL ---
+# --- 4B. CLIENT PORTAL ---
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
@@ -161,12 +162,16 @@ elif service == "📊 Client Portal":
         if meta_df.empty:
             st.warning("No approved data available. Please approve data in Admin Tools.")
         else:
-            c1, c2 = st.columns(2)
+            # Added a third column for the weeks selector
+            c1, c2, c3 = st.columns([1, 1, 1])
             with c1: 
                 sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
             with c2: 
                 locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
                 sel_loc = st.selectbox("Pipe / Bank", locs)
+            with c3:
+                # NEW: Client can choose range, defaults to 6
+                weeks_to_view = st.slider("Weeks to View", 1, 12, 6)
             
             data_q = f"""
                 SELECT timestamp, temperature, depth, engineer_note 
@@ -177,10 +182,23 @@ elif service == "📊 Client Portal":
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
+            # Date Math for the View Window
+            now_utc = datetime.now(pytz.UTC)
+            # Find the most recent Monday at midnight
+            current_monday = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            # Calculate start: (N-1) weeks before current Monday
+            start_view = current_monday - timedelta(weeks=weeks_to_view - 1)
+            # End: Next Monday at midnight (completes the current week)
+            end_view = current_monday + timedelta(days=7)
+
             # --- 1. TEMP VS DEPTH (Only for non-Bank locations) ---
             if "bank" not in sel_loc.lower():
                 st.subheader("🌡️ Soil Temperature Profile (Weekly Snapshots)")
+                # Filter for Monday at 6 AM
                 snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
+                
+                # Only keep snapshots within the selected weeks range
+                snapshot = snapshot[snapshot['timestamp'] >= start_view]
                 
                 if not snapshot.empty:
                     snapshot['depth_num'] = snapshot['depth'].str.extract('(\d+)').astype(float)
@@ -189,11 +207,11 @@ elif service == "📊 Client Portal":
                     fig_profile = px.line(
                         snapshot.sort_values('depth_num'), 
                         x='temperature', y='depth_num', color='Date', markers=True,
-                        title="Temperature by Depth (Monday 6:00 AM)",
+                        title=f"Temperature by Depth (Monday 6:00 AM - Last {weeks_to_view} Weeks)",
                         labels={'temperature': 'Temperature (°F)', 'depth_num': 'Depth (ft)'}
                     )
                     
-                    # Standard Grid Look for Profile: -20 to 80, 20° lines, 5° minor
+                    # Standard Grid: -20 to 80, 20° heavy lines, 5° minor lines
                     fig_profile.update_xaxes(
                         tickmode='array', tickvals=[-20, 0, 20, 40, 60, 80], range=[-20, 80],
                         gridcolor='DimGray', gridwidth=1.5,
@@ -204,19 +222,13 @@ elif service == "📊 Client Portal":
                     fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="Freezing (32°F)")
                     fig_profile.update_layout(plot_bgcolor='white', height=600)
                     st.plotly_chart(fig_profile, width='stretch')
+                else:
+                    st.info("No Monday snapshots found in this time range.")
             
-            # --- 2. STANDARD TIMELINE TREND (1-Week Window) ---
+            # --- 2. STANDARD TIMELINE TREND ---
             st.subheader("📈 Historical Trends")
-            
-            # CALCULATE: Full week starting on last Monday
-            now_utc = datetime.now(pytz.UTC)
-            # weekday() is 0 for Monday. Subtracting it gets us back to Monday.
-            start_week = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            end_week = start_week + timedelta(days=7)
-            
-            # Pass our calculated start_week and end_week to the graph engine
             st.plotly_chart(
-                build_standard_sf_graph(df_c, f"Weekly View: {sel_loc}", start_week, end_week), 
+                build_standard_sf_graph(df_c, f"{weeks_to_view}-Week View: {sel_loc}", start_view, end_view), 
                 width='stretch'
             )
             
@@ -235,6 +247,7 @@ elif service == "📊 Client Portal":
 
     except Exception as e: 
         st.error(f"Portal Error: {e}")
+        
 # 4C. NODE DIAGNOSTICS
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
