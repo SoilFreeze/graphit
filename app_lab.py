@@ -31,20 +31,21 @@ def get_bq_client():
 client = get_bq_client()
 
 # --- 2. GRAPH ENGINE ---
+# --- 2. STANDARDIZED GRAPH ENGINE (RESTORED) ---
 def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
+    """Standard SF look: 20° heavy grid, 5° minor grid, Monday/6hr vertical markers."""
     if active_refs is None: active_refs = []
     display_df = df.copy()
     
-    # Updated to strictly use -20 to 80 for Fahrenheit
+    # Unit & Grid Config
     if unit == "Celsius":
         display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
         y_range, y_ticks, y_label, m_step = [-30, 30], [-30, -20, -10, 0, 10, 20, 30], "Temp (°C)", 2.5
     else:
-        # Fixed Range: -20 to 80
         y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
+    # Gap Logic (Line breaks > 6hrs)
     processed_dfs = []
-    # ... (Rest of the gap logic remains the same)
     for d in display_df['depth'].unique():
         s_df = display_df[display_df['depth'] == d].copy().sort_values('timestamp')
         s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
@@ -66,12 +67,33 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
             name=d, mode='lines', fill=None, connectgaps=False, line=dict(width=2)
         ))
 
+    # Grid & Axis Styling (The "Standard" Look)
     fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
+
+    # Custom Vertical Grid (Monday marks)
+    shapes = []
+    curr = start_view.replace(hour=0, minute=0, second=0, microsecond=0)
+    while curr <= end_view:
+        for h in [0, 6, 12, 18]:
+            t = curr + timedelta(hours=h)
+            if t < start_view or t > end_view: continue
+            t_ms = t.timestamp() * 1000
+            if t.weekday() == 0 and h == 0: c, w = "DimGray", 2
+            elif h == 0: c, w = "DarkGray", 1
+            else: c, w = "LightGray", 0.5
+            shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, 
+                               line=dict(color=c, width=w), layer="below"))
+        curr += timedelta(days=1)
+
+    now_ms = datetime.now(pytz.UTC).timestamp() * 1000
+    fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="RIGHT NOW")
     
-    # ... (Rest of the shape/now-line logic remains the same)
+    fig.update_layout(title={'text': title, 'x': 0.5}, shapes=shapes, plot_bgcolor='white',
+                      hovermode="x unified", legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), 
+                      margin=dict(r=150), height=750)
     return fig
 
 # --- 3. SIDEBAR NAVIGATION ---
