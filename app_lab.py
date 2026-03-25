@@ -87,34 +87,40 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit="
     now_ms = datetime.now(pytz.UTC).timestamp() * 1000
     fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="RIGHT NOW")
 
-    fig.update_layout(title={'text': title, 'x': 0.5}, shapes=shapes, plot_bgcolor='white', hovermode="x unified", margin=dict(r=150), height=750)
-    return fig
+    fig.update_layout(
+        title={'text': title, 'x': 0, 'xanchor': 'left'}, # Left Aligned
+        shapes=shapes, 
+        plot_bgcolor='white', 
+        hovermode="x unified", 
+        margin=dict(r=150, t=50, l=50), # Adjusted margins for left title
+        height=750
+    )
 
+# --- 3. SIDEBAR NAVIGATION ---
 # --- 3. SIDEBAR NAVIGATION ---
 # --- 3. SIDEBAR NAVIGATION ---
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# NEW: Reference Line Toggle
-ref_options = {
-    "Freezing (32°F)": (32, "Freezing"),
-    "Type B (26.6°F)": (26.6, "Type B"),
-    "Type A (10.2°F)": (10.2, "Type A")
-}
-selected_ref_labels = st.sidebar.multiselect(
-    "Visible Reference Lines", 
-    options=list(ref_options.keys()), 
-    default=list(ref_options.keys())
-)
-# Convert selected labels to list of (value, name) tuples
-active_refs = [ref_options[label] for label in selected_ref_labels]
+st.sidebar.subheader("Graph Reference Lines")
+# Individual Checkboxes
+show_32 = st.sidebar.checkbox("Freezing (32°F)", value=True)
+show_26 = st.sidebar.checkbox("Type B (26.6°F)", value=True)
+show_10 = st.sidebar.checkbox("Type A (10.2°F)", value=True)
+
+# Build the active_refs list based on checkboxes
+active_refs = []
+if show_32: active_refs.append((32, "Freezing"))
+if show_26: active_refs.append((26.6, "Type B"))
+if show_10: active_refs.append((10.2, "Type A"))
 
 service = st.sidebar.selectbox("Select Service", [
-    "🏠 Executive Summary", 
-    "📊 Client Portal",
-    "📉 Node Diagnostics", 
-    "📤 Data Intake Lab",
-    "🛠️ Admin Tools"
+    "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"
 ])
+
+# Print Helper
+if st.sidebar.button("🖨️ Prepare Page for Printing"):
+    st.info("Optimization complete. Use your browser's Print command (Ctrl+P) now.")
+    
 # --- 4. SERVICE ROUTING ---
 
 # 4A. EXECUTIVE SUMMARY
@@ -162,6 +168,7 @@ if service == "🏠 Executive Summary":
 # --- 4B. CLIENT PORTAL ---
 # --- 4B. CLIENT PORTAL ---
 # --- 4B. CLIENT PORTAL ---
+# --- 4B. CLIENT PORTAL ---
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
@@ -182,12 +189,13 @@ elif service == "📊 Client Portal":
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
-            now_utc = datetime.now(pytz.UTC)
-            current_monday = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            # Date Math
+            max_approved_ts = df_c['timestamp'].max()
+            current_monday = (max_approved_ts - timedelta(days=max_approved_ts.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
             start_view = current_monday - timedelta(weeks=weeks_to_view - 1)
             end_view = current_monday + timedelta(days=7)
 
-            # --- 1. FRAMED TEMP VS DEPTH PROFILE ---
+            # --- 1. TEMP VS DEPTH ---
             if "bank" not in sel_loc.lower():
                 st.subheader("🌡️ Soil Temperature Profile (Weekly Snapshots)")
                 snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
@@ -196,34 +204,30 @@ elif service == "📊 Client Portal":
                 if not snapshot.empty:
                     snapshot['depth_num'] = snapshot['depth'].str.extract('(\d+)').astype(float)
                     snapshot['Date'] = snapshot['timestamp'].dt.strftime('%m/%d')
+                    fig_profile = px.line(snapshot.sort_values('depth_num'), x='temperature', y='depth_num', color='Date', markers=True, range_x=[-20, 80])
                     
-                    fig_profile = px.line(
-                        snapshot.sort_values('depth_num'), 
-                        x='temperature', y='depth_num', color='Date', markers=True,
-                        range_x=[-20, 80], labels={'temperature': 'Temperature (°F)', 'depth_num': 'Depth (ft)'}
-                    )
-                    
-                    # Add Selected Reference Lines to Profile
+                    # Add Selected Refs
                     for val, label in active_refs:
                         fig_profile.add_vline(x=val, line_dash="dash", line_color="blue", annotation_text=label)
 
-                    # FULL FRAME: mirror=True and showline=True
+                    # Frame and Left-align Title
+                    fig_profile.update_layout(title={'text': "Temperature by Depth", 'x': 0, 'xanchor': 'left'}, plot_bgcolor='white', height=600)
                     fig_profile.update_xaxes(mirror=True, showline=True, linecolor='black', linewidth=2, gridcolor='DimGray', minor=dict(dtick=5, gridcolor='Silver', showgrid=True))
                     fig_profile.update_yaxes(autorange="reversed", mirror=True, showline=True, linecolor='black', linewidth=2, gridcolor='LightGray')
-                    fig_profile.update_layout(plot_bgcolor='white', height=600)
                     st.plotly_chart(fig_profile, width='stretch')
 
-            # --- 2. TIMELINE TREND ---
+            # --- 2. TIMELINE ---
             st.subheader("📈 Historical Trends")
-            st.plotly_chart(build_standard_sf_graph(df_c, f"{weeks_to_view}-Week View: {sel_loc}", start_view, end_view, active_refs), width='stretch')
+            st.plotly_chart(build_standard_sf_graph(df_c, f"{weeks_to_view}-Week Trend: {sel_loc}", start_view, end_view, active_refs), width='stretch')
             
-            # --- 3. DAILY PERFORMANCE TABLE (Sorted Numerically) ---
-            st.subheader("⏱️ Daily Performance (Last 24 Hours)")
-            last_24h = df_c[df_c['timestamp'] >= (now_utc - timedelta(hours=24))].copy()
+            # --- 3. DAILY PERFORMANCE (Last Approved 24h) ---
+            st.subheader(f"⏱️ Performance: {max_approved_ts.strftime('%m/%d')} (Final Approved 24h)")
+            # Filter for the 24 hours leading up to the most recent approved point
+            last_approved_24h = df_c[df_c['timestamp'] >= (max_approved_ts - timedelta(hours=24))].copy()
             
-            if not last_24h.empty:
-                last_24h['depth_num'] = last_24h['depth'].str.extract('(\d+)').astype(float)
-                stats = last_24h.groupby(['depth', 'depth_num']).agg(
+            if not last_approved_24h.empty:
+                last_approved_24h['depth_num'] = last_approved_24h['depth'].str.extract('(\d+)').astype(float)
+                stats = last_approved_24h.groupby(['depth', 'depth_num']).agg(
                     High=('temperature', 'max'),
                     Low=('temperature', 'min'),
                     Current=('temperature', 'last'),
@@ -231,8 +235,7 @@ elif service == "📊 Client Portal":
                 ).reset_index()
                 
                 stats['Difference'] = stats['High'] - stats['Low']
-                # Numerical Sort
-                stats = stats.sort_values('depth_num')
+                stats = stats.sort_values('depth_num') # Numerical Sort
                 
                 st.dataframe(
                     stats[['depth', 'Current', 'High', 'Low', 'Difference', 'Last_Update']].style.format({
@@ -241,6 +244,7 @@ elif service == "📊 Client Portal":
                     width='stretch', hide_index=True
                 )
 
+            # Engineer Note
             latest_note = df_c.sort_values('timestamp', ascending=False)['engineer_note'].dropna()
             if not latest_note.empty and latest_note.iloc[0]:
                 st.info(f"**Field Engineer Note:** {latest_note.iloc[0]}")
