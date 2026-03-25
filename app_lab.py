@@ -120,9 +120,11 @@ if service == "🏠 Executive Summary":
         st.error(f"Executive Summary Error: {e}")
 
 # 📉 NODE DIAGNOSTICS
+# 📉 NODE DIAGNOSTICS
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
+        # 1. Fetch Metadata (lowercase schema)
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe()
 
@@ -130,36 +132,74 @@ elif service == "📉 Node Diagnostics":
             st.warning("No data found. Run 'Master Scrub' in Data Intake.")
         else:
             c1, c2, c3 = st.columns(3)
-            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
+            with c1: 
+                sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
             with c2: 
                 locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
                 sel_loc = st.selectbox("Pipe / Bank", locs)
-            with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
+            with c3: 
+                weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
+
+            # FIX: Convert WEEK to DAY for BigQuery compatibility
+            days_back = weeks * 7
 
             data_q = f"""
-                SELECT timestamp, temperature, depth, sensor_name FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-                WHERE project = '{sel_proj}' AND location = '{sel_loc}'
-                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {weeks} WEEK)
+                SELECT timestamp, temperature, depth, sensor_name 
+                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+                WHERE project = '{sel_proj}' 
+                  AND location = '{sel_loc}'
+                  AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
                 ORDER BY timestamp ASC
             """
             df_g = client.query(data_q).to_dataframe()
 
             if df_g.empty:
-                st.info("No data found.")
+                st.info(f"No data found for {sel_loc} in the last {weeks} weeks.")
             else:
+                # 2. Data Processing & Precision
                 df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
+                # Round to 1 significant digit
                 df_g['temperature'] = df_g['temperature'].astype(float).round(1)
+                
+                # Numeric Depth Sort (e.g., 2ft before 12ft) using raw string regex
                 df_g['d_sort'] = df_g['depth'].str.extract(r'(\d+)').fillna(0).astype(float)
                 df_g = df_g.sort_values(['d_sort', 'timestamp'])
 
-                fig = px.line(df_g, x='timestamp', y='temperature', color='depth', 
-                             hover_data={'temperature': ':.1f', 'timestamp': True})
-                fig.update_layout(hovermode="x unified")
+                # 3. Interactive Plotly Graph
+                fig = px.line(
+                    df_g, 
+                    x='timestamp', 
+                    y='temperature', 
+                    color='depth', 
+                    hover_data={'temperature': ':.1f', 'timestamp': True},
+                    title=f"Thermal Trend: {sel_proj} | {sel_loc}"
+                )
+                
+                fig.update_layout(
+                    hovermode="x unified",
+                    xaxis_title="Date/Time (UTC)",
+                    yaxis_title="Temperature",
+                    margin=dict(l=0, r=0, t=40, b=0)
+                )
+                
+                # Add Freeze Line
+                fig.add_hline(y=32.0, line_dash="dot", line_color="cyan", annotation_text="32°F")
+                
                 st.plotly_chart(fig, use_container_width=True)
+
+                # 4. Summary Table (1 decimal place)
+                st.subheader("Latest Readings")
+                latest = df_g.sort_values('timestamp').groupby('depth').tail(1)
+                st.dataframe(
+                    latest[['depth', 'sensor_name', 'temperature']].rename(columns={
+                        'depth': 'Depth', 'sensor_name': 'Node ID', 'temperature': 'Current Temp'
+                    }).style.format({'Current Temp': '{:.1f}'}),
+                    use_container_width=True, 
+                    hide_index=True
+                )
     except Exception as e:
         st.error(f"Diagnostics Error: {e}")
         st.code(traceback.format_exc())
-
 # 📤 DATA INTAKE LAB
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
