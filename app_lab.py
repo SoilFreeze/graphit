@@ -31,6 +31,7 @@ def get_bq_client():
 client = get_bq_client()
 
 # --- 1. RESTORED GRAPH ENGINE (STABLE) ---
+# --- 1. CLEANED GRAPH ENGINE (STOPS THE OPERAND ERROR) ---
 def build_standard_sf_graph(df, title, start_view, end_view):
     display_df = df.copy()
     processed_dfs = []
@@ -42,6 +43,7 @@ def build_standard_sf_graph(df, title, start_view, end_view):
         gaps = s_df[s_df['gap'] > 6.0].copy()
         if not gaps.empty:
             gaps['temperature'] = None  
+            # Use timedelta to avoid the "int + datetime" error
             gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
         processed_dfs.append(s_df)
@@ -49,7 +51,7 @@ def build_standard_sf_graph(df, title, start_view, end_view):
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     fig = go.Figure()
     
-    # Numeric Sort for Legend
+    # Sort depths numerically for the legend
     depths = sorted(clean_df['depth'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x)) or 0))
     
     for d in depths:
@@ -60,12 +62,12 @@ def build_standard_sf_graph(df, title, start_view, end_view):
             hovertemplate='%{x}<br>Temp: %{y:.1f}°F'
         ))
 
-    # Grid & Axis Styling
+    # Grid Styling (No math loops here)
     fig.update_yaxes(gridcolor='DimGray', gridwidth=1, minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2, title="Temperature (°F)")
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # NOW Line & Freeze Reference
+    # NOW Line & 32°F Reference
     now_ts = datetime.now(pytz.UTC)
     fig.add_vline(x=now_ts, line_width=2, line_color="red", annotation_text="RIGHT NOW")
     fig.add_hline(y=32, line_dash="dash", line_color="cyan", annotation_text="32°F")
@@ -117,9 +119,11 @@ if service == "🏠 Executive Summary":
     except Exception as e: st.error(f"Summary Error: {e}")
 
 # --- 2. NODE DIAGNOSTICS SERVICE ---
+# --- 2. NODE DIAGNOSTICS BLOCK ---
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
+        # Load Filters
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe()
         
@@ -130,6 +134,7 @@ elif service == "📉 Node Diagnostics":
             sel_loc = st.selectbox("Pipe / Bank", locs)
         with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
 
+        # Pull Data
         days_back = weeks * 7
         data_q = f"""
             SELECT timestamp, temperature, depth, sensor_name FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
@@ -144,27 +149,37 @@ elif service == "📉 Node Diagnostics":
             end_v = datetime.now(pytz.UTC)
             start_v = end_v - timedelta(days=days_back)
             
-            # Draw Graph
-            fig = build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v)
-            st.plotly_chart(fig, use_container_width=True)
+            # Display Graph
+            st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v), use_container_width=True)
             
-            # Restored Color-Coded Table
-            st.subheader("Latest Readings & Status")
+            # 3. Restored COLOR-CODED TABLE
+            st.subheader("Current Status & 24h Change")
+            
+            # Calculate 24h Change for the table
             latest = df_g.sort_values('timestamp').groupby('depth').tail(1).copy()
-            now_ts = datetime.now(pytz.UTC)
-            latest['hrs_ago'] = (now_ts - latest['timestamp']).dt.total_seconds() / 3600
+            earliest_24 = df_g[df_g['timestamp'] >= (end_v - timedelta(hours=24))].sort_values('timestamp').groupby('depth').head(1)
             
-            def style_diagnostic_table(row):
+            # Merge to find change
+            latest = latest.merge(earliest_24[['depth', 'temperature']], on='depth', suffixes=('', '_24h'))
+            latest['24h_change'] = latest['temperature'] - latest['temperature_24h']
+            latest['hrs_ago'] = (end_v - latest['timestamp']).dt.total_seconds() / 3600
+
+            def apply_diag_styles(row):
                 styles = [''] * len(row)
-                h_idx = row.index.get_loc("timestamp")
-                # Color code "Last Seen" timestamp
-                if row['hrs_ago'] >= 24: styles[h_idx] = 'background-color: #ff4b4b; color: white'
-                elif row['hrs_ago'] >= 12: styles[h_idx] = 'background-color: #ffa500; color: black'
+                # Status Color (Column 3)
+                if row['hrs_ago'] >= 24: styles[3] = 'background-color: #ff4b4b; color: white'
+                elif row['hrs_ago'] >= 12: styles[3] = 'background-color: #ffa500; color: black'
+                
+                # Change Color (Column 4)
+                if row['24h_change'] >= 2.0: styles[4] = 'background-color: #ff4b4b; color: white'
+                elif row['24h_change'] >= 0.5: styles[4] = 'background-color: #ffff00; color: black'
+                elif row['24h_change'] <= -1.0: styles[4] = 'background-color: #00008b; color: white'
                 return styles
 
+            # Final Table Display
             st.dataframe(
-                latest[['depth', 'sensor_name', 'temperature', 'timestamp', 'hrs_ago']].style.apply(style_diagnostic_table, axis=1).format({
-                    'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}', 'hrs_ago': '{:.0f}h'
+                latest[['depth', 'sensor_name', 'temperature', 'timestamp', '24h_change', 'hrs_ago']].style.apply(apply_diag_styles, axis=1).format({
+                    'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}', '24h_change': '{:+.1f}', 'hrs_ago': '{:.0f}h ago'
                 }),
                 use_container_width=True, hide_index=True
             )
