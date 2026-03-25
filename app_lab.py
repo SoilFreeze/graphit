@@ -111,25 +111,25 @@ service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "�
 if service == "🏠 Executive Summary":
     st.header("🏠 Site Health & Warming Alerts")
 
-    # 1. Project Selection
+    # 1. Project Selection (Metadata uses uppercase/lowercase - adjusted for lowercase schema)
     meta_df = client.query(
-        f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`"
+        f"SELECT DISTINCT project FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
     ).to_dataframe(create_bqstorage_client=False)
     
-    all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
+    all_projs = sorted(meta_df['project'].unique())
     default_idx = all_projs.index("Office") if "Office" in all_projs else 0
     sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=default_idx)
 
-    # 2. SQL Query - Updated to use sensor_id
+    # 2. SQL Query - Matching your exact Field Names from the screenshot
     query = f"""
         WITH NodeLimits AS (
             SELECT sensor_id, MAX(timestamp) as max_ts
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-            WHERE Project = '{sel_summary_proj}'
+            WHERE project = '{sel_summary_proj}'
             GROUP BY sensor_id
         )
         SELECT 
-            m.timestamp, m.value, m.Location, m.Depth, m.sensor_id
+            m.timestamp, m.temperature, m.location, m.depth, m.sensor_id, m.sensor_name
         FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` m
         JOIN NodeLimits nl ON m.sensor_id = nl.sensor_id
         WHERE m.timestamp >= TIMESTAMP_SUB(nl.max_ts, INTERVAL 24 HOUR)
@@ -147,29 +147,30 @@ if service == "🏠 Executive Summary":
             for node in df_summary['sensor_id'].unique():
                 n_df = df_summary[df_summary['sensor_id'] == node].sort_values('timestamp')
                 
-                current_temp = n_df['value'].iloc[-1]
-                # Calculate change from the start of the 24h window to now
-                net_change = current_temp - n_df['value'].iloc[0]
+                # Using 'temperature' column from your schema
+                current_temp = n_df['temperature'].iloc[-1]
+                net_change = current_temp - n_df['temperature'].iloc[0]
                 
                 last_seen_dt = n_df['timestamp'].iloc[-1]
                 hours_ago = (now_ts - last_seen_dt).total_seconds() / 3600
                 hours_int = int(round(hours_ago, 0))
                 
                 summary_stats.append({
-                    "Location": n_df['Location'].iloc[0],
-                    "Depth": f"{n_df['Depth'].iloc[0]}ft",
+                    "Location": n_df['location'].iloc[0],
+                    "Depth": f"{n_df['depth'].iloc[0]}ft",
                     "Node ID": node,
+                    "Sensor Name": n_df['sensor_name'].iloc[0],
                     "Status / Last Seen": f"{last_seen_dt.strftime('%m/%d %H:%M')} ({hours_int}h ago)",
                     "hours_raw": hours_ago,
-                    "Min (24h)": round(float(n_df['value'].min()), 1),
-                    "Max (24h)": round(float(n_df['value'].max()), 1),
+                    "Min (24h)": round(float(n_df['temperature'].min()), 1),
+                    "Max (24h)": round(float(n_df['temperature'].max()), 1),
                     "24h Change": round(float(net_change), 1),
                     "Current": round(float(current_temp), 1)
                 })
 
             df_full = pd.DataFrame(summary_stats).sort_values(by="24h Change", ascending=False)
 
-            # Pagination
+            # Pagination (20 rows)
             rows_per_page = 20
             total_pages = max((len(df_full) // rows_per_page) + (1 if len(df_full) % rows_per_page > 0 else 0), 1)
             col_nav1, col_nav2 = st.columns([1, 4])
@@ -178,6 +179,7 @@ if service == "🏠 Executive Summary":
             
             df_display = df_full.iloc[(page_num-1)*rows_per_page : page_num*rows_per_page]
 
+            # Style Logic
             def apply_row_styles(row):
                 styles = [''] * len(row)
                 h = row['hours_raw']
