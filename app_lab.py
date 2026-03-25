@@ -213,48 +213,97 @@ if service == "🏠 Executive Summary":
         st.error(f"Executive Summary Error: {e}")
 
 ##########################################
-elif service == "📈 Node Diagnostics":
-    st.header("📈 Node Diagnostics")
-    
-    # Sidebar Settings
-    temp_unit = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
-    ref_list = []
-    if st.sidebar.checkbox("32°F (Frost)"): ref_list.append((32.0, "Frost"))
-    if st.sidebar.checkbox("26.6°F (Brine)"): ref_list.append((26.6, "Brine"))
-    if st.sidebar.checkbox("10.2°F (Deep)"): ref_list.append((10.2, "Deep"))
+elif service == "📉 Node Diagnostics":
+    st.header("📉 High-Resolution Node Diagnostics")
 
-    # Single-Selection Filters
-    meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`").to_dataframe(create_bqstorage_client=False)
-    
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        all_projs = sorted([p for p in meta_df['Project'].unique() if p is not None])
-        default_idx = all_projs.index("Office") if "Office" in all_projs else 0
-        sel_proj = st.selectbox("Project", all_projs, index=default_idx)
-    with c2:
-        raw_locs = meta_df[meta_df['Project'] == sel_proj]['Location'].unique()
-        avail_locs = sorted([l for l in raw_locs if l is not None])
-        sel_loc = st.selectbox("Pipe / Bank", avail_locs)
-    with c3:
-        weeks = st.slider("Duration (Weeks)", 1, 12, 6)
+    # 1. Sidebar/Top Filters (Lowercase schema alignment)
+    meta_df = client.query(
+        f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`"
+    ).to_dataframe(create_bqstorage_client=False)
 
-    # Data & Plotting
-    if sel_proj and sel_loc:
-        now_utc = datetime.now(pytz.UTC)
-        end_view = (now_utc + timedelta(days=(7 - now_utc.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        start_view = end_view - timedelta(weeks=weeks)
-        
-        q = f"SELECT timestamp, value, Location, Depth, nodenumber FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'"
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
+    with col2:
+        loc_options = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
+        sel_loc = st.selectbox("Pipe / Bank", loc_options)
+    with col3:
+        duration_weeks = st.slider("Duration (Weeks)", 1, 12, 4)
+
+    # 2. SQL Query (Updated to use 'temperature' and lowercase fields)
+    q = f"""
+        SELECT 
+            timestamp, 
+            temperature, 
+            depth, 
+            sensor_name 
+        FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+        WHERE project = '{sel_proj}' 
+          AND location = '{sel_loc}'
+          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {duration_weeks} WEEK)
+        ORDER BY timestamp DESC
+    """
+
+    try:
         df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
-        
-        if not df_g.empty:
-            df_g['depth_num'] = pd.to_numeric(df_g['Depth'], errors='coerce').fillna(0)
-            df_g['Sensor'] = df_g.apply(lambda x: f"{x['Depth']}ft ({x['nodenumber']})" if str(x['Depth']).replace('.','',1).isdigit() else f"{x['Depth']} ({x['nodenumber']})", axis=1)
-            df_g = df_g.sort_values(by=['depth_num', 'timestamp'])
-            
-            fig = build_standard_sf_graph(df_g, f"Trend: {sel_proj} - {sel_loc}", start_view, end_view, unit=temp_unit, active_refs=ref_list)
-            st.plotly_chart(fig, width='stretch')
 
+        if df_g.empty:
+            st.warning("No data found for the selected criteria.")
+        else:
+            # 3. Data Cleaning & Precision
+            df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
+            # Force 1 decimal point for internal calculation
+            df_g['temperature'] = df_g['temperature'].round(1)
+            
+            # Sort depths numerically for a clean legend
+            df_g['depth_num'] = df_g['depth'].str.extract('(\d+)').astype(float)
+            df_g = df_g.sort_values(['depth_num', 'timestamp'])
+
+            # 4. Interactive Plotly Chart
+            import plotly.express as px
+
+            fig = px.line(
+                df_g,
+                x='timestamp',
+                y='temperature',
+                color='depth',
+                hover_data={'temperature': ':.1f', 'timestamp': True, 'depth': True},
+                title=f"Thermal Trends: {sel_proj} - {sel_loc}",
+                labels={'temperature': 'Temp (°C)', 'timestamp': 'Time', 'depth': 'Depth'}
+            )
+
+            # Clean styling
+            fig.update_layout(
+                hovermode="x unified",
+                legend_title_text='Sensor Depth',
+                margin=dict(l=0, r=0, t=40, b=0)
+            )
+            
+            # Add a horizontal line at 0°C if needed for freezing reference
+            fig.add_hline(y=0, line_dash="dash", line_color="cyan", annotation_text="Freezing Point")
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 5. Summary Table for this Pipe
+            st.subheader("Sensor Summary")
+            df_summary = df_g.groupby('depth').agg({
+                'temperature': ['last', 'min', 'max']
+            }).reset_index()
+            
+            df_summary.columns = ['Depth', 'Current', 'Min', 'Max']
+            
+            st.dataframe(
+                df_summary.style.format({
+                    'Current': '{:.1f}',
+                    'Min': '{:.1f}',
+                    'Max': '{:.1f}'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    except Exception as e:
+        st.error(f"Diagnostics Error: {e}")
 ################################################
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
