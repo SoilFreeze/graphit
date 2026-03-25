@@ -120,20 +120,19 @@ if service == "🏠 Executive Summary":
     default_idx = all_projs.index("Office") if "Office" in all_projs else 0
     sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=default_idx)
 
-    # 2. SQL Query
+    # 2. SQL Query - Updated to use sensor_id
     query = f"""
         WITH NodeLimits AS (
-            SELECT nodenumber, MAX(timestamp) as max_ts
+            SELECT sensor_id, MAX(timestamp) as max_ts
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
             WHERE Project = '{sel_summary_proj}'
-            GROUP BY nodenumber
+            GROUP BY sensor_id
         )
         SELECT 
-            m.timestamp, m.value, m.Location, m.Depth, m.nodenumber
+            m.timestamp, m.value, m.Location, m.Depth, m.sensor_id
         FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` m
-        JOIN NodeLimits nl ON m.nodenumber = nl.nodenumber
+        JOIN NodeLimits nl ON m.sensor_id = nl.sensor_id
         WHERE m.timestamp >= TIMESTAMP_SUB(nl.max_ts, INTERVAL 24 HOUR)
-        ORDER BY m.timestamp DESC
     """
     
     try:
@@ -145,11 +144,12 @@ if service == "🏠 Executive Summary":
             now_ts = datetime.now(pytz.UTC)
             summary_stats = []
             
-            for node in df_summary['nodenumber'].unique():
-                n_df = df_summary[df_summary['nodenumber'] == node].sort_values('timestamp')
+            for node in df_summary['sensor_id'].unique():
+                n_df = df_summary[df_summary['sensor_id'] == node].sort_values('timestamp')
                 
                 current_temp = n_df['value'].iloc[-1]
-                net_change = current_temp - n_df['value'].iloc[0] # Heating (+) vs Cooling (-)
+                # Calculate change from the start of the 24h window to now
+                net_change = current_temp - n_df['value'].iloc[0]
                 
                 last_seen_dt = n_df['timestamp'].iloc[-1]
                 hours_ago = (now_ts - last_seen_dt).total_seconds() / 3600
@@ -167,35 +167,25 @@ if service == "🏠 Executive Summary":
                     "Current": round(float(current_temp), 1)
                 })
 
-            # --- 3. SORTING LOGIC: Warming Highest at Top ---
-            df_full = pd.DataFrame(summary_stats)
-            df_full = df_full.sort_values(by="24h Change", ascending=False)
+            df_full = pd.DataFrame(summary_stats).sort_values(by="24h Change", ascending=False)
 
-            # --- 4. PAGINATION LOGIC: 20 Rows per Page ---
+            # Pagination
             rows_per_page = 20
-            total_pages = (len(df_full) // rows_per_page) + (1 if len(df_full) % rows_per_page > 0 else 0)
-            
-            # Simple Navigation UI
+            total_pages = max((len(df_full) // rows_per_page) + (1 if len(df_full) % rows_per_page > 0 else 0), 1)
             col_nav1, col_nav2 = st.columns([1, 4])
             with col_nav1:
                 page_num = st.number_input(f"Page (1 of {total_pages})", min_value=1, max_value=total_pages, step=1)
             
-            start_idx = (page_num - 1) * rows_per_page
-            end_idx = start_idx + rows_per_page
-            df_display = df_full.iloc[start_idx:end_idx]
+            df_display = df_full.iloc[(page_num-1)*rows_per_page : page_num*rows_per_page]
 
-            # 5. ADVANCED STYLING (Age of Data & Thermal Delta)
             def apply_row_styles(row):
                 styles = [''] * len(row)
-                
-                # Age Coloring
                 h = row['hours_raw']
                 status_idx = row.index.get_loc("Status / Last Seen")
                 if h >= 24: styles[status_idx] = 'background-color: #ff4b4b; color: white'
                 elif h >= 12: styles[status_idx] = 'background-color: #ffa500; color: black'
                 elif h >= 6: styles[status_idx] = 'background-color: #ffff00; color: black'
                 
-                # Thermal Delta Coloring
                 change = row['24h Change']
                 chg_idx = row.index.get_loc("24h Change")
                 if change >= 5.0: styles[chg_idx] = 'background-color: #ff4b4b; color: white'
@@ -204,24 +194,19 @@ if service == "🏠 Executive Summary":
                 elif change <= -1.0: styles[chg_idx] = 'background-color: #00008b; color: white'
                 elif change <= -0.5: styles[chg_idx] = 'background-color: #0000ff; color: white'
                 elif change <= -0.25: styles[chg_idx] = 'background-color: #add8e6; color: black'
-                
                 return styles
 
-            # 6. Final Display (Height set for 20 rows to avoid internal scroll)
             st.dataframe(
                 df_display.style.apply(apply_row_styles, axis=1),
                 column_config={
+                    "hours_raw": None,
                     "Min (24h)": st.column_config.NumberColumn(format="%.1f"),
                     "Max (24h)": st.column_config.NumberColumn(format="%.1f"),
                     "24h Change": st.column_config.NumberColumn(format="%.1f"),
-                    "Current": st.column_config.NumberColumn(format="%.1f"),
-                    "hours_raw": None
+                    "Current": st.column_config.NumberColumn(format="%.1f")
                 },
-                width='stretch',
-                height=780, # Fits approx 20 rows comfortably
-                hide_index=True
+                width='stretch', height=780, hide_index=True
             )
-
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
 
