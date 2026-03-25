@@ -102,10 +102,13 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
                       legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), margin=dict(r=150), height=750)
     return fig
 
-# --- 3. SERVICE ROUTING ---
-st.sidebar.title("❄️ SoilFreeze Lab")
-service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📈 Node Diagnostics", "📤 Data Intake Lab", "⚙️ Database Maintenance"])
-
+# 2. Sidebar Router
+    st.sidebar.title("❄️ SoilFreeze Lab")
+    service = st.sidebar.selectbox("Select Service", [
+        "🏠 Executive Summary", 
+        "📉 Node Diagnostics", 
+        "📤 Data Intake Lab"
+    ])
 
 #################################################################
 if service == "🏠 Executive Summary":
