@@ -215,75 +215,71 @@ if service == "🏠 Executive Summary":
 ##########################################
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
+    
+    # DEBUG MARKER 1: If you see this, the block started
+    st.write("🔍 Initializing Diagnostics...")
 
-    # 1. Fetch Projects for Dropdown
     try:
-        # Schema Check: uses lowercase 'project' and 'location'
+        # 1. Fetch Metadata using the known lowercase schema
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe(create_bqstorage_client=False)
-    except Exception as e:
-        st.error(f"Metadata Load Failed: {e}")
-        st.stop()
+        
+        if meta_df.empty:
+            st.warning("No data found in final_databoard_master.")
+            st.stop()
 
-    if meta_df.empty:
-        st.warning("No data found in Master Table. Run 'Master Scrub' first.")
-        st.stop()
+        # DEBUG MARKER 2: If you see this, BigQuery connected
+        st.write(f"✅ Found {len(meta_df)} project/location pairs.")
 
-    # 2. UI Layout
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
-    with col2:
-        locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
-        sel_loc = st.selectbox("Pipe / Bank", locs)
-    with col3:
-        duration_weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
+        # 2. Simplified Filters
+        sel_proj = st.selectbox("Select Project", sorted(meta_df['project'].unique()), key="diag_proj")
+        
+        filtered_locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
+        sel_loc = st.selectbox("Select Pipe", filtered_locs, key="diag_loc")
+        
+        weeks = st.slider("Lookback (Weeks)", 1, 12, 4, key="diag_weeks")
 
-    # 3. Main Data Query (Schema Check: 'temperature')
-    # Removed all references to 'value'
-    data_q = f"""
-        SELECT timestamp, temperature, depth, sensor_name 
-        FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-        WHERE project = '{sel_proj}' 
-          AND location = '{sel_loc}'
-          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {duration_weeks} WEEK)
-        ORDER BY timestamp ASC
-    """
-
-    try:
+        # 3. Data Query
+        data_q = f"""
+            SELECT timestamp, temperature, depth, sensor_name 
+            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+            WHERE project = '{sel_proj}' 
+              AND location = '{sel_loc}'
+              AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {weeks} WEEK)
+            ORDER BY timestamp ASC
+        """
         df_g = client.query(data_q).to_dataframe(create_bqstorage_client=False)
+
+        if df_g.empty:
+            st.info("No data found for this selection.")
+        else:
+            # 4. Basic Charting
+            import plotly.express as px
+            
+            # Clean data types
+            df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
+            df_g['temperature'] = df_g['temperature'].astype(float).round(1)
+
+            fig = px.line(
+                df_g, x='timestamp', y='temperature', color='depth',
+                title=f"Trend: {sel_loc}",
+                labels={'temperature': 'Temp', 'timestamp': 'Time'}
+            )
+            
+            # Use unified hover to show one decimal point
+            fig.update_layout(hovermode="x unified")
+            
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 5. Simple Table
+            st.subheader("Raw Data Preview (Last 10)")
+            st.table(df_g.tail(10).style.format({'temperature': '{:.1f}'}))
+
     except Exception as e:
-        st.error(f"BigQuery Error: {e}")
-        st.stop()
-
-    if df_g.empty:
-        st.info(f"No records found for {sel_loc} in the last {duration_weeks} weeks.")
-        st.stop()
-
-    # 4. Data Processing
-    # FIX: Use r'(\d+)' to avoid SyntaxWarnings/Crashes
-    df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-    df_g['temperature'] = df_g['temperature'].astype(float).round(1)
-    df_g['d_sort'] = df_g['depth'].str.extract(r'(\d+)').fillna(0).astype(float)
-    df_g = df_g.sort_values(['d_sort', 'timestamp'])
-
-    # 5. Graphing
-    import plotly.express as px
-    fig = px.line(
-        df_g, x='timestamp', y='temperature', color='depth',
-        hover_data={'temperature': ':.1f', 'timestamp': True},
-        title=f"Trends: {sel_proj} - {sel_loc}"
-    )
-    fig.update_layout(hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 6. Summary Table
-    st.subheader("Latest Readings")
-    latest = df_g.sort_values('timestamp').groupby('depth').tail(1)
-    st.dataframe(
-        latest[['depth', 'sensor_name', 'temperature']].style.format({'temperature': '{:.1f}'}),
-        use_container_width=True, hide_index=True
-    )
+        # If it crashes, this will show the exact line and error
+        st.error(f"🚨 Diagnostics Error: {e}")
+        import traceback
+        st.code(traceback.format_exc())
     
 ################################################
 elif service == "📤 Data Intake Lab":
