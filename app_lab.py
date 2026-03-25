@@ -145,41 +145,83 @@ if service == "🏠 Executive Summary":
     except Exception as e: st.error(f"Summary Error: {e}")
 
 # 4B. CLIENT PORTAL
+# --- 4B. CLIENT PORTAL ---
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
+        # Only show approved data
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
         meta_df = client.query(meta_q).to_dataframe()
+        
         if meta_df.empty:
-            st.warning("No approved data available.")
+            st.warning("No approved data available. Please approve data in Admin Tools.")
         else:
             c1, c2 = st.columns(2)
-            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
+            with c1: 
+                sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
             with c2: 
-                locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
+                locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
                 sel_loc = st.selectbox("Pipe / Bank", locs)
             
-            data_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE ORDER BY timestamp ASC"
+            data_q = f"""
+                SELECT timestamp, temperature, depth, engineer_note 
+                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
+                WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE 
+                ORDER BY timestamp ASC
+            """
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
-            st.subheader("🗓️ Weekly Snapshot (Mondays 6:00 AM)")
-            snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
-            if not snapshot.empty:
-                fig_snap = px.bar(snapshot, x='timestamp', y='temperature', color='depth', barmode='group')
-                st.plotly_chart(fig_snap, width='stretch')
-
-            st.subheader("📈 Temperature Trends")
-            st.plotly_chart(build_standard_sf_graph(df_c, f"Site Trend: {sel_loc}", df_c['timestamp'].min(), df_c['timestamp'].max()), width='stretch')
+            # --- 1. TEMPERATURE VS DEPTH PROFILE (Monday 6AM) ---
+            st.subheader("🌡️ Soil Temperature Profile (Weekly Snapshots)")
             
-            st.subheader("🌡️ Current Conditions")
-            latest = df_c.sort_values('timestamp').groupby('depth').tail(1).copy()
-            st.dataframe(latest[['depth', 'temperature', 'timestamp']].style.format({'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}'}), width='stretch', hide_index=True)
+            # Filter for Monday at 6 AM
+            snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
+            
+            if not snapshot.empty:
+                # Convert depth to numeric for proper Y-axis sorting (stripping 'ft')
+                snapshot['depth_num'] = snapshot['depth'].str.extract('(\d+)').astype(float)
+                snapshot['Date'] = snapshot['timestamp'].dt.strftime('%Y-%m-%d')
+                
+                # Create the Profile Plot
+                fig_profile = px.line(
+                    snapshot.sort_values('depth_num'), 
+                    x='temperature', 
+                    y='depth_num', 
+                    color='Date',
+                    markers=True,
+                    title="Temperature by Depth (Monday 6:00 AM)",
+                    labels={'temperature': 'Temperature (°F)', 'depth_num': 'Depth (ft)'}
+                )
+                
+                # Invert Y-axis so 0 is at the top (ground surface)
+                fig_profile.update_yaxes(autorange="reversed")
+                # Add a vertical line at freezing (32°F) for reference
+                fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="Freezing (32°F)")
+                
+                st.plotly_chart(fig_profile, width='stretch')
+            else:
+                st.info("No Monday 6:00 AM data points found to create a depth profile.")
 
+            # --- 2. STANDARD TIMELINE TREND ---
+            st.subheader("📈 Historical Trends")
+            st.plotly_chart(build_standard_sf_graph(df_c, f"Timeline: {sel_loc}", df_c['timestamp'].min(), df_c['timestamp'].max()), width='stretch')
+            
+            # --- 3. ENGINEER NOTES ---
             latest_note = df_c.sort_values('timestamp', ascending=False)['engineer_note'].dropna()
             if not latest_note.empty and latest_note.iloc[0]:
-                st.info(f"**Engineer's Note:** {latest_note.iloc[0]}")
-    except Exception as e: st.error(f"Portal Error: {e}")
+                st.info(f"**Field Engineer Note:** {latest_note.iloc[0]}")
+
+            # --- 4. LATEST READINGS TABLE ---
+            st.subheader("⏱️ Most Recent Readings")
+            latest = df_c.sort_values('timestamp').groupby('depth').tail(1).copy()
+            st.dataframe(
+                latest[['depth', 'temperature', 'timestamp']].style.format({'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}'}), 
+                width='stretch', hide_index=True
+            )
+
+    except Exception as e: 
+        st.error(f"Portal Error: {e}")
 
 # 4C. NODE DIAGNOSTICS
 elif service == "📉 Node Diagnostics":
