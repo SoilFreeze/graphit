@@ -276,81 +276,102 @@ elif service == "📤 Data Intake Lab":
                 st.error(f"File Error: {e}")
 
     # --- TAB 2: API RECOVERY (FIXED 400 ERROR) ---
-    with tab2:
-        st.subheader("SensorPush Cloud Recovery")
-        c1, c2 = st.columns(2)
-        with c1:
-            sd = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
-            st_time = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
-        with c2:
-            ed = st.date_input("Recovery End", datetime.now())
-            et_time = st.time_input("End Time (UTC)", datetime.now().time())
+    # --- TAB 2: MULTI-ACCOUNT API RECOVERY ---
+with tab2:
+    st.subheader("SensorPush Multi-Account Recovery")
+    # ... (Keep your date/time input variables s_iso and e_iso)
 
-        # ISO 8601 Strings for API
-        s_iso = datetime.combine(sd, st_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        e_iso = datetime.combine(ed, et_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-        if st.button("🛰️ RUN CLOUD RECOVERY"):
-            if "sensorpush" not in st.secrets:
-                st.error("Missing credentials.")
-            else:
+    if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
+        if "sensorpush_accounts" not in st.secrets:
+            st.error("No accounts found in secrets.")
+        else:
+            accounts = st.secrets["sensorpush_accounts"]
+            all_api_recs = []
+            
+            for acc_name, creds in accounts.items():
                 try:
-                    creds = st.secrets["sensorpush"]
-                    # 1. Authorize
+                    st.write(f"Fetching {acc_name}...")
                     auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", 
                                              json={"email": creds["email"], "password": creds["password"]})
-                    auth_res.raise_for_status()
                     token = auth_res.json().get("accesstoken")
-
-                    # 2. Fetch Samples (Corrected Payload)
-                    headers = {"accept": "application/json", "Authorization": token}
-                    payload = {
-                        "startTime": s_iso,
-                        "endTime": e_iso,
-                        "measures": ["temperature"] # Ensure lowercase
-                    }
                     
-                    with st.spinner("Requesting data from SensorPush..."):
-                        sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=payload)
-                        # This captures why the 400 is happening if it fails again
-                        if sample_res.status_code != 200:
-                            st.error(f"API Error {sample_res.status_code}: {sample_res.text}")
-                            st.stop()
-                        
-                        raw_json = sample_res.json()
+                    headers = {"accept": "application/json", "Authorization": token}
+                    payload = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
+                    
+                    sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=payload)
+                    raw_json = sample_res.json()
 
-                    # 3. Process and Push
-                    api_recs = []
                     for sid, samples in raw_json.get("sensors", {}).items():
                         for s in samples:
-                            api_recs.append({
+                            all_api_recs.append({
                                 "timestamp": s["observed"],
                                 "temperature": s["value"],
-                                "sensor_id": sid.replace(':', '-')
+                                "sensor_id": sid.replace(':', '-'),
+                                "source_type": "API_SensorPush"
                             })
-                    
-                    if api_recs:
-                        df_api = pd.DataFrame(api_recs)
-                        df_api['timestamp'] = pd.to_datetime(df_api['timestamp'])
-                        
-                        # Load to BQ
-                        client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                        
-                        # Trigger Master Scrub
-                        scrub_sql = f"""
-                            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                            WITH Unified AS (
-                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                                UNION ALL 
-                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                            ) 
-                            SELECT u.*, u.node AS sensor_id, m.SensorName as sensor_name, m.Project as project, m.Location as location, m.Depth as depth 
-                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
-                        """
-                        client.query(scrub_sql).result()
-                        st.success(f"✅ Success! Pulled {len(api_recs)} points.")
-                        st.balloons()
-                    else:
-                        st.warning("No data found for this window. Check if the Gateway is online.")
                 except Exception as e:
-                    st.error(f"Recovery Failed: {e}")
+                    st.warning(f"Failed to fetch {acc_name}: {e}")
+
+            if all_api_recs:
+                df_api = pd.DataFrame(all_api_recs)
+                df_api['timestamp'] = pd.to_datetime(df_api['timestamp'])
+                client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                st.success(f"✅ Total {len(all_api_recs)} points uploaded from all accounts.")
+
+############################################
+elif service == "🛠️ Admin Tools":
+    st.header("🛠️ Data QA & Cleanup")
+    
+    clean_tab, approve_tab = st.tabs(["🧹 Data Scrubber", "✅ Engineer Approval"])
+    
+    with clean_tab:
+        st.subheader("Erase Data Points")
+        col1, col2 = st.columns(2)
+        with col1:
+            p_del = st.text_input("Project to scrub")
+            l_del = st.text_input("Location to scrub")
+        with col2:
+            t_start = st.text_input("Start Time (YYYY-MM-DD HH:MM:SS)")
+            t_end = st.text_input("End Time (YYYY-MM-DD HH:MM:SS)")
+        
+        if st.button("🗑️ PERMANENTLY DELETE"):
+            sql = f"""DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
+                      WHERE project='{p_del}' AND location='{l_del}' 
+                      AND timestamp BETWEEN '{t_start}' AND '{t_end}'"""
+            client.query(sql).result()
+            st.success("Data Scrubbed!")
+
+    with approve_tab:
+        st.subheader("Approve Data for Clients")
+        # Fetch unapproved data
+        unapproved = client.query(f"SELECT timestamp, sensor_name, temperature, is_approved, engineer_note FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved IS FALSE OR is_approved IS NULL LIMIT 100").to_dataframe()
+        
+        if not unapproved.empty:
+            edited_df = st.data_editor(unapproved, num_rows="dynamic")
+            if st.button("💾 SAVE APPROVALS"):
+                # This would typically require a loop to update rows in BQ. 
+                # For simplicity, you can overwrite or use a MERGE statement.
+                st.info("Logic to push edits back to BigQuery would go here.")
+
+###########################
+elif service == "📊 Client Dashboard":
+    st.header("📊 Client Project Portal")
+    # 1. Filter only approved data
+    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
+    df_c = client.query(query).to_dataframe()
+    
+    if not df_c.empty:
+        df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
+        
+        # 2. THE SNAPSHOT: Mondays at 6 AM
+        # Filter for hour 6 and weekday 0 (Monday)
+        snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)]
+        
+        fig_snap = px.bar(snapshot, x='timestamp', y='temperature', color='depth', 
+                          title="Weekly Snapshot (Mondays 6:00 AM)", barmode='group')
+        st.plotly_chart(fig_snap, use_container_width=True)
+        
+        # 3. Engineer Notes
+        latest_note = df_c.sort_values('timestamp').iloc[-1]['engineer_note']
+        if latest_note:
+            st.info(f"**Engineer Note:** {latest_note}")
