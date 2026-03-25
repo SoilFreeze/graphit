@@ -277,6 +277,7 @@ elif service == "📤 Data Intake Lab":
 
 # 4E. ADMIN TOOLS
 # --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
+# --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Bulk Approval"])
@@ -305,25 +306,30 @@ elif service == "🛠️ Admin Tools":
 
     with tab_approve:
         st.subheader("Bulk Approve Data")
-        st.write("This will set `is_approved = TRUE` for all data points in the selected range.")
+        st.write("Set `is_approved = TRUE` for a specific site and time range.")
         
-        # 1. Get list of projects/locations that have unapproved data
         try:
+            # 1. Get metadata, filtering out Nulls to prevent the '<' error
             unapproved_meta_q = f"""
                 SELECT DISTINCT project, location 
                 FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
-                WHERE is_approved IS FALSE OR is_approved IS NULL
+                WHERE (is_approved IS FALSE OR is_approved IS NULL)
+                AND project IS NOT NULL 
+                AND location IS NOT NULL
             """
             un_meta = client.query(unapproved_meta_q).to_dataframe()
             
             if un_meta.empty:
                 st.success("🎉 All data is currently approved!")
             else:
-                app_proj = st.selectbox("Select Project to Approve", sorted(un_meta['project'].unique()))
-                app_loc = st.selectbox("Select Location/Pipe", sorted(un_meta[un_meta['project'] == app_proj]['location'].unique()))
+                # Use dropna and sorted to safely handle the dropdowns
+                u_projs = sorted(un_meta['project'].dropna().unique())
+                app_proj = st.selectbox("Select Project", u_projs)
                 
-                app_note = st.text_area("Engineer Note (Will be applied to this bulk set)", 
-                                        placeholder="e.g., Data verified against manual loggers. All trends normal.")
+                u_locs = sorted(un_meta[un_meta['project'] == app_proj]['location'].dropna().unique())
+                app_loc = st.selectbox("Select Location/Pipe", u_locs)
+                
+                app_note = st.text_area("Engineer Note", placeholder="Verified data trends...")
                 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -331,19 +337,27 @@ elif service == "🛠️ Admin Tools":
                 with c2:
                     t_end = st.text_input("End Time", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), key="app_end")
 
+                # 2. Preview Count
+                if st.button("🔍 PREVIEW COUNT"):
+                    count_q = f"""
+                        SELECT COUNT(*) as total FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+                        WHERE project='{app_proj}' AND location='{app_loc}'
+                        AND timestamp BETWEEN '{t_start}' AND '{t_end}'
+                        AND (is_approved IS FALSE OR is_approved IS NULL)
+                    """
+                    count_res = client.query(count_q).to_dataframe()
+                    st.info(f"This will approve **{count_res['total'].iloc[0]}** data points.")
+
+                # 3. Final Approval
                 if st.button("🚀 BULK APPROVE NOW"):
-                    # This query updates all rows at once for that specific site/time
                     bulk_q = f"""
                         UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-                        SET is_approved = TRUE,
-                            engineer_note = '{app_note}'
-                        WHERE project = '{app_proj}' 
-                        AND location = '{app_loc}'
+                        SET is_approved = TRUE, engineer_note = '{app_note}'
+                        WHERE project = '{app_proj}' AND location = '{app_loc}'
                         AND timestamp BETWEEN '{t_start}' AND '{t_end}'
                     """
-                    with st.spinner("Updating BigQuery..."):
-                        client.query(bulk_q).result()
-                    st.success(f"✅ Bulk Approved {app_loc}!")
+                    client.query(bulk_q).result()
+                    st.success(f"✅ Approved data for {app_loc}!")
                     st.balloons()
                     
         except Exception as e:
