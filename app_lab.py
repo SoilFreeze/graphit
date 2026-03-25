@@ -216,94 +216,105 @@ if service == "🏠 Executive Summary":
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
 
-    # 1. Sidebar/Top Filters (Lowercase schema alignment)
-    meta_df = client.query(
-        f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`"
-    ).to_dataframe(create_bqstorage_client=False)
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
-    with col2:
-        loc_options = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
-        sel_loc = st.selectbox("Pipe / Bank", loc_options)
-    with col3:
-        duration_weeks = st.slider("Duration (Weeks)", 1, 12, 4)
-
-    # 2. SQL Query (Updated to use 'temperature' and lowercase fields)
-    q = f"""
-        SELECT 
-            timestamp, 
-            temperature, 
-            depth, 
-            sensor_name 
-        FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-        WHERE project = '{sel_proj}' 
-          AND location = '{sel_loc}'
-          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {duration_weeks} WEEK)
-        ORDER BY timestamp DESC
-    """
-
     try:
-        df_g = client.query(q).to_dataframe(create_bqstorage_client=False)
+        # 1. INITIAL FETCH: Get unique projects and locations
+        # We use LOWERCASE 'project' and 'location' per your BigQuery schema screenshot
+        filter_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
+        meta_df = client.query(filter_q).to_dataframe(create_bqstorage_client=False)
 
-        if df_g.empty:
-            st.warning("No data found for the selected criteria.")
+        if meta_df.empty:
+            st.warning("⚠️ No data found in the Master Table. Please run a 'Master Scrub' in the Data Intake Lab.")
         else:
-            # 3. Data Cleaning & Precision
-            df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-            # Force 1 decimal point for internal calculation
-            df_g['temperature'] = df_g['temperature'].round(1)
+            # 2. SELECTION UI
+            col1, col2, col3 = st.columns(3)
             
-            # Sort depths numerically for a clean legend
-            df_g['depth_num'] = df_g['depth'].str.extract('(\d+)').astype(float)
-            df_g = df_g.sort_values(['depth_num', 'timestamp'])
-
-            # 4. Interactive Plotly Chart
-            import plotly.express as px
-
-            fig = px.line(
-                df_g,
-                x='timestamp',
-                y='temperature',
-                color='depth',
-                hover_data={'temperature': ':.1f', 'timestamp': True, 'depth': True},
-                title=f"Thermal Trends: {sel_proj} - {sel_loc}",
-                labels={'temperature': 'Temp (°C)', 'timestamp': 'Time', 'depth': 'Depth'}
-            )
-
-            # Clean styling
-            fig.update_layout(
-                hovermode="x unified",
-                legend_title_text='Sensor Depth',
-                margin=dict(l=0, r=0, t=40, b=0)
-            )
+            with col1:
+                # Get unique projects
+                proj_list = sorted(meta_df['project'].unique())
+                sel_proj = st.selectbox("Select Project", proj_list)
             
-            # Add a horizontal line at 0°C if needed for freezing reference
-            fig.add_hline(y=0, line_dash="dash", line_color="cyan", annotation_text="Freezing Point")
+            with col2:
+                # Filter locations based on the selected project
+                loc_list = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
+                sel_loc = st.selectbox("Select Pipe / Bank", loc_list)
+                
+            with col3:
+                duration_weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
 
-            st.plotly_chart(fig, use_container_width=True)
+            # 3. MAIN DATA QUERY
+            # Updated to use 'temperature' instead of 'value'
+            main_q = f"""
+                SELECT 
+                    timestamp, 
+                    temperature, 
+                    depth, 
+                    sensor_name 
+                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+                WHERE project = '{sel_proj}' 
+                  AND location = '{sel_loc}'
+                  AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {duration_weeks} WEEK)
+                ORDER BY timestamp ASC
+            """
+            
+            df_g = client.query(main_q).to_dataframe(create_bqstorage_client=False)
 
-            # 5. Summary Table for this Pipe
-            st.subheader("Sensor Summary")
-            df_summary = df_g.groupby('depth').agg({
-                'temperature': ['last', 'min', 'max']
-            }).reset_index()
-            
-            df_summary.columns = ['Depth', 'Current', 'Min', 'Max']
-            
-            st.dataframe(
-                df_summary.style.format({
-                    'Current': '{:.1f}',
-                    'Min': '{:.1f}',
-                    'Max': '{:.1f}'
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
+            if df_g.empty:
+                st.info(f"No recent data found for {sel_loc} in the last {duration_weeks} weeks.")
+            else:
+                # 4. DATA PREPARATION
+                df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
+                # Force 1 decimal precision for the chart
+                df_g['temperature'] = df_g['temperature'].astype(float).round(1)
+                
+                # Sort depths numerically (extracts '12' from '12ft')
+                df_g['d_num'] = df_g['depth'].str.extract('(\d+)').astype(float)
+                df_g = df_g.sort_values(['d_num', 'timestamp'])
+
+                # 5. CHARTING (Plotly)
+                import plotly.express as px
+                
+                fig = px.line(
+                    df_g,
+                    x='timestamp',
+                    y='temperature',
+                    color='depth',
+                    title=f"Thermal Trend: {sel_proj} | {sel_loc}",
+                    labels={'temperature': 'Temp', 'timestamp': 'Time', 'depth': 'Depth'},
+                    hover_data={'temperature': ':.1f', 'timestamp': True} # Force 1 decimal in hover
+                )
+
+                fig.update_layout(
+                    hovermode="x unified",
+                    legend_title_text='Sensor Depth',
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    yaxis_title="Temperature"
+                )
+                
+                # Add 0-degree reference line
+                fig.add_hline(y=0, line_dash="dot", line_color="red", annotation_text="Freezing Point")
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # 6. SUMMARY TABLE
+                st.subheader("Current Node Stats")
+                # Get the most recent reading for each depth
+                df_latest = df_g.sort_values('timestamp').groupby('depth').tail(1)
+                
+                st.dataframe(
+                    df_latest[['depth', 'sensor_name', 'temperature']].rename(columns={
+                        'depth': 'Depth', 
+                        'sensor_name': 'Sensor ID', 
+                        'temperature': 'Current Temp'
+                    }).style.format({'Current Temp': '{:.1f}'}),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
     except Exception as e:
-        st.error(f"Diagnostics Error: {e}")
+        st.error(f"❌ Diagnostics Page Error: {e}")
+        st.info("This usually means a column name in your BigQuery table doesn't match the code. Check if 'temperature' and 'project' are correct.")
+
+
 ################################################
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
