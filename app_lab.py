@@ -32,19 +32,13 @@ client = get_bq_client()
 
 # --- 2. GRAPH ENGINE ---
 # --- 2. STANDARDIZED GRAPH ENGINE (RESTORED) ---
-def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", active_refs=None):
-    """Standard SF look: 20° heavy grid, 5° minor grid, Monday/6hr vertical markers."""
-    if active_refs is None: active_refs = []
+# --- 2. STANDARDIZED GRAPH ENGINE ---
+def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit="Fahrenheit"):
     display_df = df.copy()
     
-    # Unit & Grid Config
-    if unit == "Celsius":
-        display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
-        y_range, y_ticks, y_label, m_step = [-30, 30], [-30, -20, -10, 0, 10, 20, 30], "Temp (°C)", 2.5
-    else:
-        y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
+    y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # Gap Logic (Line breaks > 6hrs)
+    # Gap Logic
     processed_dfs = []
     for d in display_df['depth'].unique():
         s_df = display_df[display_df['depth'] == d].copy().sort_values('timestamp')
@@ -55,25 +49,24 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
             gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
         processed_dfs.append(s_df)
-    
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     
     fig = go.Figure()
+    # Numeric depth sorting for legend
     depths = sorted(clean_df['depth'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x)) or 0))
     for d in depths:
         sensor_df = clean_df[clean_df['depth'] == d]
         fig.add_trace(go.Scatter(
             x=sensor_df['timestamp'], y=sensor_df['temperature'],
-            name=d, mode='lines', fill=None, connectgaps=False, line=dict(width=2)
+            name=d, mode='lines', connectgaps=False, line=dict(width=2)
         ))
 
-    # Grid & Axis Styling (The "Standard" Look)
     fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # Custom Vertical Grid (Monday marks)
+    # Vertical Grid Logic
     shapes = []
     curr = start_view.replace(hour=0, minute=0, second=0, microsecond=0)
     while curr <= end_view:
@@ -84,20 +77,37 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
             if t.weekday() == 0 and h == 0: c, w = "DimGray", 2
             elif h == 0: c, w = "DarkGray", 1
             else: c, w = "LightGray", 0.5
-            shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, 
-                               line=dict(color=c, width=w), layer="below"))
+            shapes.append(dict(type="line", xref="x", yref="paper", x0=t_ms, y0=0, x1=t_ms, y1=1, line=dict(color=c, width=w), layer="below"))
         curr += timedelta(days=1)
+    
+    # Add ONLY the selected reference lines
+    for val, label in active_refs:
+        fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
 
     now_ms = datetime.now(pytz.UTC).timestamp() * 1000
     fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="RIGHT NOW")
-    
-    fig.update_layout(title={'text': title, 'x': 0.5}, shapes=shapes, plot_bgcolor='white',
-                      hovermode="x unified", legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), 
-                      margin=dict(r=150), height=750)
+
+    fig.update_layout(title={'text': title, 'x': 0.5}, shapes=shapes, plot_bgcolor='white', hovermode="x unified", margin=dict(r=150), height=750)
     return fig
 
 # --- 3. SIDEBAR NAVIGATION ---
+# --- 3. SIDEBAR NAVIGATION ---
 st.sidebar.title("❄️ SoilFreeze Lab")
+
+# NEW: Reference Line Toggle
+ref_options = {
+    "Freezing (32°F)": (32, "Freezing"),
+    "Type B (26.6°F)": (26.6, "Type B"),
+    "Type A (10.2°F)": (10.2, "Type A")
+}
+selected_ref_labels = st.sidebar.multiselect(
+    "Visible Reference Lines", 
+    options=list(ref_options.keys()), 
+    default=list(ref_options.keys())
+)
+# Convert selected labels to list of (value, name) tuples
+active_refs = [ref_options[label] for label in selected_ref_labels]
+
 service = st.sidebar.selectbox("Select Service", [
     "🏠 Executive Summary", 
     "📊 Client Portal",
@@ -105,7 +115,6 @@ service = st.sidebar.selectbox("Select Service", [
     "📤 Data Intake Lab",
     "🛠️ Admin Tools"
 ])
-
 # --- 4. SERVICE ROUTING ---
 
 # 4A. EXECUTIVE SUMMARY
@@ -152,52 +161,36 @@ if service == "🏠 Executive Summary":
 # --- 4B. CLIENT PORTAL ---
 # --- 4B. CLIENT PORTAL ---
 # --- 4B. CLIENT PORTAL ---
+# --- 4B. CLIENT PORTAL ---
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
-        # Only show approved data
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
         meta_df = client.query(meta_q).to_dataframe()
         
         if meta_df.empty:
-            st.warning("No approved data available. Please approve data in Admin Tools.")
+            st.warning("No approved data available.")
         else:
-            # Added a third column for the weeks selector
             c1, c2, c3 = st.columns([1, 1, 1])
-            with c1: 
-                sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
+            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
             with c2: 
                 locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
                 sel_loc = st.selectbox("Pipe / Bank", locs)
-            with c3:
-                # NEW: Client can choose range, defaults to 6
-                weeks_to_view = st.slider("Weeks to View", 1, 12, 6)
+            with c3: weeks_to_view = st.slider("Weeks to View", 1, 12, 6)
             
-            data_q = f"""
-                SELECT timestamp, temperature, depth, engineer_note 
-                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
-                WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE 
-                ORDER BY timestamp ASC
-            """
+            data_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE ORDER BY timestamp ASC"
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
-            # Date Math for the View Window
             now_utc = datetime.now(pytz.UTC)
-            # Find the most recent Monday at midnight
             current_monday = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            # Calculate start: (N-1) weeks before current Monday
             start_view = current_monday - timedelta(weeks=weeks_to_view - 1)
-            # End: Next Monday at midnight (completes the current week)
             end_view = current_monday + timedelta(days=7)
 
-            # --- 1. TEMP VS DEPTH (Only for non-Bank locations) ---
+            # --- 1. FRAMED TEMP VS DEPTH PROFILE ---
             if "bank" not in sel_loc.lower():
                 st.subheader("🌡️ Soil Temperature Profile (Weekly Snapshots)")
-                # Filter for Monday at 6 AM
                 snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
-                
-                # Only keep snapshots within the selected weeks range
                 snapshot = snapshot[snapshot['timestamp'] >= start_view]
                 
                 if not snapshot.empty:
@@ -207,46 +200,52 @@ elif service == "📊 Client Portal":
                     fig_profile = px.line(
                         snapshot.sort_values('depth_num'), 
                         x='temperature', y='depth_num', color='Date', markers=True,
-                        title=f"Temperature by Depth (Monday 6:00 AM - Last {weeks_to_view} Weeks)",
-                        labels={'temperature': 'Temperature (°F)', 'depth_num': 'Depth (ft)'}
+                        range_x=[-20, 80], labels={'temperature': 'Temperature (°F)', 'depth_num': 'Depth (ft)'}
                     )
                     
-                    # Standard Grid: -20 to 80, 20° heavy lines, 5° minor lines
-                    fig_profile.update_xaxes(
-                        tickmode='array', tickvals=[-20, 0, 20, 40, 60, 80], range=[-20, 80],
-                        gridcolor='DimGray', gridwidth=1.5,
-                        minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
-                        mirror=True, showline=True, linecolor='black', linewidth=2
-                    )
-                    fig_profile.update_yaxes(autorange="reversed", gridcolor='LightGray')
-                    fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="Freezing (32°F)")
+                    # Add Selected Reference Lines to Profile
+                    for val, label in active_refs:
+                        fig_profile.add_vline(x=val, line_dash="dash", line_color="blue", annotation_text=label)
+
+                    # FULL FRAME: mirror=True and showline=True
+                    fig_profile.update_xaxes(mirror=True, showline=True, linecolor='black', linewidth=2, gridcolor='DimGray', minor=dict(dtick=5, gridcolor='Silver', showgrid=True))
+                    fig_profile.update_yaxes(autorange="reversed", mirror=True, showline=True, linecolor='black', linewidth=2, gridcolor='LightGray')
                     fig_profile.update_layout(plot_bgcolor='white', height=600)
                     st.plotly_chart(fig_profile, width='stretch')
-                else:
-                    st.info("No Monday snapshots found in this time range.")
-            
-            # --- 2. STANDARD TIMELINE TREND ---
-            st.subheader("📈 Historical Trends")
-            st.plotly_chart(
-                build_standard_sf_graph(df_c, f"{weeks_to_view}-Week View: {sel_loc}", start_view, end_view), 
-                width='stretch'
-            )
-            
-            # --- 3. LATEST READINGS TABLE ---
-            st.subheader("⏱️ Most Recent Readings")
-            latest = df_c.sort_values('timestamp').groupby('depth').tail(1).copy()
-            st.dataframe(
-                latest[['depth', 'temperature', 'timestamp']].style.format({'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}'}), 
-                width='stretch', hide_index=True
-            )
 
-            # --- 4. ENGINEER NOTES ---
+            # --- 2. TIMELINE TREND ---
+            st.subheader("📈 Historical Trends")
+            st.plotly_chart(build_standard_sf_graph(df_c, f"{weeks_to_view}-Week View: {sel_loc}", start_view, end_view, active_refs), width='stretch')
+            
+            # --- 3. DAILY PERFORMANCE TABLE (Sorted Numerically) ---
+            st.subheader("⏱️ Daily Performance (Last 24 Hours)")
+            last_24h = df_c[df_c['timestamp'] >= (now_utc - timedelta(hours=24))].copy()
+            
+            if not last_24h.empty:
+                last_24h['depth_num'] = last_24h['depth'].str.extract('(\d+)').astype(float)
+                stats = last_24h.groupby(['depth', 'depth_num']).agg(
+                    High=('temperature', 'max'),
+                    Low=('temperature', 'min'),
+                    Current=('temperature', 'last'),
+                    Last_Update=('timestamp', 'last')
+                ).reset_index()
+                
+                stats['Difference'] = stats['High'] - stats['Low']
+                # Numerical Sort
+                stats = stats.sort_values('depth_num')
+                
+                st.dataframe(
+                    stats[['depth', 'Current', 'High', 'Low', 'Difference', 'Last_Update']].style.format({
+                        'Current': '{:.1f}', 'High': '{:.1f}', 'Low': '{:.1f}', 'Difference': '{:.1f}', 'Last_Update': '{:%m/%d %H:%M}'
+                    }), 
+                    width='stretch', hide_index=True
+                )
+
             latest_note = df_c.sort_values('timestamp', ascending=False)['engineer_note'].dropna()
             if not latest_note.empty and latest_note.iloc[0]:
                 st.info(f"**Field Engineer Note:** {latest_note.iloc[0]}")
 
-    except Exception as e: 
-        st.error(f"Portal Error: {e}")
+    except Exception as e: st.error(f"Portal Error: {e}")
         
 # 4C. NODE DIAGNOSTICS
 elif service == "📉 Node Diagnostics":
