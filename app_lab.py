@@ -249,34 +249,7 @@ elif service == "📉 Node Diagnostics":
     except Exception as e: st.error(f"Diagnostics Error: {e}")
 
 # SERVICE 4: DATA INTAKE (WITH MULTI-ACCOUNT API)
-elif service == "📤 Data Intake Lab":
-    st.header("📤 Data Ingestion & Recovery")
-    tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
-
-    with tab1:
-        st.subheader("Manual CSV Ingestion")
-        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
-        u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
-        if u_file is not None:
-            try:
-                # ... (Keep your existing manual upload logic here)
-                st.info("Manual upload logic ready.")
-            except Exception as e: st.error(f"File Error: {e}")
-
-    with tab2:
-        st.subheader("SensorPush Multi-Account Recovery")
-        c1, c2 = st.columns(2)
-        with c1:
-            sd = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
-            st_time = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
-        with c2:
-            ed = st.date_input("Recovery End", datetime.now())
-            et_time = st.time_input("End Time (UTC)", datetime.now().time())
-
-        s_iso = datetime.combine(sd, st_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        e_iso = datetime.combine(ed, et_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-        if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
+if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
             if "sensorpush_accounts" not in st.secrets:
                 st.error("Missing 'sensorpush_accounts' in Streamlit Secrets.")
             else:
@@ -284,32 +257,32 @@ elif service == "📤 Data Intake Lab":
                 all_api_recs = []
                 for acc_id, creds in accounts.items():
                     try:
-                        with st.spinner(f"Attempting login for {acc_id}..."):
-                            # 1. Authorize with explicit headers
-                            auth_headers = {
-                                "accept": "application/json",
-                                "Content-Type": "application/json"
-                            }
-                            
+                        with st.spinner(f"Processing {acc_id}..."):
+                            # 1. Login with explicit headers
                             auth_res = requests.post(
                                 "https://api.sensorpush.com/api/v1/oauth/authorize", 
                                 json=dict(creds),
-                                headers=auth_headers
+                                headers={"accept": "application/json", "Content-Type": "application/json"}
                             )
                             
-                            # If this fails, it will now print the reason why (e.g., invalid password)
                             if auth_res.status_code != 200:
-                                st.error(f"❌ {acc_id} Login Failed ({auth_res.status_code}): {auth_res.text}")
+                                st.error(f"❌ {acc_id} Login Failed: {auth_res.text}")
                                 continue 
                             
+                            # SensorPush tokens are usually just the string, but let's be safe
                             token = auth_res.json().get("accesstoken")
                             
-                            # 2. Fetch Samples
-                            headers = {"accept": "application/json", "Authorization": token}
+                            # 2. Fetch Samples - Hardened Headers & Payload
+                            headers = {
+                                "accept": "application/json", 
+                                "Authorization": token, # Some APIs need f"Bearer {token}" if this fails
+                                "Content-Type": "application/json"
+                            }
+                            
                             payload = {
                                 "startTime": s_iso, 
                                 "endTime": e_iso, 
-                                "measures": ["temperature"]
+                                "measures": ["temperature"] 
                             }
                             
                             sample_res = requests.post(
@@ -327,19 +300,18 @@ elif service == "📤 Data Intake Lab":
                                             "temperature": s["value"], 
                                             "sensor_id": sid.replace(':', '-')
                                         })
-                                st.toast(f"Fetched data for {acc_id}")
                             else:
-                                st.warning(f"⚠️ {acc_id} could not fetch samples: {sample_res.text}")
+                                st.warning(f"⚠️ {acc_id} Sample Error ({sample_res.status_code}): {sample_res.text}")
 
                     except Exception as e: 
-                        st.error(f"Critical error on {acc_id}: {str(e)}")
+                        st.error(f"Technical failure on {acc_id}: {str(e)}")
                 
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
-                    # Push to the raw table
+                    # Convert timestamp to BQ format
+                    df_api['timestamp'] = pd.to_datetime(df_api['timestamp'])
                     client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    st.success(f"✅ Success! Pulled {len(all_api_recs)} total points from all valid accounts.")
-                    st.balloons()
+                    st.success(f"✅ Success! Pulled {len(all_api_recs)} points total.")
 
 # SERVICE 5: ADMIN TOOLS (SCRUBBER & APPROVAL)
 elif service == "🛠️ Admin Tools":
