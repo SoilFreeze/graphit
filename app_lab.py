@@ -30,10 +30,12 @@ def get_bq_client():
 
 client = get_bq_client()
 
-# --- 2. THE MALTBY GRAPH ENGINE (FIXED) ---
+# --- 1. RESTORED GRAPH ENGINE (STABLE) ---
 def build_standard_sf_graph(df, title, start_view, end_view):
     display_df = df.copy()
     processed_dfs = []
+    
+    # Gap Logic (Line breaks > 6hrs)
     for d in display_df['depth'].unique():
         s_df = display_df[display_df['depth'] == d].copy().sort_values('timestamp')
         s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
@@ -46,6 +48,8 @@ def build_standard_sf_graph(df, title, start_view, end_view):
     
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     fig = go.Figure()
+    
+    # Numeric Sort for Legend
     depths = sorted(clean_df['depth'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x)) or 0))
     
     for d in depths:
@@ -61,7 +65,7 @@ def build_standard_sf_graph(df, title, start_view, end_view):
                      mirror=True, showline=True, linecolor='black', linewidth=2, title="Temperature (°F)")
     fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # NOW Line
+    # NOW Line & Freeze Reference
     now_ts = datetime.now(pytz.UTC)
     fig.add_vline(x=now_ts, line_width=2, line_color="red", annotation_text="RIGHT NOW")
     fig.add_hline(y=32, line_dash="dash", line_color="cyan", annotation_text="32°F")
@@ -112,11 +116,13 @@ if service == "🏠 Executive Summary":
             st.dataframe(pd.DataFrame(summary_stats), use_container_width=True, hide_index=True)
     except Exception as e: st.error(f"Summary Error: {e}")
 
+# --- 2. NODE DIAGNOSTICS SERVICE ---
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe()
+        
         c1, c2, c3 = st.columns(3)
         with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
         with c2: 
@@ -132,15 +138,38 @@ elif service == "📉 Node Diagnostics":
             ORDER BY timestamp ASC
         """
         df_g = client.query(data_q).to_dataframe()
+        
         if not df_g.empty:
             df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
             end_v = datetime.now(pytz.UTC)
             start_v = end_v - timedelta(days=days_back)
+            
+            # Draw Graph
             fig = build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v)
             st.plotly_chart(fig, use_container_width=True)
-            latest = df_g.sort_values('timestamp').groupby('depth').tail(1)
-            st.dataframe(latest[['depth', 'sensor_name', 'temperature']].style.format({'temperature': '{:.1f}'}), use_container_width=True, hide_index=True)
-    except Exception as e: st.error(f"Diagnostics Error: {e}")
+            
+            # Restored Color-Coded Table
+            st.subheader("Latest Readings & Status")
+            latest = df_g.sort_values('timestamp').groupby('depth').tail(1).copy()
+            now_ts = datetime.now(pytz.UTC)
+            latest['hrs_ago'] = (now_ts - latest['timestamp']).dt.total_seconds() / 3600
+            
+            def style_diagnostic_table(row):
+                styles = [''] * len(row)
+                h_idx = row.index.get_loc("timestamp")
+                # Color code "Last Seen" timestamp
+                if row['hrs_ago'] >= 24: styles[h_idx] = 'background-color: #ff4b4b; color: white'
+                elif row['hrs_ago'] >= 12: styles[h_idx] = 'background-color: #ffa500; color: black'
+                return styles
+
+            st.dataframe(
+                latest[['depth', 'sensor_name', 'temperature', 'timestamp', 'hrs_ago']].style.apply(style_diagnostic_table, axis=1).format({
+                    'temperature': '{:.1f}', 'timestamp': '{:%m/%d %H:%M}', 'hrs_ago': '{:.0f}h'
+                }),
+                use_container_width=True, hide_index=True
+            )
+    except Exception as e:
+        st.error(f"Diagnostics Error: {e}")
 
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
