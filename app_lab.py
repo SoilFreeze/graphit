@@ -29,7 +29,7 @@ def get_bq_client():
         return None
 
 client = get_bq_client()
-
+#############################################
 # --- 1. RESTORED GRAPH ENGINE (STABLE) ---
 # --- 1. CLEANED GRAPH ENGINE (STOPS THE OPERAND ERROR) ---
 # --- 2. STANDARDIZED GRAPH ENGINE ---
@@ -113,11 +113,11 @@ def build_standard_sf_graph(df, title, start_view, end_view, unit="Fahrenheit", 
                       hovermode="x unified", legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1), 
                       margin=dict(r=150), height=750)
     return fig
-
+###############################
 # --- 3. SIDEBAR NAVIGATION ---
 st.sidebar.title("❄️ SoilFreeze Lab")
 service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📉 Node Diagnostics", "📤 Data Intake Lab"])
-
+##################################
 # --- 4. SERVICE ROUTING ---
 
 if service == "🏠 Executive Summary":
@@ -155,6 +155,8 @@ if service == "🏠 Executive Summary":
             st.dataframe(pd.DataFrame(summary_stats), use_container_width=True, hide_index=True)
     except Exception as e: st.error(f"Summary Error: {e}")
 
+
+###########################################
 # --- 2. NODE DIAGNOSTICS SERVICE ---
 # --- 2. NODE DIAGNOSTICS BLOCK ---
 elif service == "📉 Node Diagnostics":
@@ -223,6 +225,8 @@ elif service == "📉 Node Diagnostics":
     except Exception as e:
         st.error(f"Diagnostics Error: {e}")
 
+
+################################################
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     
