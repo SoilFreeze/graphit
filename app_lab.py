@@ -216,20 +216,19 @@ if service == "🏠 Executive Summary":
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
 
-    # 1. Check for Project/Location Metadata
-    # We use 'project' and 'location' (lowercase) to match your BQ schema
+    # 1. Fetch Metadata (lowercase project/location)
     try:
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe(create_bqstorage_client=False)
     except Exception as e:
-        st.error(f"Failed to load project list: {e}")
+        st.error(f"Metadata Load Failed: {e}")
         st.stop()
 
     if meta_df.empty:
-        st.warning("No data found. Please run 'Master Scrub' in Data Intake Lab.")
+        st.warning("Master Table is empty. Run 'Master Scrub' first.")
         st.stop()
 
-    # 2. UI Filters
+    # 2. UI Layout
     c1, c2, c3 = st.columns(3)
     with c1:
         sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
@@ -239,8 +238,7 @@ elif service == "📉 Node Diagnostics":
     with c3:
         weeks = st.slider("Duration (Weeks)", 1, 12, 4)
 
-    # 3. Main Data Fetch
-    # Using 'temperature' (lowercase) to match your schema
+    # 3. Data Query (Strictly using 'temperature')
     data_q = f"""
         SELECT timestamp, temperature, depth, sensor_name 
         FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
@@ -253,19 +251,20 @@ elif service == "📉 Node Diagnostics":
     try:
         df_g = client.query(data_q).to_dataframe(create_bqstorage_client=False)
     except Exception as e:
-        st.error(f"Query Error: {e}")
+        # This will catch if BigQuery still sees the old 'value' name
+        st.error(f"SQL Error: {e}")
         st.stop()
 
     if df_g.empty:
-        st.info(f"No data available for {sel_loc} in the last {weeks} weeks.")
+        st.info(f"No data for {sel_loc} in the last {weeks} weeks.")
         st.stop()
 
-    # 4. Data Processing (Precision Locking)
+    # 4. Data Formatting (Addressing the \d Syntax Warning)
     df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-    df_g['temperature'] = df_g['temperature'].astype(float).round(1) # ONE significant digit
+    df_g['temperature'] = df_g['temperature'].astype(float).round(1)
     
-    # Sort depths numerically (e.g., 2ft before 12ft)
-    df_g['d_sort'] = df_g['depth'].str.extract('(\d+)').astype(float)
+    # We use r'(\d+)' to prevent "invalid escape sequence" warnings
+    df_g['d_sort'] = df_g['depth'].str.extract(r'(\d+)').astype(float)
     df_g = df_g.sort_values(['d_sort', 'timestamp'])
 
     # 5. Graphing
@@ -278,14 +277,13 @@ elif service == "📉 Node Diagnostics":
     fig.update_layout(hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
     st.plotly_chart(fig, use_container_width=True)
 
-    # 6. Final Data Table
+    # 6. Summary Table
     st.subheader("Latest Readings")
     latest = df_g.sort_values('timestamp').groupby('depth').tail(1)
     st.dataframe(
         latest[['depth', 'sensor_name', 'temperature']].style.format({'temperature': '{:.1f}'}),
         use_container_width=True, hide_index=True
     )
-
 
 ################################################
 elif service == "📤 Data Intake Lab":
