@@ -284,36 +284,62 @@ elif service == "📤 Data Intake Lab":
                 all_api_recs = []
                 for acc_id, creds in accounts.items():
                     try:
-                        with st.spinner(f"Fetching {acc_id}..."):
-                            # Convert AttrDict to a regular dict for JSON serialization
+                        with st.spinner(f"Attempting login for {acc_id}..."):
+                            # 1. Authorize with explicit headers
+                            auth_headers = {
+                                "accept": "application/json",
+                                "Content-Type": "application/json"
+                            }
+                            
                             auth_res = requests.post(
                                 "https://api.sensorpush.com/api/v1/oauth/authorize", 
-                                json=dict(creds) 
+                                json=dict(creds),
+                                headers=auth_headers
                             )
-                            auth_res.raise_for_status()
+                            
+                            # If this fails, it will now print the reason why (e.g., invalid password)
+                            if auth_res.status_code != 200:
+                                st.error(f"❌ {acc_id} Login Failed ({auth_res.status_code}): {auth_res.text}")
+                                continue 
                             
                             token = auth_res.json().get("accesstoken")
+                            
+                            # 2. Fetch Samples
                             headers = {"accept": "application/json", "Authorization": token}
-                            payload = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
+                            payload = {
+                                "startTime": s_iso, 
+                                "endTime": e_iso, 
+                                "measures": ["temperature"]
+                            }
                             
-                            sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=payload)
-                            raw_json = sample_res.json()
+                            sample_res = requests.post(
+                                "https://api.sensorpush.com/api/v1/samples", 
+                                headers=headers, 
+                                json=payload
+                            )
                             
-                            for sid, samples in raw_json.get("sensors", {}).items():
-                                for s in samples:
-                                    all_api_recs.append({
-                                        "timestamp": s["observed"], 
-                                        "temperature": s["value"], 
-                                        "sensor_id": sid.replace(':', '-')
-                                    })
+                            if sample_res.status_code == 200:
+                                raw_json = sample_res.json()
+                                for sid, samples in raw_json.get("sensors", {}).items():
+                                    for s in samples:
+                                        all_api_recs.append({
+                                            "timestamp": s["observed"], 
+                                            "temperature": s["value"], 
+                                            "sensor_id": sid.replace(':', '-')
+                                        })
+                                st.toast(f"Fetched data for {acc_id}")
+                            else:
+                                st.warning(f"⚠️ {acc_id} could not fetch samples: {sample_res.text}")
+
                     except Exception as e: 
-                        st.warning(f"Failed {acc_id}: {e}")
+                        st.error(f"Critical error on {acc_id}: {str(e)}")
                 
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
-                    # This pushes to your raw table before the master scrub runs
+                    # Push to the raw table
                     client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    st.success(f"✅ Success! Pulled {len(all_api_recs)} points total.")
+                    st.success(f"✅ Success! Pulled {len(all_api_recs)} total points from all valid accounts.")
+                    st.balloons()
 
 # SERVICE 5: ADMIN TOOLS (SCRUBBER & APPROVAL)
 elif service == "🛠️ Admin Tools":
