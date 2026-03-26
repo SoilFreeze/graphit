@@ -375,26 +375,22 @@ elif service == "📊 Client Portal":
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
-        # 1. Fetch Projects/Locations for the dropdowns
-        meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`"
-        meta_df = client.query(meta_q).to_dataframe()
+        # Get your metadata to fill the dropdowns
+        meta_df = client.query(f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`").to_dataframe()
         
         c1, c2, c3 = st.columns(3)
         with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
-        with c2: 
-            locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
-            sel_loc = st.selectbox("Pipe / Bank", locs)
+        with c2: sel_loc = st.selectbox("Pipe / Bank", sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique()))
         with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 1)
 
-        # 2. Setup the "Full Week" Time Window (Monday Midnight)
         now = datetime.now(pytz.UTC)
         monday_this_week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = monday_this_week - timedelta(weeks=weeks-1)
-        end_view = monday_this_week + timedelta(days=7) # Ensures the full current week shows
+        end_view = monday_this_week + timedelta(days=7)
 
-        # 3. Query with sensor_name included
+        # Explicitly pull the newly created sensor_name (TP/SP Name)
         data_q = f"""
-            SELECT timestamp, temperature, depth, sensor_name 
+            SELECT timestamp, temperature, depth, sensor_name, sensor_id
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
             WHERE project = '{sel_proj}' AND location = '{sel_loc}' 
             AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
@@ -404,14 +400,11 @@ elif service == "📉 Node Diagnostics":
         
         if not df_g.empty:
             df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-            st.plotly_chart(build_standard_sf_graph(
-                df_g, f"Trend: {sel_proj} | {sel_loc}", 
-                start_view, end_view, active_refs
-            ), use_container_width=True)
+            st.plotly_chart(build_standard_sf_graph(df_g, f"{sel_proj} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
         else:
-            st.warning(f"No data found for {sel_loc} starting from {start_view.date()}.")
+            st.warning("No data mapped. Check if the Physical IDs in your CSV match the IDs in your Metadata Google Sheet.")
             
-    except Exception as e: 
+    except Exception as e:
         st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE LAB (HARDENED SYNC)
