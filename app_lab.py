@@ -142,13 +142,7 @@ if service == "🏠 Executive Summary":
 
 # 4B. CLIENT PORTAL
 # --- 4B. CLIENT PORTAL ---
-# --- 4B. CLIENT PORTAL ---
-# --- 4B. CLIENT PORTAL ---
-# --- 4B. CLIENT PORTAL ---
-# --- 4B. CLIENT PORTAL ---
-# --- 4B. CLIENT PORTAL ---
-# --- 4B. CLIENT PORTAL ---
-# --- 4B. CLIENT PORTAL ---
+
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
@@ -244,74 +238,84 @@ elif service == "📉 Node Diagnostics":
     except Exception as e: st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE
+# --- 4D. DATA INTAKE (HARDENED FOR MIXED FORMATS) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
 
     with tab1:
         st.subheader("Manual CSV Ingestion")
-        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)"], horizontal=True)
+        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)", "Logger (Master Log)"], horizontal=True)
         u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
+        
         if u_file is not None:
-             try:
-                content = u_file.getvalue().decode("utf-8").splitlines()
-                if "Lord" in source:
-                    start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
-                    u_file.seek(0)
-                    df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
-                    df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='temperature')
-                    df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
+            try:
+                # 1. Load the raw data
+                # We use low_memory=False to handle mixed types in columns
+                df_raw = pd.read_csv(u_file, low_memory=False)
+                
+                # 2. Fix Timestamps (The 'mixed' format solves your error)
+                # We find the timestamp column regardless of capitalization
+                ts_col = next((c for c in df_raw.columns if c.lower() == 'timestamp'), df_raw.columns[0])
+                df_raw['timestamp_parsed'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
+                df_raw = df_raw.dropna(subset=['timestamp_parsed']).drop(columns=[ts_col]).rename(columns={'timestamp_parsed': 'timestamp'})
+
+                df_up = pd.DataFrame()
+                table_ref = ""
+
+                # 3. Process based on source
+                if "Master Log" in source:
+                    # Detect if narrow format: check if the 3rd column contains Sensor ID strings
+                    # Master_Log.csv mostly uses: Timestamp, Temp, SensorID
+                    if df_raw.iloc[:, 1].dtype == object or (df_raw.shape[1] > 2 and any(isinstance(x, str) for x in df_raw.iloc[:, 1])):
+                        # Narrow logic: Col 0: TS, Col 1: Temp, Col 2: SensorID
+                        df_up = df_raw.iloc[:, [df_raw.columns.get_loc('timestamp'), 0, 1]].copy()
+                        df_up.columns = ['timestamp', 'temperature', 'sensor_id']
+                        # Filter out rows that are actually wide (where sensor_id is numeric)
+                        df_up = df_up[df_up['sensor_id'].apply(lambda x: not str(x).replace('.','',1).isdigit())]
+                        table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    else:
+                        # Wide logic: Melt the columns
+                        df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
+                        table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+
+                elif "Lord" in source:
+                    df_up = df_raw.melt(id_vars=['timestamp'], var_name='nodenumber', value_name='value')
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                else:
-                    df_up = pd.read_csv(u_file).rename(columns={'Timestamp':'timestamp', 'Temperature':'temperature', 'Sensor':'sensor_id'})
+
+                else: # SensorPush
+                    df_up = df_raw.rename(columns={'Temperature': 'temperature', 'Sensor': 'sensor_id'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                
-                df_up['timestamp'] = pd.to_datetime(df_up['timestamp'])
-                if st.button("🚀 PUSH FILE TO BIGQUERY"):
-                    client.load_table_from_dataframe(df_up, table_ref).result()
-                    st.success("File uploaded to Raw storage.")
-             except Exception as e: st.error(f"Upload error: {e}")
 
-    with tab2:
-        st.subheader("SensorPush Multi-Account Recovery")
-        c1, c2 = st.columns(2)
-        with c1:
-            sd = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
-            st_time = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
-        with c2:
-            ed = st.date_input("Recovery End", datetime.now())
-            et_time = st.time_input("End Time (UTC)", datetime.now().time())
+                # 4. Standardize and Upload
+                if not df_up.empty:
+                    # Ensure node IDs use hyphens instead of colons
+                    id_col = 'sensor_id' if 'sensor_id' in df_up.columns else 'nodenumber'
+                    df_up[id_col] = df_up[id_col].astype(str).str.replace(':', '-', regex=False)
+                    
+                    st.write(f"Previewing {len(df_up)} points for {table_ref}:")
+                    st.dataframe(df_up.head(), width='stretch')
 
-        if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
-            s_iso = datetime.combine(sd, st_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            e_iso = datetime.combine(ed, et_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            if "sensorpush_accounts" not in st.secrets:
-                st.error("Missing accounts in Secrets.")
-            else:
-                accounts = st.secrets["sensorpush_accounts"]
-                all_api_recs = []
-                for acc_id, creds in accounts.items():
-                    try:
-                        with st.spinner(f"Processing {acc_id}..."):
-                            auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json=dict(creds), headers={"accept": "application/json"})
-                            if auth_res.status_code == 200:
-                                token = auth_res.json().get("accesstoken")
-                                h = {"accept": "application/json", "Authorization": token, "Content-Type": "application/json"}
-                                p = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
-                                sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=h, json=p)
-                                if sample_res.status_code == 200:
-                                    raw_json = sample_res.json()
-                                    for sid, samples in raw_json.get("sensors", {}).items():
-                                        for s in samples:
-                                            all_api_recs.append({"timestamp": s["observed"], "temperature": s["value"], "sensor_id": sid.replace(':', '-')})
-                    except Exception as e: st.error(f"Failure on {acc_id}: {e}")
-                
-                if all_api_recs:
-                    df_api = pd.DataFrame(all_api_recs)
-                    df_api['timestamp'] = pd.to_datetime(df_api['timestamp'])
-                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    st.success(f"✅ Pulled {len(all_api_recs)} points.")
-                    st.balloons()
+                    if st.button("🚀 PUSH TO BIGQUERY"):
+                        with st.spinner("Uploading..."):
+                            client.load_table_from_dataframe(df_up, table_ref).result()
+                            
+                            # Run the Master Scrub to sync everything
+                            scrub_sql = f"""
+                                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                                WITH Unified AS (
+                                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
+                                    UNION ALL 
+                                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                                ) 
+                                SELECT u.*, u.node AS sensor_id, m.SensorName as sensor_name, m.Project as project, m.Location as location, m.Depth as depth 
+                                FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
+                            """
+                            client.query(scrub_sql).result()
+                            st.success("✅ Uploaded and Master Table Synced!")
+                            st.balloons()
+            except Exception as e:
+                st.error(f"File Error: {e}")
 
 # 4E. ADMIN TOOLS
 # --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
