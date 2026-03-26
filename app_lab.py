@@ -101,6 +101,7 @@ service = st.sidebar.selectbox("Select Service", [
 ])
 
 # --- 4. SERVICE ROUTING ---
+# --- 4. SERVICE ROUTING ---
 
 # 4A. EXECUTIVE SUMMARY
 if service == "🏠 Executive Summary":
@@ -108,7 +109,7 @@ if service == "🏠 Executive Summary":
     try:
         proj_q = f"SELECT DISTINCT project FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(proj_q).to_dataframe()
-        all_projs = sorted(meta_df['project'].unique())
+        all_projs = sorted(meta_df['project'].dropna().unique())
         sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=0)
 
         query = f"""
@@ -141,14 +142,11 @@ if service == "🏠 Executive Summary":
     except Exception as e: st.error(f"Summary Error: {e}")
 
 # 4B. CLIENT PORTAL
-# --- 4B. CLIENT PORTAL ---
-
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
         meta_df = client.query(meta_q).to_dataframe()
-        
         if meta_df.empty:
             st.warning("No approved data available.")
         else:
@@ -163,20 +161,18 @@ elif service == "📊 Client Portal":
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
-            # Date Math based on latest approved point
             max_approved_ts = df_c['timestamp'].max()
             current_monday = (max_approved_ts - timedelta(days=max_approved_ts.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
             start_view = current_monday - timedelta(weeks=weeks_to_view - 1)
             end_view = current_monday + timedelta(days=7)
 
-            # 1. DEPTH PROFILE
             if "bank" not in sel_loc.lower():
                 st.subheader("🌡️ Soil Temperature Profile (Weekly Snapshots)")
                 snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
                 snapshot = snapshot[snapshot['timestamp'] >= start_view]
-                
                 if not snapshot.empty:
-                    snapshot['depth_num'] = snapshot['depth'].str.extract('(\d+)').astype(float)
+                    # FIXED: Added 'r' for raw string to avoid syntax warning
+                    snapshot['depth_num'] = snapshot['depth'].str.extract(r'(\d+)').astype(float)
                     snapshot['Date'] = snapshot['timestamp'].dt.strftime('%m/%d')
                     fig_profile = px.line(snapshot.sort_values('depth_num'), x='temperature', y='depth_num', color='Date', markers=True, range_x=[-20, 80])
                     for val, label in active_refs:
@@ -186,33 +182,25 @@ elif service == "📊 Client Portal":
                     fig_profile.update_yaxes(autorange="reversed", mirror=True, showline=True, linecolor='black', linewidth=2, gridcolor='LightGray')
                     st.plotly_chart(fig_profile, width='stretch')
 
-            # 2. TIMELINE
             st.subheader("📈 Historical Trends")
             fig_timeline = build_standard_sf_graph(df_c, f"{weeks_to_view}-Week Trend: {sel_loc}", start_view, end_view, active_refs)
             st.plotly_chart(fig_timeline, width='stretch')
             
-            # 3. PERFORMANCE TABLE (Last Approved 24h Window)
             st.subheader(f"⏱️ Performance Window: {max_approved_ts.strftime('%m/%d %H:%M')}")
             last_approved_24h = df_c[df_c['timestamp'] >= (max_approved_ts - timedelta(hours=24))].copy()
-            
             if not last_approved_24h.empty:
-                last_approved_24h['depth_num'] = last_approved_24h['depth'].str.extract('(\d+)').astype(float)
-                stats = last_approved_24h.groupby(['depth', 'depth_num']).agg(
-                    High=('temperature', 'max'), Low=('temperature', 'min'), Current=('temperature', 'last'), Last_Update=('timestamp', 'last')
-                ).reset_index()
+                # FIXED: Added 'r' for raw string
+                last_approved_24h['depth_num'] = last_approved_24h['depth'].str.extract(r'(\d+)').astype(float)
+                stats = last_approved_24h.groupby(['depth', 'depth_num']).agg(High=('temperature', 'max'), Low=('temperature', 'min'), Current=('temperature', 'last'), Last_Update=('timestamp', 'last')).reset_index()
                 stats['Difference'] = stats['High'] - stats['Low']
-                stats = stats.sort_values('depth_num') # Fixed Numerical Order
-                
-                st.dataframe(stats[['depth', 'Current', 'High', 'Low', 'Difference', 'Last_Update']].style.format({
-                    'Current': '{:.1f}', 'High': '{:.1f}', 'Low': '{:.1f}', 'Difference': '{:.1f}', 'Last_Update': '{:%m/%d %H:%M}'
-                }), width='stretch', hide_index=True)
+                stats = stats.sort_values('depth_num')
+                st.dataframe(stats[['depth', 'Current', 'High', 'Low', 'Difference', 'Last_Update']].style.format({'Current': '{:.1f}', 'High': '{:.1f}', 'Low': '{:.1f}', 'Difference': '{:.1f}', 'Last_Update': '{:%m/%d %H:%M}'}), width='stretch', hide_index=True)
 
             latest_note = df_c.sort_values('timestamp', ascending=False)['engineer_note'].dropna()
             if not latest_note.empty and latest_note.iloc[0]:
                 st.info(f"**Field Engineer Note:** {latest_note.iloc[0]}")
-
     except Exception as e: st.error(f"Portal Error: {e}")
-        
+
 # 4C. NODE DIAGNOSTICS
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
@@ -220,28 +208,22 @@ elif service == "📉 Node Diagnostics":
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe()
         c1, c2, c3 = st.columns(3)
-        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
+        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
         with c2: 
-            locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
+            locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
             sel_loc = st.selectbox("Pipe / Bank", locs)
         with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
-
         days_back = weeks * 7
         data_q = f"SELECT timestamp, temperature, depth, sensor_name FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY) ORDER BY timestamp ASC"
         df_g = client.query(data_q).to_dataframe()
-        
         if not df_g.empty:
             df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
             end_v = datetime.now(pytz.UTC)
             start_v = end_v - timedelta(days=days_back)
-            st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v), width='stretch')
+            st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v, active_refs), width='stretch')
     except Exception as e: st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE
-# --- 4D. DATA INTAKE (HARDENED FOR MIXED FORMATS) ---
-# --- 4D. DATA INTAKE (HARDENED FOR MULTIPLE FORMATS) ---
-# 4D. DATA INTAKE
-# --- 4D. DATA INTAKE (FIXED SQL & COLUMN NAMES) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
@@ -250,19 +232,14 @@ elif service == "📤 Data Intake Lab":
         st.subheader("Manual CSV Ingestion")
         source = st.radio("Device Type", ["Master Log", "Lord (SensorConnect)", "SensorPush Export"], horizontal=True)
         u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
-        
         if u_file is not None:
             try:
                 df_up, table_ref = pd.DataFrame(), ""
-                
-                # 1. Parsing logic based on source
                 if source == "Master Log":
                     df_up = pd.read_csv(u_file)
                     df_up.columns = [c.lower() for c in df_up.columns]
-                    # Map 'nodenumber' to 'sensor_id' to match your metadata
                     df_up = df_up.rename(columns={'nodenumber': 'sensor_id'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                
                 elif source == "Lord (SensorConnect)":
                     content = u_file.getvalue().decode("utf-8").splitlines()
                     start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
@@ -270,7 +247,6 @@ elif service == "📤 Data Intake Lab":
                     df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
                     df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='sensor_id', value_name='value').rename(columns={df_raw.columns[0]: 'timestamp'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                
                 elif source == "SensorPush Export":
                     content = u_file.getvalue().decode("utf-8").splitlines()
                     start_idx = next((i for i, l in enumerate(content) if "SensorId,Observed" in l), 0)
@@ -280,22 +256,14 @@ elif service == "📤 Data Intake Lab":
                     df_up = df_raw[['SensorId', 'Observed', temp_col]].copy()
                     df_up.columns = ['sensor_id', 'timestamp', 'temperature']
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-
-                # 2. Standardization
+                
                 if not df_up.empty:
                     df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce').dropna()
                     df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
-                    
-                    st.write("Preview of data to be pushed:")
                     st.dataframe(df_up.head(), width='stretch')
-
                     if st.button("🚀 PUSH TO BIGQUERY"):
-                        with st.spinner("Uploading and Syncing..."):
-                            # STEP A: Load the raw data
+                        with st.spinner("Pushing..."):
                             client.load_table_from_dataframe(df_up, table_ref).result()
-                            
-                            # STEP B: Run the Master Sync (Updated with sensor_id)
-                            # We use m.sensor_id for the name column as requested
                             scrub_sql = f"""
                                 CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
                                 WITH Unified AS (
@@ -303,29 +271,15 @@ elif service == "📤 Data Intake Lab":
                                     UNION ALL 
                                     SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                                 ) 
-                                SELECT 
-                                    u.timestamp, 
-                                    u.node AS sensor_id, 
-                                    u.temperature, 
-                                    m.sensor_id as sensor_name, 
-                                    m.project, 
-                                    m.location, 
-                                    m.depth, 
-                                    CAST(FALSE AS BOOLEAN) as is_approved, 
-                                    CAST(NULL AS STRING) as engineer_note
-                                FROM Unified u 
-                                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
+                                SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.nodenum as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
+                                FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
                             """
-                            # Execute the sync as its own query call
                             client.query(scrub_sql).result()
-                            st.success("✅ Uploaded and Master Table Rebuilt!")
-                            st.balloons()
-            except Exception as e:
-                st.error(f"Processing Error: {e}")
+                            st.success("✅ Database Synchronized!")
+            except Exception as e: st.error(f"Processing Error: {e}")
 
     with tab2:
         st.subheader("📡 SensorPush Multi-Account Recovery")
-        
         c1, c2 = st.columns(2)
         with c1:
             sd = st.date_input("Recovery Start Date", datetime.now() - timedelta(days=2))
@@ -335,192 +289,74 @@ elif service == "📤 Data Intake Lab":
             et_time = st.time_input("End Time (UTC)", datetime.now().time())
 
         if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
-            # Format times for API: YYYY-MM-DDTHH:MM:SS+0000
             s_iso = datetime.combine(sd, st_time).strftime("%Y-%m-%dT%H:%M:%S+0000")
             e_iso = datetime.combine(ed, et_time).strftime("%Y-%m-%dT%H:%M:%S+0000")
-            
-            if "sensorpush_accounts" not in st.secrets:
-                st.error("Missing accounts in Secrets.")
-            else:
-                accounts = st.secrets["sensorpush_accounts"]
-                all_api_recs = []
-                
+            if "sensorpush_accounts" in st.secrets:
+                accounts, all_api_recs = st.secrets["sensorpush_accounts"], []
                 for acc_id, creds in accounts.items():
                     try:
-                        with st.spinner(f"Processing {creds['email']}..."):
-                            # STEP 1: Authorize to get code
-                            auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", 
-                                                     json=dict(creds))
-                            if auth_res.status_code != 200:
-                                st.error(f"❌ {acc_id} Auth Step 1 Failed")
-                                continue
-                            auth_code = auth_res.json().get("authorization")
-
-                            # STEP 2: Trade code for actual Access Token
-                            token_res = requests.post("https://api.sensorpush.com/api/v1/oauth/accesstoken", 
-                                                      json={"authorization": auth_code})
-                            if token_res.status_code != 200:
-                                st.error(f"❌ {acc_id} Auth Step 2 Failed")
-                                continue
-                            token = token_res.json().get("accesstoken")
-                            
-                            headers = {"accept": "application/json", "Authorization": token, "Content-Type": "application/json"}
-
-                            # STEP 3: Get Sensor List (using /devices/sensors)
-                            sensor_res = requests.post("https://api.sensorpush.com/api/v1/devices/sensors", 
-                                                       headers=headers, json={})
-                            if sensor_res.status_code != 200:
-                                continue
-                            
-                            # Build ID list
-                            sensor_data = sensor_res.json()
-                            sensor_ids = []
-                            if isinstance(sensor_data, dict):
-                                sensor_ids = [str(v.get('id', k)) for k, v in sensor_data.items()]
-                            elif isinstance(sensor_data, list):
-                                sensor_ids = [str(i.get('id')) for i in sensor_data]
-
-                            if not sensor_ids:
-                                continue
-
-                            # STEP 4: Fetch Samples
-                            payload = {
-                                "startTime": s_iso, 
-                                "endTime": e_iso, 
-                                "sensors": sensor_ids
-                            }
-                            
-                            sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", 
-                                                       headers=headers, json=payload)
-                            
-                            if sample_res.status_code == 200:
-                                data = sample_res.json().get("sensors", {})
-                                acc_count = 0
-                                for sid, samples in data.items():
-                                    for s in samples:
-                                        # Check for temperature in various field names used by SP
-                                        temp_val = s.get('temperature') or s.get('temp_f') or s.get('value')
-                                        if temp_val is not None:
-                                            all_api_recs.append({
-                                                "timestamp": s["observed"], 
-                                                "temperature": float(temp_val), 
-                                                "sensor_id": sid.replace(':', '-')
-                                            })
-                                            acc_count += 1
-                                if acc_count > 0:
-                                    st.toast(f"✅ {acc_id}: Found {acc_count} points.")
-                    except Exception as e:
-                        st.error(f"Error on {acc_id}: {e}")
-
-                # STEP 5: BigQuery Load and Master Table Sync
+                        with st.spinner(f"Auth {acc_id}..."):
+                            # Logic from your sensor_catchup.py
+                            auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json=dict(creds))
+                            if auth_res.status_code == 200:
+                                auth_code = auth_res.json().get("authorization")
+                                token_res = requests.post("https://api.sensorpush.com/api/v1/oauth/accesstoken", json={"authorization": auth_code})
+                                if token_res.status_code == 200:
+                                    token = token_res.json().get("accesstoken")
+                                    headers = {"Authorization": token, "accept": "application/json"}
+                                    # Get Sensors
+                                    sensor_res = requests.post("https://api.sensorpush.com/api/v1/devices/sensors", headers=headers, json={})
+                                    if sensor_res.status_code == 200:
+                                        s_data = sensor_res.json()
+                                        s_ids = [str(v.get('id', k)) for k, v in s_data.items()] if isinstance(s_data, dict) else [str(i.get('id')) for i in s_data]
+                                        # Get Samples
+                                        p_load = {"startTime": s_iso, "endTime": e_iso, "sensors": s_ids}
+                                        samp_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=p_load)
+                                        if samp_res.status_code == 200:
+                                            for sid, samples in samp_res.json().get("sensors", {}).items():
+                                                for s in samples:
+                                                    val = s.get('value') or s.get('temperature') or s.get('temp_f')
+                                                    if val is not None:
+                                                        all_api_recs.append({"timestamp": s["observed"], "temperature": float(val), "sensor_id": sid.replace(':', '-')})
+                    except Exception as e: st.error(f"Error on {acc_id}: {e}")
+                
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
-                    df_api['timestamp'] = pd.to_datetime(df_api['timestamp'], format='mixed')
-                    
-                    with st.spinner("Pushing to BigQuery and Syncing..."):
-                        client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                        
-                        # Master Sync logic using lowercase schema
-                        scrub_sql = f"""
-                            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                            WITH Unified AS (
-                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                                UNION ALL 
-                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                            ) 
-                            SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.sensor_id as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
-                        """
-                        client.query(scrub_sql).result()
-                    st.success(f"🏁 Sync Complete! {len(all_api_recs)} points added.")
+                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                    # FIXED: Changed sensor_id to nodenum in the SELECT statement
+                    scrub_sql = f"""
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                        WITH Unified AS (
+                            SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
+                            UNION ALL 
+                            SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                        ) 
+                        SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.nodenum as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
+                        FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
+                    """
+                    client.query(scrub_sql).result()
+                    st.success(f"✅ Sync Complete! {len(all_api_recs)} points added.")
                     st.balloons()
-                else:
-                    st.warning("⚠️ No data points returned for this window.")
-                    
+
 # 4E. ADMIN TOOLS
-# --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
-# --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
 elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
+    st.header("🛠️ Admin Tools")
     tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Bulk Approval"])
-    
     with tab_scrub:
-        st.subheader("Delete Bad Data")
-        sc_proj = st.text_input("Project Name", key="scrub_p")
-        sc_loc = st.text_input("Location / Pipe", key="scrub_l")
-        col1, col2 = st.columns(2)
-        with col1:
-            sc_start = st.text_input("Start (YYYY-MM-DD HH:MM:SS)", value="2026-01-01 00:00:00")
-        with col2:
-            sc_end = st.text_input("End (YYYY-MM-DD HH:MM:SS)", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            
-        if st.button("🗑️ PERMANENTLY DELETE POINTS"):
-            if sc_proj and sc_loc:
-                scrub_q = f"""
-                    DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
-                    WHERE project='{sc_proj}' AND location='{sc_loc}' 
-                    AND timestamp BETWEEN '{sc_start}' AND '{sc_end}'
-                """
-                client.query(scrub_q).result()
-                st.success(f"✅ Deleted points for {sc_loc} in {sc_proj}")
-            else:
-                st.error("Please enter both Project and Location.")
-
+        sc_proj, sc_loc = st.text_input("Project Name"), st.text_input("Location")
+        sc_start, sc_end = st.text_input("Start (YYYY-MM-DD HH:MM:SS)"), st.text_input("End (YYYY-MM-DD HH:MM:SS)")
+        if st.button("🗑️ DELETE POINTS"):
+            client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sc_proj}' AND location='{sc_loc}' AND timestamp BETWEEN '{sc_start}' AND '{sc_end}'").result()
+            st.success("Data Scrubbed.")
     with tab_approve:
-        st.subheader("Bulk Approve Data")
-        st.write("Set `is_approved = TRUE` for a specific site and time range.")
-        
-        try:
-            # 1. Get metadata, filtering out Nulls to prevent the '<' error
-            unapproved_meta_q = f"""
-                SELECT DISTINCT project, location 
-                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
-                WHERE (is_approved IS FALSE OR is_approved IS NULL)
-                AND project IS NOT NULL 
-                AND location IS NOT NULL
-            """
-            un_meta = client.query(unapproved_meta_q).to_dataframe()
-            
-            if un_meta.empty:
-                st.success("🎉 All data is currently approved!")
-            else:
-                # Use dropna and sorted to safely handle the dropdowns
-                u_projs = sorted(un_meta['project'].dropna().unique())
-                app_proj = st.selectbox("Select Project", u_projs)
-                
-                u_locs = sorted(un_meta[un_meta['project'] == app_proj]['location'].dropna().unique())
-                app_loc = st.selectbox("Select Location/Pipe", u_locs)
-                
-                app_note = st.text_area("Engineer Note", placeholder="Verified data trends...")
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    t_start = st.text_input("Start Time", value="2026-01-01 00:00:00", key="app_start")
-                with c2:
-                    t_end = st.text_input("End Time", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), key="app_end")
-
-                # 2. Preview Count
-                if st.button("🔍 PREVIEW COUNT"):
-                    count_q = f"""
-                        SELECT COUNT(*) as total FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-                        WHERE project='{app_proj}' AND location='{app_loc}'
-                        AND timestamp BETWEEN '{t_start}' AND '{t_end}'
-                        AND (is_approved IS FALSE OR is_approved IS NULL)
-                    """
-                    count_res = client.query(count_q).to_dataframe()
-                    st.info(f"This will approve **{count_res['total'].iloc[0]}** data points.")
-
-                # 3. Final Approval
-                if st.button("🚀 BULK APPROVE NOW"):
-                    bulk_q = f"""
-                        UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-                        SET is_approved = TRUE, engineer_note = '{app_note}'
-                        WHERE project = '{app_proj}' AND location = '{app_loc}'
-                        AND timestamp BETWEEN '{t_start}' AND '{t_end}'
-                    """
-                    client.query(bulk_q).result()
-                    st.success(f"✅ Approved data for {app_loc}!")
-                    st.balloons()
-                    
-        except Exception as e:
-            st.error(f"Approval Error: {e}")
+        un_meta = client.query(f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE (is_approved IS FALSE OR is_approved IS NULL) AND project IS NOT NULL AND location IS NOT NULL").to_dataframe()
+        if not un_meta.empty:
+            u_projs = sorted(un_meta['project'].dropna().unique())
+            app_proj = st.selectbox("Select Project", u_projs)
+            u_locs = sorted(un_meta[un_meta['project'] == app_proj]['location'].dropna().unique())
+            app_loc = st.selectbox("Select Location", u_locs)
+            app_note = st.text_area("Engineer Note")
+            t_start, t_end = st.text_input("Start", value="2026-01-01 00:00:00"), st.text_input("End", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            if st.button("🚀 BULK APPROVE NOW"):
+                client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` SET is_approved = TRUE, engineer_note = '{app_note}' WHERE project = '{app_proj}' AND location = '{app_loc}' AND timestamp BETWEEN '{t_start}' AND '{t_end}'").result()
+                st.success("Bulk Approved!")
