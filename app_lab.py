@@ -414,12 +414,61 @@ elif service == "📤 Data Intake Lab":
             else:
                 status_box.warning("No new data found on SensorPush servers for this range.")
 
-    with tab3:
-        st.subheader("🛠️ Database Maintenance")
-        if st.button("🔄 FORCE HISTORICAL REBUILD"):
-            with st.spinner("Processing every row in raw history..."):
-                if rebuild_master_table(mode="preserve"):
-                    st.success("✅ Master Table refreshed. All historical points should now appear.")
+   # Add this inside Tab 3 of Section 4D
+with tab3:
+    st.subheader("📊 7-Day Data Audit")
+    st.write("Comparison of Raw incoming data vs. Master deduplicated data.")
+    
+    audit_sql = f"""
+    WITH MasterCounts AS (
+      SELECT project, COUNT(*) as master_points
+      FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+      GROUP BY project
+    ),
+    RawPush AS (
+      SELECT m.Project, COUNT(*) as raw_points
+      FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r
+      INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+        ON REPLACE(r.sensor_id, ':', '-') = REPLACE(m.NodeNum, ':', '-')
+      WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+      GROUP BY m.Project
+    ),
+    RawLord AS (
+      SELECT m.Project, COUNT(*) as raw_points
+      FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` l
+      INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+        ON REPLACE(l.nodenumber, ':', '-') = REPLACE(m.NodeNum, ':', '-')
+      WHERE l.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+      GROUP BY m.Project
+    ),
+    CombinedRaw AS (
+      SELECT Project, SUM(raw_points) as raw_total FROM (SELECT * FROM RawPush UNION ALL SELECT * FROM RawLord) GROUP BY Project
+    )
+    SELECT 
+        COALESCE(m.project, r.Project) as Project,
+        r.raw_total as Raw_Points,
+        m.master_points as Master_Points,
+        (r.raw_total - m.master_points) as Duplicates_Filtered
+    FROM MasterCounts m
+    FULL OUTER JOIN CombinedRaw r ON m.project = r.Project
+    ORDER BY Raw_Points DESC
+    """
+    
+    if st.button("🔍 RUN DATA AUDIT"):
+        try:
+            df_audit = client.query(audit_sql).to_dataframe()
+            if not df_audit.empty:
+                st.dataframe(df_audit, use_container_width=True, hide_index=True)
+                
+                # Logic check: If Raw > 0 but Master is 0, something is wrong with the metadata join
+                for index, row in df_audit.iterrows():
+                    if row['Raw_Points'] > 0 and (pd.isna(row['Master_Points']) or row['Master_Points'] == 0):
+                        st.error(f"⚠️ Project '{row['Project']}' has raw data but 0 master points. Check if NodeNums match in your metadata!")
+            else:
+                st.warning("No data found in any table for the last 7 days.")
+        except Exception as e:
+            st.error(f"Audit failed: {e}")
                 
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
