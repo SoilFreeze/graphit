@@ -18,35 +18,29 @@ PROJECT_ID = "sensorpush-export"
 
 @st.cache_resource
 def get_bq_client():
-    """Handles authentication with added Google Drive scopes for linked sheets."""
+    """Handles authentication with BigQuery and Drive scopes."""
     try:
-        # Define the necessary scopes for BigQuery AND Google Drive
         SCOPES = [
             "https://www.googleapis.com/auth/bigquery",
             "https://www.googleapis.com/auth/drive"
         ]
-        
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            # Add scopes to the credentials
-            credentials = service_account.Credentials.from_service_account_info(
-                info, scopes=SCOPES
-            )
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             return bigquery.Client(credentials=credentials, project=info["project_id"])
-        
-        # Fallback for local development
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
         return None
-client = get_bq_client()
 
-
-def rebuild_master_table():
+def rebuild_master_table(mode="preserve"):
     """
-    Combines raw data and metadata into the final dashboard table.
-    Requires BigQuery + Drive permissions.
+    Deduplicates data and manages approval status.
+    Historic = 'yes' (TRUE), New = 'no' (FALSE).
     """
+    # Decide if we are forcing approval or checking existing status
+    status_sql = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
+    
     scrub_sql = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
         WITH RawUnified AS (
@@ -61,25 +55,26 @@ def rebuild_master_table():
             FROM RawUnified
         )
         SELECT 
-            h.ts as timestamp, 
-            h.temp as temperature, 
-            m.NodeNum as sensor_id, 
-            m.NodeNum as sensor_name, 
-            m.Project as project, 
-            m.Location as location, 
-            m.Depth as depth, 
-            FALSE as is_approved
+            h.ts as timestamp, h.temp as temperature, m.NodeNum as sensor_id, 
+            m.NodeNum as sensor_name, m.Project as project, m.Location as location, m.Depth as depth,
+            {status_sql} as is_approved
         FROM HourlyDedupped h 
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
+        -- We join with the current table to remember who was already approved
+        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` ex 
+            ON h.ts = ex.timestamp AND h.node = ex.sensor_id
         WHERE h.rank = 1
     """
     try:
-        # This will now work once the 'drive' scope is added to the client
-        query_job = client.query(scrub_sql)
-        query_job.result() 
+        client.query(scrub_sql).result()
         return True
     except Exception as e:
-        st.error(f"Master Build Failed: {e}")
+        # If the table doesn't exist yet (first run), fallback to FALSE
+        if "Not found" in str(e):
+            fallback_sql = scrub_sql.replace(f"LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` ex ON h.ts = ex.timestamp AND h.node = ex.sensor_id", "")
+            client.query(fallback_sql.replace(status_sql, "FALSE")).result()
+            return True
+        st.error(f"Master Build Error: {e}")
         return False
         
 # --- 2. ENGINE: FAST API FETCH ---
@@ -327,53 +322,111 @@ elif service == "📉 Node Diagnostics":
 # --- 4D. DATA INTAKE LAB (FULLY CORRECTED) ---
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
+# --- 4D. DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
+    
+    # Using three tabs to separate Manual, API, and Maintenance logic
     tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Database Maintenance"])
 
     with tab1:
         st.subheader("Manual CSV Ingestion")
-        # ... (Your existing file uploader logic) ...
-        if st.button("🚀 UPLOAD & REBUILD"):
-            with st.spinner("Uploading raw data..."):
-                client.load_table_from_dataframe(df_up, table_ref).result()
-                if rebuild_master_table():
-                    st.success("✅ Raw data uploaded and Master Table rebuilt!")
+        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)", "Logger (Master Log)"], horizontal=True)
+        u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
+        
+        if u_file is not None:
+            try:
+                # 1. Load Raw Data
+                df_raw = pd.read_csv(u_file, low_memory=False)
+                ts_col = next((c for c in df_raw.columns if c.lower() == 'timestamp'), df_raw.columns[0])
+                df_raw['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
+                df_raw = df_raw.dropna(subset=['timestamp'])
+
+                df_up = pd.DataFrame()
+                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+
+                # 2. Process based on source
+                if "Master Log" in source:
+                    if df_raw.shape[1] > 2 and any(isinstance(x, str) for x in df_raw.iloc[:, 1]):
+                        df_up = df_raw.iloc[:, [df_raw.columns.get_loc('timestamp'), 0, 1]].copy()
+                        df_up.columns = ['timestamp', 'temperature', 'sensor_id']
+                    else:
+                        df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
+                elif "Lord" in source:
+                    df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                else: 
+                    df_up = df_raw.rename(columns={'Temperature': 'temperature', 'Sensor': 'sensor_id'})
+
+                if not df_up.empty:
+                    # Standardize IDs (hyphens instead of colons)
+                    df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
+                    st.write(f"Previewing {len(df_up)} points:")
+                    st.dataframe(df_up.head())
+
+                    if st.button("🚀 UPLOAD & REBUILD MASTER"):
+                        with st.spinner("Uploading raw data and rebuilding master..."):
+                            # Upload to raw storage
+                            client.load_table_from_dataframe(df_up, table_ref).result()
+                            
+                            # Trigger the separate modular function
+                            if rebuild_master_table(mode="preserve"):
+                                st.success("✅ Uploaded and Master Table Rebuilt. New data is 'Unapproved'.")
+            except Exception as e: 
+                st.error(f"Manual Upload Error: {e}")
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
+        st.info("Pulls data for both HT.w and TC.x sensors in 12-hour chunks to prevent timeouts.")
+        
         c1, c2 = st.columns(2)
         start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=2))
         end_date = c2.date_input("End Date", datetime.now())
         
         if st.button("🛰️ FETCH & SYNC MASTER"):
+            status_box = st.empty()
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            with st.spinner("Fetching from SensorPush..."):
-                df_api = fetch_sensorpush_data(start_dt, end_dt)
-                
-                if not df_api.empty:
+            status_box.info("Step 1/2: Contacting SensorPush API...")
+            df_api = fetch_sensorpush_data(start_dt, end_dt) 
+            
+            if not df_api.empty:
+                status_box.info(f"Step 2/2: Mapping {len(df_api)} points to Master Table...")
+                try:
                     # Clean the ID format before upload
-                    df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-')
+                    df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
                     
-                    # 1. Upload to Raw
-                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                    # 1. Upload to Raw table
+                    raw_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    client.load_table_from_dataframe(df_api, raw_table).result()
                     
-                    # 2. Rebuild Master using our new function
-                    if rebuild_master_table():
-                        st.success(f"✅ Synced {len(df_api)} points and updated Master Table!")
+                    # 2. Rebuild Master using the modular function
+                    if rebuild_master_table(mode="preserve"):
+                        status_box.success("✅ Master Table Synced! All sensors mapped and deduplicated.")
                         st.balloons()
-                else:
-                    st.warning("No data found for this range. Ensure your sensors are active.")
+                except Exception as bq_e:
+                    st.error(f"BigQuery Sync Failed: {bq_e}")
+            else:
+                status_box.warning("No data found for this range. Check sensor connectivity.")
 
     with tab3:
-        st.subheader("Manual Master Rebuild")
-        st.write("If you manually edited BigQuery raw tables or metadata, use this to force a refresh.")
-        if st.button("🔄 FORCE MASTER REBUILD"):
-            with st.spinner("Running global deduplication and mapping..."):
-                if rebuild_master_table():
-                    st.success("✅ Master Table has been fully refreshed from all raw sources.")
+        st.subheader("🛠️ Database Maintenance")
+        st.write("Use these tools to manage historical data and table health.")
+        
+        col_m1, col_m2 = st.columns(2)
+        
+        with col_m1:
+            if st.button("🚩 MARK ALL EXISTING DATA AS HISTORIC"):
+                with st.spinner("Approving all current records..."):
+                    if rebuild_master_table(mode="approve_all"):
+                        st.success("✅ All records in the system are now marked as 'Approved'.")
+        
+        with col_m2:
+            if st.button("🔄 FORCE CLEAN REBUILD"):
+                with st.spinner("Running deduplication and mapping..."):
+                    if rebuild_master_table(mode="preserve"):
+                        st.success("✅ Master table refreshed from all raw sources.")
 
 # --- 4E. ADMIN TOOLS ---
 elif service == "🛠️ Admin Tools":
