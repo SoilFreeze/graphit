@@ -52,30 +52,38 @@ client = get_bq_client()
 # --- REBUILD TABLE --- #
 #########################
 def rebuild_master_table(mode="preserve"):
-    # Logic to keep historical approvals
+    """
+    Joins Raw Data (Large Numbers) with Metadata (TP/SP Names).
+    Ensures 'sensor_name' contains the SP/TP label.
+    """
     status_logic = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
     
     scrub_sql = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
         WITH RawUnified AS (
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
             UNION ALL 
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
         ),
         HourlyDedupped AS (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
+            FROM RawUnified
         )
         SELECT 
             h.ts as timestamp, 
             h.temp as temperature, 
-            m.NodeNum as sensor_id,      -- The long numerical ID
-            COALESCE(m.SensorName, m.NodeNum) as sensor_name, -- This ensures 'TP33' etc. exists
+            h.node as sensor_id,            -- The long physical ID
+            COALESCE(m.NodeNum, h.node) as sensor_name, -- Prefer 'TP33-N' but fallback to ID if no match
             m.Project as project, 
             m.Location as location, 
             m.Depth as depth, 
             {status_logic} as is_approved
         FROM HourlyDedupped h 
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
+        -- JOIN: This links the CSV's ID (h.node) to your Metadata's PhysicalID column
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+            ON h.node = REPLACE(CAST(m.PhysicalID AS STRING), ':', '-')
         LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` ex 
             ON h.ts = ex.timestamp AND h.node = ex.sensor_id
         WHERE h.rank = 1
@@ -162,6 +170,9 @@ def fetch_sensorpush_data(start_dt, end_dt):
             st.error(f"Fetch Error ({acc['email']}): {e}")
             
     return pd.DataFrame(all_records)
+################################
+# --- END FETCH SENSORPUSH --- #
+################################
 ########################
 # --- GRAPH ENGINE --- #
 ########################
@@ -255,8 +266,9 @@ service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "�
 ####################
 # --- SERVICES --- #
 ####################
-# --- 5. SERVICE ROUTING ---
-
+#############################
+# --- EXECUTIVE SUMMARY --- #
+#############################
 if service == "🏠 Executive Summary":
     st.header("🏠 Site Health Summary")
 
@@ -294,7 +306,12 @@ if service == "🏠 Executive Summary":
                 })
             st.dataframe(pd.DataFrame(summary_stats), width='stretch', hide_index=True)
     except Exception as e: st.error(f"Summary Error: {e}")
-
+#################################
+# --- END EXECUTIVE SUMMARY --- #
+#################################
+#########################
+# --- CLIENT PORTAL --- #
+#########################
 # 4B. CLIENT PORTAL
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
@@ -350,7 +367,9 @@ elif service == "📊 Client Portal":
                 st.dataframe(stats[['depth', 'Current', 'High', 'Low', 'Difference', 'Last_Update']], width='stretch', hide_index=True)
 
     except Exception as e: st.error(f"Portal Error: {e}")
-        
+#############################
+# --- END CLIENT PORTAL --- #
+#############################  
 # 4C. NODE DIAGNOSTICS
 # --- 4C. NODE DIAGNOSTICS ---
 elif service == "📉 Node Diagnostics":
