@@ -161,15 +161,20 @@ def fetch_sensorpush_data(start_dt, end_dt):
 # --- 3. GRAPH ENGINE ---
 
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
-    """Restores full formatting and handling for SoilFreeze thermal trends."""
+    """
+    SF Standard: 6hr, Midnight, and Monday Gridlines.
+    Legend Format: Depth (NodeNum).
+    """
     display_df = df.copy()
-    # Standard SF Thermal Range
     y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # 1. Gap Logic: Prevents lines from 'jumping' over missing data periods
+    # 1. Gap Logic
     processed_dfs = []
-    for d in display_df['depth'].unique():
-        s_df = display_df[display_df['depth'] == d].copy().sort_values('timestamp')
+    # Using a combined key for grouping to handle the new naming convention
+    display_df['label'] = display_df['depth'] + " (" + display_df['sensor_id'] + ")"
+    
+    for lbl in display_df['label'].unique():
+        s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
         s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gaps = s_df[s_df['gap'] > 6.0].copy()
         if not gaps.empty:
@@ -181,38 +186,53 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     
     # 2. Trace Creation
     fig = go.Figure()
-    depths = sorted(clean_df['depth'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x)) or 0))
-    for d in depths:
-        sensor_df = clean_df[clean_df['depth'] == d]
-        fig.add_trace(go.Scatter(
-            x=sensor_df['timestamp'], y=sensor_df['temperature'], 
-            name=d, mode='lines', connectgaps=False
-        ))
+    # Sort by numerical depth
+    labels = sorted(clean_df['label'].unique(), 
+                    key=lambda x: int(next(iter(re.findall(r'\d+', x)), 0)))
+    
+    for lbl in labels:
+        sensor_df = clean_df[clean_df['label'] == lbl]
+        fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
+                                 name=lbl, mode='lines', connectgaps=False))
 
-    # 3. Restored Formatting (Gridlines and Borders)
+    # 3. Formatting & Granular Gridlines
     fig.update_layout(
         title={'text': title, 'x': 0, 'xanchor': 'left'},
-        plot_bgcolor='white', hovermode="x unified", 
-        margin=dict(t=50, l=50, r=150), height=750
+        plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
     )
     
-    fig.update_yaxes(
-        title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
-        gridcolor='DimGray', gridwidth=1.5, 
-        minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
-        mirror=True, showline=True, linecolor='black', linewidth=2
-    )
+    # Y-Axis Formatting
+    fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
+                     gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
+                     mirror=True, showline=True, linecolor='black', linewidth=2)
+
+    # X-Axis Formatting: 6-hour minor, 24-hour major, Weekly markers
     fig.update_xaxes(
-        showgrid=False, range=[start_view, end_view], 
-        mirror=True, showline=True, linecolor='black', linewidth=2
+        range=[start_view, end_view],
+        mirror=True, showline=True, linecolor='black', linewidth=2,
+        gridcolor='DimGray', gridwidth=1,
+        # Major Ticks every 24 hours (Midnight)
+        tick0=start_view, 
+        dtick=86400000, # 24 hours in ms
+        tickformat="%a\n%m/%d",
+        # Minor Ticks every 6 hours
+        minor=dict(
+            dtick=21600000, # 6 hours in ms
+            gridcolor='Silver', 
+            showgrid=True
+        )
     )
 
     # 4. Reference Lines
     for val, label in active_refs:
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
     
-    now_ms = datetime.now(pytz.UTC).timestamp() * 1000
-    fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="RIGHT NOW")
+    # Add vertical line for Monday Midnight specifically if in range
+    curr_ts = start_view
+    while curr_ts <= end_view:
+        if curr_ts.weekday() == 0: # Monday
+            fig.add_vline(x=curr_ts.timestamp() * 1000, line_width=2, line_color="DimGray", line_dash="solid")
+        curr_ts += timedelta(days=1)
 
     return fig
 
@@ -337,32 +357,33 @@ elif service == "📉 Node Diagnostics":
         with c2: 
             locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique())
             sel_loc = st.selectbox("Pipe / Bank", locs)
-        with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
+        with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 1)
 
-        days_back = weeks * 7
-        # Querying with a specific lookback to ensure historical data is retrieved
+        # Date Math: Find the most recent Monday at Midnight
+        now = datetime.now(pytz.UTC)
+        monday_midnight = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_view = monday_midnight - timedelta(weeks=weeks-1)
+        end_view = monday_midnight + timedelta(days=7) # Show the full current week
+
         data_q = f"""
-            SELECT timestamp, temperature, depth 
+            SELECT timestamp, temperature, depth, sensor_id 
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
             WHERE project = '{sel_proj}' AND location = '{sel_loc}' 
-            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY) 
+            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
             ORDER BY timestamp ASC
         """
         df_g = client.query(data_q).to_dataframe()
         
         if not df_g.empty:
             df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-            # Explicitly setting the view window to the full slider range
-            end_v = datetime.now(pytz.UTC)
-            start_v = end_v - timedelta(days=days_back)
-            
             st.plotly_chart(build_standard_sf_graph(
                 df_g, f"Trend: {sel_proj} | {sel_loc}", 
-                start_v, end_v, active_refs
+                start_view, end_view, active_refs
             ), width='stretch')
         else:
-            st.warning("No data found in the master table for this lookback period.")
-    except Exception as e: st.error(f"Diagnostics Error: {e}")
+            st.warning("No data found for this period.")
+    except Exception as e: 
+        st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE LAB (HARDENED SYNC)
 # --- 4D. DATA INTAKE LAB (FIXED INDENTATION & SCHEMA) ---
