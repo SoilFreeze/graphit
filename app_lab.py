@@ -15,12 +15,14 @@ from google.oauth2 import service_account
 
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
-    # BigQuery needs these three specific 'scopes' to read a Google Sheet
+    
+    # BIGQUERY NEEDS THESE THREE TO TALK TO GOOGLE SHEETS
     scopes = [
         "https://www.googleapis.com/auth/bigquery",
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/spreadsheets",
     ]
+    
     creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     client = bigquery.Client(credentials=creds, project=info["project_id"])
 else:
