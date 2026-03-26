@@ -16,6 +16,12 @@ st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 DATASET_ID = "sensor_data" 
 PROJECT_ID = "sensorpush-export"
 
+# --- 1. CONFIGURATION & AUTH ---
+st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
+
+DATASET_ID = "sensor_data" 
+PROJECT_ID = "sensorpush-export"
+
 @st.cache_resource
 def get_bq_client():
     """Handles authentication with BigQuery and Drive scopes."""
@@ -32,6 +38,9 @@ def get_bq_client():
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
         return None
+
+# CRITICAL: Initialize the global client variable here
+client = get_bq_client()
 
 def rebuild_master_table(mode="preserve"):
     """
@@ -324,6 +333,7 @@ elif service == "📉 Node Diagnostics":
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
+# --- 4D. DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     
@@ -344,7 +354,8 @@ elif service == "📤 Data Intake Lab":
                 df_raw = df_raw.dropna(subset=['timestamp'])
 
                 df_up = pd.DataFrame()
-                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                # Determine destination table
+                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord" if "Lord" in source else f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
 
                 # 2. Process based on source
                 if "Master Log" in source:
@@ -355,12 +366,11 @@ elif service == "📤 Data Intake Lab":
                         df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
                 elif "Lord" in source:
                     df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
-                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
                 else: 
                     df_up = df_raw.rename(columns={'Temperature': 'temperature', 'Sensor': 'sensor_id'})
 
                 if not df_up.empty:
-                    # Standardize IDs (hyphens instead of colons)
+                    # Standardize IDs
                     df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
                     st.write(f"Previewing {len(df_up)} points:")
                     st.dataframe(df_up.head())
@@ -378,7 +388,7 @@ elif service == "📤 Data Intake Lab":
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
-        st.info("Pulls data for both HT.w and TC.x sensors in 12-hour chunks to prevent timeouts.")
+        st.info("Pulls data for both HT.w and TC.x sensors in 12-hour chunks.")
         
         c1, c2 = st.columns(2)
         start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=2))
@@ -395,39 +405,36 @@ elif service == "📤 Data Intake Lab":
             if not df_api.empty:
                 status_box.info(f"Step 2/2: Mapping {len(df_api)} points to Master Table...")
                 try:
-                    # Clean the ID format before upload
                     df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
                     
                     # 1. Upload to Raw table
                     raw_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                     client.load_table_from_dataframe(df_api, raw_table).result()
                     
-                    # 2. Rebuild Master using the modular function
+                    # 2. Rebuild Master
                     if rebuild_master_table(mode="preserve"):
-                        status_box.success("✅ Master Table Synced! All sensors mapped and deduplicated.")
+                        status_box.success("✅ Master Table Synced! Data deduplicated and mapped.")
                         st.balloons()
                 except Exception as bq_e:
                     st.error(f"BigQuery Sync Failed: {bq_e}")
             else:
-                status_box.warning("No data found for this range. Check sensor connectivity.")
+                status_box.warning("No data found for this range.")
 
     with tab3:
         st.subheader("🛠️ Database Maintenance")
-        st.write("Use these tools to manage historical data and table health.")
-        
         col_m1, col_m2 = st.columns(2)
         
         with col_m1:
             if st.button("🚩 MARK ALL EXISTING DATA AS HISTORIC"):
                 with st.spinner("Approving all current records..."):
                     if rebuild_master_table(mode="approve_all"):
-                        st.success("✅ All records in the system are now marked as 'Approved'.")
+                        st.success("✅ All records are now marked as 'Approved'.")
         
         with col_m2:
             if st.button("🔄 FORCE CLEAN REBUILD"):
-                with st.spinner("Running deduplication and mapping..."):
+                with st.spinner("Running global deduplication..."):
                     if rebuild_master_table(mode="preserve"):
-                        st.success("✅ Master table refreshed from all raw sources.")
+                        st.success("✅ Master table refreshed.")
                 
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
