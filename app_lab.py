@@ -18,26 +18,34 @@ PROJECT_ID = "sensorpush-export"
 
 @st.cache_resource
 def get_bq_client():
-    """Handles authentication to Google BigQuery."""
+    """Handles authentication with added Google Drive scopes for linked sheets."""
     try:
+        # Define the necessary scopes for BigQuery AND Google Drive
+        SCOPES = [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(info)
+            # Add scopes to the credentials
+            credentials = service_account.Credentials.from_service_account_info(
+                info, scopes=SCOPES
+            )
             return bigquery.Client(credentials=credentials, project=info["project_id"])
+        
+        # Fallback for local development
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
         return None
-
 client = get_bq_client()
 
 
 def rebuild_master_table():
     """
-    The 'Brain' of the database:
-    1. Combines Raw Lord and Raw SensorPush data.
-    2. Deduplicates to one unique point per hour per sensor.
-    3. Joins with master_metadata using NodeNum to restore project/location/depth labels.
+    Combines raw data and metadata into the final dashboard table.
+    Requires BigQuery + Drive permissions.
     """
     scrub_sql = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
@@ -49,7 +57,6 @@ def rebuild_master_table():
             FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
         ),
         HourlyDedupped AS (
-            -- Keeps only the most recent record for each unique hour/sensor combination
             SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
             FROM RawUnified
         )
@@ -57,7 +64,7 @@ def rebuild_master_table():
             h.ts as timestamp, 
             h.temp as temperature, 
             m.NodeNum as sensor_id, 
-            m.NodeNum as sensor_name, -- Using NodeNum as name per user requirement
+            m.NodeNum as sensor_name, 
             m.Project as project, 
             m.Location as location, 
             m.Depth as depth, 
@@ -67,8 +74,9 @@ def rebuild_master_table():
         WHERE h.rank = 1
     """
     try:
+        # This will now work once the 'drive' scope is added to the client
         query_job = client.query(scrub_sql)
-        query_job.result() # Wait for the table to be recreated
+        query_job.result() 
         return True
     except Exception as e:
         st.error(f"Master Build Failed: {e}")
