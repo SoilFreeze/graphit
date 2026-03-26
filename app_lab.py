@@ -122,9 +122,10 @@ service = st.sidebar.selectbox("Select Service", [
 # --- 4. SERVICE ROUTING ---
 # --- 4. SERVICE ROUTING ---
 # --- 4. SERVICE ROUTING ---
+# --- 4. SERVICE ROUTING ---
 
-# Names updated to match your BigQuery Console
-DATASET_ID = "final_databoard_master"
+# Updated to match your specific BigQuery Hierarchy
+DATASET_ID = "sensor_data" 
 
 # 4A. EXECUTIVE SUMMARY
 if service == "🏠 Executive Summary":
@@ -177,7 +178,7 @@ elif service == "📊 Client Portal":
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
         meta_df = client.query(meta_q).to_dataframe()
         if meta_df.empty:
-            st.warning("No approved data found in the master table.")
+            st.warning("No approved data found. Check Admin Tools to approve data.")
         else:
             c1, c2, c3 = st.columns([1, 1, 1])
             with c1:
@@ -202,56 +203,21 @@ elif service == "📊 Client Portal":
                 snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
                 snapshot = snapshot[snapshot['timestamp'] >= start_view]
                 if not snapshot.empty:
-                    # Using raw string r'' to prevent indentation/syntax errors
+                    # Raw string r'' fixed
                     snapshot['depth_num'] = snapshot['depth'].str.extract(r'(\d+)').astype(float)
                     snapshot['Date'] = snapshot['timestamp'].dt.strftime('%m/%d')
                     fig_profile = px.line(snapshot.sort_values('depth_num'), x='temperature', y='depth_num', color='Date', markers=True, range_x=[-20, 80])
                     for val, label in active_refs:
                         fig_profile.add_vline(x=val, line_dash="dash", line_color="blue", annotation_text=label)
                     fig_profile.update_layout(title={'text': "Temperature by Depth", 'x': 0, 'xanchor': 'left'}, plot_bgcolor='white', height=600)
-                    fig_profile.update_yaxes(autorange="reversed", mirror=True, showline=True, linecolor='black', linewidth=2, gridcolor='LightGray')
+                    fig_profile.update_yaxes(autorange="reversed", mirror=True, showline=True, linecolor='black', linewidth=2)
                     st.plotly_chart(fig_profile, width='stretch')
 
             st.subheader("📈 Historical Trends")
             fig_timeline = build_standard_sf_graph(df_c, f"{weeks_to_view}-Week Trend: {sel_loc}", start_view, end_view, active_refs)
             st.plotly_chart(fig_timeline, width='stretch')
-            
-            st.subheader(f"⏱️ Performance Window: {max_approved_ts.strftime('%m/%d %H:%M')}")
-            last_approved_24h = df_c[df_c['timestamp'] >= (max_approved_ts - timedelta(hours=24))].copy()
-            if not last_approved_24h.empty:
-                last_approved_24h['depth_num'] = last_approved_24h['depth'].str.extract(r'(\d+)').astype(float)
-                stats = last_approved_24h.groupby(['depth', 'depth_num']).agg(High=('temperature', 'max'), Low=('temperature', 'min'), Current=('temperature', 'last'), Last_Update=('timestamp', 'last')).reset_index()
-                stats['Difference'] = stats['High'] - stats['Low']
-                stats = stats.sort_values('depth_num')
-                st.dataframe(stats[['depth', 'Current', 'High', 'Low', 'Difference', 'Last_Update']].style.format({'Current': '{:.1f}', 'High': '{:.1f}', 'Low': '{:.1f}', 'Difference': '{:.1f}', 'Last_Update': '{:%m/%d %H:%M}'}), width='stretch', hide_index=True)
     except Exception as e:
         st.error(f"Portal Error: {e}")
-
-# 4C. NODE DIAGNOSTICS
-elif service == "📉 Node Diagnostics":
-    st.header("📉 High-Resolution Node Diagnostics")
-    try:
-        meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
-        meta_df = client.query(meta_q).to_dataframe()
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
-        with c2: 
-            locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
-            sel_loc = st.selectbox("Pipe / Bank", locs)
-        with c3:
-            weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
-        
-        days_back = weeks * 7
-        data_q = f"SELECT timestamp, temperature, depth, sensor_name FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY) ORDER BY timestamp ASC"
-        df_g = client.query(data_q).to_dataframe()
-        if not df_g.empty:
-            df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-            end_v = datetime.now(pytz.UTC)
-            start_v = end_v - timedelta(days=days_back)
-            st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v, active_refs), width='stretch')
-    except Exception as e:
-        st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE
 elif service == "📤 Data Intake Lab":
@@ -310,7 +276,7 @@ elif service == "📤 Data Intake Lab":
                 accounts, all_api_recs = st.secrets["sensorpush_accounts"], []
                 for acc_id, creds in accounts.items():
                     try:
-                        with st.spinner(f"Processing {acc_id}..."):
+                        with st.spinner(f"Auth {acc_id}..."):
                             auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json=dict(creds))
                             if auth_res.status_code == 200:
                                 auth_code = auth_res.json().get("authorization")
@@ -361,7 +327,7 @@ elif service == "🛠️ Admin Tools":
         try:
             test_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata` LIMIT 5"
             test_df = client.query(test_q).to_dataframe()
-            st.success("✅ BigQuery can see the Metadata Google Sheet!")
+            st.success(f"✅ BigQuery can see the Metadata Google Sheet in dataset '{DATASET_ID}'!")
             st.dataframe(test_df)
         except Exception as e:
             st.error(f"❌ Diagnostic failed: {e}")
