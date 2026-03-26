@@ -31,6 +31,49 @@ def get_bq_client():
 
 client = get_bq_client()
 
+
+def rebuild_master_table():
+    """
+    The 'Brain' of the database:
+    1. Combines Raw Lord and Raw SensorPush data.
+    2. Deduplicates to one unique point per hour per sensor.
+    3. Joins with master_metadata using NodeNum to restore project/location/depth labels.
+    """
+    scrub_sql = f"""
+        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+        WITH RawUnified AS (
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+            UNION ALL 
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+        ),
+        HourlyDedupped AS (
+            -- Keeps only the most recent record for each unique hour/sensor combination
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
+            FROM RawUnified
+        )
+        SELECT 
+            h.ts as timestamp, 
+            h.temp as temperature, 
+            m.NodeNum as sensor_id, 
+            m.NodeNum as sensor_name, -- Using NodeNum as name per user requirement
+            m.Project as project, 
+            m.Location as location, 
+            m.Depth as depth, 
+            FALSE as is_approved
+        FROM HourlyDedupped h 
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
+        WHERE h.rank = 1
+    """
+    try:
+        query_job = client.query(scrub_sql)
+        query_job.result() # Wait for the table to be recreated
+        return True
+    except Exception as e:
+        st.error(f"Master Build Failed: {e}")
+        return False
+        
 # --- 2. ENGINE: FAST API FETCH ---
 
 def fetch_sensorpush_data(start_dt, end_dt):
@@ -275,73 +318,19 @@ elif service == "📉 Node Diagnostics":
 # --- 4D. DATA INTAKE LAB (FIXED INDENTATION & SCHEMA) ---
 # --- 4D. DATA INTAKE LAB (FULLY CORRECTED) ---
 # --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB (FIXED FOR NODENUM) ---
+# --- 4D. DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
-    tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
+    tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Database Maintenance"])
 
     with tab1:
         st.subheader("Manual CSV Ingestion")
-        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)", "Logger (Master Log)"], horizontal=True)
-        u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
-        
-        if u_file is not None:
-            try:
-                df_raw = pd.read_csv(u_file, low_memory=False)
-                ts_col = next((c for c in df_raw.columns if c.lower() == 'timestamp'), df_raw.columns[0])
-                df_raw['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
-                df_raw = df_raw.dropna(subset=['timestamp'])
-
-                df_up = pd.DataFrame()
-                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-
-                if "Master Log" in source:
-                    if df_raw.shape[1] > 2 and any(isinstance(x, str) for x in df_raw.iloc[:, 1]):
-                        df_up = df_raw.iloc[:, [df_raw.columns.get_loc('timestamp'), 0, 1]].copy()
-                        df_up.columns = ['timestamp', 'temperature', 'sensor_id']
-                    else:
-                        df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
-                elif "Lord" in source:
-                    df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
-                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                else: 
-                    df_up = df_raw.rename(columns={'Temperature': 'temperature', 'Sensor': 'sensor_id'})
-
-                if not df_up.empty:
-                    df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-')
-                    
-                    if st.button("🚀 PUSH & CLEANSE"):
-                        with st.spinner("Syncing to Master Table..."):
-                            client.load_table_from_dataframe(df_up, table_ref).result()
-                            
-                            # SQL FIX: Removed SensorName, using NodeNum exclusively
-                            scrub_sql = f"""
-                                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                                WITH RawUnified AS (
-                                    SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
-                                    UNION ALL 
-                                    SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
-                                ),
-                                HourlyDedupped AS (
-                                    SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
-                                )
-                                SELECT 
-                                    h.ts as timestamp, 
-                                    h.temp as temperature, 
-                                    m.NodeNum as sensor_id, 
-                                    m.NodeNum as sensor_name, -- Using NodeNum since SensorName is missing
-                                    m.Project as project, 
-                                    m.Location as location, 
-                                    m.Depth as depth, 
-                                    FALSE as is_approved
-                                FROM HourlyDedupped h 
-                                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
-                                WHERE h.rank = 1
-                            """
-                            client.query(scrub_sql).result()
-                            st.success("✅ Master Table updated successfully!")
-            except Exception as e: 
-                st.error(f"Upload Error: {e}")
+        # ... (Your existing file uploader logic) ...
+        if st.button("🚀 UPLOAD & REBUILD"):
+            with st.spinner("Uploading raw data..."):
+                client.load_table_from_dataframe(df_up, table_ref).result()
+                if rebuild_master_table():
+                    st.success("✅ Raw data uploaded and Master Table rebuilt!")
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
@@ -350,50 +339,33 @@ elif service == "📤 Data Intake Lab":
         end_date = c2.date_input("End Date", datetime.now())
         
         if st.button("🛰️ FETCH & SYNC MASTER"):
-            status_box = st.empty()
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            status_box.info("Step 1/2: Fetching data...")
-            df_api = fetch_sensorpush_data(start_dt, end_dt) 
-            
-            if not df_api.empty:
-                status_box.info(f"Step 2/2: Mapping to Master File...")
-                try:
+            with st.spinner("Fetching from SensorPush..."):
+                df_api = fetch_sensorpush_data(start_dt, end_dt)
+                
+                if not df_api.empty:
+                    # Clean the ID format before upload
                     df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-')
+                    
+                    # 1. Upload to Raw
                     client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
                     
-                    # SQL FIX: Removed SensorName, using NodeNum exclusively
-                    scrub_sql = f"""
-                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                        WITH RawUnified AS (
-                            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
-                            UNION ALL 
-                            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
-                        ),
-                        HourlyDedupped AS (
-                            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
-                        )
-                        SELECT 
-                            h.ts as timestamp, 
-                            h.temp as temperature, 
-                            m.NodeNum as sensor_id, 
-                            m.NodeNum as sensor_name, 
-                            m.Project as project, 
-                            m.Location as location, 
-                            m.Depth as depth, 
-                            FALSE as is_approved
-                        FROM HourlyDedupped h 
-                        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
-                        WHERE h.rank = 1
-                    """
-                    client.query(scrub_sql).result()
-                    status_box.success("✅ Master File synchronized and deduplicated!")
-                    st.balloons()
-                except Exception as bq_e:
-                    st.error(f"Sync Failed: {bq_e}")
-            else:
-                status_box.warning("No data found to sync.")
+                    # 2. Rebuild Master using our new function
+                    if rebuild_master_table():
+                        st.success(f"✅ Synced {len(df_api)} points and updated Master Table!")
+                        st.balloons()
+                else:
+                    st.warning("No data found for this range. Ensure your sensors are active.")
+
+    with tab3:
+        st.subheader("Manual Master Rebuild")
+        st.write("If you manually edited BigQuery raw tables or metadata, use this to force a refresh.")
+        if st.button("🔄 FORCE MASTER REBUILD"):
+            with st.spinner("Running global deduplication and mapping..."):
+                if rebuild_master_table():
+                    st.success("✅ Master Table has been fully refreshed from all raw sources.")
 
 # --- 4E. ADMIN TOOLS ---
 elif service == "🛠️ Admin Tools":
