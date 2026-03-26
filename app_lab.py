@@ -52,42 +52,32 @@ client = get_bq_client()
 # --- REBUILD TABLE --- #
 #########################
 def rebuild_master_table(mode="preserve"):
-    """
-    Rebuilds the master table by joining raw data with metadata.
-    Prioritizes NodeNum for the mapping.
-    """
     status_logic = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
     
-    # SQL logic to join raw sensor data with your Google Sheet metadata
     scrub_sql = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
         WITH RawUnified AS (
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
             UNION ALL 
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
         ),
         HourlyDedupped AS (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
-            FROM RawUnified
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
         )
         SELECT 
             h.ts as timestamp, 
             h.temp as temperature, 
-            m.NodeNum as sensor_id,      -- Use NodeNum (SP-0001) as the ID
-            m.NodeNum as sensor_name,    -- Use NodeNum as the display name
+            m.NodeNum as sensor_id,
+            m.NodeNum as sensor_name,
             m.Project as project, 
             m.Location as location, 
             m.Depth as depth, 
             {status_logic} as is_approved
         FROM HourlyDedupped h 
-        -- JOIN LOGIC: Matches raw 'node' to either NodeNum or PhysicalID in your sheet
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
-            ON TRIM(CAST(h.node AS STRING)) = TRIM(CAST(m.NodeNum AS STRING))
-            OR TRIM(CAST(h.node AS STRING)) = TRIM(REPLACE(CAST(m.PhysicalID AS STRING), ':', '-'))
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` ex 
-            ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id
+            -- FUZZY MATCH LOGIC: Match exact OR match first 12 characters to bypass rounding issues
+            ON (TRIM(h.node) = TRIM(REPLACE(CAST(m.PhysicalID AS STRING), ':', '-')))
+            OR (SUBSTR(TRIM(h.node), 1, 12) = SUBSTR(TRIM(REPLACE(CAST(m.PhysicalID AS STRING), ':', '-')), 1, 12))
         WHERE h.rank = 1
     """
     try:
@@ -417,143 +407,137 @@ elif service == "📉 Node Diagnostics":
 ###############################
 # --- DATA INTAKE LAB --- #
 ###############################
-# --- 4D. DATA INTAKE LAB ---
+# --- 4D. DATA INTAKE LAB (RECOVERY & AUDIT) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     
-    # We create three tabs. The button you are looking for is in the third one ("🛠️ Maintenance")
+    # 1. Create Tabs
     tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
 
     with tab1:
         st.subheader("Manual CSV Ingestion")
-        st.info("Upload SensorPush CSV (Handles Metadata Headers & Narrow/Wide formats).")
+        st.info("Handles SensorPush CSVs. IDs are forced to String format to prevent rounding.")
         u_file = st.file_uploader("Upload SensorPush CSV", type=['csv'], key="manual_upload")
         
         if u_file is not None:
             try:
                 import io
+                # Read raw bytes and find the header row
                 raw_bytes = u_file.getvalue().decode('utf-8').splitlines()
                 header_idx = -1
                 for i, line in enumerate(raw_bytes):
-                    if "SensorId" in line or "Observed" in line or "Time" in line:
+                    if "SensorId" in line or "Observed" in line:
                         header_idx = i
                         break
                 
                 if header_idx != -1:
-                    df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])), low_memory=False)
+                    # CRITICAL: dtype=str prevents the ID rounding you saw in BigQuery
+                    df_raw = pd.read_csv(
+                        io.StringIO("\n".join(raw_bytes[header_idx:])), 
+                        low_memory=False, 
+                        dtype=str 
+                    )
                     df_raw = df_raw.dropna(how='all')
 
+                    # Process Narrow Format (SensorId/Observed columns)
                     if "SensorId" in df_raw.columns:
-                        # Narrow Format Logic
                         ts_col = "Observed" if "Observed" in df_raw.columns else df_raw.columns[1]
-                        temp_cols = [c for c in df_raw.columns if "Temperature" in c or "Thermocouple" in c]
-                        df_raw['final_temp'] = df_raw[temp_cols].bfill(axis=1).iloc[:, 0]
-                        df_up = df_raw[['SensorId', ts_col, 'final_temp']].copy()
-                        df_up.columns = ['sensor_id', 'timestamp', 'temperature']
-                    else:
-                        # Wide Format Logic
-                        ts_col = df_raw.columns[0]
-                        df_up = df_raw.melt(id_vars=[ts_col], var_name='sensor_id', value_name='temperature')
-                        df_up = df_up.rename(columns={ts_col: 'timestamp'})
+                        
+                        df_up = pd.DataFrame()
+                        df_up['sensor_id'] = df_raw['SensorId'].astype(str).str.strip()
+                        df_up['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
+                        
+                        # Handle Temperature or Thermocouple columns
+                        t_cols = [c for c in df_raw.columns if "Temperature" in c or "Thermocouple" in c]
+                        df_up['temperature'] = pd.to_numeric(df_raw[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
+                        
+                        df_up = df_up.dropna(subset=['timestamp', 'temperature'])
 
-                    df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce')
-                    df_up = df_up.dropna(subset=['timestamp', 'temperature'])
-                    df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
+                        st.write(f"✅ Parsed {len(df_up)} readings from {df_up['sensor_id'].nunique()} sensors.")
+                        st.dataframe(df_up.head())
 
-                    st.write(f"Processed {len(df_up)} readings.")
-                    st.dataframe(df_up.head())
-
-                    if st.button("🚀 PUSH & REBUILD"):
-                        with st.spinner("Uploading and Mapping..."):
-                            client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                            if rebuild_master_table(mode="preserve"):
-                                st.success("✅ Success: Data ingested and Master Table updated!")
+                        if st.button("🚀 UPLOAD TO RAW & REBUILD"):
+                            with st.spinner("Pushing to BigQuery..."):
+                                client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                                # Trigger rebuild using NodeNum matching
+                                if rebuild_master_table(mode="preserve"):
+                                    st.success("✅ Data integrated. Check Diagnostics for new graphs.")
+                                    st.balloons()
                 else:
-                    st.error("Could not find a valid data header in this file.")
+                    st.error("Header row not found. Ensure 'SensorId' is present in your CSV.")
             except Exception as e: 
                 st.error(f"Upload Error: {e}")
 
     with tab2:
-        st.subheader("📡 API Data Recovery")
+        st.subheader("📡 Cloud-to-Cloud API Sync")
         c1, c2 = st.columns(2)
         start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=7))
         end_date = c2.date_input("End Date", datetime.now())
         
-        if st.button("🛰️ FETCH & SYNC MASTER"):
+        if st.button("🛰️ FETCH & FULL SYNC"):
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
+            
             with st.spinner("Fetching from SensorPush API..."):
                 df_api = fetch_sensorpush_data(start_dt, end_dt)
                 if not df_api.empty:
-                    try:
-                        df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
-                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                        client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=job_config).result()
-                        if rebuild_master_table(mode="preserve"):
-                            st.success(f"✅ API Sync Complete: {len(df_api)} points added.")
-                    except Exception as bq_e:
-                        st.error(f"Sync Failed: {bq_e}")
+                    df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
+                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                    if rebuild_master_table(mode="preserve"):
+                        st.success(f"✅ API Sync Complete: {len(df_api)} points integrated.")
                 else:
                     st.warning("No data found for this range.")
 
     with tab3:
-        st.subheader("🛠️ Maintenance & Data Audit")
+        st.subheader("🛠️ Database Maintenance")
         
-        # 1. THE DAILY AUDIT
-        audit_sql = f"""
-            WITH MasterCounts AS (
-                SELECT DATE(timestamp) as audit_date, project, COUNT(*) as master_points
-                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-                GROUP BY audit_date, project
-            ),
-            RawPush AS (
-                SELECT DATE(r.timestamp) as audit_date, m.Project, COUNT(*) as raw_points
-                FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r
-                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON r.sensor_id = REPLACE(CAST(m.PhysicalID AS STRING), ':', '-')
-                WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-                GROUP BY audit_date, m.Project
-            ),
-            CombinedRaw AS (
-                SELECT audit_date, Project, SUM(raw_points) as raw_total 
-                FROM RawPush GROUP BY audit_date, Project
-            )
-            SELECT 
-                COALESCE(m.audit_date, r.audit_date) as Date,
-                COALESCE(m.project, r.Project) as Project,
-                COALESCE(r.raw_total, 0) as Raw_Points,
-                COALESCE(m.master_points, 0) as Master_Points
-            FROM MasterCounts m
-            FULL OUTER JOIN CombinedRaw r ON m.project = r.Project AND m.audit_date = r.audit_date
-            ORDER BY Date DESC, Project ASC
-        """
-        
-        if st.button("🔍 RUN DAILY AUDIT"):
+        # 1. Diagnostic Audit
+        if st.button("🔍 RUN DAILY DATA AUDIT"):
+            audit_sql = f"""
+                WITH MasterCounts AS (
+                    SELECT DATE(timestamp) as audit_date, project, COUNT(*) as master_points
+                    FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+                    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                    GROUP BY audit_date, project
+                ),
+                RawPush AS (
+                    SELECT DATE(r.timestamp) as audit_date, m.Project, COUNT(*) as raw_points
+                    FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r
+                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+                        ON (SUBSTR(TRIM(r.sensor_id), 1, 12) = SUBSTR(TRIM(CAST(m.PhysicalID AS STRING)), 1, 12))
+                        OR (TRIM(r.sensor_id) = TRIM(CAST(m.NodeNum AS STRING)))
+                    WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                    GROUP BY audit_date, m.Project
+                )
+                SELECT COALESCE(m.audit_date, r.audit_date) as Date, COALESCE(m.project, r.Project) as Project, 
+                       COALESCE(r.raw_points, 0) as Raw_Points, COALESCE(m.master_points, 0) as Master_Points
+                FROM MasterCounts m FULL OUTER JOIN RawPush r ON m.project = r.Project AND m.audit_date = r.audit_date
+                ORDER BY Date DESC
+            """
             try:
                 df_audit = client.query(audit_sql).to_dataframe()
                 st.dataframe(df_audit, use_container_width=True, hide_index=True)
             except Exception as e:
-                st.error(f"Audit failed: {e}")
+                st.error(f"Audit Error: {e}")
 
         st.divider()
         
-        # 2. THE REBUILD CONTROLS
+        # 2. Rebuild Controls
         st.subheader("Master Table Controls")
-        st.write("Use these to fix mapping issues or update approval states.")
         col_m1, col_m2 = st.columns(2)
         
         with col_m1:
-            if st.button("🚩 MARK ALL AS HISTORIC"):
-                with st.spinner("Approving all existing records..."):
-                    if rebuild_master_table(mode="approve_all"):
-                        st.success("✅ All data marked as Approved.")
-        
-        with col_m2:
-            # THIS IS THE MISSING BUTTON
             if st.button("🔄 FORCE MASTER REBUILD"):
                 with st.spinner("Re-mapping Physical IDs and cleaning data..."):
                     if rebuild_master_table(mode="preserve"):
-                        st.success("✅ Master Table Refreshed! Check your graphs now.")
+                        st.success("✅ Master Table Refreshed! Dropdowns and Graphs should now appear.")
+                        st.balloons()
+        
+        with col_m2:
+            if st.button("🚩 MARK ALL AS HISTORIC"):
+                with st.spinner("Approving all data..."):
+                    if rebuild_master_table(mode="approve_all"):
+                        st.success("✅ All data marked as Approved.")
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
