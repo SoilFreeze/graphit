@@ -30,6 +30,62 @@ def get_bq_client():
 
 client = get_bq_client()
 
+def fetch_sensorpush_data(hours_back):
+    """Fetches data from SensorPush API based on hours back."""
+    # Using the credentials from your catch-up script
+    ACCOUNTS = [
+        {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
+        {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
+    ]
+    BASE_URL = "https://api.sensorpush.com/api/v1"
+    all_records = []
+    
+    now_utc = datetime.now(pytz.UTC)
+    start_time = (now_utc - timedelta(hours=hours_back)).replace(minute=0, second=0, microsecond=0)
+    
+    # Create hourly slots
+    target_times = [start_time + timedelta(hours=i) for i in range(hours_back + 1)]
+
+    for acc in ACCOUNTS:
+        # Step 1: Auth
+        auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=acc)
+        if auth_resp.status_code != 200: continue
+        
+        token_resp = requests.post(f"{BASE_URL}/oauth/accesstoken", 
+                                   json={"authorization": auth_resp.json().get('authorization')})
+        token = token_resp.json().get('accesstoken')
+        headers = {"Authorization": token}
+
+        # Step 2: Get Sensors (to filter HT.w)
+        dev_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={})
+        valid_ids = []
+        if dev_resp.status_code == 200:
+            sensors_data = dev_resp.json()
+            # Normalize to list if dict
+            sensor_list = sensors_data.values() if isinstance(sensors_data, dict) else sensors_data
+            valid_ids = [str(s.get('id')) for s in sensor_list if str(s.get('type')) == 'HT.w']
+
+        if not valid_ids: continue
+
+        # Step 3: Fetch Samples
+        for target in target_times:
+            api_time = target.strftime('%Y-%m-%dT%H:%M:%S+0000')
+            payload = {"limit": 50, "startTime": api_time, "sensors": valid_ids}
+            r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload)
+            
+            if r.status_code == 200:
+                samples_dict = r.json().get('sensors', {})
+                for s_id, samples in samples_dict.items():
+                    if samples:
+                        s = samples[0]
+                        temp = s.get('temp_f') or s.get('temperature') or ((s.get('temp_c', 0) * 1.8) + 32)
+                        all_records.append({
+                            'timestamp': target,
+                            'sensor_id': s_id.replace(':', '-'),
+                            'temperature': round(float(temp), 2)
+                        })
+    return pd.DataFrame(all_records)
+
 # --- 2. GRAPH ENGINE ---
 # --- 2. STANDARDIZED GRAPH ENGINE (RESTORED) ---
 # --- 2. STANDARDIZED GRAPH ENGINE ---
@@ -316,6 +372,42 @@ elif service == "📤 Data Intake Lab":
                             st.balloons()
             except Exception as e:
                 st.error(f"File Error: {e}")
+
+with tab2:
+        st.subheader("Cloud-to-Cloud Recovery")
+        st.write("Pull missing data directly from SensorPush API into BigQuery.")
+        
+        recovery_hours = st.number_input("Hours of data to recover", min_value=1, max_value=168, value=24)
+        
+        if st.button("📡 START API RECOVERY"):
+            with st.spinner(f"Contacting SensorPush for the last {recovery_hours} hours..."):
+                df_recovered = fetch_sensorpush_data(recovery_hours)
+                
+                if not df_recovered.empty:
+                    st.write(f"Found {len(df_recovered)} data points.")
+                    st.dataframe(df_recovered.head())
+                    
+                    # Push to BigQuery
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    job = client.load_table_from_dataframe(df_recovered, table_ref)
+                    job.result()
+                    
+                    # Trigger the Master Scrub (Same SQL logic you already have)
+                    scrub_sql = f"""
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                        WITH Unified AS (
+                            SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
+                            UNION ALL 
+                            SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                        ) 
+                        SELECT u.*, u.node AS sensor_id, m.SensorName as sensor_name, m.Project as project, m.Location as location, m.Depth as depth 
+                        FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
+                    """
+                    client.query(scrub_sql).result()
+                    st.success("✅ API Data Recovered and Database Synced!")
+                    st.balloons()
+                else:
+                    st.warning("No data found for that time range.")
 
 # 4E. ADMIN TOOLS
 # --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
