@@ -10,6 +10,22 @@ import requests
 import json
 import traceback
 
+# --- 1. CREDENTIALS & INITIALIZATION ---
+from google.oauth2 import service_account
+
+if "gcp_service_account" in st.secrets:
+    info = st.secrets["gcp_service_account"]
+    # We explicitly define scopes here to bridge BigQuery and Google Drive
+    scopes = [
+        "https://www.googleapis.com/auth/bigquery",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/spreadsheets",
+    ]
+    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    client = bigquery.Client(credentials=creds, project=info["project_id"])
+else:
+    st.error("GCP Credentials not found in Streamlit Secrets.")
+
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
