@@ -487,8 +487,6 @@ elif service == "📤 Data Intake Lab":
                 if rebuild_master_table(mode="preserve"):
                     st.success("✅ Master Table Refreshed.")
 
-# --- 4E. ADMIN TOOLS (Starting flush with the left margin) ---
-elif service == "🛠️ Admin Tools":
                 
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
