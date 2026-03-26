@@ -172,8 +172,8 @@ elif service == "📊 Client Portal":
                 snapshot = snapshot[snapshot['timestamp'] >= start_view]
                 if not snapshot.empty:
                     # Update these two lines in Section 4B:
-                        snapshot['depth_num'] = snapshot['depth'].str.extract(r'(\d+)').astype(float)
-                        last_approved_24h['depth_num'] = last_approved_24h['depth'].str.extract(r'(\d+)').astype(float)
+                    snapshot['depth_num'] = snapshot['depth'].str.extract(r'(\d+)').astype(float)
+                    last_approved_24h['depth_num'] = last_approved_24h['depth'].str.extract(r'(\d+)').astype(float)
                     fig_profile = px.line(snapshot.sort_values('depth_num'), x='temperature', y='depth_num', color='Date', markers=True, range_x=[-20, 80])
                     for val, label in active_refs:
                         fig_profile.add_vline(x=val, line_dash="dash", line_color="blue", annotation_text=label)
