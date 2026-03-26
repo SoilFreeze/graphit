@@ -52,26 +52,24 @@ client = get_bq_client()
 # --- REBUILD TABLE --- #
 #########################
 def rebuild_master_table(mode="preserve"):
+    # Logic to keep historical approvals
     status_logic = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
     
     scrub_sql = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
         WITH RawUnified AS (
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
             UNION ALL 
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
         ),
         HourlyDedupped AS (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
-            FROM RawUnified
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
         )
         SELECT 
             h.ts as timestamp, 
             h.temp as temperature, 
-            m.NodeNum as sensor_id,      -- Keep the unique ID here
-            COALESCE(m.SensorName, m.NodeNum) as sensor_name, -- This is where SP/TP comes from
+            m.NodeNum as sensor_id,      -- The long numerical ID
+            COALESCE(m.SensorName, m.NodeNum) as sensor_name, -- This ensures 'TP33' etc. exists
             m.Project as project, 
             m.Location as location, 
             m.Depth as depth, 
