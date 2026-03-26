@@ -356,8 +356,10 @@ elif service == "📊 Client Portal":
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
-        meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
+        # 1. Fetch Projects/Locations for the dropdowns
+        meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`"
         meta_df = client.query(meta_q).to_dataframe()
+        
         c1, c2, c3 = st.columns(3)
         with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
         with c2: 
@@ -365,14 +367,15 @@ elif service == "📉 Node Diagnostics":
             sel_loc = st.selectbox("Pipe / Bank", locs)
         with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 1)
 
-        # Date Math: Find the most recent Monday at Midnight
+        # 2. Setup the "Full Week" Time Window (Monday Midnight)
         now = datetime.now(pytz.UTC)
-        monday_midnight = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        start_view = monday_midnight - timedelta(weeks=weeks-1)
-        end_view = monday_midnight + timedelta(days=7) # Show the full current week
+        monday_this_week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_view = monday_this_week - timedelta(weeks=weeks-1)
+        end_view = monday_this_week + timedelta(days=7) # Ensures the full current week shows
 
+        # 3. Query with sensor_name included
         data_q = f"""
-            SELECT timestamp, temperature, depth, sensor_id 
+            SELECT timestamp, temperature, depth, sensor_name 
             FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
             WHERE project = '{sel_proj}' AND location = '{sel_loc}' 
             AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
@@ -385,9 +388,10 @@ elif service == "📉 Node Diagnostics":
             st.plotly_chart(build_standard_sf_graph(
                 df_g, f"Trend: {sel_proj} | {sel_loc}", 
                 start_view, end_view, active_refs
-            ), width='stretch')
+            ), use_container_width=True)
         else:
-            st.warning("No data found for this period.")
+            st.warning(f"No data found for {sel_loc} starting from {start_view.date()}.")
+            
     except Exception as e: 
         st.error(f"Diagnostics Error: {e}")
 
