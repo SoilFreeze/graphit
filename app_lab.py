@@ -240,87 +240,88 @@ elif service == "📉 Node Diagnostics":
 # 4D. DATA INTAKE
 # --- 4D. DATA INTAKE (HARDENED FOR MIXED FORMATS) ---
 # --- 4D. DATA INTAKE (HARDENED FOR MULTIPLE FORMATS) ---
+# 4D. DATA INTAKE
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
-
     with tab1:
         st.subheader("Manual CSV Ingestion")
         source = st.radio("Device Type", ["Master Log", "Lord (SensorConnect)", "SensorPush Export"], horizontal=True)
         u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
-        
         if u_file is not None:
             try:
-                df_up = pd.DataFrame()
-                table_ref = ""
-
-                # --- TYPE 1: MASTER LOG (Narrow format) ---
+                df_up, table_ref = pd.DataFrame(), ""
                 if source == "Master Log":
                     df_up = pd.read_csv(u_file)
                     df_up.columns = [c.lower() for c in df_up.columns]
-                    # Standardize names
                     df_up = df_up.rename(columns={'nodenumber': 'sensor_id'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-
-                # --- TYPE 2: LORD / SENSORCONNECT (Wide format) ---
                 elif source == "Lord (SensorConnect)":
                     content = u_file.getvalue().decode("utf-8").splitlines()
-                    # Find where the data actually starts
                     start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
                     u_file.seek(0)
-                    # Skip metadata header
                     df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
-                    # Melt from wide to narrow
-                    df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
-                    df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
+                    df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value').rename(columns={df_raw.columns[0]: 'timestamp'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-
-                # --- TYPE 3: SENSORPUSH EXPORT (Narrow format with header info) ---
                 elif source == "SensorPush Export":
                     content = u_file.getvalue().decode("utf-8").splitlines()
-                    # Find the real header line
                     start_idx = next((i for i, l in enumerate(content) if "SensorId,Observed" in l), 0)
                     u_file.seek(0)
                     df_raw = pd.read_csv(u_file, skiprows=start_idx)
-                    # Pick only necessary columns
                     temp_col = [c for c in df_raw.columns if "Temperature" in c][0]
                     df_up = df_raw[['SensorId', 'Observed', temp_col]].copy()
                     df_up.columns = ['sensor_id', 'timestamp', 'temperature']
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-
-                # --- FINAL PROCESSING & UPLOAD ---
                 if not df_up.empty:
-                    # Robust Timestamp Parsing (Handles mixed formats)
-                    df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce')
-                    df_up = df_up.dropna(subset=['timestamp'])
-                    
-                    # Standardize Node IDs
+                    df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce').dropna()
                     id_col = 'sensor_id' if 'sensor_id' in df_up.columns else 'nodenumber'
                     df_up[id_col] = df_up[id_col].astype(str).str.replace(':', '-', regex=False)
-
-                    st.write(f"Parsed {len(df_up)} data points. Preview:")
                     st.dataframe(df_up.head(), width='stretch')
-
                     if st.button("🚀 PUSH TO BIGQUERY"):
-                        with st.spinner("Uploading data..."):
-                            client.load_table_from_dataframe(df_up, table_ref).result()
-                            
-                            # Trigger the Master Sync
-                            scrub_sql = f"""
-                                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                                WITH Unified AS (
-                                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                                    UNION ALL 
-                                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                                ) 
-                                SELECT u.*, u.node AS sensor_id, m.SensorName as sensor_name, m.Project as project, m.Location as location, m.Depth as depth 
-                                FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
-                            """
-                            client.query(scrub_sql).result()
-                            st.success("✅ Database Synchronized!")
-                            st.balloons()
-            except Exception as e:
-                st.error(f"Processing Error: {e}")
+                        client.load_table_from_dataframe(df_up, table_ref).result()
+                        scrub_sql = f"""
+                            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                            WITH Unified AS (
+                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
+                                UNION ALL 
+                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                            ) 
+                            SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
+                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
+                        """
+                        client.query(scrub_sql).result()
+                        st.success("✅ Database Synchronized!")
+            except Exception as e: st.error(f"Processing Error: {e}")
+
+    with tab2:
+        st.subheader("SensorPush Multi-Account Recovery")
+        c1, c2 = st.columns(2)
+        with c1:
+            sd = st.date_input("Recovery Start", datetime.now() - timedelta(days=2))
+            st_time = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
+        with c2:
+            ed = st.date_input("Recovery End", datetime.now())
+            et_time = st.time_input("End Time (UTC)", datetime.now().time())
+        if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
+            s_iso = datetime.combine(sd, st_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            e_iso = datetime.combine(ed, et_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            if "sensorpush_accounts" in st.secrets:
+                accounts, all_api_recs = st.secrets["sensorpush_accounts"], []
+                for acc_id, creds in accounts.items():
+                    try:
+                        auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json=dict(creds), headers={"accept": "application/json"})
+                        if auth_res.status_code == 200:
+                            token = auth_res.json().get("accesstoken")
+                            h = {"accept": "application/json", "Authorization": token, "Content-Type": "application/json"}
+                            p = {"startTime": s_iso, "endTime": e_iso, "measures": ["temperature"]}
+                            sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=h, json=p)
+                            if sample_res.status_code == 200:
+                                for sid, samples in sample_res.json().get("sensors", {}).items():
+                                    for s in samples: all_api_recs.append({"timestamp": s["observed"], "temperature": s["value"], "sensor_id": sid.replace(':', '-')})
+                    except Exception as e: st.error(f"API Error on {acc_id}: {e}")
+                if all_api_recs:
+                    client.load_table_from_dataframe(pd.DataFrame(all_api_recs), f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                    st.success(f"✅ Pulled {len(all_api_recs)} points.")
 
     # API Recovery section remains below...
 
