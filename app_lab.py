@@ -366,109 +366,129 @@ elif service == "📉 Node Diagnostics":
 
 # 4D. DATA INTAKE LAB (HARDENED SYNC)
 # --- 4D. DATA INTAKE LAB (FIXED INDENTATION & SCHEMA) ---
-# --- 4D. DATA INTAKE LAB (FULLY CORRECTED) ---
-# --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
 
+    with tab1:
+        st.subheader("Manual CSV Ingestion")
+        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)", "Logger (Master Log)"], horizontal=True)
+        u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
+        
+        if u_file is not None:
+            try:
+                df_raw = pd.read_csv(u_file, low_memory=False)
+                ts_col = next((c for c in df_raw.columns if c.lower() == 'timestamp'), df_raw.columns[0])
+                df_raw['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
+                df_raw = df_raw.dropna(subset=['timestamp'])
+
+                df_up = pd.DataFrame()
+                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord" if "Lord" in source else f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+
+                if "Master Log" in source:
+                    if df_raw.shape[1] > 2 and any(isinstance(x, str) for x in df_raw.iloc[:, 1]):
+                        df_up = df_raw.iloc[:, [df_raw.columns.get_loc('timestamp'), 0, 1]].copy()
+                        df_up.columns = ['timestamp', 'temperature', 'sensor_id']
+                    else:
+                        df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
+                elif "Lord" in source:
+                    df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
+                else: 
+                    df_up = df_raw.rename(columns={'Temperature': 'temperature', 'Sensor': 'sensor_id'})
+
+                if not df_up.empty:
+                    df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
+                    st.write(f"Previewing {len(df_up)} points:")
+                    st.dataframe(df_up.head())
+
+                    if st.button("🚀 UPLOAD & REBUILD MASTER"):
+                        with st.spinner("Syncing..."):
+                            client.load_table_from_dataframe(df_up, table_ref).result()
+                            if rebuild_master_table(mode="preserve"):
+                                st.success("✅ Master Table Rebuilt.")
+            except Exception as e: 
+                st.error(f"Manual Upload Error: {e}")
+
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
         c1, c2 = st.columns(2)
-        # Use a longer default range to catch missing history
-        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=14)) 
+        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=7))
         end_date = c2.date_input("End Date", datetime.now())
         
-        if st.button("🛰️ FETCH & FULL SYNC"):
-            status_box = st.empty()
+        if st.button("🛰️ FETCH & SYNC MASTER"):
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            status_box.info(f"Fetching from {start_date}...")
-            df_api = fetch_sensorpush_data(start_dt, end_dt) 
-            
-            if not df_api.empty:
-                try:
-                    # Clean the ID format
-                    df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
-                    
-                    # 1. Push to Raw Storage (Appending new data to existing history)
-                    status_box.info(f"Syncing {len(df_api)} points to BigQuery...")
-                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                    client.load_table_from_dataframe(
-                        df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=job_config
-                    ).result()
-                    
-                    # 2. Trigger Modular Rebuild (This updates the final table)
-                    if rebuild_master_table(mode="preserve"):
-                        status_box.success("✅ Success: Master Table rebuilt from all raw sources.")
-                        st.balloons()
-                except Exception as bq_e:
-                    st.error(f"BigQuery Error: {bq_e}")
-            else:
-                status_box.warning("No new data found on SensorPush servers for this range.")
+            with st.spinner("Fetching from SensorPush..."):
+                df_api = fetch_sensorpush_data(start_dt, end_dt)
+                if not df_api.empty:
+                    try:
+                        df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
+                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                        client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=job_config).result()
+                        if rebuild_master_table(mode="preserve"):
+                            st.success(f"✅ Synced {len(df_api)} points!")
+                            st.balloons()
+                    except Exception as bq_e:
+                        st.error(f"Sync Failed: {bq_e}")
+                else:
+                    st.warning("No data found for this range.")
 
-   # Add this inside Tab 3 of Section 4D
-with tab3:
-    st.subheader("📊 7-Day Data Audit")
-    st.write("Comparison of Raw incoming data vs. Master deduplicated data.")
-    
-    audit_sql = f"""
-    WITH MasterCounts AS (
-      SELECT project, COUNT(*) as master_points
-      FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-      GROUP BY project
-    ),
-    RawPush AS (
-      SELECT m.Project, COUNT(*) as raw_points
-      FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r
-      INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
-        ON REPLACE(r.sensor_id, ':', '-') = REPLACE(m.NodeNum, ':', '-')
-      WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-      GROUP BY m.Project
-    ),
-    RawLord AS (
-      SELECT m.Project, COUNT(*) as raw_points
-      FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` l
-      INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
-        ON REPLACE(l.nodenumber, ':', '-') = REPLACE(m.NodeNum, ':', '-')
-      WHERE l.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-      GROUP BY m.Project
-    ),
-    CombinedRaw AS (
-      SELECT Project, SUM(raw_points) as raw_total FROM (SELECT * FROM RawPush UNION ALL SELECT * FROM RawLord) GROUP BY Project
-    )
-    SELECT 
-        COALESCE(m.project, r.Project) as Project,
-        r.raw_total as Raw_Points,
-        m.master_points as Master_Points,
-        (r.raw_total - m.master_points) as Duplicates_Filtered
-    FROM MasterCounts m
-    FULL OUTER JOIN CombinedRaw r ON m.project = r.Project
-    ORDER BY Raw_Points DESC
-    """
-    
-    if st.button("🔍 RUN DATA AUDIT"):
-        try:
-            df_audit = client.query(audit_sql).to_dataframe()
-            if not df_audit.empty:
-                st.dataframe(df_audit, use_container_width=True, hide_index=True)
-                
-                # Logic check: If Raw > 0 but Master is 0, something is wrong with the metadata join
-                for index, row in df_audit.iterrows():
-                    if row['Raw_Points'] > 0 and (pd.isna(row['Master_Points']) or row['Master_Points'] == 0):
-                        st.error(f"⚠️ Project '{row['Project']}' has raw data but 0 master points. Check if NodeNums match in your metadata!")
-            else:
-                st.warning("No data found in any table for the last 7 days.")
-        except Exception as e:
-            st.error(f"Audit failed: {e}")
+    with tab3:
+        st.subheader("📊 Data Audit & Maintenance")
+        
+        # 7-Day Data Audit Logic
+        audit_sql = f"""
+        WITH MasterCounts AS (
+          SELECT project, COUNT(*) as master_points
+          FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+          WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+          GROUP BY project
+        ),
+        RawPush AS (
+          SELECT m.Project, COUNT(*) as raw_points
+          FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r
+          INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON REPLACE(r.sensor_id, ':', '-') = REPLACE(m.NodeNum, ':', '-')
+          WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+          GROUP BY m.Project
+        ),
+        RawLord AS (
+          SELECT m.Project, COUNT(*) as raw_points
+          FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` l
+          INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON REPLACE(l.nodenumber, ':', '-') = REPLACE(m.NodeNum, ':', '-')
+          WHERE l.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+          GROUP BY m.Project
+        ),
+        CombinedRaw AS (
+          SELECT Project, SUM(raw_points) as raw_total FROM (SELECT * FROM RawPush UNION ALL SELECT * FROM RawLord) GROUP BY Project
+        )
+        SELECT 
+            COALESCE(m.project, r.Project) as Project,
+            r.raw_total as Raw_Points,
+            m.master_points as Master_Points,
+            (r.raw_total - m.master_points) as Duplicates_Filtered
+        FROM MasterCounts m
+        FULL OUTER JOIN CombinedRaw r ON m.project = r.Project
+        ORDER BY Raw_Points DESC
+        """
+        
+        col_audit, col_rebuild = st.columns(2)
+        with col_audit:
+            if st.button("🔍 RUN 7-DAY DATA AUDIT"):
+                try:
+                    df_audit = client.query(audit_sql).to_dataframe()
+                    st.dataframe(df_audit, use_container_width=True, hide_index=True)
+                except Exception as audit_e:
+                    st.error(f"Audit Error: {audit_e}")
+        
+        with col_rebuild:
+            if st.button("🔄 FORCE MASTER REBUILD"):
+                if rebuild_master_table(mode="preserve"):
+                    st.success("✅ Master Table Refreshed.")
+
+# --- 4E. ADMIN TOOLS (Starting flush with the left margin) ---
+elif service == "🛠️ Admin Tools":
                 
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
