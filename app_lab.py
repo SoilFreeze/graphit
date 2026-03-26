@@ -328,75 +328,103 @@ elif service == "📤 Data Intake Lab":
         
         c1, c2 = st.columns(2)
         with c1:
-            sd = st.date_input("Recovery Start Date", datetime.now() - timedelta(days=2))
+            # We use a slightly wider default window to catch anything near the edge
+            sd = st.date_input("Recovery Start Date", datetime.now() - timedelta(days=3))
             st_time = st.time_input("Start Time (UTC)", datetime.strptime("00:00", "%H:%M").time())
         with c2:
-            ed = st.date_input("Recovery End Date", datetime.now())
+            ed = st.date_input("Recovery End Date", datetime.now() + timedelta(days=1))
             et_time = st.time_input("End Time (UTC)", datetime.now().time())
 
         if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
+            # Ensure timestamps are exactly what the API expects
             s_iso = datetime.combine(sd, st_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             e_iso = datetime.combine(ed, et_time).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             
+            st.write(f"Querying window: `{s_iso}` to `{e_iso}`")
+
             if "sensorpush_accounts" not in st.secrets:
-                st.error("Missing accounts in Secrets.")
+                st.error("Missing 'sensorpush_accounts' in Secrets.")
             else:
                 accounts = st.secrets["sensorpush_accounts"]
                 all_api_recs = []
                 
                 for acc_id, creds in accounts.items():
                     try:
-                        with st.spinner(f"Processing {creds['email']}..."):
+                        with st.spinner(f"Talking to {creds['email']}..."):
                             # 1. Authorize
-                            auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", 
-                                                     json=dict(creds))
+                            auth_res = requests.post(
+                                "https://api.sensorpush.com/api/v1/oauth/authorize", 
+                                json=dict(creds),
+                                timeout=15
+                            )
                             if auth_res.status_code != 200:
-                                st.error(f"❌ {acc_id} Auth Failed")
+                                st.error(f"❌ {acc_id} Login Failed: {auth_res.text}")
                                 continue
+                            
                             token = auth_res.json().get("accesstoken")
-                            headers = {"accept": "application/json", "Authorization": token, "Content-Type": "application/json"}
+                            headers = {
+                                "accept": "application/json", 
+                                "Authorization": token, 
+                                "Content-Type": "application/json"
+                            }
 
-                            # 2. Get Sensor List (Logic from your catchup script)
-                            # This ensures the API knows which sensors we are interested in
-                            sensor_res = requests.post("https://api.sensorpush.com/api/v1/sensors", headers=headers, json={})
+                            # 2. Get EVERY sensor ID first (Matches your catchup script)
+                            sensor_res = requests.post("https://api.sensorpush.com/api/v1/sensors", headers=headers, json={}, timeout=15)
                             if sensor_res.status_code != 200:
+                                st.warning(f"Could not retrieve sensor list for {acc_id}")
                                 continue
+                            
                             sensor_ids = list(sensor_res.json().keys())
+                            
+                            if not sensor_ids:
+                                st.warning(f"No sensors found in account {acc_id}")
+                                continue
 
-                            # 3. Fetch Samples for these specific sensors
+                            # 3. Fetch Samples using the explicit sensor list
+                            # Note: The payload is slightly simplified to ensure compatibility
                             payload = {
-                                "startTime": s_iso, 
-                                "endTime": e_iso, 
-                                "sensors": sensor_ids, # Explicitly asking for these sensors
-                                "measures": ["temperature"]
+                                "startTime": s_iso,
+                                "endTime": e_iso,
+                                "sensors": sensor_ids
                             }
                             
-                            sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=payload)
+                            sample_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=payload, timeout=30)
                             
                             if sample_res.status_code == 200:
-                                data = sample_res.json().get("sensors", {})
+                                samples_data = sample_res.json().get("sensors", {})
                                 acc_count = 0
-                                for sid, samples in data.items():
+                                for sid, samples in samples_data.items():
                                     for s in samples:
-                                        all_api_recs.append({
-                                            "timestamp": s["observed"], 
-                                            "temperature": s["value"], 
-                                            "sensor_id": sid.replace(':', '-')
-                                        })
-                                        acc_count += 1
+                                        # SensorPush returns temperature, but we check if it's there
+                                        if 'temperature' in s or 'value' in s:
+                                            val = s.get('temperature') if 'temperature' in s else s.get('value')
+                                            all_api_recs.append({
+                                                "timestamp": s["observed"], 
+                                                "temperature": val, 
+                                                "sensor_id": sid.replace(':', '-')
+                                            })
+                                            acc_count += 1
                                 if acc_count > 0:
                                     st.toast(f"✅ {acc_id}: Found {acc_count} points.")
-                    except Exception as e:
-                        st.error(f"Error on {acc_id}: {e}")
+                                else:
+                                    st.info(f"ℹ️ {acc_id}: Connected, but 0 samples in this time window.")
+                            else:
+                                st.error(f"❌ Sample Request Failed for {acc_id}: {sample_res.text}")
 
+                    except Exception as e:
+                        st.error(f"Error on {acc_id}: {str(e)}")
+
+                # 4. Final Processing and Master Sync
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
                     df_api['timestamp'] = pd.to_datetime(df_api['timestamp'], format='mixed')
                     
-                    with st.spinner("Pushing to BigQuery and Syncing..."):
+                    with st.spinner("Pushing to BigQuery and rebuilding Master Table..."):
+                        # Upload Raw
                         client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
                         
                         # Trigger Master Sync
+                        # Note: We use lowercase column names to match your schema
                         scrub_sql = f"""
                             CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
                             WITH Unified AS (
@@ -404,14 +432,23 @@ elif service == "📤 Data Intake Lab":
                                 UNION ALL 
                                 SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                             ) 
-                            SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.sensor_id as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
+                            SELECT 
+                                u.timestamp, 
+                                u.node AS sensor_id, 
+                                u.temperature, 
+                                m.sensor_id as sensor_name, 
+                                m.project, 
+                                m.location, 
+                                m.depth, 
+                                CAST(FALSE AS BOOLEAN) as is_approved, 
+                                CAST(NULL AS STRING) as engineer_note
+                            FROM Unified u 
+                            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
                         """
                         client.query(scrub_sql).result()
-                    st.success(f"🏁 Done! Total {len(all_api_recs)} points recovered.")
+                    st.success(f"🏁 Recovery Complete! {len(all_api_recs)} total points synced.")
                     st.balloons()
-                else:
-                    st.warning("⚠️ Still 0 points returned. Check if the sensors are currently uploading to the SensorPush Gateway.")
+                    
 # 4E. ADMIN TOOLS
 # --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
 # --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
