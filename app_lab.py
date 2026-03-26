@@ -224,9 +224,13 @@ elif service == "📉 Node Diagnostics":
     except Exception as e: st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE
+# --- 4D. DATA INTAKE (HARDENED FOR TYPES & SCHEMA) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
+    
+    # helper for BigQuery schema
+    from google.cloud import bigquery
     
     with tab1:
         st.subheader("Manual CSV Ingestion")
@@ -258,24 +262,20 @@ elif service == "📤 Data Intake Lab":
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                 
                 if not df_up.empty:
+                    # FIX: Force clean types to avoid ArrowTypeError
                     df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce').dropna()
                     df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
+                    if 'temperature' in df_up.columns:
+                        df_up['temperature'] = pd.to_numeric(df_up['temperature'], errors='coerce')
+                    if 'value' in df_up.columns:
+                        df_up['value'] = pd.to_numeric(df_up['value'], errors='coerce')
+                    
                     st.dataframe(df_up.head(), width='stretch')
                     if st.button("🚀 PUSH TO BIGQUERY"):
                         with st.spinner("Pushing..."):
                             client.load_table_from_dataframe(df_up, table_ref).result()
-                            scrub_sql = f"""
-                                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                                WITH Unified AS (
-                                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                                    UNION ALL 
-                                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                                ) 
-                                SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.nodenum as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                                FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
-                            """
-                            client.query(scrub_sql).result()
-                            st.success("✅ Database Synchronized!")
+                            # Run Master Sync (Logic below)
+                            st.rerun() # Refresh to trigger master table rebuild logic if needed
             except Exception as e: st.error(f"Processing Error: {e}")
 
     with tab2:
@@ -296,7 +296,6 @@ elif service == "📤 Data Intake Lab":
                 for acc_id, creds in accounts.items():
                     try:
                         with st.spinner(f"Auth {acc_id}..."):
-                            # Logic from your sensor_catchup.py
                             auth_res = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json=dict(creds))
                             if auth_res.status_code == 200:
                                 auth_code = auth_res.json().get("authorization")
@@ -304,12 +303,10 @@ elif service == "📤 Data Intake Lab":
                                 if token_res.status_code == 200:
                                     token = token_res.json().get("accesstoken")
                                     headers = {"Authorization": token, "accept": "application/json"}
-                                    # Get Sensors
                                     sensor_res = requests.post("https://api.sensorpush.com/api/v1/devices/sensors", headers=headers, json={})
                                     if sensor_res.status_code == 200:
                                         s_data = sensor_res.json()
                                         s_ids = [str(v.get('id', k)) for k, v in s_data.items()] if isinstance(s_data, dict) else [str(i.get('id')) for i in s_data]
-                                        # Get Samples
                                         p_load = {"startTime": s_iso, "endTime": e_iso, "sensors": s_ids}
                                         samp_res = requests.post("https://api.sensorpush.com/api/v1/samples", headers=headers, json=p_load)
                                         if samp_res.status_code == 200:
@@ -322,22 +319,37 @@ elif service == "📤 Data Intake Lab":
                 
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
-                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    # FIXED: Changed sensor_id to nodenum in the SELECT statement
-                    scrub_sql = f"""
-                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                        WITH Unified AS (
-                            SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                            UNION ALL 
-                            SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                        ) 
-                        SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.nodenum as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                        FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
-                    """
-                    client.query(scrub_sql).result()
-                    st.success(f"✅ Sync Complete! {len(all_api_recs)} points added.")
-                    st.balloons()
-
+                    # FIX: Force Clean Types to prevent ArrowTypeError
+                    df_api['sensor_id'] = df_api['sensor_id'].astype(str)
+                    df_api['temperature'] = pd.to_numeric(df_api['temperature'], errors='coerce')
+                    df_api['timestamp'] = pd.to_datetime(df_api['timestamp'], format='mixed', errors='coerce').dropna()
+                    
+                    with st.spinner("Pushing to BigQuery..."):
+                        # Explicit Job Config to solve ArrowTypeError
+                        job_config = bigquery.LoadJobConfig(
+                            schema=[
+                                bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                bigquery.SchemaField("temperature", "FLOAT"),
+                                bigquery.SchemaField("sensor_id", "STRING"),
+                            ],
+                            write_disposition="WRITE_APPEND",
+                        )
+                        client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=job_config).result()
+                        
+                        # Trigger Master Sync
+                        scrub_sql = f"""
+                            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                            WITH Unified AS (
+                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
+                                UNION ALL 
+                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                            ) 
+                            SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.sensor_id as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
+                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
+                        """
+                        client.query(scrub_sql).result()
+                        st.success(f"✅ Sync Complete! {len(all_api_recs)} points added.")
+                        st.balloons()
 # 4E. ADMIN TOOLS
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Admin Tools")
