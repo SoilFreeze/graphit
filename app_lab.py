@@ -239,68 +239,73 @@ elif service == "📉 Node Diagnostics":
 
 # 4D. DATA INTAKE
 # --- 4D. DATA INTAKE (HARDENED FOR MIXED FORMATS) ---
+# --- 4D. DATA INTAKE (HARDENED FOR MULTIPLE FORMATS) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
 
     with tab1:
         st.subheader("Manual CSV Ingestion")
-        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)", "Logger (Master Log)"], horizontal=True)
+        source = st.radio("Device Type", ["Master Log", "Lord (SensorConnect)", "SensorPush Export"], horizontal=True)
         u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
         
         if u_file is not None:
             try:
-                # 1. Load the raw data
-                # We use low_memory=False to handle mixed types in columns
-                df_raw = pd.read_csv(u_file, low_memory=False)
-                
-                # 2. Fix Timestamps (The 'mixed' format solves your error)
-                # We find the timestamp column regardless of capitalization
-                ts_col = next((c for c in df_raw.columns if c.lower() == 'timestamp'), df_raw.columns[0])
-                df_raw['timestamp_parsed'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
-                df_raw = df_raw.dropna(subset=['timestamp_parsed']).drop(columns=[ts_col]).rename(columns={'timestamp_parsed': 'timestamp'})
-
                 df_up = pd.DataFrame()
                 table_ref = ""
 
-                # 3. Process based on source
-                if "Master Log" in source:
-                    # Detect if narrow format: check if the 3rd column contains Sensor ID strings
-                    # Master_Log.csv mostly uses: Timestamp, Temp, SensorID
-                    if df_raw.iloc[:, 1].dtype == object or (df_raw.shape[1] > 2 and any(isinstance(x, str) for x in df_raw.iloc[:, 1])):
-                        # Narrow logic: Col 0: TS, Col 1: Temp, Col 2: SensorID
-                        df_up = df_raw.iloc[:, [df_raw.columns.get_loc('timestamp'), 0, 1]].copy()
-                        df_up.columns = ['timestamp', 'temperature', 'sensor_id']
-                        # Filter out rows that are actually wide (where sensor_id is numeric)
-                        df_up = df_up[df_up['sensor_id'].apply(lambda x: not str(x).replace('.','',1).isdigit())]
-                        table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                    else:
-                        # Wide logic: Melt the columns
-                        df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
-                        table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-
-                elif "Lord" in source:
-                    df_up = df_raw.melt(id_vars=['timestamp'], var_name='nodenumber', value_name='value')
-                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-
-                else: # SensorPush
-                    df_up = df_raw.rename(columns={'Temperature': 'temperature', 'Sensor': 'sensor_id'})
+                # --- TYPE 1: MASTER LOG (Narrow format) ---
+                if source == "Master Log":
+                    df_up = pd.read_csv(u_file)
+                    df_up.columns = [c.lower() for c in df_up.columns]
+                    # Standardize names
+                    df_up = df_up.rename(columns={'nodenumber': 'sensor_id'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
 
-                # 4. Standardize and Upload
+                # --- TYPE 2: LORD / SENSORCONNECT (Wide format) ---
+                elif source == "Lord (SensorConnect)":
+                    content = u_file.getvalue().decode("utf-8").splitlines()
+                    # Find where the data actually starts
+                    start_idx = next((i for i, l in enumerate(content) if "DATA_START" in l), 0)
+                    u_file.seek(0)
+                    # Skip metadata header
+                    df_raw = pd.read_csv(u_file, skiprows=start_idx + 1)
+                    # Melt from wide to narrow
+                    df_up = df_raw.melt(id_vars=[df_raw.columns[0]], var_name='nodenumber', value_name='value')
+                    df_up = df_up.rename(columns={df_raw.columns[0]: 'timestamp'})
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+
+                # --- TYPE 3: SENSORPUSH EXPORT (Narrow format with header info) ---
+                elif source == "SensorPush Export":
+                    content = u_file.getvalue().decode("utf-8").splitlines()
+                    # Find the real header line
+                    start_idx = next((i for i, l in enumerate(content) if "SensorId,Observed" in l), 0)
+                    u_file.seek(0)
+                    df_raw = pd.read_csv(u_file, skiprows=start_idx)
+                    # Pick only necessary columns
+                    temp_col = [c for c in df_raw.columns if "Temperature" in c][0]
+                    df_up = df_raw[['SensorId', 'Observed', temp_col]].copy()
+                    df_up.columns = ['sensor_id', 'timestamp', 'temperature']
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+
+                # --- FINAL PROCESSING & UPLOAD ---
                 if not df_up.empty:
-                    # Ensure node IDs use hyphens instead of colons
+                    # Robust Timestamp Parsing (Handles mixed formats)
+                    df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce')
+                    df_up = df_up.dropna(subset=['timestamp'])
+                    
+                    # Standardize Node IDs
                     id_col = 'sensor_id' if 'sensor_id' in df_up.columns else 'nodenumber'
                     df_up[id_col] = df_up[id_col].astype(str).str.replace(':', '-', regex=False)
-                    
-                    st.write(f"Previewing {len(df_up)} points for {table_ref}:")
+
+                    st.write(f"Parsed {len(df_up)} data points. Preview:")
                     st.dataframe(df_up.head(), width='stretch')
 
                     if st.button("🚀 PUSH TO BIGQUERY"):
-                        with st.spinner("Uploading..."):
+                        with st.spinner("Uploading data..."):
                             client.load_table_from_dataframe(df_up, table_ref).result()
                             
-                            # Run the Master Scrub to sync everything
+                            # Trigger the Master Sync
                             scrub_sql = f"""
                                 CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
                                 WITH Unified AS (
@@ -312,10 +317,12 @@ elif service == "📤 Data Intake Lab":
                                 FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.NodeNum, ':', '-')
                             """
                             client.query(scrub_sql).result()
-                            st.success("✅ Uploaded and Master Table Synced!")
+                            st.success("✅ Database Synchronized!")
                             st.balloons()
             except Exception as e:
-                st.error(f"File Error: {e}")
+                st.error(f"Processing Error: {e}")
+
+    # API Recovery section remains below...
 
 # 4E. ADMIN TOOLS
 # --- 4E. ADMIN TOOLS (BULK APPROVAL & SCRUBBER) ---
