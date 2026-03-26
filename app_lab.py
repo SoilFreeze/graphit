@@ -323,6 +323,7 @@ elif service == "📉 Node Diagnostics":
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
+# --- 4D. DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     
@@ -427,32 +428,6 @@ elif service == "📤 Data Intake Lab":
                 with st.spinner("Running deduplication and mapping..."):
                     if rebuild_master_table(mode="preserve"):
                         st.success("✅ Master table refreshed from all raw sources.")
-
-# --- 4E. ADMIN TOOLS ---
-elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
-    tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Bulk Approval"])
-    
-    with tab_scrub:
-        sc_proj = st.text_input("Project Name", key="scrub_p")
-        sc_loc = st.text_input("Location / Pipe", key="scrub_l")
-        if st.button("🗑️ DELETE POINTS"):
-            if sc_proj and sc_loc:
-                client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sc_proj}' AND location='{sc_loc}'").result()
-                st.success(f"Deleted {sc_loc} data.")
-
-    with tab_approve:
-        try:
-            unapproved_meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE (is_approved IS FALSE OR is_approved IS NULL)"
-            un_meta = client.query(unapproved_meta_q).to_dataframe()
-            if not un_meta.empty:
-                app_proj = st.selectbox("Project", un_meta['project'].unique(), key="app_p")
-                app_loc = st.selectbox("Location", un_meta[un_meta['project'] == app_proj]['location'].unique(), key="app_l")
-                if st.button("🚀 APPROVE NOW"):
-                    client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` SET is_approved = TRUE WHERE project='{app_proj}' AND location='{app_loc}'").result()
-                    st.success("Approved!")
-        except Exception as e: 
-            st.error(f"Approval Error: {e}")
                 
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
