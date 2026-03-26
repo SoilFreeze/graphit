@@ -367,6 +367,7 @@ elif service == "📉 Node Diagnostics":
 # 4D. DATA INTAKE LAB (HARDENED SYNC)
 # --- 4D. DATA INTAKE LAB (FIXED INDENTATION & SCHEMA) ---
 # --- 4D. DATA INTAKE LAB ---
+# --- 4D. DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
@@ -436,58 +437,66 @@ elif service == "📤 Data Intake Lab":
                     st.warning("No data found for this range.")
 
     with tab3:
-        st.subheader("📊 Data Audit & Maintenance")
+        st.subheader("📊 Daily Data Audit & Maintenance")
         
-        # 7-Day Data Audit Logic
+        # SQL Updated to break out by Date and Project
         audit_sql = f"""
         WITH MasterCounts AS (
-          SELECT project, COUNT(*) as master_points
+          SELECT DATE(timestamp) as audit_date, project, COUNT(*) as master_points
           FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
           WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-          GROUP BY project
+          GROUP BY audit_date, project
         ),
         RawPush AS (
-          SELECT m.Project, COUNT(*) as raw_points
+          SELECT DATE(r.timestamp) as audit_date, m.Project, COUNT(*) as raw_points
           FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r
           INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON REPLACE(r.sensor_id, ':', '-') = REPLACE(m.NodeNum, ':', '-')
           WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-          GROUP BY m.Project
+          GROUP BY audit_date, m.Project
         ),
         RawLord AS (
-          SELECT m.Project, COUNT(*) as raw_points
+          SELECT DATE(l.timestamp) as audit_date, m.Project, COUNT(*) as raw_points
           FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` l
           INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON REPLACE(l.nodenumber, ':', '-') = REPLACE(m.NodeNum, ':', '-')
           WHERE l.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-          GROUP BY m.Project
+          GROUP BY audit_date, m.Project
         ),
         CombinedRaw AS (
-          SELECT Project, SUM(raw_points) as raw_total FROM (SELECT * FROM RawPush UNION ALL SELECT * FROM RawLord) GROUP BY Project
+          SELECT audit_date, Project, SUM(raw_points) as raw_total 
+          FROM (SELECT * FROM RawPush UNION ALL SELECT * FROM RawLord) 
+          GROUP BY audit_date, Project
         )
         SELECT 
+            COALESCE(m.audit_date, r.audit_date) as Date,
             COALESCE(m.project, r.Project) as Project,
-            r.raw_total as Raw_Points,
-            m.master_points as Master_Points,
-            (r.raw_total - m.master_points) as Duplicates_Filtered
+            COALESCE(r.raw_total, 0) as Raw_Points,
+            COALESCE(m.master_points, 0) as Master_Points,
+            (COALESCE(r.raw_total, 0) - COALESCE(m.master_points, 0)) as Duplicates_Filtered
         FROM MasterCounts m
-        FULL OUTER JOIN CombinedRaw r ON m.project = r.Project
-        ORDER BY Raw_Points DESC
+        FULL OUTER JOIN CombinedRaw r ON m.project = r.Project AND m.audit_date = r.audit_date
+        ORDER BY Date DESC, Project ASC
         """
         
-        col_audit, col_rebuild = st.columns(2)
-        with col_audit:
-            if st.button("🔍 RUN 7-DAY DATA AUDIT"):
-                try:
-                    df_audit = client.query(audit_sql).to_dataframe()
-                    st.dataframe(df_audit, use_container_width=True, hide_index=True)
-                except Exception as audit_e:
-                    st.error(f"Audit Error: {audit_e}")
+        if st.button("🔍 RUN DAILY DATA AUDIT"):
+            try:
+                df_audit = client.query(audit_sql).to_dataframe()
+                st.dataframe(df_audit, use_container_width=True, hide_index=True)
+            except Exception as audit_e:
+                st.error(f"Audit Error: {audit_e}")
         
-        with col_rebuild:
+        st.divider()
+        st.subheader("🛠️ Table Maintenance")
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            if st.button("🚩 MARK ALL AS HISTORIC"):
+                if rebuild_master_table(mode="approve_all"):
+                    st.success("✅ All data marked as Approved.")
+        with col_m2:
             if st.button("🔄 FORCE MASTER REBUILD"):
                 if rebuild_master_table(mode="preserve"):
                     st.success("✅ Master Table Refreshed.")
 
-                
+               
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
