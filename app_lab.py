@@ -171,9 +171,9 @@ elif service == "📊 Client Portal":
                 snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
                 snapshot = snapshot[snapshot['timestamp'] >= start_view]
                 if not snapshot.empty:
-                    # FIXED: Added 'r' for raw string to avoid syntax warning
-                    snapshot['depth_num'] = snapshot['depth'].str.extract(r'(\d+)').astype(float)
-                    snapshot['Date'] = snapshot['timestamp'].dt.strftime('%m/%d')
+                    # Update these two lines in Section 4B:
+                        snapshot['depth_num'] = snapshot['depth'].str.extract(r'(\d+)').astype(float)
+                        last_approved_24h['depth_num'] = last_approved_24h['depth'].str.extract(r'(\d+)').astype(float)
                     fig_profile = px.line(snapshot.sort_values('depth_num'), x='temperature', y='depth_num', color='Date', markers=True, range_x=[-20, 80])
                     for val, label in active_refs:
                         fig_profile.add_vline(x=val, line_dash="dash", line_color="blue", annotation_text=label)
@@ -225,13 +225,13 @@ elif service == "📉 Node Diagnostics":
 
 # 4D. DATA INTAKE
 # --- 4D. DATA INTAKE (HARDENED FOR TYPES & SCHEMA) ---
+# --- 4D. DATA INTAKE (HARDENED FOR BIGQUERY TYPES) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
     
-    # helper for BigQuery schema
     from google.cloud import bigquery
-    
+
     with tab1:
         st.subheader("Manual CSV Ingestion")
         source = st.radio("Device Type", ["Master Log", "Lord (SensorConnect)", "SensorPush Export"], horizontal=True)
@@ -262,20 +262,23 @@ elif service == "📤 Data Intake Lab":
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                 
                 if not df_up.empty:
-                    # FIX: Force clean types to avoid ArrowTypeError
-                    df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce').dropna()
+                    # FORCING DATA TYPES FOR BIGQUERY COMPATIBILITY
+                    df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce')
+                    df_up = df_up.dropna(subset=['timestamp'])
                     df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
-                    if 'temperature' in df_up.columns:
-                        df_up['temperature'] = pd.to_numeric(df_up['temperature'], errors='coerce')
-                    if 'value' in df_up.columns:
-                        df_up['value'] = pd.to_numeric(df_up['value'], errors='coerce')
                     
+                    # Ensure numeric columns are strictly float
+                    for col in ['temperature', 'value']:
+                        if col in df_up.columns:
+                            df_up[col] = pd.to_numeric(df_up[col], errors='coerce')
+
                     st.dataframe(df_up.head(), width='stretch')
                     if st.button("🚀 PUSH TO BIGQUERY"):
-                        with st.spinner("Pushing..."):
-                            client.load_table_from_dataframe(df_up, table_ref).result()
-                            # Run Master Sync (Logic below)
-                            st.rerun() # Refresh to trigger master table rebuild logic if needed
+                        with st.spinner("Uploading..."):
+                            # Use explicit schema to avoid ArrowTypeError
+                            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                            client.load_table_from_dataframe(df_up, table_ref, job_config=job_config).result()
+                            st.success("✅ Uploaded! Rebuild Master table to see changes.")
             except Exception as e: st.error(f"Processing Error: {e}")
 
     with tab2:
@@ -319,24 +322,16 @@ elif service == "📤 Data Intake Lab":
                 
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
-                    # FIX: Force Clean Types to prevent ArrowTypeError
-                    df_api['sensor_id'] = df_api['sensor_id'].astype(str)
+                    # CRITICAL: Fix types before BigQuery upload
+                    df_api['timestamp'] = pd.to_datetime(df_api['timestamp'], format='mixed')
                     df_api['temperature'] = pd.to_numeric(df_api['temperature'], errors='coerce')
-                    df_api['timestamp'] = pd.to_datetime(df_api['timestamp'], format='mixed', errors='coerce').dropna()
+                    df_api['sensor_id'] = df_api['sensor_id'].astype(str)
                     
-                    with st.spinner("Pushing to BigQuery..."):
-                        # Explicit Job Config to solve ArrowTypeError
-                        job_config = bigquery.LoadJobConfig(
-                            schema=[
-                                bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                bigquery.SchemaField("temperature", "FLOAT"),
-                                bigquery.SchemaField("sensor_id", "STRING"),
-                            ],
-                            write_disposition="WRITE_APPEND",
-                        )
-                        client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=job_config).result()
+                    with st.spinner("Pushing to BigQuery & Syncing Master Table..."):
+                        # Step 1: Upload raw data
+                        client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
                         
-                        # Trigger Master Sync
+                        # Step 2: Rebuild Master Table (Fixed column names)
                         scrub_sql = f"""
                             CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
                             WITH Unified AS (
@@ -344,12 +339,24 @@ elif service == "📤 Data Intake Lab":
                                 UNION ALL 
                                 SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                             ) 
-                            SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.sensor_id as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
+                            SELECT 
+                                u.timestamp, 
+                                u.node AS sensor_id, 
+                                u.temperature, 
+                                m.nodenum as sensor_name, -- Using nodenum as the name field
+                                m.project, 
+                                m.location, 
+                                m.depth, 
+                                CAST(FALSE AS BOOLEAN) as is_approved, 
+                                CAST(NULL AS STRING) as engineer_note
+                            FROM Unified u 
+                            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+                            ON u.node = REPLACE(m.nodenum, ':', '-')
                         """
                         client.query(scrub_sql).result()
-                        st.success(f"✅ Sync Complete! {len(all_api_recs)} points added.")
-                        st.balloons()
+                    st.success(f"✅ Sync Complete! {len(all_api_recs)} points added.")
+                    st.balloons()
+                    
 # 4E. ADMIN TOOLS
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Admin Tools")
