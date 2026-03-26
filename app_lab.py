@@ -286,8 +286,19 @@ elif service == "📤 Data Intake Lab":
                                 UNION ALL 
                                 SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                             ) 
-                            SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
+                            SELECT 
+                                u.timestamp, 
+                                u.node AS sensor_id, 
+                                u.temperature,
+                                m.sensor_id AS sensor_name, -- Mapping your metadata's sensor_id to the display name
+                                m.project, 
+                                m.location, 
+                                m.depth,
+                            CAST(FALSE AS BOOLEAN) as is_approved,
+                            CAST(NULL AS STRING) as engineer_note
+                            FROM Unified u 
+                            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+                            ON u.node = REPLACE(m.nodenum, ':', '-')CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
                         """
                         client.query(scrub_sql).result()
                         st.success("✅ Database Synchronized!")
