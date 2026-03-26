@@ -52,17 +52,44 @@ client = get_bq_client()
 # --- REBUILD TABLE --- #
 #########################
 def rebuild_master_table(mode="preserve"):
+    """
+    Rebuilds the master table. Handles the 'ex' error by checking 
+    if the table exists before attempting to join.
+    """
+    # 1. Determine if we are force-approving everything
     status_logic = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
     
+    # 2. Check if the table actually exists to avoid the 'ex' error
+    table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+    exists = True
+    try:
+        client.get_table(table_id)
+    except Exception:
+        exists = False
+
+    # 3. Build the SQL based on whether the table exists
+    join_clause = ""
+    if exists and mode == "preserve":
+        join_clause = f"""
+            LEFT JOIN `{table_id}` ex 
+            ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id
+        """
+    else:
+        # If table doesn't exist, we can't join 'ex', so we set status to FALSE
+        status_logic = "TRUE" if mode == "approve_all" else "FALSE"
+
     scrub_sql = f"""
-        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+        CREATE OR REPLACE TABLE `{table_id}` AS 
         WITH RawUnified AS (
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
             UNION ALL 
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
         ),
         HourlyDedupped AS (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
+            FROM RawUnified
         )
         SELECT 
             h.ts as timestamp, 
@@ -75,11 +102,12 @@ def rebuild_master_table(mode="preserve"):
             {status_logic} as is_approved
         FROM HourlyDedupped h 
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
-            -- FUZZY MATCH LOGIC: Match exact OR match first 12 characters to bypass rounding issues
-            ON (TRIM(h.node) = TRIM(REPLACE(CAST(m.PhysicalID AS STRING), ':', '-')))
-            OR (SUBSTR(TRIM(h.node), 1, 12) = SUBSTR(TRIM(REPLACE(CAST(m.PhysicalID AS STRING), ':', '-')), 1, 12))
+            ON (SUBSTR(TRIM(h.node), 1, 12) = SUBSTR(TRIM(CAST(m.PhysicalID AS STRING)), 1, 12))
+            OR (TRIM(h.node) = TRIM(CAST(m.NodeNum AS STRING)))
+        {join_clause}
         WHERE h.rank = 1
     """
+    
     try:
         client.query(scrub_sql).result()
         return True
