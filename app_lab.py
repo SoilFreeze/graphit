@@ -370,6 +370,9 @@ elif service == "📊 Client Portal":
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
+###########################
+# --- NODE DIAGNOSTIC --- #
+###########################  
 # 4C. NODE DIAGNOSTICS
 # --- 4C. NODE DIAGNOSTICS ---
 elif service == "📉 Node Diagnostics":
@@ -406,15 +409,17 @@ elif service == "📉 Node Diagnostics":
             
     except Exception as e:
         st.error(f"Diagnostics Error: {e}")
-
-# 4D. DATA INTAKE LAB (HARDENED SYNC)
-# --- 4D. DATA INTAKE LAB (FIXED INDENTATION & SCHEMA) ---
+###############################
+# --- END NODE DIAGNOSTIC --- #
+###############################
+###############################
+# --- DATA INTAKE LAB --- #
+###############################
 # --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB ---
-# --- 4D. DATA INTAKE LAB (ROBUST CSV LOADER) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
+    
+    # We create three tabs. The button you are looking for is in the third one ("🛠️ Maintenance")
     tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
 
     with tab1:
@@ -424,8 +429,6 @@ elif service == "📤 Data Intake Lab":
         
         if u_file is not None:
             try:
-                # 1. READ FILE TO FIND HEADER
-                # We look for the row containing "SensorId" or "Observed"
                 import io
                 raw_bytes = u_file.getvalue().decode('utf-8').splitlines()
                 header_idx = -1
@@ -434,56 +437,42 @@ elif service == "📤 Data Intake Lab":
                         header_idx = i
                         break
                 
-                if header_idx == -1:
-                    st.error("Could not find a valid data header in this file.")
-                else:
-                    # 2. LOAD DATA STARTING AT THE DISCOVERED HEADER
+                if header_idx != -1:
                     df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])), low_memory=False)
-                    df_raw = df_raw.dropna(how='all') # Remove any empty rows
+                    df_raw = df_raw.dropna(how='all')
 
-                    df_up = pd.DataFrame()
-
-                    # 3. DETECT FORMAT: NARROW (API Style) vs WIDE (Dashboard Style)
                     if "SensorId" in df_raw.columns:
-                        # NARROW LOGIC
+                        # Narrow Format Logic
                         ts_col = "Observed" if "Observed" in df_raw.columns else df_raw.columns[1]
-                        
-                        # Find temperature columns (handles regular and thermocouple)
                         temp_cols = [c for c in df_raw.columns if "Temperature" in c or "Thermocouple" in c]
-                        
-                        # Use the first available temperature column with data
                         df_raw['final_temp'] = df_raw[temp_cols].bfill(axis=1).iloc[:, 0]
-                        
                         df_up = df_raw[['SensorId', ts_col, 'final_temp']].copy()
                         df_up.columns = ['sensor_id', 'timestamp', 'temperature']
                     else:
-                        # WIDE LOGIC (Melt)
+                        # Wide Format Logic
                         ts_col = df_raw.columns[0]
                         df_up = df_raw.melt(id_vars=[ts_col], var_name='sensor_id', value_name='temperature')
                         df_up = df_up.rename(columns={ts_col: 'timestamp'})
 
-                    # 4. FINAL CLEANUP
                     df_up['timestamp'] = pd.to_datetime(df_up['timestamp'], format='mixed', errors='coerce')
                     df_up = df_up.dropna(subset=['timestamp', 'temperature'])
                     df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
 
                     st.write(f"Processed {len(df_up)} readings.")
-                    st.dataframe(df_up.head(), use_container_width=True)
+                    st.dataframe(df_up.head())
 
-                    if st.button("🚀 PUSH TO RAW & REBUILD MASTER"):
-                        with st.spinner("Updating BigQuery..."):
-                            table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                            client.load_table_from_dataframe(df_up, table_ref).result()
+                    if st.button("🚀 PUSH & REBUILD"):
+                        with st.spinner("Uploading and Mapping..."):
+                            client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
                             if rebuild_master_table(mode="preserve"):
                                 st.success("✅ Success: Data ingested and Master Table updated!")
-                                st.balloons()
-
+                else:
+                    st.error("Could not find a valid data header in this file.")
             except Exception as e: 
-                st.error(f"Processing Error: {e}")
+                st.error(f"Upload Error: {e}")
 
     with tab2:
-        # --- API FETCH LOGIC (Same as before) ---
-        st.subheader("📡 Cloud-to-Cloud API Sync")
+        st.subheader("📡 API Data Recovery")
         c1, c2 = st.columns(2)
         start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=7))
         end_date = c2.date_input("End Date", datetime.now())
@@ -491,7 +480,6 @@ elif service == "📤 Data Intake Lab":
         if st.button("🛰️ FETCH & SYNC MASTER"):
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
-            
             with st.spinner("Fetching from SensorPush API..."):
                 df_api = fetch_sensorpush_data(start_dt, end_dt)
                 if not df_api.empty:
@@ -507,11 +495,69 @@ elif service == "📤 Data Intake Lab":
                     st.warning("No data found for this range.")
 
     with tab3:
-        # --- DAILY AUDIT LOGIC (Same as before) ---
-        st.subheader("📊 Daily Data Audit")
-        # (Audit SQL logic from previous turn...)
+        st.subheader("🛠️ Maintenance & Data Audit")
+        
+        # 1. THE DAILY AUDIT
+        audit_sql = f"""
+            WITH MasterCounts AS (
+                SELECT DATE(timestamp) as audit_date, project, COUNT(*) as master_points
+                FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
+                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                GROUP BY audit_date, project
+            ),
+            RawPush AS (
+                SELECT DATE(r.timestamp) as audit_date, m.Project, COUNT(*) as raw_points
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON r.sensor_id = REPLACE(CAST(m.PhysicalID AS STRING), ':', '-')
+                WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                GROUP BY audit_date, m.Project
+            ),
+            CombinedRaw AS (
+                SELECT audit_date, Project, SUM(raw_points) as raw_total 
+                FROM RawPush GROUP BY audit_date, Project
+            )
+            SELECT 
+                COALESCE(m.audit_date, r.audit_date) as Date,
+                COALESCE(m.project, r.Project) as Project,
+                COALESCE(r.raw_total, 0) as Raw_Points,
+                COALESCE(m.master_points, 0) as Master_Points
+            FROM MasterCounts m
+            FULL OUTER JOIN CombinedRaw r ON m.project = r.Project AND m.audit_date = r.audit_date
+            ORDER BY Date DESC, Project ASC
+        """
+        
+        if st.button("🔍 RUN DAILY AUDIT"):
+            try:
+                df_audit = client.query(audit_sql).to_dataframe()
+                st.dataframe(df_audit, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"Audit failed: {e}")
 
-               
+        st.divider()
+        
+        # 2. THE REBUILD CONTROLS
+        st.subheader("Master Table Controls")
+        st.write("Use these to fix mapping issues or update approval states.")
+        col_m1, col_m2 = st.columns(2)
+        
+        with col_m1:
+            if st.button("🚩 MARK ALL AS HISTORIC"):
+                with st.spinner("Approving all existing records..."):
+                    if rebuild_master_table(mode="approve_all"):
+                        st.success("✅ All data marked as Approved.")
+        
+        with col_m2:
+            # THIS IS THE MISSING BUTTON
+            if st.button("🔄 FORCE MASTER REBUILD"):
+                with st.spinner("Re-mapping Physical IDs and cleaning data..."):
+                    if rebuild_master_table(mode="preserve"):
+                        st.success("✅ Master Table Refreshed! Check your graphs now.")
+###############################
+# --- END DATA INTAKE LAB --- #
+###############################
+#######################
+# --- ADMIN TOOLS --- #
+#######################             
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
@@ -538,3 +584,6 @@ elif service == "🛠️ Admin Tools":
                     st.success("Approved!")
         except Exception as e: 
             st.error(f"Approval Error: {e}")
+###########################
+# --- END ADMIN TOOLS --- #
+########################### 
