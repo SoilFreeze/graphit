@@ -9,7 +9,11 @@ import pytz
 import requests
 import json
 import traceback
+import re
 
+#########################
+# --- CONFIGURATION --- #
+#########################
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
@@ -41,14 +45,13 @@ def get_bq_client():
 
 # CRITICAL: Initialize the global client variable here
 client = get_bq_client()
-
+#############################
+# --- END CONFIGURATION --- #
+#############################
+#########################
+# --- REBUILD TABLE --- #
+#########################
 def rebuild_master_table(mode="preserve"):
-    """
-    Ensures a full historical rebuild. 
-    New data = 'no' (FALSE), Existing Approved data = 'yes' (TRUE).
-    """
-    # Logic: If mode is approve_all, force everything to TRUE. 
-    # Otherwise, check if the record was already approved in the old table.
     status_logic = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
     
     scrub_sql = f"""
@@ -61,15 +64,14 @@ def rebuild_master_table(mode="preserve"):
             FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
         ),
         HourlyDedupped AS (
-            -- This ensures that even if we upload overlapping days, we only keep 1 point per hour
             SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
             FROM RawUnified
         )
         SELECT 
             h.ts as timestamp, 
             h.temp as temperature, 
-            m.NodeNum as sensor_id, 
-            m.NodeNum as sensor_name, 
+            m.NodeNum as sensor_id,      -- Keep the unique ID here
+            COALESCE(m.SensorName, m.NodeNum) as sensor_name, -- This is where SP/TP comes from
             m.Project as project, 
             m.Location as location, 
             m.Depth as depth, 
@@ -84,9 +86,14 @@ def rebuild_master_table(mode="preserve"):
         client.query(scrub_sql).result()
         return True
     except Exception as e:
-        # Fallback if the table doesn't exist yet
         st.error(f"Rebuild Error: {e}")
         return False
+#############################
+# --- END REBUILD TABLE --- #
+#############################
+############################
+# --- FETCH SENSORPUSH --- #
+############################
         
 # --- 2. ENGINE: FAST API FETCH ---
 
@@ -157,22 +164,21 @@ def fetch_sensorpush_data(start_dt, end_dt):
             st.error(f"Fetch Error ({acc['email']}): {e}")
             
     return pd.DataFrame(all_records)
-
-# --- 3. GRAPH ENGINE ---
-
+########################
+# --- GRAPH ENGINE --- #
+########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
     SF Standard: 6hr, Midnight, and Monday Gridlines.
-    Legend Format: Depth (NodeNum).
+    Legend Format: Depth (SP-XXXX).
     """
     display_df = df.copy()
     y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # 1. Gap Logic
-    processed_dfs = []
-    # Using a combined key for grouping to handle the new naming convention
-    display_df['label'] = display_df['depth'] + " (" + display_df['sensor_id'] + ")"
+    # 1. Labeling Logic: Use sensor_name (SP/TP) instead of the long ID
+    display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
     
+    processed_dfs = []
     for lbl in display_df['label'].unique():
         s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
         s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
@@ -186,7 +192,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     
     # 2. Trace Creation
     fig = go.Figure()
-    # Sort by numerical depth
+    # Sort by numerical depth using the 're' module
     labels = sorted(clean_df['label'].unique(), 
                     key=lambda x: int(next(iter(re.findall(r'\d+', x)), 0)))
     
@@ -201,41 +207,38 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
     )
     
-    # Y-Axis Formatting
     fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # X-Axis Formatting: 6-hour minor, 24-hour major, Weekly markers
+    # X-Axis Formatting
     fig.update_xaxes(
         range=[start_view, end_view],
         mirror=True, showline=True, linecolor='black', linewidth=2,
         gridcolor='DimGray', gridwidth=1,
-        # Major Ticks every 24 hours (Midnight)
         tick0=start_view, 
-        dtick=86400000, # 24 hours in ms
+        dtick=86400000, # 24 hours
         tickformat="%a\n%m/%d",
-        # Minor Ticks every 6 hours
-        minor=dict(
-            dtick=21600000, # 6 hours in ms
-            gridcolor='Silver', 
-            showgrid=True
-        )
+        minor=dict(dtick=21600000, gridcolor='Silver', showgrid=True) # 6 hours
     )
 
-    # 4. Reference Lines
+    # 4. Vertical Monday Lines
+    curr_ts = start_view
+    while curr_ts <= end_view:
+        if curr_ts.weekday() == 0: # 0 is Monday
+            fig.add_vline(x=curr_ts.timestamp() * 1000, line_width=2, line_color="DimGray")
+        curr_ts += timedelta(days=1)
+
     for val, label in active_refs:
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
     
-    # Add vertical line for Monday Midnight specifically if in range
-    curr_ts = start_view
-    while curr_ts <= end_view:
-        if curr_ts.weekday() == 0: # Monday
-            fig.add_vline(x=curr_ts.timestamp() * 1000, line_width=2, line_color="DimGray", line_dash="solid")
-        curr_ts += timedelta(days=1)
-
     return fig
-
+############################
+# --- END GRAPH ENGINE --- #
+############################
+###################
+# --- SIDEBAR --- #
+###################
 # --- 4. SIDEBAR ---
 st.sidebar.title("❄️ SoilFreeze Lab")
 show_32 = st.sidebar.checkbox("Freezing (32°F)", value=True)
@@ -248,7 +251,12 @@ if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
 
 service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
-
+#######################
+# --- END SIDEBAR --- #
+#######################
+####################
+# --- SERVICES --- #
+####################
 # --- 5. SERVICE ROUTING ---
 
 if service == "🏠 Executive Summary":
