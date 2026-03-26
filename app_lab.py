@@ -53,11 +53,12 @@ client = get_bq_client()
 #########################
 def rebuild_master_table(mode="preserve"):
     """
-    Joins Raw Data (Large Numbers) with Metadata (TP/SP Names).
-    Ensures 'sensor_name' contains the SP/TP label.
+    Rebuilds the master table by joining raw data with metadata.
+    Prioritizes NodeNum for the mapping.
     """
     status_logic = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
     
+    # SQL logic to join raw sensor data with your Google Sheet metadata
     scrub_sql = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
         WITH RawUnified AS (
@@ -74,18 +75,19 @@ def rebuild_master_table(mode="preserve"):
         SELECT 
             h.ts as timestamp, 
             h.temp as temperature, 
-            h.node as sensor_id,            -- The long physical ID
-            COALESCE(m.NodeNum, h.node) as sensor_name, -- Prefer 'TP33-N' but fallback to ID if no match
+            m.NodeNum as sensor_id,      -- Use NodeNum (SP-0001) as the ID
+            m.NodeNum as sensor_name,    -- Use NodeNum as the display name
             m.Project as project, 
             m.Location as location, 
             m.Depth as depth, 
             {status_logic} as is_approved
         FROM HourlyDedupped h 
-        -- JOIN: This links the CSV's ID (h.node) to your Metadata's PhysicalID column
+        -- JOIN LOGIC: Matches raw 'node' to either NodeNum or PhysicalID in your sheet
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
-            ON h.node = REPLACE(CAST(m.PhysicalID AS STRING), ':', '-')
+            ON TRIM(CAST(h.node AS STRING)) = TRIM(CAST(m.NodeNum AS STRING))
+            OR TRIM(CAST(h.node AS STRING)) = TRIM(REPLACE(CAST(m.PhysicalID AS STRING), ':', '-'))
         LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` ex 
-            ON h.ts = ex.timestamp AND h.node = ex.sensor_id
+            ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id
         WHERE h.rank = 1
     """
     try:
