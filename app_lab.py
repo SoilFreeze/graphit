@@ -31,11 +31,12 @@ def get_bq_client():
 
 client = get_bq_client()
 
-# --- 2. HELPERS & API ENGINE ---
+# --- 2. ENGINE: FAST API FETCH ---
 
 def fetch_sensorpush_data(start_dt, end_dt):
     """
-    FAST BATCH FETCH: Pulls the entire time range in one API call per account.
+    Fetches data for ALL sensors (HT.w and TC.x) in 12-hour chunks 
+    to prevent timeouts.
     """
     ACCOUNTS = [
         {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
@@ -43,62 +44,71 @@ def fetch_sensorpush_data(start_dt, end_dt):
     ]
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = []
-    
-    # Format times for API
-    start_str = start_dt.strftime('%Y-%m-%dT%H:%M:%S+0000')
 
     for acc in ACCOUNTS:
         try:
             # 1. Auth
-            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=10)
+            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15)
             if auth_resp.status_code != 200: continue
             token = requests.post(f"{BASE_URL}/oauth/accesstoken", 
-                                   json={"authorization": auth_resp.json().get('authorization')}, timeout=10).json().get('accesstoken')
+                                   json={"authorization": auth_resp.json().get('authorization')}, timeout=15).json().get('accesstoken')
             headers = {"Authorization": token}
 
-            # 2. Get Names & ID List
-            dev_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=10)
+            # 2. Get All Sensors (HT.w and TC.x)
+            dev_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20)
             name_map = {}
             if dev_resp.status_code == 200:
-                sensor_list = dev_resp.json().values() if isinstance(dev_resp.json(), dict) else dev_resp.json()
-                for s in sensor_list:
-                    name_map[str(s.get('id'))] = s.get('name', str(s.get('id')))
+                s_list = dev_resp.json().values() if isinstance(dev_resp.json(), dict) else dev_resp.json()
+                for s in s_list:
+                    s_type = str(s.get('type', ''))
+                    # Updated Filter: Allow both HT.w and TC.x
+                    if s_type in ['HT.w', 'TC.x']:
+                        name_map[str(s.get('id'))] = s.get('name', str(s.get('id')))
 
-            # 3. BATCH FETCH (No more hourly loops!)
-            # We set a high limit (10,000) to get the whole range at once
-            payload = {
-                "limit": 10000, 
-                "startTime": start_str, 
-                "sensors": list(name_map.keys())
-            }
-            r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=20)
-            
-            if r.status_code == 200:
-                data = r.json().get('sensors', {})
-                for s_id, samples in data.items():
-                    for s in samples:
-                        # Extract and Convert
-                        ts = pd.to_datetime(s.get('observed'))
-                        # Only keep data within our requested window
-                        if start_dt <= ts <= end_dt:
-                            temp = s.get('temp_f') or s.get('temperature') or ((s.get('temp_c', 0) * 1.8) + 32)
-                            all_records.append({
-                                'timestamp': ts,
-                                'sensor_id': s_id.replace(':', '-'),
-                                'sensor_name': name_map.get(s_id),
-                                'temperature': round(float(temp), 2)
-                            })
+            # 3. Chunked Fetching (12-hour blocks for stability)
+            current_start = start_dt
+            while current_start < end_dt:
+                current_end = min(current_start + timedelta(hours=12), end_dt)
+                payload = {
+                    "limit": 10000, 
+                    "startTime": current_start.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
+                    "sensors": list(name_map.keys())
+                }
+                # Increased timeout to 60s
+                r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60)
+                
+                if r.status_code == 200:
+                    data = r.json().get('sensors', {})
+                    for s_id, samples in data.items():
+                        for s in samples:
+                            ts = pd.to_datetime(s.get('observed'))
+                            if current_start <= ts <= current_end:
+                                # Logic to handle temperature from different sensor types
+                                temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                                if temp is None and s.get('temp_c') is not None:
+                                    temp = (float(s['temp_c']) * 1.8) + 32
+                                
+                                if temp is not None:
+                                    all_records.append({
+                                        'timestamp': ts,
+                                        'sensor_id': s_id.replace(':', '-'),
+                                        'sensor_name': name_map.get(s_id),
+                                        'temperature': round(float(temp), 2)
+                                    })
+                current_start = current_end
         except Exception as e:
-            st.error(f"Error on {acc['email']}: {e}")
+            st.error(f"Fetch Error ({acc['email']}): {e}")
             
     return pd.DataFrame(all_records)
+
+# --- 3. GRAPH ENGINE ---
 
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """Generates the standardized SoilFreeze thermal line graph."""
     display_df = df.copy()
     y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # Gap Logic
+    # Gap Logic for disconnected sensors
     processed_dfs = []
     for d in display_df['depth'].unique():
         s_df = display_df[display_df['depth'] == d].copy().sort_values('timestamp')
@@ -121,24 +131,16 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         title={'text': title, 'x': 0, 'xanchor': 'left'},
         plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
     )
-    
-    fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
-                     gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
-                     mirror=True, showline=True, linecolor='black', linewidth=2)
-    fig.update_xaxes(showgrid=False, range=[start_view, end_view], mirror=True, showline=True, linecolor='black', linewidth=2)
+    fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range, gridcolor='DimGray')
+    fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
 
     for val, label in active_refs:
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
     
-    now_ms = datetime.now(pytz.UTC).timestamp() * 1000
-    fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="RIGHT NOW")
-
     return fig
 
-# --- 3. SIDEBAR NAVIGATION ---
+# --- 4. SIDEBAR ---
 st.sidebar.title("❄️ SoilFreeze Lab")
-
-st.sidebar.subheader("Graph Reference Lines")
 show_32 = st.sidebar.checkbox("Freezing (32°F)", value=True)
 show_26 = st.sidebar.checkbox("Type B (26.6°F)", value=True)
 show_10 = st.sidebar.checkbox("Type A (10.2°F)", value=True)
@@ -148,15 +150,13 @@ if show_32: active_refs.append((32, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
 
-service = st.sidebar.selectbox("Select Service", [
-    "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"
-])
+service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 
-# --- 4. SERVICE ROUTING ---
+# --- 5. SERVICE ROUTING ---
 
-# 4A. EXECUTIVE SUMMARY
 if service == "🏠 Executive Summary":
-    st.header("🏠 Site Health & Warming Alerts")
+    st.header("🏠 Site Health Summary")
+
     try:
         proj_q = f"SELECT DISTINCT project FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(proj_q).to_dataframe()
@@ -249,6 +249,8 @@ elif service == "📊 Client Portal":
     except Exception as e: st.error(f"Portal Error: {e}")
         
 # 4C. NODE DIAGNOSTICS
+
+
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
@@ -271,6 +273,78 @@ elif service == "📉 Node Diagnostics":
 
 # 4D. DATA INTAKE LAB (HARDENED SYNC)
 # --- 4D. DATA INTAKE LAB ---
+    elif service == "📤 Data Intake Lab":
+    st.header("📤 Data Ingestion & Recovery")
+    tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
+
+    with tab1:
+        st.subheader("Manual CSV Ingestion")
+        source = st.radio("Source", ["SensorPush", "Lord"], horizontal=True)
+        u_file = st.file_uploader("Upload CSV", type=['csv'])
+        if u_file and st.button("🚀 UPLOAD CSV"):
+            df_raw = pd.read_csv(u_file)
+            table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if source == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+            client.load_table_from_dataframe(df_raw, table).result()
+            st.success("CSV Uploaded. Use API tab to sync master table.")
+
+    with tab2:
+        st.subheader("📡 Cloud-to-Cloud API Recovery")
+        c1, c2 = st.columns(2)
+        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=2))
+        end_date = c2.date_input("End Date", datetime.now())
+        
+        if st.button("🛰️ FETCH & SYNC NOW"):
+            status = st.empty()
+            start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
+            end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
+            
+            status.info("1/3: Fetching Batch Data from SensorPush...")
+            df_api = fetch_sensorpush_data(start_dt, end_dt)
+            
+            if not df_api.empty:
+                status.info(f"2/3: Uploading {len(df_api)} points to BigQuery...")
+                raw_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                job = client.load_table_from_dataframe(df_api, raw_table)
+                job.result() # Wait for confirmation
+                
+                status.info("3/3: Mapping sensor_id and Deduplicating (1 point/hr)...")
+                # THE SMART SYNC SQL: Maps sensor_id back even if only name was provided
+                scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                    WITH RawUnified AS (
+                        -- Combine Lord and SensorPush raw data
+                        SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+                        UNION ALL 
+                        SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+                    ),
+                    HourlyDedupped AS (
+                        -- Pick one record per sensor per hour
+                        SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
+                    )
+                    SELECT 
+                        h.ts as timestamp, 
+                        h.temp as temperature, 
+                        m.NodeNum as sensor_id,   -- Correct ID mapped from metadata
+                        m.SensorName as sensor_name, 
+                        m.Project as project, 
+                        m.Location as location, 
+                        m.Depth as depth,
+                        FALSE as is_approved
+                    FROM HourlyDedupped h 
+                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+                        -- Smart Join: Match on ID OR Name
+                        ON (h.node = REPLACE(m.NodeNum, ':', '-') OR h.node = m.SensorName)
+                    WHERE h.rank = 1
+                """
+                client.query(scrub_sql).result()
+                status.success("✅ Database Fully Synced! All sensor_ids mapped.")
+                st.balloons()
+            else:
+                status.warning("No data found for this range.")
+
+elif service == "🛠️ Admin Tools":
+    st.header("🛠️ Admin Tools")
+    # ... (Standard Admin Logic) ...
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
