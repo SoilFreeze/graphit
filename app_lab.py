@@ -15,7 +15,7 @@ from google.oauth2 import service_account
 
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
-    # We explicitly define scopes here to bridge BigQuery and Google Drive
+    # BigQuery needs these three specific 'scopes' to read a Google Sheet
     scopes = [
         "https://www.googleapis.com/auth/bigquery",
         "https://www.googleapis.com/auth/drive",
