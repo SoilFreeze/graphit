@@ -14,26 +14,24 @@ import traceback
 from google.oauth2 import service_account
 from google.cloud import bigquery
 
+# REQUIRED: These scopes must be present to bridge BigQuery and Google Sheets
+SCOPES = [
+    "https://www.googleapis.com/auth/bigquery",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
+
 if "gcp_service_account" in st.secrets:
     info = st.secrets["gcp_service_account"]
-    
-    # THIS IS THE LOOP BREAKER: Explicitly asking for Drive access
-    scopes = [
-        "https://www.googleapis.com/auth/bigquery",
-        "https://www.googleapis.com/auth/drive",
-        "https://www.googleapis.com/auth/spreadsheets",
-    ]
-    
-    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    # Create credentials with explicit DRIVE scopes
+    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     client = bigquery.Client(credentials=creds, project=info["project_id"])
 else:
     st.error("GCP Credentials not found in Streamlit Secrets.")
 
-# --- 1. CONFIGURATION & STYLING ---
-st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
-
-DATASET_ID = "sensor_data" 
+# Ensure these match your BigQuery Console exactly
 PROJECT_ID = "sensorpush-export"
+DATASET_ID = "sensor_data"
 
 @st.cache_resource
 def get_bq_client():
@@ -127,10 +125,7 @@ service = st.sidebar.selectbox("Select Service", [
 # --- 4. SERVICE ROUTING ---
 # --- 4. SERVICE ROUTING ---
 # --- 4. SERVICE ROUTING ---
-
-# Confirmed Project and Dataset
-PROJECT_ID = "sensorpush-export"
-DATASET_ID = "sensor_data"
+# --- 4. SERVICE ROUTING ---
 
 # 4A. EXECUTIVE SUMMARY
 if service == "🏠 Executive Summary":
@@ -150,6 +145,8 @@ if service == "🏠 Executive Summary":
         df_summary = client.query(query).to_dataframe()
         if not df_summary.empty:
             st.dataframe(df_summary, width='stretch', hide_index=True)
+        else:
+            st.info("No data currently available in the master table.")
     except Exception as e:
         st.error(f"Summary Error: {e}")
 
@@ -159,7 +156,6 @@ elif service == "📊 Client Portal":
     try:
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
         meta_df = client.query(meta_q).to_dataframe()
-        
         if meta_df.empty:
             st.warning("No approved data found.")
         else:
@@ -167,52 +163,72 @@ elif service == "📊 Client Portal":
             with c1: sel_p = st.selectbox("Project", sorted(meta_df['project'].unique()))
             with c2: sel_l = st.selectbox("Location", sorted(meta_df[meta_df['project']==sel_p]['location'].unique()))
             
-            data_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sel_p}' AND location='{sel_l}' AND is_approved=TRUE"
+            data_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sel_p}' AND location='{sel_l}' AND is_approved=TRUE ORDER BY timestamp ASC"
             df_c = client.query(data_q).to_dataframe()
             
             if not df_c.empty:
-                # Fixed regex with raw string r''
+                df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
+                # Restore the depth profile plotting
                 df_c['depth_num'] = df_c['depth'].str.extract(r'(\d+)').astype(float)
                 st.line_chart(df_c, x='timestamp', y='temperature')
     except Exception as e:
         st.error(f"Portal Error: {e}")
+
+# 4C. NODE DIAGNOSTICS
+elif service == "📉 Node Diagnostics":
+    st.header("📉 High-Resolution Diagnostics")
+    try:
+        diag_q = f"SELECT timestamp, temperature, sensor_id, sensor_name FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` ORDER BY timestamp DESC LIMIT 500"
+        df_diag = client.query(diag_q).to_dataframe()
+        st.dataframe(df_diag)
+    except Exception as e:
+        st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
     
+    with tab1:
+        u_file = st.file_uploader("Upload CSV", type=['csv'])
+        if u_file:
+            df_m = pd.read_csv(u_file)
+            st.write(df_m.head())
+            if st.button("Push Manual Data"):
+                client.load_table_from_dataframe(df_m, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                st.success("Data Uploaded.")
+
     with tab2:
-        st.subheader("📡 SensorPush Multi-Account Recovery")
+        st.subheader("📡 SensorPush API Recovery")
         if st.button("🛰️ RUN ALL-ACCOUNT RECOVERY"):
+            # This SQL rebuilds the master table using the metadata sheet
+            sync_sql = f"""
+                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                WITH Unified AS (
+                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, CAST(value AS FLOAT64) as temperature, REPLACE(CAST(nodenumber AS STRING), ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
+                    UNION ALL 
+                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, CAST(temperature AS FLOAT64) as temperature, REPLACE(CAST(sensor_id AS STRING), ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                ) 
+                SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.nodenum as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
+                FROM Unified u 
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(CAST(m.nodenum AS STRING), ':', '-')
+            """
             try:
-                # This SQL handles the long numeric IDs by casting to STRING
-                sync_sql = f"""
-                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                    WITH Unified AS (
-                        SELECT CAST(timestamp AS TIMESTAMP) as timestamp, CAST(value AS FLOAT64) as temperature, REPLACE(CAST(nodenumber AS STRING), ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                        UNION ALL 
-                        SELECT CAST(timestamp AS TIMESTAMP) as timestamp, CAST(temperature AS FLOAT64) as temperature, REPLACE(CAST(sensor_id AS STRING), ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                    ) 
-                    SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.nodenum as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                    FROM Unified u 
-                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(CAST(m.nodenum AS STRING), ':', '-')
-                """
                 client.query(sync_sql).result()
-                st.success("✅ Sync Complete!")
+                st.success("✅ Master Table Rebuilt Successfully!")
                 st.balloons()
             except Exception as e:
-                st.error(f"Sync Error: {e}")
+                st.error(f"Master Sync Failed: {e}")
 
 # 4E. ADMIN TOOLS
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Admin Tools")
-    if st.button("🔍 Test Metadata Access"):
+    if st.button("🔍 Run Connection Test"):
         try:
-            # If Step 1 (Scopes) is done, this will finally work
+            # THIS IS THE ULTIMATE TEST
             test_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata` LIMIT 5"
             test_df = client.query(test_q).to_dataframe()
-            st.success("✅ Connection Successful! Metadata is visible.")
+            st.success("✅ CONNECTION VERIFIED! BigQuery can see the Google Sheet.")
             st.dataframe(test_df)
         except Exception as e:
-            st.error(f"❌ Diagnostic failed: {e}")
+            st.error(f"❌ Connection Test Failed: {e}")
