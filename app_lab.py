@@ -354,26 +354,38 @@ elif service == "📤 Data Intake Lab":
                     job = client.load_table_from_dataframe(df_api, table_ref)
                     job.result() 
                     
-                    status_box.info("Step 3/3: Running Master Deduplication...")
-                    # SQL Logic remains consistent to fix sensor_id mapping
-                    scrub_sql = f"""
-                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                        WITH RawUnified AS (
-                            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
-                            UNION ALL 
-                            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
-                        ),
-                        HourlyDedupped AS (
-                            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
-                        )
-                        SELECT h.ts as timestamp, h.temp as temperature, m.NodeNum as sensor_id, m.SensorName as sensor_name, m.Project as project, m.Location as location, m.Depth as depth, FALSE as is_approved
-                        FROM HourlyDedupped h 
-                        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON (h.node = REPLACE(m.NodeNum, ':', '-') OR h.node = m.SensorName)
-                        WHERE h.rank = 1
-                    """
-                    client.query(scrub_sql).result()
-                    status_box.success("✅ Database Fully Synced and Deduplicated!")
-                    st.balloons()
+                    status_box.info("Step 3/3: Running Master Deduplication & ID Mapping...")
+                # THE UPDATED SYNC SQL: Uses NodeNum as the primary mapping key
+                scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                    WITH RawUnified AS (
+                        -- Combine Lord and SensorPush raw data, stripping colons for consistency
+                        SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+                        UNION ALL 
+                        SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+                    ),
+                    HourlyDedupped AS (
+                        -- Window function to keep only the most recent record per hour per sensor
+                        SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
+                    )
+                    SELECT 
+                        h.ts as timestamp, 
+                        h.temp as temperature, 
+                        m.NodeNum as sensor_id,   -- Restores the official ID from metadata
+                        COALESCE(m.SensorName, m.NodeNum) as sensor_name, -- Falls back to NodeNum if Name is missing
+                        m.Project as project, 
+                        m.Location as location, 
+                        m.Depth as depth,
+                        FALSE as is_approved
+                    FROM HourlyDedupped h 
+                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+                        -- Joins by comparing the raw 'node' string to the metadata 'NodeNum'
+                        ON h.node = REPLACE(m.NodeNum, ':', '-')
+                    WHERE h.rank = 1
+                """
+                client.query(scrub_sql).result()
+                status_box.success("✅ Database Fully Synced! Data is now mapped to NodeNum and deduplicated.")
+                st.balloons()
                 except Exception as bq_e:
                     st.error(f"BigQuery Sync Failed: {bq_e}")
             else:
