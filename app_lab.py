@@ -44,11 +44,12 @@ client = get_bq_client()
 
 def rebuild_master_table(mode="preserve"):
     """
-    Deduplicates data and manages approval status.
-    Historic = 'yes' (TRUE), New = 'no' (FALSE).
+    Ensures a full historical rebuild. 
+    New data = 'no' (FALSE), Existing Approved data = 'yes' (TRUE).
     """
-    # Decide if we are forcing approval or checking existing status
-    status_sql = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
+    # Logic: If mode is approve_all, force everything to TRUE. 
+    # Otherwise, check if the record was already approved in the old table.
+    status_logic = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
     
     scrub_sql = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
@@ -60,16 +61,21 @@ def rebuild_master_table(mode="preserve"):
             FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
         ),
         HourlyDedupped AS (
+            -- This ensures that even if we upload overlapping days, we only keep 1 point per hour
             SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
             FROM RawUnified
         )
         SELECT 
-            h.ts as timestamp, h.temp as temperature, m.NodeNum as sensor_id, 
-            m.NodeNum as sensor_name, m.Project as project, m.Location as location, m.Depth as depth,
-            {status_sql} as is_approved
+            h.ts as timestamp, 
+            h.temp as temperature, 
+            m.NodeNum as sensor_id, 
+            m.NodeNum as sensor_name, 
+            m.Project as project, 
+            m.Location as location, 
+            m.Depth as depth, 
+            {status_logic} as is_approved
         FROM HourlyDedupped h 
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
-        -- We join with the current table to remember who was already approved
         LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` ex 
             ON h.ts = ex.timestamp AND h.node = ex.sensor_id
         WHERE h.rank = 1
@@ -78,12 +84,8 @@ def rebuild_master_table(mode="preserve"):
         client.query(scrub_sql).result()
         return True
     except Exception as e:
-        # If the table doesn't exist yet (first run), fallback to FALSE
-        if "Not found" in str(e):
-            fallback_sql = scrub_sql.replace(f"LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` ex ON h.ts = ex.timestamp AND h.node = ex.sensor_id", "")
-            client.query(fallback_sql.replace(status_sql, "FALSE")).result()
-            return True
-        st.error(f"Master Build Error: {e}")
+        # Fallback if the table doesn't exist yet
+        st.error(f"Rebuild Error: {e}")
         return False
         
 # --- 2. ENGINE: FAST API FETCH ---
@@ -159,11 +161,12 @@ def fetch_sensorpush_data(start_dt, end_dt):
 # --- 3. GRAPH ENGINE ---
 
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
-    """Generates the standardized SoilFreeze thermal line graph."""
+    """Restores full formatting and handling for SoilFreeze thermal trends."""
     display_df = df.copy()
+    # Standard SF Thermal Range
     y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # Gap Logic for disconnected sensors
+    # 1. Gap Logic: Prevents lines from 'jumping' over missing data periods
     processed_dfs = []
     for d in display_df['depth'].unique():
         s_df = display_df[display_df['depth'] == d].copy().sort_values('timestamp')
@@ -176,22 +179,41 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         processed_dfs.append(s_df)
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     
+    # 2. Trace Creation
     fig = go.Figure()
     depths = sorted(clean_df['depth'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x)) or 0))
     for d in depths:
         sensor_df = clean_df[clean_df['depth'] == d]
-        fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], name=d, mode='lines', connectgaps=False))
+        fig.add_trace(go.Scatter(
+            x=sensor_df['timestamp'], y=sensor_df['temperature'], 
+            name=d, mode='lines', connectgaps=False
+        ))
 
+    # 3. Restored Formatting (Gridlines and Borders)
     fig.update_layout(
         title={'text': title, 'x': 0, 'xanchor': 'left'},
-        plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
+        plot_bgcolor='white', hovermode="x unified", 
+        margin=dict(t=50, l=50, r=150), height=750
     )
-    fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range, gridcolor='DimGray')
-    fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
+    
+    fig.update_yaxes(
+        title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
+        gridcolor='DimGray', gridwidth=1.5, 
+        minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
+        mirror=True, showline=True, linecolor='black', linewidth=2
+    )
+    fig.update_xaxes(
+        showgrid=False, range=[start_view, end_view], 
+        mirror=True, showline=True, linecolor='black', linewidth=2
+    )
 
+    # 4. Reference Lines
     for val, label in active_refs:
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
     
+    now_ms = datetime.now(pytz.UTC).timestamp() * 1000
+    fig.add_vline(x=now_ms, line_width=2, line_color="red", annotation_text="RIGHT NOW")
+
     return fig
 
 # --- 4. SIDEBAR ---
@@ -334,107 +356,48 @@ elif service == "📉 Node Diagnostics":
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
+# --- 4D. DATA INTAKE LAB ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
-    
-    # Using three tabs to separate Manual, API, and Maintenance logic
-    tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Database Maintenance"])
-
-    with tab1:
-        st.subheader("Manual CSV Ingestion")
-        source = st.radio("Device Type", ["SensorPush (CSV)", "Lord (SensorConnect)", "Logger (Master Log)"], horizontal=True)
-        u_file = st.file_uploader("Upload Logger File", type=['csv'], key="manual_upload")
-        
-        if u_file is not None:
-            try:
-                # 1. Load Raw Data
-                df_raw = pd.read_csv(u_file, low_memory=False)
-                ts_col = next((c for c in df_raw.columns if c.lower() == 'timestamp'), df_raw.columns[0])
-                df_raw['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
-                df_raw = df_raw.dropna(subset=['timestamp'])
-
-                df_up = pd.DataFrame()
-                # Determine destination table
-                table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_lord" if "Lord" in source else f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-
-                # 2. Process based on source
-                if "Master Log" in source:
-                    if df_raw.shape[1] > 2 and any(isinstance(x, str) for x in df_raw.iloc[:, 1]):
-                        df_up = df_raw.iloc[:, [df_raw.columns.get_loc('timestamp'), 0, 1]].copy()
-                        df_up.columns = ['timestamp', 'temperature', 'sensor_id']
-                    else:
-                        df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
-                elif "Lord" in source:
-                    df_up = df_raw.melt(id_vars=['timestamp'], var_name='sensor_id', value_name='temperature')
-                else: 
-                    df_up = df_raw.rename(columns={'Temperature': 'temperature', 'Sensor': 'sensor_id'})
-
-                if not df_up.empty:
-                    # Standardize IDs
-                    df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
-                    st.write(f"Previewing {len(df_up)} points:")
-                    st.dataframe(df_up.head())
-
-                    if st.button("🚀 UPLOAD & REBUILD MASTER"):
-                        with st.spinner("Uploading raw data and rebuilding master..."):
-                            # Upload to raw storage
-                            client.load_table_from_dataframe(df_up, table_ref).result()
-                            
-                            # Trigger the separate modular function
-                            if rebuild_master_table(mode="preserve"):
-                                st.success("✅ Uploaded and Master Table Rebuilt. New data is 'Unapproved'.")
-            except Exception as e: 
-                st.error(f"Manual Upload Error: {e}")
+    tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
-        st.info("Pulls data for both HT.w and TC.x sensors in 12-hour chunks.")
-        
         c1, c2 = st.columns(2)
-        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=2))
+        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=7)) # Default to 1 week
         end_date = c2.date_input("End Date", datetime.now())
         
-        if st.button("🛰️ FETCH & SYNC MASTER"):
+        if st.button("🛰️ FETCH & FULL SYNC"):
             status_box = st.empty()
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            status_box.info("Step 1/2: Contacting SensorPush API...")
+            status_box.info(f"Fetching data from {start_date} to {end_date}...")
             df_api = fetch_sensorpush_data(start_dt, end_dt) 
             
             if not df_api.empty:
-                status_box.info(f"Step 2/2: Mapping {len(df_api)} points to Master Table...")
+                status_box.info(f"Found {len(df_api)} points. Syncing to BigQuery...")
                 try:
                     df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
                     
-                    # 1. Upload to Raw table
-                    raw_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                    client.load_table_from_dataframe(df_api, raw_table).result()
+                    # 1. Upload to Raw (WRITE_APPEND)
+                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=job_config).result()
                     
-                    # 2. Rebuild Master
+                    # 2. Full Master Rebuild
                     if rebuild_master_table(mode="preserve"):
-                        status_box.success("✅ Master Table Synced! Data deduplicated and mapped.")
+                        status_box.success(f"✅ Full Sync Complete! {len(df_api)} points integrated into history.")
                         st.balloons()
                 except Exception as bq_e:
-                    st.error(f"BigQuery Sync Failed: {bq_e}")
+                    st.error(f"BigQuery Error: {bq_e}")
             else:
-                status_box.warning("No data found for this range.")
+                status_box.warning("No data found for this range. Check your SensorPush account.")
 
     with tab3:
         st.subheader("🛠️ Database Maintenance")
-        col_m1, col_m2 = st.columns(2)
-        
-        with col_m1:
-            if st.button("🚩 MARK ALL EXISTING DATA AS HISTORIC"):
-                with st.spinner("Approving all current records..."):
-                    if rebuild_master_table(mode="approve_all"):
-                        st.success("✅ All records are now marked as 'Approved'.")
-        
-        with col_m2:
-            if st.button("🔄 FORCE CLEAN REBUILD"):
-                with st.spinner("Running global deduplication..."):
-                    if rebuild_master_table(mode="preserve"):
-                        st.success("✅ Master table refreshed.")
+        if st.button("🔄 FORCE HISTORICAL REBUILD (CLEANUP)"):
+            if rebuild_master_table(mode="preserve"):
+                st.success("✅ Master Table has been fully re-synced from all raw data.")
                 
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
