@@ -103,6 +103,7 @@ service = st.sidebar.selectbox("Select Service", [
 # --- 4. SERVICE ROUTING ---
 # --- 4. SERVICE ROUTING ---
 # --- 4. SERVICE ROUTING ---
+# --- 4. SERVICE ROUTING ---
 
 # 4A. EXECUTIVE SUMMARY
 if service == "🏠 Executive Summary":
@@ -140,7 +141,8 @@ if service == "🏠 Executive Summary":
                     "Change": round(float(chg), 1), "Current": round(float(curr_t), 1)
                 })
             st.dataframe(pd.DataFrame(summary_stats), width='stretch', hide_index=True)
-    except Exception as e: st.error(f"Summary Error: {e}")
+    except Exception as e:
+        st.error(f"Summary Error: {e}")
 
 # 4B. CLIENT PORTAL
 elif service == "📊 Client Portal":
@@ -152,11 +154,13 @@ elif service == "📊 Client Portal":
             st.warning("No approved data available.")
         else:
             c1, c2, c3 = st.columns([1, 1, 1])
-            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
+            with c1:
+                sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
             with c2: 
                 locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
                 sel_loc = st.selectbox("Pipe / Bank", locs)
-            with c3: weeks_to_view = st.slider("Weeks to View", 1, 12, 6)
+            with c3:
+                weeks_to_view = st.slider("Weeks to View", 1, 12, 6)
             
             data_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE ORDER BY timestamp ASC"
             df_c = client.query(data_q).to_dataframe()
@@ -172,6 +176,7 @@ elif service == "📊 Client Portal":
                 snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
                 snapshot = snapshot[snapshot['timestamp'] >= start_view]
                 if not snapshot.empty:
+                    # Added 'r' to regex to fix syntax warning
                     snapshot['depth_num'] = snapshot['depth'].str.extract(r'(\d+)').astype(float)
                     snapshot['Date'] = snapshot['timestamp'].dt.strftime('%m/%d')
                     fig_profile = px.line(snapshot.sort_values('depth_num'), x='temperature', y='depth_num', color='Date', markers=True, range_x=[-20, 80])
@@ -198,7 +203,8 @@ elif service == "📊 Client Portal":
             latest_note = df_c.sort_values('timestamp', ascending=False)['engineer_note'].dropna()
             if not latest_note.empty and latest_note.iloc[0]:
                 st.info(f"**Field Engineer Note:** {latest_note.iloc[0]}")
-    except Exception as e: st.error(f"Portal Error: {e}")
+    except Exception as e:
+        st.error(f"Portal Error: {e}")
 
 # 4C. NODE DIAGNOSTICS
 elif service == "📉 Node Diagnostics":
@@ -207,11 +213,14 @@ elif service == "📉 Node Diagnostics":
         meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe()
         c1, c2, c3 = st.columns(3)
-        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
+        with c1:
+            sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
         with c2: 
             locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
             sel_loc = st.selectbox("Pipe / Bank", locs)
-        with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
+        with c3:
+            weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
+        
         days_back = weeks * 7
         data_q = f"SELECT timestamp, temperature, depth, sensor_name FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY) ORDER BY timestamp ASC"
         df_g = client.query(data_q).to_dataframe()
@@ -220,7 +229,8 @@ elif service == "📉 Node Diagnostics":
             end_v = datetime.now(pytz.UTC)
             start_v = end_v - timedelta(days=days_back)
             st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", start_v, end_v, active_refs), width='stretch')
-    except Exception as e: st.error(f"Diagnostics Error: {e}")
+    except Exception as e:
+        st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE
 elif service == "📤 Data Intake Lab":
@@ -237,7 +247,8 @@ elif service == "📤 Data Intake Lab":
                 if source == "Master Log":
                     df_up = pd.read_csv(u_file)
                     df_up.columns = [c.lower() for c in df_up.columns]
-                    df_up = df_up.rename(columns={'nodenumber': 'sensor_id'})
+                    if 'nodenumber' in df_up.columns:
+                        df_up = df_up.rename(columns={'nodenumber': 'sensor_id'})
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                 elif source == "Lord (SensorConnect)":
                     content = u_file.getvalue().decode("utf-8").splitlines()
@@ -251,9 +262,10 @@ elif service == "📤 Data Intake Lab":
                     start_idx = next((i for i, l in enumerate(content) if "SensorId,Observed" in l), 0)
                     u_file.seek(0)
                     df_raw = pd.read_csv(u_file, skiprows=start_idx)
-                    temp_col = [c for c in df_raw.columns if "Temperature" in c][0]
-                    df_up = df_raw[['SensorId', 'Observed', temp_col]].copy()
-                    df_up.columns = ['sensor_id', 'timestamp', 'temperature']
+                    temp_col = next((c for c in df_raw.columns if "Temperature" in c), None)
+                    if temp_col:
+                        df_up = df_raw[['SensorId', 'Observed', temp_col]].copy()
+                        df_up.columns = ['sensor_id', 'timestamp', 'temperature']
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                 
                 if not df_up.empty:
@@ -261,21 +273,11 @@ elif service == "📤 Data Intake Lab":
                     df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-', regex=False)
                     st.dataframe(df_up.head(), width='stretch')
                     if st.button("🚀 PUSH TO BIGQUERY"):
-                        with st.spinner("Pushing..."):
+                        with st.spinner("Uploading..."):
                             client.load_table_from_dataframe(df_up, table_ref).result()
-                            scrub_sql = f"""
-                                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                                WITH Unified AS (
-                                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
-                                    UNION ALL 
-                                    SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                                ) 
-                                SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.nodenum as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                                FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
-                            """
-                            client.query(scrub_sql).result()
-                            st.success("✅ Database Synchronized!")
-            except Exception as e: st.error(f"Processing Error: {e}")
+                            st.success("✅ Raw Data Uploaded!")
+            except Exception as e:
+                st.error(f"Processing Error: {e}")
 
     with tab2:
         st.subheader("📡 SensorPush Multi-Account Recovery")
@@ -314,26 +316,27 @@ elif service == "📤 Data Intake Lab":
                                                     val = s.get('value') or s.get('temperature') or s.get('temp_f')
                                                     if val is not None:
                                                         all_api_recs.append({"timestamp": s["observed"], "temperature": float(val), "sensor_id": sid.replace(':', '-')})
-                    except Exception as e: st.error(f"Error on {acc_id}: {e}")
+                    except Exception as e:
+                        st.error(f"Error on {acc_id}: {e}")
                 
                 if all_api_recs:
                     df_api = pd.DataFrame(all_api_recs)
-                    # Type safety for BigQuery
                     df_api['timestamp'] = pd.to_datetime(df_api['timestamp'], format='mixed')
                     df_api['temperature'] = pd.to_numeric(df_api['temperature'], errors='coerce')
                     df_api['sensor_id'] = df_api['sensor_id'].astype(str)
                     
                     with st.spinner("Pushing to BigQuery & Syncing..."):
                         client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                        # Rebuild Master Table with String Casting for Numeric IDs
                         scrub_sql = f"""
                             CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
                             WITH Unified AS (
-                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
+                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, value as temperature, REPLACE(CAST(nodenumber AS STRING), ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` 
                                 UNION ALL 
-                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                                SELECT CAST(timestamp AS TIMESTAMP) as timestamp, temperature, REPLACE(CAST(sensor_id AS STRING), ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                             ) 
                             SELECT u.timestamp, u.node AS sensor_id, u.temperature, m.nodenum as sensor_name, m.project, m.location, m.depth, CAST(FALSE AS BOOLEAN) as is_approved, CAST(NULL AS STRING) as engineer_note
-                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(m.nodenum, ':', '-')
+                            FROM Unified u INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON u.node = REPLACE(CAST(m.nodenum AS STRING), ':', '-')
                         """
                         client.query(scrub_sql).result()
                     st.success(f"✅ Sync Complete! {len(all_api_recs)} points added.")
