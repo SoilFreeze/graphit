@@ -343,24 +343,44 @@ elif service == "📤 Data Intake Lab":
                     st.balloons()
 
 # 4E. ADMIN TOOLS
+# --- 4E. ADMIN TOOLS (DIAGNOSTIC MODE) ---
 elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Admin Tools")
-    tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Bulk Approval"])
-    with tab_scrub:
-        sc_proj, sc_loc = st.text_input("Project Name"), st.text_input("Location")
-        sc_start, sc_end = st.text_input("Start (YYYY-MM-DD HH:MM:SS)"), st.text_input("End (YYYY-MM-DD HH:MM:SS)")
-        if st.button("🗑️ DELETE POINTS"):
-            client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sc_proj}' AND location='{sc_loc}' AND timestamp BETWEEN '{sc_start}' AND '{sc_end}'").result()
-            st.success("Data Scrubbed.")
-    with tab_approve:
-        un_meta = client.query(f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE (is_approved IS FALSE OR is_approved IS NULL) AND project IS NOT NULL AND location IS NOT NULL").to_dataframe()
-        if not un_meta.empty:
-            u_projs = sorted(un_meta['project'].dropna().unique())
-            app_proj = st.selectbox("Select Project", u_projs)
-            u_locs = sorted(un_meta[un_meta['project'] == app_proj]['location'].dropna().unique())
-            app_loc = st.selectbox("Select Location", u_locs)
-            app_note = st.text_area("Engineer Note")
-            t_start, t_end = st.text_input("Start", value="2026-01-01 00:00:00"), st.text_input("End", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            if st.button("🚀 BULK APPROVE NOW"):
-                client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` SET is_approved = TRUE, engineer_note = '{app_note}' WHERE project = '{app_proj}' AND location = '{app_loc}' AND timestamp BETWEEN '{t_start}' AND '{t_end}'").result()
-                st.success("Bulk Approved!")
+    st.header("🛠️ System Diagnostics")
+    
+    st.subheader("1. Service Account Identity")
+    # This helps you confirm exactly which email needs to be invited to the Sheet
+    if "gcp_service_account" in st.secrets:
+        sa_email = st.secrets["gcp_service_account"]["client_email"]
+        st.info(f"**Invite this email to your Google Sheet:** `{sa_email}`")
+    else:
+        st.error("Service account not found in Streamlit Secrets.")
+
+    st.subheader("2. Metadata Connection Test")
+    if st.button("🔍 Test Metadata Access"):
+        try:
+            # Attempting to read the external table
+            test_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata` LIMIT 5"
+            test_df = client.query(test_q).to_dataframe()
+            
+            st.success("✅ Connection Successful! Metadata is visible.")
+            st.write("Preview of Metadata Table:")
+            st.dataframe(test_df)
+            
+        except Exception as e:
+            if "accessDenied" in str(e) or "Drive credentials" in str(e):
+                st.error("❌ Access Denied: BigQuery cannot see the Google Sheet.")
+                st.write("**Troubleshooting:**")
+                st.write("1. Open your Metadata Google Sheet.")
+                st.write(f"2. Click 'Share' and add `{sa_email}` as a **Viewer**.")
+                st.write("3. Wait 30 seconds and try this test again.")
+            else:
+                st.error(f"❌ Connection Error: {e}")
+
+    st.subheader("3. Reset Tools")
+    if st.button("🧨 RESET RAW TABLES"):
+        try:
+            client.query(f"DROP TABLE IF EXISTS `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").result()
+            client.query(f"DROP TABLE IF EXISTS `{PROJECT_ID}.{DATASET_ID}.raw_lord`").result()
+            st.success("Raw tables cleared.")
+        except Exception as e:
+            st.error(f"Error clearing tables: {e}")
