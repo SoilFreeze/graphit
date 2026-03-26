@@ -273,6 +273,7 @@ elif service == "📉 Node Diagnostics":
 
 # 4D. DATA INTAKE LAB (HARDENED SYNC)
 # --- 4D. DATA INTAKE LAB (FIXED INDENTATION & SCHEMA) ---
+# --- 4D. DATA INTAKE LAB (FULLY CORRECTED) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
@@ -323,15 +324,15 @@ elif service == "📤 Data Intake Lab":
                                 HourlyDedupped AS (
                                     SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
                                 )
-                                SELECT h.ts as timestamp, h.temp as temperature, m.NodeNum as sensor_id, m.SensorName as sensor_name, m.Project as project, m.Location as location, m.Depth as depth, FALSE as is_approved
+                                SELECT h.ts as timestamp, h.temp as temperature, m.NodeNum as sensor_id, COALESCE(m.SensorName, m.NodeNum) as sensor_name, m.Project as project, m.Location as location, m.Depth as depth, FALSE as is_approved
                                 FROM HourlyDedupped h 
-                                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON (h.node = REPLACE(m.NodeNum, ':', '-') OR h.node = m.SensorName)
+                                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
                                 WHERE h.rank = 1
                             """
                             client.query(scrub_sql).result()
                             st.success("✅ Database synced with hourly deduplication!")
             except Exception as e: 
-                st.error(f"File Error: {e}")
+                st.error(f"Manual Upload Error: {e}")
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud Range Recovery")
@@ -344,53 +345,52 @@ elif service == "📤 Data Intake Lab":
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            status_box.info("Step 1/3: Fetching data (HT.w & TC.x) in 12hr chunks...")
-            df_api = fetch_sensorpush_data(start_dt, end_dt) # Now uses the chunked fetcher
+            status_box.info("Step 1/3: Fetching data from SensorPush...")
+            # This calls the chunked fetcher we updated previously
+            df_api = fetch_sensorpush_data(start_dt, end_dt) 
             
             if not df_api.empty:
                 status_box.info(f"Step 2/3: Uploading {len(df_api)} points to BigQuery...")
                 try:
                     table_ref = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    # Ensure columns match BigQuery expected schema
+                    df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-')
+                    
                     job = client.load_table_from_dataframe(df_api, table_ref)
                     job.result() 
                     
-                    status_box.info("Step 3/3: Running Master Deduplication & ID Mapping...")
-                # THE UPDATED SYNC SQL: Uses NodeNum as the primary mapping key
-                scrub_sql = f"""
-                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
-                    WITH RawUnified AS (
-                        -- Combine Lord and SensorPush raw data, stripping colons for consistency
-                        SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
-                        UNION ALL 
-                        SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
-                    ),
-                    HourlyDedupped AS (
-                        -- Window function to keep only the most recent record per hour per sensor
-                        SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
-                    )
-                    SELECT 
-                        h.ts as timestamp, 
-                        h.temp as temperature, 
-                        m.NodeNum as sensor_id,   -- Restores the official ID from metadata
-                        COALESCE(m.SensorName, m.NodeNum) as sensor_name, -- Falls back to NodeNum if Name is missing
-                        m.Project as project, 
-                        m.Location as location, 
-                        m.Depth as depth,
-                        FALSE as is_approved
-                    FROM HourlyDedupped h 
-                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
-                        -- Joins by comparing the raw 'node' string to the metadata 'NodeNum'
-                        ON h.node = REPLACE(m.NodeNum, ':', '-')
-                    WHERE h.rank = 1
-                """
-                client.query(scrub_sql).result()
-                status_box.success("✅ Database Fully Synced! Data is now mapped to NodeNum and deduplicated.")
-                st.balloons()
+                    status_box.info("Step 3/3: Mapping IDs and Deduplicating...")
+                    scrub_sql = f"""
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
+                        WITH RawUnified AS (
+                            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+                            UNION ALL 
+                            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+                        ),
+                        HourlyDedupped AS (
+                            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
+                        )
+                        SELECT 
+                            h.ts as timestamp, 
+                            h.temp as temperature, 
+                            m.NodeNum as sensor_id, 
+                            COALESCE(m.SensorName, m.NodeNum) as sensor_name, 
+                            m.Project as project, 
+                            m.Location as location, 
+                            m.Depth as depth, 
+                            FALSE as is_approved
+                        FROM HourlyDedupped h 
+                        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
+                        WHERE h.rank = 1
+                    """
+                    client.query(scrub_sql).result()
+                    status_box.success("✅ Database Fully Synced! sensor_id is correctly mapped from NodeNum.")
+                    st.balloons()
                 except Exception as bq_e:
                     st.error(f"BigQuery Sync Failed: {bq_e}")
             else:
-                status_box.warning("No data found for this range.")
-
+                status_box.warning("No data found for this range. Check your SensorPush account.")
+                
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
