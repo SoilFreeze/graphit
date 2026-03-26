@@ -294,8 +294,8 @@ elif service == "📤 Data Intake Lab":
                                 m.project, 
                                 m.location, 
                                 m.depth,
-                            CAST(FALSE AS BOOLEAN) as is_approved,
-                            CAST(NULL AS STRING) as engineer_note
+                                CAST(FALSE AS BOOLEAN) as is_approved,
+                                CAST(NULL AS STRING) as engineer_note
                             FROM Unified u 
                             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
                             ON u.node = REPLACE(m.nodenum, ':', '-')CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
