@@ -275,6 +275,7 @@ elif service == "📉 Node Diagnostics":
 # --- 4D. DATA INTAKE LAB (FIXED INDENTATION & SCHEMA) ---
 # --- 4D. DATA INTAKE LAB (FULLY CORRECTED) ---
 # --- 4D. DATA INTAKE LAB ---
+# --- 4D. DATA INTAKE LAB (FIXED FOR NODENUM) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     tab1, tab2 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery"])
@@ -308,15 +309,12 @@ elif service == "📤 Data Intake Lab":
 
                 if not df_up.empty:
                     df_up['sensor_id'] = df_up['sensor_id'].astype(str).str.replace(':', '-')
-                    st.write(f"Previewing {len(df_up)} points:")
-                    st.dataframe(df_up.head())
-
+                    
                     if st.button("🚀 PUSH & CLEANSE"):
                         with st.spinner("Syncing to Master Table..."):
-                            # 1. Upload to Raw
                             client.load_table_from_dataframe(df_up, table_ref).result()
                             
-                            # 2. Run the Master Scrub (The code you need)
+                            # SQL FIX: Removed SensorName, using NodeNum exclusively
                             scrub_sql = f"""
                                 CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
                                 WITH RawUnified AS (
@@ -327,13 +325,21 @@ elif service == "📤 Data Intake Lab":
                                 HourlyDedupped AS (
                                     SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
                                 )
-                                SELECT h.ts as timestamp, h.temp as temperature, m.NodeNum as sensor_id, COALESCE(m.SensorName, m.NodeNum) as sensor_name, m.Project as project, m.Location as location, m.Depth as depth, FALSE as is_approved
+                                SELECT 
+                                    h.ts as timestamp, 
+                                    h.temp as temperature, 
+                                    m.NodeNum as sensor_id, 
+                                    m.NodeNum as sensor_name, -- Using NodeNum since SensorName is missing
+                                    m.Project as project, 
+                                    m.Location as location, 
+                                    m.Depth as depth, 
+                                    FALSE as is_approved
                                 FROM HourlyDedupped h 
                                 INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
                                 WHERE h.rank = 1
                             """
                             client.query(scrub_sql).result()
-                            st.success("✅ Master Table updated with clean, unique hourly data!")
+                            st.success("✅ Master Table updated successfully!")
             except Exception as e: 
                 st.error(f"Upload Error: {e}")
 
@@ -354,10 +360,10 @@ elif service == "📤 Data Intake Lab":
             if not df_api.empty:
                 status_box.info(f"Step 2/2: Mapping to Master File...")
                 try:
-                    # Upload to Raw first
+                    df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-')
                     client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
                     
-                    # Final Push to Master
+                    # SQL FIX: Removed SensorName, using NodeNum exclusively
                     scrub_sql = f"""
                         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` AS 
                         WITH RawUnified AS (
@@ -368,13 +374,21 @@ elif service == "📤 Data Intake Lab":
                         HourlyDedupped AS (
                             SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank FROM RawUnified
                         )
-                        SELECT h.ts as timestamp, h.temp as temperature, m.NodeNum as sensor_id, COALESCE(m.SensorName, m.NodeNum) as sensor_name, m.Project as project, m.Location as location, m.Depth as depth, FALSE as is_approved
+                        SELECT 
+                            h.ts as timestamp, 
+                            h.temp as temperature, 
+                            m.NodeNum as sensor_id, 
+                            m.NodeNum as sensor_name, 
+                            m.Project as project, 
+                            m.Location as location, 
+                            m.Depth as depth, 
+                            FALSE as is_approved
                         FROM HourlyDedupped h 
                         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m ON h.node = REPLACE(m.NodeNum, ':', '-')
                         WHERE h.rank = 1
                     """
                     client.query(scrub_sql).result()
-                    status_box.success("✅ Master File is now synchronized and clean!")
+                    status_box.success("✅ Master File synchronized and deduplicated!")
                     st.balloons()
                 except Exception as bq_e:
                     st.error(f"Sync Failed: {bq_e}")
