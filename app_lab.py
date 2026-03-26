@@ -53,42 +53,35 @@ client = get_bq_client()
 #########################
 def rebuild_master_table(mode="preserve"):
     """
-    Rebuilds the master table. Handles the 'ex' error by checking 
-    if the table exists before attempting to join.
+    Failsafe Rebuild: Strips all non-numeric characters to ensure 
+    a match between CSV IDs and Google Sheet IDs.
     """
-    # 1. Determine if we are force-approving everything
-    status_logic = "TRUE" if mode == "approve_all" else "COALESCE(ex.is_approved, FALSE)"
-    
-    # 2. Check if the table actually exists to avoid the 'ex' error
     table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+    
+    # Check if table exists to handle the 'ex' alias error
     exists = True
     try:
         client.get_table(table_id)
     except Exception:
         exists = False
 
-    # 3. Build the SQL based on whether the table exists
-    join_clause = ""
-    if exists and mode == "preserve":
-        join_clause = f"""
-            LEFT JOIN `{table_id}` ex 
-            ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id
-        """
-    else:
-        # If table doesn't exist, we can't join 'ex', so we set status to FALSE
-        status_logic = "TRUE" if mode == "approve_all" else "FALSE"
+    status_logic = "TRUE" if mode == "approve_all" else ("COALESCE(ex.is_approved, FALSE)" if exists else "FALSE")
+    join_clause = f"LEFT JOIN `{table_id}` ex ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id" if (exists and mode == "preserve") else ""
 
     scrub_sql = f"""
         CREATE OR REPLACE TABLE `{table_id}` AS 
         WITH RawUnified AS (
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, REPLACE(nodenumber, ':', '-') as node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
-            UNION ALL 
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, REPLACE(sensor_id, ':', '-') as node 
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
+                   -- Clean the ID: Remove colons, spaces, and non-digits
+                   REGEXP_REPLACE(CAST(sensor_id AS STRING), r'[^0-9]', '') as clean_node 
             FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            UNION ALL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, 
+                   REGEXP_REPLACE(REPLACE(nodenumber, ':', '-'), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
         ),
         HourlyDedupped AS (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY clean_node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
             FROM RawUnified
         )
         SELECT 
@@ -102,12 +95,11 @@ def rebuild_master_table(mode="preserve"):
             {status_logic} as is_approved
         FROM HourlyDedupped h 
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
-            ON (SUBSTR(TRIM(h.node), 1, 12) = SUBSTR(TRIM(CAST(m.PhysicalID AS STRING)), 1, 12))
-            OR (TRIM(h.node) = TRIM(CAST(m.NodeNum AS STRING)))
+            -- Match by stripping the Google Sheet PhysicalID of all non-digits too
+            ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
         {join_clause}
         WHERE h.rank = 1
     """
-    
     try:
         client.query(scrub_sql).result()
         return True
