@@ -326,8 +326,7 @@ elif service == "📊 Client Portal":
     except Exception as e: st.error(f"Portal Error: {e}")
         
 # 4C. NODE DIAGNOSTICS
-
-
+# --- 4C. NODE DIAGNOSTICS ---
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
@@ -341,16 +340,34 @@ elif service == "📉 Node Diagnostics":
         with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
 
         days_back = weeks * 7
-        data_q = f"SELECT timestamp, temperature, depth FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY) ORDER BY timestamp ASC"
+        # Querying with a specific lookback to ensure historical data is retrieved
+        data_q = f"""
+            SELECT timestamp, temperature, depth 
+            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
+            WHERE project = '{sel_proj}' AND location = '{sel_loc}' 
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY) 
+            ORDER BY timestamp ASC
+        """
         df_g = client.query(data_q).to_dataframe()
+        
         if not df_g.empty:
             df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-            st.plotly_chart(build_standard_sf_graph(df_g, f"Trend: {sel_proj} | {sel_loc}", datetime.now(pytz.UTC)-timedelta(days=days_back), datetime.now(pytz.UTC), active_refs))
+            # Explicitly setting the view window to the full slider range
+            end_v = datetime.now(pytz.UTC)
+            start_v = end_v - timedelta(days=days_back)
+            
+            st.plotly_chart(build_standard_sf_graph(
+                df_g, f"Trend: {sel_proj} | {sel_loc}", 
+                start_v, end_v, active_refs
+            ), width='stretch')
+        else:
+            st.warning("No data found in the master table for this lookback period.")
     except Exception as e: st.error(f"Diagnostics Error: {e}")
 
 # 4D. DATA INTAKE LAB (HARDENED SYNC)
 # --- 4D. DATA INTAKE LAB (FIXED INDENTATION & SCHEMA) ---
 # --- 4D. DATA INTAKE LAB (FULLY CORRECTED) ---
+# --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
 # --- 4D. DATA INTAKE LAB ---
@@ -364,7 +381,8 @@ elif service == "📤 Data Intake Lab":
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
         c1, c2 = st.columns(2)
-        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=7)) # Default to 1 week
+        # Use a longer default range to catch missing history
+        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=14)) 
         end_date = c2.date_input("End Date", datetime.now())
         
         if st.button("🛰️ FETCH & FULL SYNC"):
@@ -372,32 +390,36 @@ elif service == "📤 Data Intake Lab":
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            status_box.info(f"Fetching data from {start_date} to {end_date}...")
+            status_box.info(f"Fetching from {start_date}...")
             df_api = fetch_sensorpush_data(start_dt, end_dt) 
             
             if not df_api.empty:
-                status_box.info(f"Found {len(df_api)} points. Syncing to BigQuery...")
                 try:
+                    # Clean the ID format
                     df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
                     
-                    # 1. Upload to Raw (WRITE_APPEND)
+                    # 1. Push to Raw Storage (Appending new data to existing history)
+                    status_box.info(f"Syncing {len(df_api)} points to BigQuery...")
                     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=job_config).result()
+                    client.load_table_from_dataframe(
+                        df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=job_config
+                    ).result()
                     
-                    # 2. Full Master Rebuild
+                    # 2. Trigger Modular Rebuild (This updates the final table)
                     if rebuild_master_table(mode="preserve"):
-                        status_box.success(f"✅ Full Sync Complete! {len(df_api)} points integrated into history.")
+                        status_box.success("✅ Success: Master Table rebuilt from all raw sources.")
                         st.balloons()
                 except Exception as bq_e:
                     st.error(f"BigQuery Error: {bq_e}")
             else:
-                status_box.warning("No data found for this range. Check your SensorPush account.")
+                status_box.warning("No new data found on SensorPush servers for this range.")
 
     with tab3:
         st.subheader("🛠️ Database Maintenance")
-        if st.button("🔄 FORCE HISTORICAL REBUILD (CLEANUP)"):
-            if rebuild_master_table(mode="preserve"):
-                st.success("✅ Master Table has been fully re-synced from all raw data.")
+        if st.button("🔄 FORCE HISTORICAL REBUILD"):
+            with st.spinner("Processing every row in raw history..."):
+                if rebuild_master_table(mode="preserve"):
+                    st.success("✅ Master Table refreshed. All historical points should now appear.")
                 
 # --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
