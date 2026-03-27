@@ -11,52 +11,7 @@ import json
 import traceback
 import re
 
-###################
-# --- SIDEBAR --- #
-###################
-# --- GLOBAL VARIABLES & CLIENT ---
-PROJECT_ID = "sensorpush-export"
-client = bigquery.Client(project=PROJECT_ID)
-
-# --- SIDEBAR (Must be at 0 indentation) ---
-st.sidebar.title("❄️ SoilFreeze Lab")
-
-service = st.sidebar.selectbox("📂 Select Page", 
-    ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
-
-unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
-unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
-
-def convert_val(f_val):
-    if f_val is None: return None
-    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
-
-st.sidebar.divider()
-
-# --- PROJECT SELECTOR ---
-# We force a query here to ensure connectivity
-try:
-    proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
-    all_projs = sorted(client.query(proj_q).to_dataframe()['Project'].dropna().unique())
-    selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
-except Exception as e:
-    st.sidebar.error(f"Connection Error: {e}")
-    selected_project = None
-
-st.sidebar.divider()
-
-# --- REFERENCE LINE CHECKBOXES ---
-show_32 = st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True)
-show_26 = st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True)
-show_10 = st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True)
-
-active_refs = []
-if show_32: active_refs.append((32.0, "Freezing"))
-if show_26: active_refs.append((26.6, "Type B"))
-if show_10: active_refs.append((10.2, "Type A"))
-#######################
-# --- END SIDEBAR --- #
-#######################    
+  
 #########################
 # --- CONFIGURATION --- #
 #########################
@@ -366,7 +321,71 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 ############################
 # --- END GRAPH ENGINE --- #
 ############################
+###################
+# --- SIDEBAR --- #
+###################
+# --- GLOBAL VARIABLES & CLIENT ---
+PROJECT_ID = "sensorpush-export"
+client = bigquery.Client(project=PROJECT_ID)
 
+# --- SIDEBAR (Must be at 0 indentation) ---
+st.sidebar.title("❄️ SoilFreeze Lab")
+
+service = st.sidebar.selectbox("📂 Select Page", 
+    ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+def convert_val(f_val):
+    if f_val is None: return None
+    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
+
+st.sidebar.divider()
+
+# --- 1. Project Selection (The 'if' block) ---
+if needs_project:
+    try:
+        proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
+        all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].dropna().unique())
+        selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
+    except:
+        selected_project = None
+        st.sidebar.error("Error loading projects.")
+else:
+    # This 'else' belongs to the 'if needs_project'
+    st.sidebar.selectbox("🎯 Active Project", ["(Not Required)"], disabled=True)
+    selected_project = None
+
+# --- 2. Page Routing (The 'if/elif' blocks) ---
+# Ensure there is NO INDENTATION (zero spaces) before these lines:
+
+if service == "🏠 Executive Summary":
+    st.header("🏠 Executive Summary")
+    # ... logic ...
+
+elif service == "📊 Client Portal":
+    st.header("📊 Client Portal")
+    # ... logic ...
+
+elif service == "🛠️ Admin Tools":
+    st.header("🛠️ Admin Tools")
+    # ... logic ...
+
+st.sidebar.divider()
+
+# --- REFERENCE LINE CHECKBOXES ---
+show_32 = st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True)
+show_26 = st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True)
+show_10 = st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True)
+
+active_refs = []
+if show_32: active_refs.append((32.0, "Freezing"))
+if show_26: active_refs.append((26.6, "Type B"))
+if show_10: active_refs.append((10.2, "Type A"))
+#######################
+# --- END SIDEBAR --- #
+#######################  
 
 ####################
 # --- SERVICES --- #
