@@ -397,7 +397,7 @@ if show_10: active_refs.append((10.2, "Type A"))
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # 1. QUERY (Using Case-Sensitive Schema: Project, Location, Depth, NodeNum)
+    # 1. QUERY (Using Case-Sensitive Schema)
     summary_q = f"""
         SELECT Project, Location, Depth, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
@@ -429,7 +429,7 @@ if service == "🏠 Executive Summary":
                 
                 # A. SAFE DEPTH FORMATTING (Fixes the str/int error)
                 d_val = str(depth).strip()
-                # Check if it's purely a number (integer or float)
+                # Use regex to check if it's purely a number (integer or float)
                 if re.match(r"^\d+(\.\d+)?$", d_val):
                     depth_display = f"{d_val} ft"
                 else:
@@ -473,14 +473,12 @@ if service == "🏠 Executive Summary":
             # 3. COLOR CODING THE CHANGE
             def color_delta(val):
                 if val is None: return ""
-                # Positive (Warming)
-                if val >= 5: return 'background-color: #ff4b4b; color: white'
-                if val >= 2: return 'background-color: #ffa500'
-                if val >= 1: return 'background-color: #ffff00'
-                # Negative (Cooling)
-                if val <= -1: return 'background-color: #0000ff; color: white'
-                if val <= -0.5: return 'background-color: #4169e1; color: white'
-                if val <= -0.25: return 'background-color: #add8e6'
+                if val >= 5: return 'background-color: #ff4b4b; color: white' # 5 Red
+                if val >= 2: return 'background-color: #ffa500'               # 2 Orange
+                if val >= 1: return 'background-color: #ffff00'               # 1 Yellow
+                if val <= -1: return 'background-color: #0000ff; color: white' # -1 Blue
+                if val <= -0.5: return 'background-color: #4169e1; color: white' # -0.5 Med Blue
+                if val <= -0.25: return 'background-color: #add8e6'            # -0.25 Light Blue
                 return ""
 
             def delta_label(x):
