@@ -17,14 +17,11 @@ import re
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
-DATASET_ID = "sensor_data" 
+# UPDATED: Pointing to the new 'Temperature' dataset
+DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
-
-# --- 1. CONFIGURATION & AUTH ---
-st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
-
-DATASET_ID = "sensor_data" 
-PROJECT_ID = "sensorpush-export"
+# The full table name is now sensorpush-export.Temperature.master_data
+MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
 
 @st.cache_resource
 def get_bq_client():
@@ -43,7 +40,6 @@ def get_bq_client():
         st.error(f"Authentication Failed: {e}")
         return None
 
-# CRITICAL: Initialize the global client variable here
 client = get_bq_client()
 #############################
 # --- END CONFIGURATION --- #
@@ -285,34 +281,35 @@ if service == "🏠 Executive Summary":
     st.header("🏠 Site Health Summary")
 
     try:
-        proj_q = f"SELECT DISTINCT project FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project IS NOT NULL"
+        # UPDATED: Using NodeNum and Project from the new master_data table
+        proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
         meta_df = client.query(proj_q).to_dataframe()
-        all_projs = sorted(meta_df['project'].unique())
+        all_projs = sorted(meta_df['Project'].unique())
         sel_summary_proj = st.selectbox("Select Project Focus", all_projs, index=0)
 
         query = f"""
             WITH NodeLimits AS (
-                SELECT sensor_id, MAX(timestamp) as max_ts FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-                WHERE project = '{sel_summary_proj}' GROUP BY sensor_id
+                SELECT NodeNum, MAX(timestamp) as max_ts FROM `{MASTER_TABLE}`
+                WHERE Project = '{sel_summary_proj}' GROUP BY NodeNum
             )
-            SELECT m.timestamp, m.temperature, m.location, m.depth, m.sensor_id, m.sensor_name
-            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` m
-            JOIN NodeLimits nl ON m.sensor_id = nl.sensor_id
+            SELECT m.timestamp, m.temperature, m.Location, m.Depth, m.NodeNum
+            FROM `{MASTER_TABLE}` m
+            JOIN NodeLimits nl ON m.NodeNum = nl.NodeNum
             WHERE m.timestamp >= TIMESTAMP_SUB(nl.max_ts, INTERVAL 24 HOUR)
         """
         df_summary = client.query(query).to_dataframe()
         if not df_summary.empty:
             now_ts = datetime.now(pytz.UTC)
             summary_stats = []
-            for node in df_summary['sensor_id'].unique():
-                n_df = df_summary[df_summary['sensor_id'] == node].sort_values('timestamp')
+            for node in df_summary['NodeNum'].unique():
+                n_df = df_summary[df_summary['NodeNum'] == node].sort_values('timestamp')
                 curr_t = n_df['temperature'].iloc[-1]
                 chg = curr_t - n_df['temperature'].iloc[0]
                 last_ts = n_df['timestamp'].iloc[-1]
                 if last_ts.tzinfo is None: last_ts = last_ts.replace(tzinfo=pytz.UTC)
                 hrs = (now_ts - last_ts).total_seconds() / 3600
                 summary_stats.append({
-                    "Location": n_df['location'].iloc[0], "Depth": f"{n_df['depth'].iloc[0]}ft", "Node ID": node,
+                    "Location": n_df['Location'].iloc[0], "Depth": f"{n_df['Depth'].iloc[0]}", "Node ID": node,
                     "Status": f"{last_ts.strftime('%m/%d %H:%M')} ({int(round(hrs, 0))}h ago)",
                     "Change": round(float(chg), 1), "Current": round(float(curr_t), 1)
                 })
@@ -324,24 +321,24 @@ if service == "🏠 Executive Summary":
 #########################
 # --- CLIENT PORTAL --- #
 #########################
-# 4B. CLIENT PORTAL
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
-        meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE is_approved = TRUE"
+        # UPDATED: Matches new schema 'approve', 'Project', 'Location'
+        meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE approve = 'TRUE'"
         meta_df = client.query(meta_q).to_dataframe()
         
         if meta_df.empty:
             st.warning("No approved data available.")
         else:
             c1, c2, c3 = st.columns([1, 1, 1])
-            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].dropna().unique()))
+            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].dropna().unique()))
             with c2: 
-                locs = sorted(meta_df[meta_df['project'] == sel_proj]['location'].dropna().unique())
+                locs = sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].dropna().unique())
                 sel_loc = st.selectbox("Pipe / Bank", locs)
             with c3: weeks_to_view = st.slider("Weeks to View", 1, 12, 6)
             
-            data_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project = '{sel_proj}' AND location = '{sel_loc}' AND is_approved = TRUE ORDER BY timestamp ASC"
+            data_q = f"SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name FROM `{MASTER_TABLE}` WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' AND approve = 'TRUE' ORDER BY timestamp ASC"
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
@@ -365,20 +362,9 @@ elif service == "📊 Client Portal":
                     st.plotly_chart(fig_profile, width='stretch')
 
             st.subheader("📈 Historical Trends")
+            # We pass 'sensor_name' which we mapped from 'NodeNum' in the SQL query above
             fig_timeline = build_standard_sf_graph(df_c, f"{weeks_to_view}-Week Trend: {sel_loc}", start_view, end_view, active_refs)
             st.plotly_chart(fig_timeline, width='stretch')
-            
-            st.subheader(f"⏱️ Performance Window: {max_approved_ts.strftime('%m/%d %H:%M')}")
-            last_approved_24h = df_c[df_c['timestamp'] >= (max_approved_ts - timedelta(hours=24))].copy()
-            if not last_approved_24h.empty:
-                last_approved_24h['depth_num'] = last_approved_24h['depth'].str.extract('(\d+)').astype(float)
-                stats = last_approved_24h.groupby(['depth', 'depth_num']).agg(
-                    High=('temperature', 'max'), Low=('temperature', 'min'), Current=('temperature', 'last'), Last_Update=('timestamp', 'last')
-                ).reset_index()
-                stats['Difference'] = stats['High'] - stats['Low']
-                st.dataframe(stats[['depth', 'Current', 'High', 'Low', 'Difference', 'Last_Update']], width='stretch', hide_index=True)
-
-    except Exception as e: st.error(f"Portal Error: {e}")
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
