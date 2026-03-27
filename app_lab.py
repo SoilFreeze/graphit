@@ -11,7 +11,12 @@ import json
 import traceback
 import re
 
-  
+ ###########################
+# --- GLOBAL SETTINGS --- #
+###########################
+PROJECT_ID = "sensorpush-export"
+client = bigquery.Client(project=PROJECT_ID) 
+
 #########################
 # --- CONFIGURATION --- #
 #########################
@@ -324,65 +329,69 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 ###################
 # --- SIDEBAR --- #
 ###################
-# --- GLOBAL VARIABLES & CLIENT ---
-PROJECT_ID = "sensorpush-export"
-client = bigquery.Client(project=PROJECT_ID)
-
-# --- SIDEBAR (Must be at 0 indentation) ---
+#######################
+# --- SIDEBAR UI --- #
+#######################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-service = st.sidebar.selectbox("📂 Select Page", 
-    ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+# 1. PAGE NAVIGATION
+service = st.sidebar.selectbox(
+    "📂 Select Page", 
+    ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
+)
 
+st.sidebar.divider()
+
+# 2. UNIT SELECTION (Global)
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
+# Helper for conversions used in graphs/tables
 def convert_val(f_val):
     if f_val is None: return None
     return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
 
 st.sidebar.divider()
 
-# --- 1. Project Selection (The 'if' block) ---
+# 3. PROJECT SELECTION
+# Logic: We only show the active project selector for pages that require it
+needs_project = service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]
+
 if needs_project:
     try:
-        proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
-        all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].dropna().unique())
-        selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
-    except:
+        # Querying Project list from your master_data table
+        proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
+        proj_df = client.query(proj_q).to_dataframe()
+        all_projs = sorted(proj_df['Project'].dropna().unique())
+        
+        if all_projs:
+            selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
+        else:
+            st.sidebar.warning("No projects found in database.")
+            selected_project = None
+    except Exception as e:
+        st.sidebar.error(f"Metadata Error: {e}")
         selected_project = None
-        st.sidebar.error("Error loading projects.")
 else:
-    # This 'else' belongs to the 'if needs_project'
+    # Keeps the UI consistent on Executive Summary/Intake pages
     st.sidebar.selectbox("🎯 Active Project", ["(Not Required)"], disabled=True)
     selected_project = None
 
-# --- 2. Page Routing (The 'if/elif' blocks) ---
-# Ensure there is NO INDENTATION (zero spaces) before these lines:
-
-if service == "🏠 Executive Summary":
-    st.header("🏠 Executive Summary")
-    # ... logic ...
-
-elif service == "📊 Client Portal":
-    st.header("📊 Client Portal")
-    # ... logic ...
-
-elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Admin Tools")
-    # ... logic ...
-
 st.sidebar.divider()
 
-# --- REFERENCE LINE CHECKBOXES ---
+# 4. REFERENCE LINE CHECKBOXES
+st.sidebar.write("### 📏 Reference Lines")
 show_32 = st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True)
 show_26 = st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True)
 show_10 = st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True)
 
+# Package these for the Graph Engine
 active_refs = []
 if show_32: active_refs.append((32.0, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
+
+st.sidebar.divider()
 #######################
 # --- END SIDEBAR --- #
 #######################  
