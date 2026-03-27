@@ -580,10 +580,13 @@ elif service == "📤 Data Intake Lab":
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
+#######################
+# --- ADMIN TOOLS --- #
+#######################             
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    # TABLE DEFINITIONS (Must be here to prevent empty tabs)
+    # Table Definitions
     MASTER_TABLE = f"{PROJECT_ID}.Temperature.master_data"
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
@@ -592,52 +595,68 @@ elif service == "🛠️ Admin Tools":
     tab_approve, tab_scrub = st.tabs(["✅ Approval Manager", "🧹 Raw Data Scrubber"])
     
     with tab_approve:
-        st.subheader("Data Validation")
+        st.subheader("Global & Targeted Approval")
         if st.button("🔓 APPROVE ALL HISTORIC DATA"):
-            with st.spinner("Updating BigQuery..."):
+            with st.spinner("Updating records..."):
                 client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'").result()
                 st.success("Global approval complete.")
         
         st.divider()
+        # Targeted approval for the sidebar-selected project
         if selected_project:
-            st.write(f"**Targeted Approval for: {selected_project}**")
+            st.write(f"**Targeted Approval for {selected_project}**")
             un_q = f"SELECT DISTINCT Location FROM `{MASTER_TABLE}` WHERE Project = '{selected_project}' AND (approve IS NULL OR approve != 'TRUE')"
             un_df = client.query(un_q).to_dataframe()
             
             if not un_df.empty:
-                sel_app_pipe = st.selectbox("Select Pipe to Approve", sorted(un_df['Location'].unique()))
-                if st.button(f"🚀 Approve {sel_app_pipe}"):
-                    client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{selected_project}' AND Location = '{sel_app_pipe}'").result()
-                    st.success(f"Approved {sel_app_pipe}!")
-                    st.rerun()
+                # FIX: Use .dropna() to remove None values before sorting
+                valid_locations = sorted(un_df['Location'].dropna().unique())
+                if valid_locations:
+                    sel_app_pipe = st.selectbox("Select Pipe to Approve", valid_locations)
+                    if st.button(f"🚀 Approve {sel_app_pipe}"):
+                        client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{selected_project}' AND Location = '{sel_app_pipe}'").result()
+                        st.success(f"Approved {sel_app_pipe}!")
+                        st.rerun()
+                else:
+                    st.info("No valid locations found for approval.")
             else:
-                st.info(f"All pipes for {selected_project} are already approved.")
+                st.info("No unapproved data for this project.")
         else:
-            st.warning("Please select a project in the sidebar to use targeted approval.")
+            st.warning("Please select a project in the sidebar.")
 
     with tab_scrub:
         st.subheader("🧹 Raw Source Scrubber")
+        st.warning("This deletes data from the source (Raw) tables.")
+        
         if selected_project:
             col_s1, col_s2 = st.columns(2)
             with col_s1:
-                source_type = st.radio("Source Table", ["SensorPush", "Lord"])
+                source_type = st.radio("Source", ["SensorPush", "Lord"])
                 target_t = RAW_SP if source_type == "SensorPush" else RAW_LORD
                 id_f = "sensor_id" if source_type == "SensorPush" else "nodenumber"
             with col_s2:
                 pipe_q = f"SELECT DISTINCT Location FROM `{METADATA}` WHERE Project = '{selected_project}'"
-                pipes = client.query(pipe_q).to_dataframe()['Location'].unique()
-                sel_scrub_pipe = st.selectbox("Pipe to Wipe from Raw", sorted(pipes))
-
-            confirm = st.text_input(f"To wipe {sel_scrub_pipe} from RAW, type 'DELETE'", key="scrub_conf_admin")
-            if st.button("🔥 PERMANENTLY DELETE"):
-                if confirm == "DELETE":
-                    scrub_sql = f"DELETE FROM `{target_t}` WHERE {id_f} IN (SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` WHERE Project = '{selected_project}' AND Location = '{sel_scrub_pipe}')"
-                    client.query(scrub_sql).result()
-                    st.success("Raw data scrubbed successfully.")
+                # FIX: Use .dropna() to remove None values before sorting
+                pipes_df = client.query(pipe_q).to_dataframe()
+                valid_pipes = sorted(pipes_df['Location'].dropna().unique())
+                
+                if valid_pipes:
+                    sel_scrub_pipe = st.selectbox("Pipe to Wipe", valid_pipes)
                 else:
-                    st.error("Type 'DELETE' to confirm.")
+                    st.error("No pipes found in metadata for this project.")
+                    sel_scrub_pipe = None
+
+            if sel_scrub_pipe:
+                confirm = st.text_input(f"Type 'DELETE' to wipe {sel_scrub_pipe}", key="scrub_conf")
+                if st.button("🔥 PERMANENTLY DELETE"):
+                    if confirm == "DELETE":
+                        scrub_sql = f"DELETE FROM `{target_t}` WHERE {id_f} IN (SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` WHERE Project = '{selected_project}' AND Location = '{sel_scrub_pipe}')"
+                        client.query(scrub_sql).result()
+                        st.success("Raw data scrubbed!")
+                    else:
+                        st.error("Please type 'DELETE' to confirm.")
         else:
-            st.warning("Please select a project in the sidebar to use the scrubber.")
+            st.warning("Please select a project in the sidebar.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
