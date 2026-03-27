@@ -395,7 +395,14 @@ st.sidebar.divider()
 #######################
 # --- END SIDEBAR --- #
 #######################  
+st.sidebar.divider()
+# --- END SIDEBAR ---
 
+# --- PAGE ROUTING ---
+# Every page after the first 'if' should use 'elif'
+if service == "🏠 Executive Summary":
+    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+    # ... (Rest of your Summary code)
 ####################
 # --- SERVICES --- #
 ####################
