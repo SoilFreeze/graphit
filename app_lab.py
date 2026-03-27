@@ -324,12 +324,12 @@ if service == "🏠 Executive Summary":
 elif service == "📊 Client Portal":
     st.header("📊 Project Status Report")
     try:
-        # UPDATED: Matches new schema 'approve', 'Project', 'Location'
+        # UPDATED: Using new field names 'Project', 'Location', and 'approve'
         meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE approve = 'TRUE'"
         meta_df = client.query(meta_q).to_dataframe()
         
         if meta_df.empty:
-            st.warning("No approved data available.")
+            st.warning("No approved data available in the Temperature.master_data table.")
         else:
             c1, c2, c3 = st.columns([1, 1, 1])
             with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].dropna().unique()))
@@ -338,7 +338,13 @@ elif service == "📊 Client Portal":
                 sel_loc = st.selectbox("Pipe / Bank", locs)
             with c3: weeks_to_view = st.slider("Weeks to View", 1, 12, 6)
             
-            data_q = f"SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name FROM `{MASTER_TABLE}` WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' AND approve = 'TRUE' ORDER BY timestamp ASC"
+            # Pulling data using the new schema
+            data_q = f"""
+                SELECT timestamp, temperature, Depth, NodeNum as sensor_name 
+                FROM `{MASTER_TABLE}` 
+                WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' AND approve = 'TRUE' 
+                ORDER BY timestamp ASC
+            """
             df_c = client.query(data_q).to_dataframe()
             df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
 
@@ -347,41 +353,27 @@ elif service == "📊 Client Portal":
             start_view = current_monday - timedelta(weeks=weeks_to_view - 1)
             end_view = current_monday + timedelta(days=7)
 
-            if "bank" not in sel_loc.lower():
-                st.subheader("🌡️ Soil Temperature Profile (Weekly Snapshots)")
-                snapshot = df_c[(df_c['timestamp'].dt.weekday == 0) & (df_c['timestamp'].dt.hour == 6)].copy()
-                snapshot = snapshot[snapshot['timestamp'] >= start_view]
-                if not snapshot.empty:
-                    snapshot['depth_num'] = snapshot['depth'].str.extract('(\d+)').astype(float)
-                    snapshot['Date'] = snapshot['timestamp'].dt.strftime('%m/%d')
-                    fig_profile = px.line(snapshot.sort_values('depth_num'), x='temperature', y='depth_num', color='Date', markers=True, range_x=[-20, 80])
-                    for val, label in active_refs:
-                        fig_profile.add_vline(x=val, line_dash="dash", line_color="blue", annotation_text=label)
-                    fig_profile.update_layout(title={'text': "Temperature by Depth", 'x': 0, 'xanchor': 'left'}, plot_bgcolor='white', height=600)
-                    fig_profile.update_yaxes(autorange="reversed")
-                    st.plotly_chart(fig_profile, width='stretch')
-
             st.subheader("📈 Historical Trends")
-            # We pass 'sensor_name' which we mapped from 'NodeNum' in the SQL query above
             fig_timeline = build_standard_sf_graph(df_c, f"{weeks_to_view}-Week Trend: {sel_loc}", start_view, end_view, active_refs)
-            st.plotly_chart(fig_timeline, width='stretch')
+            st.plotly_chart(fig_timeline, use_container_width=True)
+            
+    except Exception as e: 
+        st.error(f"Portal Error: {e}")
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
 ###########################
 # --- NODE DIAGNOSTIC --- #
 ###########################  
-# 4C. NODE DIAGNOSTICS
-# --- 4C. NODE DIAGNOSTICS ---
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
-        # Get your metadata to fill the dropdowns
-        meta_df = client.query(f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`").to_dataframe()
+        # Get metadata from the new master table
+        meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}`").to_dataframe()
         
         c1, c2, c3 = st.columns(3)
-        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['project'].unique()))
-        with c2: sel_loc = st.selectbox("Pipe / Bank", sorted(meta_df[meta_df['project'] == sel_proj]['location'].unique()))
+        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()))
+        with c2: sel_loc = st.selectbox("Pipe / Bank", sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique()))
         with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 1)
 
         now = datetime.now(pytz.UTC)
@@ -389,11 +381,11 @@ elif service == "📉 Node Diagnostics":
         start_view = monday_this_week - timedelta(weeks=weeks-1)
         end_view = monday_this_week + timedelta(days=7)
 
-        # Explicitly pull the newly created sensor_name (TP/SP Name)
+        # Pull using NodeNum as the sensor identifier
         data_q = f"""
-            SELECT timestamp, temperature, depth, sensor_name, sensor_id
-            FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` 
-            WHERE project = '{sel_proj}' AND location = '{sel_loc}' 
+            SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
+            FROM `{MASTER_TABLE}` 
+            WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' 
             AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
             ORDER BY timestamp ASC
         """
@@ -403,7 +395,7 @@ elif service == "📉 Node Diagnostics":
             df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
             st.plotly_chart(build_standard_sf_graph(df_g, f"{sel_proj} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
         else:
-            st.warning("No data mapped. Check if the Physical IDs in your CSV match the IDs in your Metadata Google Sheet.")
+            st.warning("No data found for the selected criteria in the master table.")
             
     except Exception as e:
         st.error(f"Diagnostics Error: {e}")
@@ -413,22 +405,19 @@ elif service == "📉 Node Diagnostics":
 ###############################
 # --- DATA INTAKE LAB --- #
 ###############################
-# --- 4D. DATA INTAKE LAB (RECOVERY & AUDIT) ---
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     
-    # 1. Create Tabs
     tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
 
     with tab1:
         st.subheader("Manual CSV Ingestion")
-        st.info("Handles SensorPush CSVs. IDs are forced to String format to prevent rounding.")
+        st.info(f"Uploading to {DATASET_ID}.raw_sensorpush")
         u_file = st.file_uploader("Upload SensorPush CSV", type=['csv'], key="manual_upload")
         
         if u_file is not None:
             try:
                 import io
-                # Read raw bytes and find the header row
                 raw_bytes = u_file.getvalue().decode('utf-8').splitlines()
                 header_idx = -1
                 for i, line in enumerate(raw_bytes):
@@ -437,40 +426,27 @@ elif service == "📤 Data Intake Lab":
                         break
                 
                 if header_idx != -1:
-                    # CRITICAL: dtype=str prevents the ID rounding you saw in BigQuery
-                    df_raw = pd.read_csv(
-                        io.StringIO("\n".join(raw_bytes[header_idx:])), 
-                        low_memory=False, 
-                        dtype=str 
-                    )
+                    df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])), low_memory=False, dtype=str)
                     df_raw = df_raw.dropna(how='all')
 
-                    # Process Narrow Format (SensorId/Observed columns)
                     if "SensorId" in df_raw.columns:
                         ts_col = "Observed" if "Observed" in df_raw.columns else df_raw.columns[1]
-                        
                         df_up = pd.DataFrame()
                         df_up['sensor_id'] = df_raw['SensorId'].astype(str).str.strip()
                         df_up['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
                         
-                        # Handle Temperature or Thermocouple columns
                         t_cols = [c for c in df_raw.columns if "Temperature" in c or "Thermocouple" in c]
                         df_up['temperature'] = pd.to_numeric(df_raw[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
-                        
                         df_up = df_up.dropna(subset=['timestamp', 'temperature'])
 
-                        st.write(f"✅ Parsed {len(df_up)} readings from {df_up['sensor_id'].nunique()} sensors.")
-                        st.dataframe(df_up.head())
-
-                        if st.button("🚀 UPLOAD TO RAW & REBUILD"):
+                        st.write(f"✅ Parsed {len(df_up)} readings.")
+                        if st.button("🚀 UPLOAD TO RAW"):
                             with st.spinner("Pushing to BigQuery..."):
+                                # UPDATED: Pushing to the new dataset location
                                 client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                                # Trigger rebuild using NodeNum matching
-                                if rebuild_master_table(mode="preserve"):
-                                    st.success("✅ Data integrated. Check Diagnostics for new graphs.")
-                                    st.balloons()
+                                st.success("✅ Data uploaded to raw_sensorpush.")
                 else:
-                    st.error("Header row not found. Ensure 'SensorId' is present in your CSV.")
+                    st.error("Header row not found.")
             except Exception as e: 
                 st.error(f"Upload Error: {e}")
 
@@ -480,7 +456,7 @@ elif service == "📤 Data Intake Lab":
         start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=7))
         end_date = c2.date_input("End Date", datetime.now())
         
-        if st.button("🛰️ FETCH & FULL SYNC"):
+        if st.button("🛰️ FETCH & SYNC"):
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
@@ -488,62 +464,27 @@ elif service == "📤 Data Intake Lab":
                 df_api = fetch_sensorpush_data(start_dt, end_dt)
                 if not df_api.empty:
                     df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
+                    # UPDATED: Pushing to the new dataset location
                     client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    if rebuild_master_table(mode="preserve"):
-                        st.success(f"✅ API Sync Complete: {len(df_api)} points integrated.")
+                    st.success(f"✅ API Sync Complete: {len(df_api)} points integrated.")
                 else:
                     st.warning("No data found for this range.")
 
     with tab3:
         st.subheader("🛠️ Database Maintenance")
+        st.write("Since your master table is now a consolidated view, use this to verify data counts.")
         
-        # 1. Diagnostic Audit
-        if st.button("🔍 RUN DAILY DATA AUDIT"):
+        if st.button("🔍 RUN DATA AUDIT"):
             audit_sql = f"""
-                WITH MasterCounts AS (
-                    SELECT DATE(timestamp) as audit_date, project, COUNT(*) as master_points
-                    FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master`
-                    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-                    GROUP BY audit_date, project
-                ),
-                RawPush AS (
-                    SELECT DATE(r.timestamp) as audit_date, m.Project, COUNT(*) as raw_points
-                    FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r
-                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
-                        ON (SUBSTR(TRIM(r.sensor_id), 1, 12) = SUBSTR(TRIM(CAST(m.PhysicalID AS STRING)), 1, 12))
-                        OR (TRIM(r.sensor_id) = TRIM(CAST(m.NodeNum AS STRING)))
-                    WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-                    GROUP BY audit_date, m.Project
-                )
-                SELECT COALESCE(m.audit_date, r.audit_date) as Date, COALESCE(m.project, r.Project) as Project, 
-                       COALESCE(r.raw_points, 0) as Raw_Points, COALESCE(m.master_points, 0) as Master_Points
-                FROM MasterCounts m FULL OUTER JOIN RawPush r ON m.project = r.Project AND m.audit_date = r.audit_date
-                ORDER BY Date DESC
+                SELECT DATE(timestamp) as Date, Project, COUNT(*) as Points
+                FROM `{MASTER_TABLE}`
+                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                GROUP BY Date, Project ORDER BY Date DESC
             """
             try:
-                df_audit = client.query(audit_sql).to_dataframe()
-                st.dataframe(df_audit, use_container_width=True, hide_index=True)
+                st.dataframe(client.query(audit_sql).to_dataframe(), use_container_width=True)
             except Exception as e:
                 st.error(f"Audit Error: {e}")
-
-        st.divider()
-        
-        # 2. Rebuild Controls
-        st.subheader("Master Table Controls")
-        col_m1, col_m2 = st.columns(2)
-        
-        with col_m1:
-            if st.button("🔄 FORCE MASTER REBUILD"):
-                with st.spinner("Re-mapping Physical IDs and cleaning data..."):
-                    if rebuild_master_table(mode="preserve"):
-                        st.success("✅ Master Table Refreshed! Dropdowns and Graphs should now appear.")
-                        st.balloons()
-        
-        with col_m2:
-            if st.button("🚩 MARK ALL AS HISTORIC"):
-                with st.spinner("Approving all data..."):
-                    if rebuild_master_table(mode="approve_all"):
-                        st.success("✅ All data marked as Approved.")
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
