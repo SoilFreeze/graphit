@@ -186,37 +186,31 @@ def fetch_sensorpush_data(start_dt, end_dt):
 ########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
-    SF Standard with Monday, Daily, and 6-Hour Gridlines.
-    Fixed to prevent 'unsupported operand' and 'integer addition' errors.
+    SF Standard with Robust Gridlines.
+    Bypasses Plotly's annotation bug by using separate annotation calls.
     """
     try:
         display_df = df.copy()
         
-        # 1. Force strict types to ensure math works
+        # 1. Force strict types
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         display_df['depth'] = display_df['depth'].fillna("Unknown").astype(str)
         display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
         
-        # Force axis boundaries to be Pandas Timestamps
         start_ts = pd.to_datetime(start_view)
         end_ts = pd.to_datetime(end_view)
         
-        y_range, y_ticks = [-20, 80], [-20, 0, 20, 40, 60, 80]
-
-        # 2. Labeling Logic: Force string concatenation
+        # 2. Labeling & Gap Handling
         display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
         
-        # 3. Gap Handling (Safely using pd.Timedelta)
         processed_dfs = []
         for lbl in display_df['label'].unique():
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            
             gap_mask = s_df['gap_hrs'] > 6.0
             if gap_mask.any():
                 gaps = s_df[gap_mask].copy()
                 gaps['temperature'] = None
-                # FIXED: Use explicit Timedelta for subtraction
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
             processed_dfs.append(s_df)
@@ -225,64 +219,57 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         
         fig = go.Figure()
         
-        # Natural sorting for legend
+        # 3. Trace Creation
         def natural_sort_key(s):
             nums = re.findall(r'\d+', s)
             return int(nums[0]) if nums else 0
         
         labels = sorted(clean_df['label'].unique(), key=natural_sort_key)
-        
         for lbl in labels:
             sensor_df = clean_df[clean_df['label'] == lbl]
             fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
                                      name=lbl, mode='lines', connectgaps=False))
 
-        # 4. Layout & X-Axis
+        # 4. Layout
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left'},
             plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
         )
         
-        fig.update_yaxes(title="Temp (°F)", tickmode='array', tickvals=y_ticks, range=y_range,
-                         gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
+        fig.update_yaxes(title="Temp (°F)", range=[-20, 80], gridcolor='DimGray', gridwidth=1.5,
+                         minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
                          mirror=True, showline=True, linecolor='black', linewidth=2)
 
-        fig.update_xaxes(
-            range=[start_ts, end_ts],
-            mirror=True, showline=True, linecolor='black', linewidth=2,
-            showgrid=False, tickformat="%a\n%m/%d"
-        )
+        fig.update_xaxes(range=[start_ts, end_ts], mirror=True, showline=True, linecolor='black',
+                         linewidth=2, showgrid=False, tickformat="%a\n%m/%d")
 
-        # 5. FIXED GRIDLINE LOGIC: Replace 'while' loop with 'pd.date_range'
-        # This generates 6-hour intervals across the whole view
-        all_grid_marks = pd.date_range(start=start_ts, end=end_ts, freq='6H')
-        
-        for ts in all_grid_marks:
+        # 5. GRIDLINES (Manual Loop using pd.date_range)
+        grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6H')
+        for ts in grid_times:
             if ts.hour == 0:
-                if ts.weekday() == 0:
-                    # Monday Midnight: Darkest Gray
-                    color, width = "DimGray", 2
-                else:
-                    # Daily Midnight: Medium Gray
-                    color, width = "DarkGray", 1.5
+                color, width = ("DimGray", 2) if ts.weekday() == 0 else ("DarkGray", 1.5)
             else:
-                # 6H Marks (6am, 12pm, 6pm): Lightest Gray
                 color, width = "LightGray", 0.8
-                
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 6. RED "NOW" LINE
+        # 6. NOW MARKER (FIXED: Bypassing the Plotly Bug)
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
-        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above',
-                      annotation_text="NOW", annotation_position="top")
+        # We draw the line WITHOUT text to avoid the error
+        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above')
+        # We add the text as a separate annotation
+        fig.add_annotation(x=now_marker, y=1, yref="paper", text="NOW", 
+                           showarrow=False, font=dict(color="Red", size=12), xanchor="left")
 
-        # 7. Reference Lines
+        # 7. HORIZONTAL REFERENCES
         for val, label in active_refs:
-            fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
+            fig.add_hline(y=val, line_dash="dash", line_color="blue")
+            # Separate annotation for horizontal lines too
+            fig.add_annotation(x=1, xref="paper", y=val, text=f"{label} {val}°", 
+                               showarrow=False, font=dict(color="blue"), xanchor="left")
         
         return fig
     except Exception as e:
-        st.error(f"Graph Engine Critical Error: {e}")
+        st.error(f"Graph Error: {e}")
         return go.Figure()
 ############################
 # --- END GRAPH ENGINE --- #
