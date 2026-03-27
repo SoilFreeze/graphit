@@ -397,7 +397,7 @@ if show_10: active_refs.append((10.2, "Type A"))
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # 1. QUERY (Using Case-Sensitive Schema)
+    # 1. QUERY (Using Case-Sensitive Schema: Project, Location, Depth, NodeNum)
     summary_q = f"""
         SELECT Project, Location, Depth, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
@@ -423,17 +423,20 @@ if service == "🏠 Executive Summary":
                 return f"{round(val, 1)}{unit_label}"
 
             # 2. DATA AGGREGATION
+            # Explicitly cast Depth to string to avoid comparison errors
+            raw_summary['Depth'] = raw_summary['Depth'].astype(str)
+            
             for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
                 group = group.sort_values('timestamp', ascending=False)
                 last_rec = group.iloc[0]
                 
                 # A. SAFE DEPTH FORMATTING (Fixes the str/int error)
-                d_val = str(depth).strip()
-                # Use regex to check if it's purely a number (integer or float)
+                d_val = depth.strip()
+                # Regex check: if it's a number (int or float), add 'ft'
                 if re.match(r"^\d+(\.\d+)?$", d_val):
                     depth_display = f"{d_val} ft"
                 else:
-                    depth_display = d_val # Leaves S1, R1, Bank as-is
+                    depth_display = d_val # S1, R1, Bank, etc.
 
                 # B. STATUS LATENCY (Color Coding)
                 ts = last_rec['timestamp']
@@ -452,6 +455,7 @@ if service == "🏠 Executive Summary":
                 if not last_24h.empty:
                     t_min = last_24h['temperature'].min()
                     t_max = last_24h['temperature'].max()
+                    # Change is Current Temp minus Temp from 24h ago
                     t_start = last_24h.sort_values('timestamp').iloc[0]['temperature']
                     t_change = last_rec['temperature'] - t_start
                 else:
@@ -483,6 +487,7 @@ if service == "🏠 Executive Summary":
 
             def delta_label(x):
                 if x is None: return "N/A"
+                # Delta conversion: ΔC = ΔF * 5/9
                 val = x * 5/9 if unit_mode == "Celsius" else x
                 pref = "+" if val > 0 else ""
                 return f"{pref}{round(val, 2)}{unit_label}"
