@@ -323,12 +323,9 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 ###################
 # --- SIDEBAR --- #
 ###################
-#######################
-# --- GLOBAL SIDEBAR --- #
-#######################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# 1. PAGE SELECTION (First)
+# 1. PAGE SELECTION
 service = st.sidebar.selectbox("📂 Select Page", 
     ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 
@@ -344,17 +341,21 @@ def convert_val(f_val):
 
 st.sidebar.divider()
 
-# 3. PROJECT SELECTION
-# Only show the project selector if the page actually needs it
+# 3. PROJECT SELECTION (Cleaned Indentation)
 needs_project = service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]
+
 if needs_project:
     try:
         proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
         all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].dropna().unique())
-        selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
-    except Exception:
+        if all_projs:
+            selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
+        else:
+            selected_project = None
+            st.sidebar.warning("No projects found.")
+    except Exception as e:
         selected_project = None
-        st.sidebar.error("Could not load Projects.")
+        st.sidebar.error(f"Metadata Error: {e}")
 else:
     st.sidebar.selectbox("🎯 Active Project", ["(Not Required)"], disabled=True)
     selected_project = None
@@ -367,12 +368,10 @@ show_32 = st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True)
 show_26 = st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True)
 show_10 = st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True)
 
-# Build the list for the Graph Engine to consume
 active_refs = []
 if show_32: active_refs.append((32.0, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
-    selected_project = None
 #######################
 # --- END SIDEBAR --- #
 #######################
