@@ -550,32 +550,93 @@ elif service == "📤 Data Intake Lab":
 #######################
 # --- ADMIN TOOLS --- #
 #######################             
-# --- 4E. ADMIN TOOLS (CLEAN INDENTATION) ---
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
-    tab_scrub, tab_approve = st.tabs(["🧹 Data Scrubber", "✅ Bulk Approval"])
     
-    with tab_scrub:
-        sc_proj = st.text_input("Project Name", key="scrub_p")
-        sc_loc = st.text_input("Location / Pipe", key="scrub_l")
-        if st.button("🗑️ DELETE POINTS"):
-            if sc_proj and sc_loc:
-                scrub_q = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE project='{sc_proj}' AND location='{sc_loc}'"
-                client.query(scrub_q).result()
-                st.success(f"Deleted {sc_loc} data.")
+    # Configuration for the new table paths
+    MASTER_TABLE = f"{PROJECT_ID}.Temperature.master_data"
+    RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
+    RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
 
+    tab_approve, tab_scrub = st.tabs(["✅ Approval Manager", "🧹 Raw Data Scrubber"])
+    
+    # --- 1. APPROVAL MANAGER ---
     with tab_approve:
+        st.subheader("Data Validation & Approval")
+        
+        # Action A: Approve All Historic Data
+        st.write("### 🏛️ Global Actions")
+        if st.button("🔓 APPROVE ALL HISTORIC DATA", help="Sets the 'approve' flag to 'TRUE' for every record in the master table."):
+            with st.spinner("Updating all records..."):
+                all_q = f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'"
+                client.query(all_q).result()
+                st.success("✅ All historic data has been marked as Approved.")
+        
+        st.divider()
+
+        # Action B: Individual Project / Pipe Approval
+        st.write("### 📍 Targeted Approval")
         try:
-            unapproved_meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.master_data` WHERE (is_approved IS FALSE OR is_approved IS NULL)"
-            un_meta = client.query(unapproved_meta_q).to_dataframe()
-            if not un_meta.empty:
-                app_proj = st.selectbox("Project", un_meta['project'].unique(), key="app_p")
-                app_loc = st.selectbox("Location", un_meta[un_meta['project'] == app_proj]['location'].unique(), key="app_l")
-                if st.button("🚀 APPROVE NOW"):
-                    client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` SET is_approved = TRUE WHERE project='{app_proj}' AND location='{app_loc}'").result()
-                    st.success("Approved!")
-        except Exception as e: 
+            # Get current unapproved projects
+            unapproved_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE approve IS NULL OR approve != 'TRUE'"
+            un_df = client.query(unapproved_q).to_dataframe()
+            
+            if un_df.empty:
+                st.info("No unapproved data found in the master table.")
+            else:
+                c1, c2 = st.columns(2)
+                with c1:
+                    sel_app_proj = st.selectbox("Select Project", sorted(un_df['Project'].unique()), key="app_proj")
+                with c2:
+                    pipes = sorted(un_df[un_df['Project'] == sel_app_proj]['Location'].unique())
+                    sel_app_pipe = st.selectbox("Select Temperature Pipe", pipes, key="app_pipe")
+                
+                if st.button(f"🚀 Approve {sel_app_pipe}"):
+                    spec_q = f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{sel_app_proj}' AND Location = '{sel_app_pipe}'"
+                    client.query(spec_q).result()
+                    st.success(f"✅ Data for {sel_app_pipe} is now approved.")
+                    st.rerun() # Refresh list
+        except Exception as e:
             st.error(f"Approval Error: {e}")
+
+    # --- 2. RAW DATA SCRUBBER ---
+    with tab_scrub:
+        st.subheader("Raw Ingestion Scrubbing")
+        st.warning("This deletes data from the raw source tables. This is permanent.")
+        
+        # Selection logic to target the right raw table
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            scrub_source = st.radio("Target Raw Source", ["SensorPush", "Lord"])
+            target_raw_table = RAW_SP if scrub_source == "SensorPush" else RAW_LORD
+            # Lord uses 'nodenumber', SensorPush uses 'sensor_id'
+            id_field = "sensor_id" if scrub_source == "SensorPush" else "nodenumber"
+        
+        with col_t2:
+            # Look up metadata to find which nodes belong to which project/pipe
+            meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}`"
+            meta_df = client.query(meta_q).to_dataframe()
+            
+            sel_scrub_proj = st.selectbox("Project to Clean", sorted(meta_df['Project'].unique()), key="scrub_proj")
+            sel_scrub_pipe = st.selectbox("Pipe to Clean", sorted(meta_df[meta_df['Project'] == sel_scrub_proj]['Location'].unique()), key="scrub_pipe")
+
+        confirm_text = st.text_input(f"To delete {scrub_source} data for {sel_scrub_pipe}, type 'DELETE'", key="scrub_conf")
+        
+        if st.button("🔥 DELETE RAW DATA"):
+            if confirm_text == "DELETE":
+                with st.spinner("Scrubbing raw files..."):
+                    # This joins the raw table with the master mapping to find the right sensors to wipe
+                    scrub_sql = f"""
+                        DELETE FROM `{target_raw_table}`
+                        WHERE {id_field} IN (
+                            SELECT NodeNum FROM `{MASTER_TABLE}` 
+                            WHERE Project = '{sel_scrub_proj}' AND Location = '{sel_scrub_pipe}'
+                        )
+                    """
+                    client.query(scrub_sql).result()
+                    st.success(f"✅ Raw {scrub_source} data for {sel_scrub_pipe} has been wiped.")
+            else:
+                st.error("Confirmation text must match 'DELETE'.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
