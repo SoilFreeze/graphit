@@ -15,7 +15,6 @@ import re
 # --- GLOBAL SETTINGS --- #
 ###########################
 PROJECT_ID = "sensorpush-export"
-client = bigquery.Client(project=PROJECT_ID) 
 
 #########################
 # --- CONFIGURATION --- #
@@ -394,7 +393,6 @@ if show_10: active_refs.append((10.2, "Type A"))
 ##########################
 # --- PAGE ROUTING --- #
 ##########################
-
 # --- FIX: Change 'elif' to 'if' here to solve the SyntaxError ---
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
@@ -407,86 +405,6 @@ if service == "🏠 Executive Summary":
     """
     if selected_project:
         summary_q += f" AND Project = '{selected_project}'"
-    
-    try:
-        with st.spinner("Processing sensor health..."):
-            raw_summary = client.query(summary_q).to_dataframe()
-        
-        if raw_summary.empty:
-            st.warning("📡 No data found in the last 72 hours.")
-        else:
-            summary_rows = []
-            now = pd.Timestamp.now(tz=pytz.UTC)
-            
-            # 2. DATA AGGREGATION
-            for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
-                group = group.sort_values('timestamp', ascending=False)
-                last_rec = group.iloc[0]
-                
-                # Depth Formatting (Feet vs. Bank)
-                d_val = str(depth)
-                depth_display = f"{d_val} ft" if d_val.replace('.','',1).isdigit() else d_val
-
-                # Latency Logic (Status Color)
-                ts = last_rec['timestamp']
-                if ts.tzinfo is None: ts = ts.tz_localize(pytz.UTC)
-                
-                latency_hrs = (now - ts).total_seconds() / 3600
-                if latency_hrs > 24: status = "🔴 Red (>24h)"
-                elif latency_hrs > 12: status = "🟠 Orange (>12h)"
-                elif latency_hrs > 6: status = "🟡 Yellow (>6h)"
-                else: status = "🟢 Green"
-
-                # 24-Hour Delta Logic
-                last_24h = group[group['timestamp'] >= (now - pd.Timedelta(hours=24))]
-                if not last_24h.empty:
-                    t_min, t_max = last_24h['temperature'].min(), last_24h['temperature'].max()
-                    t_start = last_24h.sort_values('timestamp').iloc[0]['temperature']
-                    t_change = last_rec['temperature'] - t_start
-                else:
-                    t_min = t_max = t_change = None
-
-                # Unit Formatting
-                def u_fmt(v):
-                    if v is None: return "N/A"
-                    val = (v - 32) * 5/9 if unit_mode == "Celsius" else v
-                    return f"{round(val, 1)}{unit_label}"
-
-                summary_rows.append({
-                    "Pipe": loc, "Depth": depth_display, "Sensor": node,
-                    "Current": u_fmt(last_rec['temperature']), "Status": status,
-                    "24h Min": u_fmt(t_min), "24h Max": u_fmt(t_max),
-                    "raw_delta": t_change, "Last Seen": ts.strftime('%m/%d %H:%M')
-                })
-
-            summary_df = pd.DataFrame(summary_rows)
-
-            # 3. COLOR CODING & DISPLAY
-            def color_delta(val):
-                if val is None: return ""
-                if val >= 5: return 'background-color: #ff4b4b; color: white'
-                if val >= 2: return 'background-color: #ffa500'
-                if val >= 1: return 'background-color: #ffff00'
-                if val <= -1: return 'background-color: #0000ff; color: white'
-                if val <= -0.5: return 'background-color: #4169e1; color: white'
-                if val <= -0.25: return 'background-color: #add8e6'
-                return ""
-
-            def delta_label(x):
-                if x is None: return "N/A"
-                val = x * 5/9 if unit_mode == "Celsius" else x
-                return f"{'+' if val > 0 else ''}{round(val, 2)}{unit_label}"
-
-            summary_df['24h Change'] = summary_df['raw_delta'].apply(delta_label)
-            final_cols = ["Pipe", "Depth", "Current", "24h Change", "Status", "24h Min", "24h Max", "Last Seen"]
-            
-            st.subheader("📡 Engineering Command Center")
-            st.table(summary_df[final_cols].style.applymap(color_delta, subset=['24h Change']))
-
-    except Exception as e:
-        st.error(f"Executive Summary Error: {e}")st.sidebar.divider()
-# --- END SIDEBAR ---
-
 ####################
 # --- SERVICES --- #
 ####################
@@ -602,10 +520,8 @@ if service == "🏠 Executive Summary":
 
             st.table(styled_view)
 
-    except Exception as e:
+     except Exception as e:
         st.error(f"Logic Error: {e}")
-        # Show raw data for troubleshooting if still blank
-        st.write(client.query(summary_q).to_dataframe().head())
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
