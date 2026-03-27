@@ -184,72 +184,99 @@ def fetch_sensorpush_data(start_dt, end_dt):
 ########################
 # --- GRAPH ENGINE --- #
 ########################
-ef build_standard_sf_graph(df, title, start_view, end_view, active_refs):
+def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
-    SF Standard: 6hr, Midnight, and Monday Gridlines.
-    Legend Format: Depth (SP-XXXX).
+    SF Standard with Robust Gridlines.
+    Uses pd.offsets to prevent 'int + Timestamp' errors.
     """
-    display_df = df.copy()
-    y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
+    try:
+        display_df = df.copy()
+        
+        # 1. Force strict types for every column
+        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+        display_df['depth'] = display_df['depth'].fillna("Unknown").astype(str)
+        display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
+        
+        # Force axis boundaries to be Pandas Timestamps
+        start_ts = pd.to_datetime(start_view)
+        end_ts = pd.to_datetime(end_view)
+        
+        y_range, y_ticks = [-20, 80], [-20, 0, 20, 40, 60, 80]
 
-    # 1. Labeling Logic: Use sensor_name (SP/TP) instead of the long ID
-    display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
-    
-    processed_dfs = []
-    for lbl in display_df['label'].unique():
-        s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-        s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gaps = s_df[s_df['gap'] > 6.0].copy()
-        if not gaps.empty:
-            gaps['temperature'] = None
-            gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
-            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-        processed_dfs.append(s_df)
-    clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
-    
-    # 2. Trace Creation
-    fig = go.Figure()
-    # Sort by numerical depth using the 're' module
-    labels = sorted(clean_df['label'].unique(), 
-                    key=lambda x: int(next(iter(re.findall(r'\d+', x)), 0)))
-    
-    for lbl in labels:
-        sensor_df = clean_df[clean_df['label'] == lbl]
-        fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
-                                 name=lbl, mode='lines', connectgaps=False))
+        # 2. Labeling Logic
+        display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
+        
+        # 3. Gap Handling (Safe version using pd.offsets)
+        processed_dfs = []
+        for lbl in display_df['label'].unique():
+            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
+            # Calculate gap in hours
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            
+            # Find points where gap > 6 hours
+            gap_mask = s_df['gap_hrs'] > 6.0
+            if gap_mask.any():
+                gaps = s_df[gap_mask].copy()
+                gaps['temperature'] = None
+                # FIXED: Use pd.offsets.Minute instead of - pd.Timedelta
+                gaps['timestamp'] = gaps['timestamp'] + pd.offsets.Minute(-1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            processed_dfs.append(s_df)
+        
+        clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
+        
+        fig = go.Figure()
+        
+        # Natural sorting for legend
+        def natural_sort_key(s):
+            nums = re.findall(r'\d+', s)
+            return int(nums[0]) if nums else 0
+        
+        labels = sorted(clean_df['label'].unique(), key=natural_sort_key)
+        
+        for lbl in labels:
+            sensor_df = clean_df[clean_df['label'] == lbl]
+            fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
+                                     name=lbl, mode='lines', connectgaps=False))
 
-    # 3. Formatting & Granular Gridlines
-    fig.update_layout(
-        title={'text': title, 'x': 0, 'xanchor': 'left'},
-        plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
-    )
-    
-    fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
-                     gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
-                     mirror=True, showline=True, linecolor='black', linewidth=2)
+        # 4. Layout
+        fig.update_layout(
+            title={'text': title, 'x': 0, 'xanchor': 'left'},
+            plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
+        )
+        
+        fig.update_yaxes(title="Temp (°F)", tickmode='array', tickvals=y_ticks, range=y_range,
+                         gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
+                         mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # X-Axis Formatting
-    fig.update_xaxes(
-        range=[start_view, end_view],
-        mirror=True, showline=True, linecolor='black', linewidth=2,
-        gridcolor='DimGray', gridwidth=1,
-        tick0=start_view, 
-        dtick=86400000, # 24 hours
-        tickformat="%a\n%m/%d",
-        minor=dict(dtick=21600000, gridcolor='Silver', showgrid=True) # 6 hours
-    )
+        fig.update_xaxes(
+            range=[start_ts, end_ts],
+            mirror=True, showline=True, linecolor='black', linewidth=2,
+            showgrid=False, tickformat="%a\n%m/%d"
+        )
 
-    # 4. Vertical Monday Lines
-    curr_ts = start_view
-    while curr_ts <= end_view:
-        if curr_ts.weekday() == 0: # 0 is Monday
-            fig.add_vline(x=curr_ts.timestamp() * 1000, line_width=2, line_color="DimGray")
-        curr_ts += timedelta(days=1)
+        # 5. CUSTOM GRIDLINES (Safely using date_range)
+        grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6H')
+        for ts in grid_times:
+            if ts.hour == 0:
+                color, width = ("DimGray", 2) if ts.weekday() == 0 else ("DarkGray", 1.5)
+            else:
+                color, width = "LightGray", 0.8
+            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    for val, label in active_refs:
-        fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
-    
-    return fig
+        # 6. NOW MARKER
+        now_marker = pd.Timestamp.now(tz=pytz.UTC)
+        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above',
+                      annotation_text="NOW", annotation_position="top")
+
+        # 7. Reference Lines
+        for val, label in active_refs:
+            fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
+        
+        return fig
+    except Exception as e:
+        st.error(f"Graph Error: {e}")
+        return go.Figure()
 ############################
 # --- END GRAPH ENGINE --- #
 ############################
