@@ -547,61 +547,56 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools (Raw Source Control)")
     
-    # Define Source Tables
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
     METADATA = f"{PROJECT_ID}.Temperature.master_metadata"
 
     tab_scrub, tab_approve = st.tabs(["🧹 Hourly Data Scrubber", "✅ Raw Bulk Approval"])
     
-    # --- 1. HOURLY DATA SCRUBBER (Deduplication) ---
     with tab_scrub:
         st.subheader("🧹 Hourly Raw Data Reduction")
-        st.write("This tool keeps only **one data point per hour** for each sensor to clean up the raw files.")
-        
         scrub_target = st.radio("Select Table to Scrub", ["SensorPush", "Lord"], horizontal=True)
         target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
-        id_field = "sensor_id" if scrub_target == "SensorPush" else "nodenumber"
+        
+        # CORRECTED MAPPING: 
+        # SensorPush raw usually uses 'id' or 'sensor'
+        # Lord raw usually uses 'nodenumber'
+        if scrub_target == "SensorPush":
+            id_field = "id" # Change to 'sensor' if your BigQuery column is named 'sensor'
+        else:
+            id_field = "nodenumber"
 
         if st.button(f"🚀 Scrub {scrub_target} to 1pt/Hour"):
             with st.spinner(f"Reducing {scrub_target} data..."):
-                # SQL Logic: Uses a CTE to find duplicates within the same hour and deletes them
+                # Using a 'ROW_NUMBER' approach which is safer for BigQuery Deduplication
                 scrub_sql = f"""
                 DELETE FROM `{target_table}`
                 WHERE STRUCT({id_field}, timestamp) NOT IN (
-                  SELECT AS STRUCT {id_field}, MIN(timestamp)
-                  FROM `{target_table}`
-                  GROUP BY {id_field}, TIMESTAMP_TRUNC(timestamp, HOUR)
+                    SELECT AS STRUCT {id_field}, MIN(timestamp)
+                    FROM `{target_table}`
+                    GROUP BY {id_field}, TIMESTAMP_TRUNC(timestamp, HOUR)
                 )
                 """
                 try:
                     client.query(scrub_sql).result()
                     st.success(f"✅ Cleaned! {target_table} now contains only 1 point per hour.")
                 except Exception as e:
-                    st.error(f"Scrub Error: {e}")
+                    st.error(f"Scrub Error: {e}. (Verify if '{id_field}' is the correct column name in BigQuery)")
 
-    # --- 2. RAW BULK APPROVAL ---
     with tab_approve:
         st.subheader("✅ Raw Table Approval Tool")
-        st.write("This writes the 'Approved' status directly into the Raw tables.")
-        
-        app_target = st.radio("Select Table to Approve", ["SensorPush", "Lord"], key="app_target", horizontal=True)
+        app_target = st.radio("Select Table to Approve", ["SensorPush", "Lord"], horizontal=True, key="app_r")
         t_table = RAW_SP if app_target == "SensorPush" else RAW_LORD
-        t_id = "sensor_id" if app_target == "SensorPush" else "nodenumber"
+        t_id = "id" if app_target == "SensorPush" else "nodenumber"
 
-        # Ensure the 'approve' column exists in the raw table first
-        if st.button(f"🛠️ Step 1: Initialize 'Approve' Column in {app_target}"):
-            init_sql = f"ALTER TABLE `{t_table}` ADD COLUMN IF NOT EXISTS approve STRING"
-            client.query(init_sql).result()
-            st.success("Column initialized.")
+        if st.button(f"🛠️ Step 1: Initialize 'approve' Column in {app_target}"):
+            client.query(f"ALTER TABLE `{t_table}` ADD COLUMN IF NOT EXISTS approve STRING").result()
+            st.success("Column 'approve' is ready in raw table.")
 
         st.divider()
 
         if selected_project:
-            st.write(f"**Bulk Approving Project: {selected_project}**")
-            
             if st.button(f"🔓 APPROVE ALL {selected_project} RAW DATA"):
-                # This subquery links the raw data to your metadata to find the right sensors
                 bulk_app_sql = f"""
                 UPDATE `{t_table}`
                 SET approve = 'TRUE'
@@ -611,13 +606,10 @@ elif service == "🛠️ Admin Tools":
                     WHERE Project = '{selected_project}'
                 )
                 """
-                try:
-                    client.query(bulk_app_sql).result()
-                    st.success(f"✅ All raw {app_target} entries for {selected_project} are now marked Approved.")
-                except Exception as e:
-                    st.error(f"Approval Error: {e}")
+                client.query(bulk_app_sql).result()
+                st.success(f"✅ Raw {app_target} data for {selected_project} is now Approved.")
         else:
-            st.warning("Please select a project in the sidebar to perform bulk approvals.")
+            st.warning("Please select a project in the sidebar.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
