@@ -541,79 +541,83 @@ elif service == "📤 Data Intake Lab":
 #######################
 # --- ADMIN TOOLS --- #
 #######################             
+#######################
+# --- ADMIN TOOLS --- #
+#######################             
 elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
+    st.header("🛠️ Engineering Admin Tools (Raw Source Control)")
     
-    # Define our Raw Source Tables
+    # Define Source Tables
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
-    # We use the View/Table just to map Project Names to Sensor IDs
-    MAP_SOURCE = f"{PROJECT_ID}.Temperature.master_data"
+    METADATA = f"{PROJECT_ID}.Temperature.master_metadata"
 
-    tab_scrub, tab_approve = st.tabs(["🧹 Raw Data Scrubber", "✅ Approval Manager"])
+    tab_scrub, tab_approve = st.tabs(["🧹 Hourly Data Scrubber", "✅ Raw Bulk Approval"])
     
-    # --- 1. RAW DATA SCRUBBER (This updates the RAW FILES) ---
+    # --- 1. HOURLY DATA SCRUBBER (Deduplication) ---
     with tab_scrub:
-        st.subheader("🧹 Direct Raw Source Scrubbing")
-        st.warning("This action deletes data from the **Raw Ingestion Tables**. This is permanent.")
+        st.subheader("🧹 Hourly Raw Data Reduction")
+        st.write("This tool keeps only **one data point per hour** for each sensor to clean up the raw files.")
         
-        try:
-            # Use the sidebar project
-            if selected_project:
-                # 1. Get the list of pipes for the selected project
-                pipe_q = f"SELECT DISTINCT Location FROM `{MAP_SOURCE}` WHERE Project = '{selected_project}'"
-                pipes_df = client.query(pipe_q).to_dataframe()
-                
-                # FIX: .dropna() prevents the '<' not supported error
-                valid_pipes = sorted(pipes_df['Location'].dropna().unique())
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    source_type = st.radio("Target Raw Table", ["SensorPush", "Lord"])
-                    target_table = RAW_SP if source_type == "SensorPush" else RAW_LORD
-                    id_field = "sensor_id" if source_type == "SensorPush" else "nodenumber"
-                
-                with c2:
-                    sel_scrub_pipe = st.selectbox("Select Pipe to Wipe from Raw", valid_pipes)
+        scrub_target = st.radio("Select Table to Scrub", ["SensorPush", "Lord"], horizontal=True)
+        target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
+        id_field = "sensor_id" if scrub_target == "SensorPush" else "nodenumber"
 
-                confirm = st.text_input(f"Type 'DELETE' to wipe {source_type} data for {sel_scrub_pipe}", key="scrub_conf_v3")
-                
-                if st.button("🔥 PERMANENTLY DELETE FROM RAW"):
-                    if confirm == "DELETE":
-                        with st.spinner("Deleting from raw source..."):
-                            # This DELETE command hits the RAW TABLE directly
-                            scrub_sql = f"""
-                                DELETE FROM `{target_table}`
-                                WHERE {id_field} IN (
-                                    SELECT CAST(NodeNum AS STRING) 
-                                    FROM `{MAP_SOURCE}` 
-                                    WHERE Project = '{selected_project}' AND Location = '{sel_scrub_pipe}'
-                                )
-                            """
-                            client.query(scrub_sql).result()
-                            st.success(f"✅ Successfully wiped {sel_scrub_pipe} from {target_table}.")
-                    else:
-                        st.error("Please type 'DELETE' to confirm.")
-            else:
-                st.warning("Please select a Project in the sidebar to use the scrubber.")
-        except Exception as e:
-            st.error(f"Scrubber Error: {e}")
+        if st.button(f"🚀 Scrub {scrub_target} to 1pt/Hour"):
+            with st.spinner(f"Reducing {scrub_target} data..."):
+                # SQL Logic: Uses a CTE to find duplicates within the same hour and deletes them
+                scrub_sql = f"""
+                DELETE FROM `{target_table}`
+                WHERE STRUCT({id_field}, timestamp) NOT IN (
+                  SELECT AS STRUCT {id_field}, MIN(timestamp)
+                  FROM `{target_table}`
+                  GROUP BY {id_field}, TIMESTAMP_TRUNC(timestamp, HOUR)
+                )
+                """
+                try:
+                    client.query(scrub_sql).result()
+                    st.success(f"✅ Cleaned! {target_table} now contains only 1 point per hour.")
+                except Exception as e:
+                    st.error(f"Scrub Error: {e}")
 
-    # --- 2. APPROVAL MANAGER (Requires Table, not View) ---
+    # --- 2. RAW BULK APPROVAL ---
     with tab_approve:
-        st.subheader("✅ Master Data Approval")
-        # Check if master_data is a View
-        table_check = client.get_table(MAP_SOURCE)
-        if table_check.table_type == "VIEW":
-            st.error("Approval requires 'master_data' to be a Table, but it is currently a VIEW.")
-            if st.button("Convert View to Table (Enables Approvals)"):
-                client.query(f"CREATE OR REPLACE TABLE `{MAP_SOURCE}` AS SELECT * FROM `{MAP_SOURCE}`").result()
-                st.rerun()
+        st.subheader("✅ Raw Table Approval Tool")
+        st.write("This writes the 'Approved' status directly into the Raw tables.")
+        
+        app_target = st.radio("Select Table to Approve", ["SensorPush", "Lord"], key="app_target", horizontal=True)
+        t_table = RAW_SP if app_target == "SensorPush" else RAW_LORD
+        t_id = "sensor_id" if app_target == "SensorPush" else "nodenumber"
+
+        # Ensure the 'approve' column exists in the raw table first
+        if st.button(f"🛠️ Step 1: Initialize 'Approve' Column in {app_target}"):
+            init_sql = f"ALTER TABLE `{t_table}` ADD COLUMN IF NOT EXISTS approve STRING"
+            client.query(init_sql).result()
+            st.success("Column initialized.")
+
+        st.divider()
+
+        if selected_project:
+            st.write(f"**Bulk Approving Project: {selected_project}**")
+            
+            if st.button(f"🔓 APPROVE ALL {selected_project} RAW DATA"):
+                # This subquery links the raw data to your metadata to find the right sensors
+                bulk_app_sql = f"""
+                UPDATE `{t_table}`
+                SET approve = 'TRUE'
+                WHERE {t_id} IN (
+                    SELECT CAST(NodeNum AS STRING) 
+                    FROM `{METADATA}` 
+                    WHERE Project = '{selected_project}'
+                )
+                """
+                try:
+                    client.query(bulk_app_sql).result()
+                    st.success(f"✅ All raw {app_target} entries for {selected_project} are now marked Approved.")
+                except Exception as e:
+                    st.error(f"Approval Error: {e}")
         else:
-            # Approval logic for physical tables
-            if st.button("🔓 APPROVE ALL DATA"):
-                client.query(f"UPDATE `{MAP_SOURCE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'").result()
-                st.success("All data approved.")
+            st.warning("Please select a project in the sidebar to perform bulk approvals.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
