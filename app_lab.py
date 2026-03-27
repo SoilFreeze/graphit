@@ -397,7 +397,7 @@ if show_10: active_refs.append((10.2, "Type A"))
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # 1. QUERY (Using Case-Sensitive Schema: Project, Location, Depth, NodeNum)
+    # 1. QUERY (Proper Case Schema)
     summary_q = f"""
         SELECT Project, Location, Depth, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
@@ -413,6 +413,10 @@ if service == "🏠 Executive Summary":
         if raw_summary.empty:
             st.warning("📡 No data found in the last 72 hours.")
         else:
+            # --- CRITICAL FIX: FORCE DEPTH TO STRING IMMEDIATELY ---
+            # This prevents the 'str' vs 'int' comparison error during groupby
+            raw_summary['Depth'] = raw_summary['Depth'].fillna("0").astype(str)
+            
             summary_rows = []
             now = pd.Timestamp.now(tz=pytz.UTC)
             
@@ -423,39 +427,36 @@ if service == "🏠 Executive Summary":
                 return f"{round(val, 1)}{unit_label}"
 
             # 2. DATA AGGREGATION
-            # FIX: Explicitly cast Depth to string to avoid comparison errors
-            raw_summary['Depth'] = raw_summary['Depth'].astype(str)
-            
+            # Grouping now works because all 'Depth' values are strings
             for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
                 group = group.sort_values('timestamp', ascending=False)
                 last_rec = group.iloc[0]
                 
-                # A. SAFE DEPTH FORMATTING (Fixes the str/int error)
+                # A. SAFE DEPTH FORMATTING
                 d_val = depth.strip()
                 # Regex check: if it's a number (int or float), add 'ft'
                 if re.match(r"^\d+(\.\d+)?$", d_val):
                     depth_display = f"{d_val} ft"
                 else:
-                    depth_display = d_val # S1, R1, Bank, etc.
+                    depth_display = d_val # Leaves S1, R1, Bank as-is
 
                 # B. STATUS LATENCY (Color Coding)
                 ts = last_rec['timestamp']
                 if ts.tzinfo is None: ts = ts.tz_localize(pytz.UTC)
                 
                 latency_hrs = (now - ts).total_seconds() / 3600
-                if latency_hrs > 24: status = "🔴 Red (>24h)" #
-                elif latency_hrs > 12: status = "🟠 Orange (>12h)" #
-                elif latency_hrs > 6: status = "🟡 Yellow (>6h)" #
-                else: status = "🟢 Green" #
+                if latency_hrs > 24: status = "🔴 Red (>24h)"
+                elif latency_hrs > 12: status = "🟠 Orange (>12h)"
+                elif latency_hrs > 6: status = "🟡 Yellow (>6h)"
+                else: status = "🟢 Green"
 
                 # C. 24-HOUR TRENDS
                 day_ago = now - pd.Timedelta(hours=24)
                 last_24h = group[group['timestamp'] >= day_ago]
                 
                 if not last_24h.empty:
-                    t_min = last_24h['temperature'].min() #
-                    t_max = last_24h['temperature'].max() #
-                    # Change is Current Temp minus Temp from 24h ago
+                    t_min = last_24h['temperature'].min()
+                    t_max = last_24h['temperature'].max()
                     t_start = last_24h.sort_values('timestamp').iloc[0]['temperature']
                     t_change = last_rec['temperature'] - t_start
                 else:
@@ -477,17 +478,16 @@ if service == "🏠 Executive Summary":
             # 3. COLOR CODING THE CHANGE
             def color_delta(val):
                 if val is None: return ""
-                if val >= 5: return 'background-color: #ff4b4b; color: white' # 5 Red
-                if val >= 2: return 'background-color: #ffa500'               # 2 Orange
-                if val >= 1: return 'background-color: #ffff00'               # 1 Yellow
-                if val <= -1: return 'background-color: #0000ff; color: white' # -1 Blue
-                if val <= -0.5: return 'background-color: #4169e1; color: white' # -0.5 Med Blue
-                if val <= -0.25: return 'background-color: #add8e6'            # -0.25 Light Blue
+                if val >= 5: return 'background-color: #ff4b4b; color: white'
+                if val >= 2: return 'background-color: #ffa500'
+                if val >= 1: return 'background-color: #ffff00'
+                if val <= -1: return 'background-color: #0000ff; color: white'
+                if val <= -0.5: return 'background-color: #4169e1; color: white'
+                if val <= -0.25: return 'background-color: #add8e6'
                 return ""
 
             def delta_label(x):
                 if x is None: return "N/A"
-                # Delta conversion: ΔC = ΔF * 5/9
                 val = x * 5/9 if unit_mode == "Celsius" else x
                 pref = "+" if val > 0 else ""
                 return f"{pref}{round(val, 2)}{unit_label}"
