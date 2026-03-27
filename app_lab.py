@@ -382,117 +382,79 @@ if show_10: active_refs.append((10.2, "Type A"))
 # --- EXECUTIVE SUMMARY --- #
 #############################
 elif service == "🏠 Executive Summary":
-    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+    st.header(f"🏠 Executive Summary")
     
-    # 1. DATASET QUERY (Expanded to 72H for safety)
+    # 1. HARDENED QUERY 
+    # Removed the 'Project' filter and 'TIMESTAMP' limit temporarily to see if ANY data exists
     summary_q = f"""
-        SELECT 
-            IFNULL(Project, 'Unknown') as Project, 
-            IFNULL(Location, 'Unknown') as Location, 
-            IFNULL(Depth, '0') as Depth, 
-            IFNULL(NodeNum, 'Unknown') as NodeNum, 
-            temperature, 
-            timestamp
+        SELECT *
         FROM `{PROJECT_ID}.Temperature.master_data`
-        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
+        LIMIT 100
     """
-    if selected_project:
-        summary_q += f" AND Project = '{selected_project}'"
     
     try:
-        with st.spinner("Calculating sensor health..."):
+        with st.spinner("Fetching most recent logs..."):
             raw_summary = client.query(summary_q).to_dataframe()
         
         if raw_summary.empty:
-            st.warning("📡 No data received from any sensors in the last 72 hours.")
-            st.info("Check your Data Intake Lab to ensure data is flowing into BigQuery.")
+            st.error(f"❌ BigQuery returned 0 rows for table: `{PROJECT_ID}.Temperature.master_data`")
+            st.info("Check if the table name is correct or if the 'Temperature' dataset exists.")
         else:
+            # 2. DATA CLEANING
+            # Ensure columns exist even if BigQuery changed the casing
+            raw_summary.columns = [c.lower() for c in raw_summary.columns]
+            
+            # 3. PROCESSING ROWS
             summary_rows = []
             now = pd.Timestamp.now(tz=pytz.UTC)
+
+            # We'll use a safer grouping method
+            unique_sensors = raw_summary.groupby(['location', 'depth', 'nodenum'])
             
-            # 2. DATA PROCESSING
-            # We group by the raw ID to ensure no sensors are lost in the shuffle
-            for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
+            for (loc, depth, node), group in unique_sensors:
                 group = group.sort_values('timestamp', ascending=False)
                 last_rec = group.iloc[0]
                 
-                # A. Depth Formatting (Feet vs. Bank)
+                # A. Depth Formatting
                 d_val = str(depth)
-                if d_val.replace('.','',1).isdigit():
-                    depth_display = f"{d_val} ft"
-                else:
-                    depth_display = d_val
+                depth_display = f"{d_val} ft" if d_val.replace('.','',1).isdigit() else d_val
 
-                # B. Latency (Status Color)
-                latency_hrs = (now - last_rec['timestamp']).total_seconds() / 3600
-                if latency_hrs > 24: status = "🔴 Critical (>24h)"
-                elif latency_hrs > 12: status = "🟠 Delayed (>12h)"
-                elif latency_hrs > 6: status = "🟡 Warning (>6h)"
+                # B. Latency
+                ts = pd.to_datetime(last_rec['timestamp']).tz_localize(pytz.UTC) if pd.to_datetime(last_rec['timestamp']).tzinfo is None else pd.to_datetime(last_rec['timestamp'])
+                latency_hrs = (now - ts).total_seconds() / 3600
+                
+                if latency_hrs > 24: status = "🔴 >24h"
+                elif latency_hrs > 12: status = "🟠 >12h"
+                elif latency_hrs > 6: status = "🟡 >6h"
                 else: status = "🟢 Active"
 
-                # C. 24-Hour Delta Logic
-                last_24h = group[group['timestamp'] >= (now - pd.Timedelta(hours=24))]
-                if not last_24h.empty:
-                    t_min = last_24h['temperature'].min()
-                    t_max = last_24h['temperature'].max()
-                    t_start = last_24h.sort_values('timestamp').iloc[0]['temperature']
-                    t_change = last_rec['temperature'] - t_start
+                # C. Simple Unit Formatting
+                cur_temp = last_rec['temperature']
+                if unit_mode == "Celsius":
+                    disp_temp = f"{round((cur_temp - 32) * 5/9, 1)}°C"
                 else:
-                    t_min = t_max = t_change = None
-
-                # D. Unit Formatting Helper
-                def u_fmt(v):
-                    if v is None: return "N/A"
-                    val = (v - 32) * 5/9 if unit_mode == "Celsius" else v
-                    return f"{round(val, 1)}{unit_label}"
+                    disp_temp = f"{round(cur_temp, 1)}°F"
 
                 summary_rows.append({
                     "Pipe": loc,
                     "Depth": depth_display,
                     "Sensor": node,
-                    "Current": u_fmt(last_rec['temperature']),
+                    "Current": disp_temp,
                     "Status": status,
-                    "24h Min": u_fmt(t_min),
-                    "24h Max": u_fmt(t_max),
-                    "raw_delta": t_change, # Hidden for sorting/styling
-                    "Last Seen": last_rec['timestamp'].strftime('%m/%d %H:%M')
+                    "Last Seen": ts.strftime('%m/%d %H:%M')
                 })
 
-            summary_df = pd.DataFrame(summary_rows)
-
-            # 3. COLOR CODING THE DELTA
-            def style_delta(val):
-                if val is None: return ""
-                if val >= 5: return 'color: #ff4b4b; font-weight: bold;' # Hot Red
-                if val >= 2: return 'color: #ffa500;' # Orange
-                if val >= 1: return 'color: #ffd700;' # Gold/Yellow
-                if val <= -1: return 'color: #0000ff; font-weight: bold;' # Deep Blue
-                if val <= -0.5: return 'color: #4169e1;' # Blue
-                if val <= -0.25: return 'color: #add8e6;' # Light Blue
-                return ""
-
-            # 4. FINAL DISPLAY FORMATTING
-            def delta_label(x):
-                if x is None: return "N/A"
-                val = x * 5/9 if unit_mode == "Celsius" else x
-                pref = "+" if val > 0 else ""
-                return f"{pref}{round(val, 2)}{unit_label}"
-
-            summary_df['24h Change'] = summary_df['raw_delta'].apply(delta_label)
-
-            # Display as a clean, styled table
-            final_view = summary_df[["Pipe", "Depth", "Current", "24h Change", "Status", "Last Seen"]]
+            # 4. DISPLAY
+            st.subheader("📡 Sensor Health Monitor")
+            st.table(pd.DataFrame(summary_rows))
             
-            st.subheader("📡 Real-Time Sensor Status")
-            # Using st.dataframe for better scrolling/sorting
-            st.dataframe(
-                final_view.style.apply(lambda x: [style_delta(summary_df.loc[i, 'raw_delta']) for i in x.index], subset=['24h Change']),
-                use_container_width=True,
-                hide_index=True
-            )
+            # DEBUG SECTION (Remove this once working)
+            with st.expander("🔍 Debug: Raw Data from BigQuery"):
+                st.write(raw_summary.head(10))
 
     except Exception as e:
-        st.error(f"Executive Summary could not be generated: {e}")
+        st.error(f"Logic Error: {e}")
+        st.code(summary_q) # Shows the query so you can copy it to BigQuery console
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
