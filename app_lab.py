@@ -389,42 +389,37 @@ elif service == "📊 Client Portal":
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
-        # UPDATED: Filter out NULLs for cleaner dropdowns
-        meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL AND Location IS NOT NULL"
+        meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe()
         
-        if meta_df.empty:
-            st.warning("No data found in Master Table.")
+        c1, c2, c3 = st.columns(3)
+        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()))
+        with c2: sel_loc = st.selectbox("Pipe / Bank", sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique()))
+        # UPDATED: Default is now 6
+        with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 6) 
+
+        now = pd.Timestamp.now(tz=pytz.UTC)
+        monday_this_week = (now - pd.offsets.Day(now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        start_view = monday_this_week - pd.offsets.Week(int(weeks)-1)
+        end_view = monday_this_week + pd.offsets.Day(7)
+
+        data_q = f"""
+            SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
+            FROM `{MASTER_TABLE}` 
+            WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' 
+            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
+            ORDER BY timestamp ASC
+        """
+        df_g = client.query(data_q).to_dataframe()
+        
+        if not df_g.empty:
+            st.plotly_chart(build_standard_sf_graph(df_g, f"{sel_proj} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
         else:
-            c1, c2, c3 = st.columns(3)
-            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()))
-            with c2: sel_loc = st.selectbox("Pipe / Bank", sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique()))
-            with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 1)
-
-            now = datetime.now(pytz.UTC)
-            monday_this_week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            start_view = monday_this_week - timedelta(weeks=weeks-1)
-            end_view = monday_this_week + timedelta(days=7)
-
-            # Pull using NodeNum as the sensor identifier
-            data_q = f"""
-                SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
-                FROM `{MASTER_TABLE}` 
-                WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' 
-                AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
-                ORDER BY timestamp ASC
-            """
-            df_g = client.query(data_q).to_dataframe()
-            
-            if not df_g.empty:
-                df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-                # Call the updated graph engine
-                st.plotly_chart(build_standard_sf_graph(df_g, f"{sel_proj} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
-            else:
-                st.warning(f"No data points found for {sel_loc} in the last {weeks} week(s).")
+            st.warning("No data points found for this range.")
             
     except Exception as e:
-        st.error(f"Diagnostics Error: {e}")
+        st.error(f"Diagnostics Logic Error: {e}")
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
