@@ -639,28 +639,43 @@ elif service == "📤 Data Intake Lab":
 #######################
 # --- ADMIN TOOLS --- #
 #######################             
+#######################
+# --- ADMIN TOOLS --- #
+#######################             
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
+    # Updated Table References - Using master_data since master_metadata was not found
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
-    METADATA = f"{PROJECT_ID}.Temperature.master_metadata"
+    # This is the table/view that actually exists and links NodeNum to Projects
+    MAPPING_TABLE = f"{PROJECT_ID}.Temperature.master_data" 
 
     tab_scrub, tab_approve = st.tabs(["🧹 Deep Data Scrubber", "✅ Raw Bulk Approval"])
     
     with tab_scrub:
         st.subheader("🧹 Deep Raw Source Cleaning")
-        st.info("This keeps 1 point per hour and **removes all NULL temperatures** from RAW tables.")
+        st.write("This cleans the **Raw Tables** based on the logic in your master mapping.")
         
-        scrub_target = st.radio("Select Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_t")
+        scrub_target = st.radio("Select Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_v4")
         target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
         
-        if st.button(f"🚀 Run Deep Clean on {scrub_target}"):
-            with st.spinner(f"Surgery in progress on {target_table}..."):
-                # 1. DELETE NULLS FIRST
-                null_sql = f"DELETE FROM `{target_table}` WHERE temperature IS NULL"
+        if st.button(f"🚀 Run Scrub on {scrub_target}"):
+            with st.spinner(f"Cleaning {target_table}..."):
+                # 1. DELETE NULL TEMPERATURES, NULL PROJECTS, AND NULL LOCATIONS
+                # This query looks at the master mapping to see what should be deleted
+                purge_sql = f"""
+                DELETE FROM `{target_table}` 
+                WHERE temperature IS NULL 
+                OR NodeNum NOT IN (
+                    SELECT DISTINCT CAST(NodeNum AS STRING) 
+                    FROM `{MAPPING_TABLE}` 
+                    WHERE Project IS NOT NULL 
+                    AND Location IS NOT NULL
+                )
+                """
                 
-                # 2. HOURLY DEDUPLICATION
+                # 2. HOURLY DEDUPLICATION (1pt/hour)
                 dedup_sql = f"""
                 DELETE FROM `{target_table}`
                 WHERE STRUCT(NodeNum, timestamp) NOT IN (
@@ -671,39 +686,29 @@ elif service == "🛠️ Admin Tools":
                 """
                 
                 try:
-                    # Run Null Cleanup
-                    n_job = client.query(null_sql)
-                    n_job.result()
-                    
-                    # Run Dedup Cleanup
-                    d_job = client.query(dedup_sql)
-                    d_job.result()
-                    
-                    st.success(f"✅ Deep Clean Complete! Nulls removed and data reduced to 1pt/hour.")
-                    st.balloons()
+                    client.query(purge_sql).result()
+                    client.query(dedup_sql).result()
+                    st.success(f"✅ Cleaned {scrub_target}! Removed Nulls and reduced to 1pt/hour.")
                 except Exception as e:
                     st.error(f"Scrub Error: {e}")
 
     with tab_approve:
         st.subheader("✅ Raw Bulk Approval")
-        app_target = st.radio("Select Table", ["SensorPush", "Lord"], key="app_r_final", horizontal=True)
-        t_table = RAW_SP if app_target == "SensorPush" else RAW_LORD
-        
-        # Ensure 'approve' column exists
-        if st.button(f"🛠️ Initialize 'approve' Column"):
-            client.query(f"ALTER TABLE `{t_table}` ADD COLUMN IF NOT EXISTS approve STRING").result()
-            st.success(f"Column 'approve' verified.")
-
+        # Ensure your approval logic also uses MAPPING_TABLE
         if selected_project and st.button(f"🔓 APPROVE {selected_project} RAW DATA"):
-            bulk_app_sql = f"""
-            UPDATE `{t_table}` SET approve = 'TRUE'
-            WHERE NodeNum IN (
-                SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` 
-                WHERE Project = '{selected_project}'
-            )
-            """
-            client.query(bulk_app_sql).result()
-            st.success(f"✅ Raw records for {selected_project} are now marked 'TRUE'.")
+            try:
+                bulk_app_sql = f"""
+                UPDATE `{target_table}` SET approve = 'TRUE'
+                WHERE NodeNum IN (
+                    SELECT DISTINCT CAST(NodeNum AS STRING) 
+                    FROM `{MAPPING_TABLE}` 
+                    WHERE Project = '{selected_project}'
+                )
+                """
+                client.query(bulk_app_sql).result()
+                st.success(f"✅ Raw records for {selected_project} marked as Approved.")
+            except Exception as e:
+                st.error(f"Approval Error: {e}")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
