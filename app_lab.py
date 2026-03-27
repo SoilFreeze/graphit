@@ -414,44 +414,84 @@ elif service == "📤 Data Intake Lab":
     tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
 
     with tab1:
-        st.subheader("Manual CSV Ingestion")
-        st.info(f"Uploading to {DATASET_ID}.raw_sensorpush")
-        u_file = st.file_uploader("Upload SensorPush CSV", type=['csv'], key="manual_upload")
+        st.subheader("📄 Manual File Ingestion")
+        st.info("Upload Lord SensorConnect (Wide) or SensorPush (Narrow) CSV files.")
+        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_gate")
         
         if u_file is not None:
-            try:
-                import io
-                raw_bytes = u_file.getvalue().decode('utf-8').splitlines()
-                header_idx = -1
-                for i, line in enumerate(raw_bytes):
-                    if "SensorId" in line or "Observed" in line:
-                        header_idx = i
-                        break
-                
-                if header_idx != -1:
-                    df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])), low_memory=False, dtype=str)
-                    df_raw = df_raw.dropna(how='all')
+            import io
+            filename = u_file.name.lower()
+            # Read raw bytes to detect format
+            raw_content = u_file.getvalue().decode('utf-8').splitlines()
 
-                    if "SensorId" in df_raw.columns:
-                        ts_col = "Observed" if "Observed" in df_raw.columns else df_raw.columns[1]
-                        df_up = pd.DataFrame()
-                        df_up['sensor_id'] = df_raw['SensorId'].astype(str).str.strip()
-                        df_up['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed', errors='coerce')
+            # --- BRANCH A: LORD SENSORCONNECT (WIDE FORMAT) ---
+            if any("DATA_START" in line for line in raw_content[:100]) or "sensorconnect" in filename:
+                try:
+                    # 1. Find the DATA_START line to begin reading
+                    start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
+                    df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
+                    
+                    # 2. Melt from Wide (Columns per sensor) to Long (Rows per reading)
+                    # 'Time' is the index, all other columns are sensors (e.g., 58014:ch1)
+                    df_long = df_wide.melt(id_vars=['Time'], var_name='nodenumber', value_name='temperature')
+                    
+                    # 3. Format Cleaning
+                    df_long['nodenumber'] = df_long['nodenumber'].str.replace(':', '-', regex=False)
+                    df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed', errors='coerce')
+                    df_long = df_long.dropna(subset=['temperature', 'timestamp'])
+                    
+                    st.success(f"✅ Lord Data Parsed: {len(df_long)} readings from {df_long['nodenumber'].nunique()} channels.")
+                    st.dataframe(df_long.head())
+
+                    if st.button("🚀 UPLOAD LORD DATA"):
+                        with st.spinner("Pushing to BigQuery..."):
+                            dest_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                            client.load_table_from_dataframe(df_long[['timestamp', 'nodenumber', 'temperature']], dest_table).result()
+                            st.success(f"Uploaded to {dest_table}")
+                            st.balloons()
+                except Exception as e:
+                    st.error(f"Lord Parsing Error: {e}")
+
+            # --- BRANCH B: SENSORPUSH (NARROW FORMAT) ---
+            else:
+                try:
+                    # 1. Find the Header Row (usually contains 'SensorId' or 'Observed')
+                    header_idx = -1
+                    for i, line in enumerate(raw_content[:50]):
+                        if "SensorId" in line or "Observed" in line:
+                            header_idx = i
+                            break
+                    
+                    if header_idx != -1:
+                        df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), low_memory=False, dtype=str)
                         
-                        t_cols = [c for c in df_raw.columns if "Temperature" in c or "Thermocouple" in c]
-                        df_up['temperature'] = pd.to_numeric(df_raw[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
+                        # 2. Map Columns
+                        # Check for 'Observed' or use the second column as timestamp
+                        ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
+                        
+                        df_up = pd.DataFrame()
+                        df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
+                        df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed', errors='coerce')
+                        
+                        # Handle Temperature or Thermocouple columns automatically
+                        t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
+                        df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
+                        
                         df_up = df_up.dropna(subset=['timestamp', 'temperature'])
 
-                        st.write(f"✅ Parsed {len(df_up)} readings.")
-                        if st.button("🚀 UPLOAD TO RAW"):
+                        st.success(f"✅ SensorPush Data Parsed: {len(df_up)} readings from {df_up['sensor_id'].nunique()} sensors.")
+                        st.dataframe(df_up.head())
+
+                        if st.button("🚀 UPLOAD SENSORPUSH DATA"):
                             with st.spinner("Pushing to BigQuery..."):
-                                # UPDATED: Pushing to the new dataset location
-                                client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                                st.success("✅ Data uploaded to raw_sensorpush.")
-                else:
-                    st.error("Header row not found.")
-            except Exception as e: 
-                st.error(f"Upload Error: {e}")
+                                dest_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                                client.load_table_from_dataframe(df_up, dest_table).result()
+                                st.success(f"Uploaded to {dest_table}")
+                                st.balloons()
+                    else:
+                        st.error("Could not find SensorPush headers ('SensorId'). Please check your CSV format.")
+                except Exception as e: 
+                    st.error(f"SensorPush Parsing Error: {e}")
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
@@ -474,20 +514,16 @@ elif service == "📤 Data Intake Lab":
                     st.warning("No data found for this range.")
 
     with tab3:
-        st.subheader("🛠️ Database Maintenance")
-        st.write("Since your master table is now a consolidated view, use this to verify data counts.")
-        
-        if st.button("🔍 RUN DATA AUDIT"):
-            audit_sql = f"""
-                SELECT DATE(timestamp) as Date, Project, COUNT(*) as Points
-                FROM `{MASTER_TABLE}`
-                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-                GROUP BY Date, Project ORDER BY Date DESC
-            """
-            try:
-                st.dataframe(client.query(audit_sql).to_dataframe(), use_container_width=True)
-            except Exception as e:
-                st.error(f"Audit Error: {e}")
+        st.subheader("🛠️ Metadata Management")
+        u_meta = st.file_uploader("Upload Master_Log / Metadata CSV", type=['csv'])
+        if u_meta:
+            df_new_meta = pd.read_csv(u_meta)
+            st.dataframe(df_new_meta.head())
+            if st.button("Overwrite Master Metadata"):
+                # This replaces the mapping table in BigQuery
+                client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
+                                                 job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
+                st.success("Master Metadata Updated!")
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
