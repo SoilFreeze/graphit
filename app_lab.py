@@ -281,24 +281,36 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 ###################
 # --- SIDEBAR --- #
 ###################
-###################
-# --- SIDEBAR --- #
-###################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# 1. Global Project Selection (Used by all services)
-try:
-    # Get all projects for the sidebar dropdown
-    proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
-    all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].unique())
-    selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
-except:
-    selected_project = None
-    st.sidebar.warning("No projects found in master_data.")
+# 1. PAGE SELECTION (Now First)
+service = st.sidebar.selectbox("📂 Select Page", 
+    ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 
 st.sidebar.divider()
 
-# 2. Reference Lines
+# 2. CONTEXTUAL PROJECT SELECTION
+# Pages that NEED a project: Client Portal, Node Diagnostics, Admin Tools (for targeted scrub)
+needs_project = service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]
+
+if needs_project:
+    try:
+        # Get all projects
+        proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
+        all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].unique())
+        selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
+    except:
+        selected_project = None
+        st.sidebar.error("Error loading projects.")
+else:
+    # Greyed out / Disabled state
+    st.sidebar.selectbox("🎯 Active Project", ["(Not Required for this Page)"], disabled=True)
+    selected_project = None
+
+st.sidebar.divider()
+
+# 3. GRAPH SETTINGS
+st.sidebar.write("### Graph Settings")
 show_32 = st.sidebar.checkbox("Freezing (32°F)", value=True)
 show_26 = st.sidebar.checkbox("Type B (26.6°F)", value=True)
 show_10 = st.sidebar.checkbox("Type A (10.2°F)", value=True)
@@ -307,12 +319,6 @@ active_refs = []
 if show_32: active_refs.append((32, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
-
-st.sidebar.divider()
-
-# 3. Service Navigation
-service = st.sidebar.selectbox("Select Service", 
-    ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 #######################
 # --- END SIDEBAR --- #
 #######################
@@ -574,27 +580,10 @@ elif service == "📤 Data Intake Lab":
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
-#######################
-# --- ADMIN TOOLS --- #
-#######################             
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    # Configuration for the new table paths
-    MASTER_TABLE = f"{PROJECT_ID}.Temperature.master_data"
-    RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
-    RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
-
-#######################
-# --- ADMIN TOOLS --- #
-#######################             
-#######################
-# --- ADMIN TOOLS --- #
-#######################             
-elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
-    
-    # Table Definitions
+    # TABLE DEFINITIONS (Must be here to prevent empty tabs)
     MASTER_TABLE = f"{PROJECT_ID}.Temperature.master_data"
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
@@ -603,50 +592,52 @@ elif service == "🛠️ Admin Tools":
     tab_approve, tab_scrub = st.tabs(["✅ Approval Manager", "🧹 Raw Data Scrubber"])
     
     with tab_approve:
-        st.subheader("Global & Targeted Approval")
+        st.subheader("Data Validation")
         if st.button("🔓 APPROVE ALL HISTORIC DATA"):
-            with st.spinner("Updating records..."):
+            with st.spinner("Updating BigQuery..."):
                 client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'").result()
                 st.success("Global approval complete.")
         
         st.divider()
-        # Targeted approval for the sidebar-selected project
-        st.write(f"**Targeted Approval for {selected_project}**")
-        un_q = f"SELECT DISTINCT Location FROM `{MASTER_TABLE}` WHERE Project = '{selected_project}' AND (approve IS NULL OR approve != 'TRUE')"
-        un_df = client.query(un_q).to_dataframe()
-        
-        if not un_df.empty:
-            sel_app_pipe = st.selectbox("Select Pipe to Approve", sorted(un_df['Location'].unique()))
-            if st.button(f"🚀 Approve {sel_app_pipe}"):
-                client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{selected_project}' AND Location = '{sel_app_pipe}'").result()
-                st.success(f"Approved {sel_app_pipe}!")
-                st.rerun()
+        if selected_project:
+            st.write(f"**Targeted Approval for: {selected_project}**")
+            un_q = f"SELECT DISTINCT Location FROM `{MASTER_TABLE}` WHERE Project = '{selected_project}' AND (approve IS NULL OR approve != 'TRUE')"
+            un_df = client.query(un_q).to_dataframe()
+            
+            if not un_df.empty:
+                sel_app_pipe = st.selectbox("Select Pipe to Approve", sorted(un_df['Location'].unique()))
+                if st.button(f"🚀 Approve {sel_app_pipe}"):
+                    client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{selected_project}' AND Location = '{sel_app_pipe}'").result()
+                    st.success(f"Approved {sel_app_pipe}!")
+                    st.rerun()
+            else:
+                st.info(f"All pipes for {selected_project} are already approved.")
         else:
-            st.info("No unapproved data for this project.")
+            st.warning("Please select a project in the sidebar to use targeted approval.")
 
     with tab_scrub:
         st.subheader("🧹 Raw Source Scrubber")
-        st.warning("This deletes data from the source (Raw) tables.")
-        
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            source_type = st.radio("Source", ["SensorPush", "Lord"])
-            target_t = RAW_SP if source_type == "SensorPush" else RAW_LORD
-            id_f = "sensor_id" if source_type == "SensorPush" else "nodenumber"
-        with col_s2:
-            # Use current project from sidebar, but let user pick the pipe
-            pipe_q = f"SELECT DISTINCT Location FROM `{METADATA}` WHERE Project = '{selected_project}'"
-            pipes = client.query(pipe_q).to_dataframe()['Location'].unique()
-            sel_scrub_pipe = st.selectbox("Pipe to Wipe", sorted(pipes))
+        if selected_project:
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                source_type = st.radio("Source Table", ["SensorPush", "Lord"])
+                target_t = RAW_SP if source_type == "SensorPush" else RAW_LORD
+                id_f = "sensor_id" if source_type == "SensorPush" else "nodenumber"
+            with col_s2:
+                pipe_q = f"SELECT DISTINCT Location FROM `{METADATA}` WHERE Project = '{selected_project}'"
+                pipes = client.query(pipe_q).to_dataframe()['Location'].unique()
+                sel_scrub_pipe = st.selectbox("Pipe to Wipe from Raw", sorted(pipes))
 
-        confirm = st.text_input(f"Type 'DELETE' to wipe {sel_scrub_pipe}", key="scrub_conf")
-        if st.button("🔥 PERMANENTLY DELETE"):
-            if confirm == "DELETE":
-                scrub_sql = f"DELETE FROM `{target_t}` WHERE {id_f} IN (SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` WHERE Project = '{selected_project}' AND Location = '{sel_scrub_pipe}')"
-                client.query(scrub_sql).result()
-                st.success("Raw data scrubbed!")
-            else:
-                st.error("Please type 'DELETE' to confirm.")
+            confirm = st.text_input(f"To wipe {sel_scrub_pipe} from RAW, type 'DELETE'", key="scrub_conf_admin")
+            if st.button("🔥 PERMANENTLY DELETE"):
+                if confirm == "DELETE":
+                    scrub_sql = f"DELETE FROM `{target_t}` WHERE {id_f} IN (SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` WHERE Project = '{selected_project}' AND Location = '{sel_scrub_pipe}')"
+                    client.query(scrub_sql).result()
+                    st.success("Raw data scrubbed successfully.")
+                else:
+                    st.error("Type 'DELETE' to confirm.")
+        else:
+            st.warning("Please select a project in the sidebar to use the scrubber.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
