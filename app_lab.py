@@ -520,7 +520,7 @@ if service == "🏠 Executive Summary":
 
             st.table(styled_view)
 
-     except Exception as e:
+    except Exception as e:
         st.error(f"Logic Error: {e}")
 #################################
 # --- END EXECUTIVE SUMMARY --- #
