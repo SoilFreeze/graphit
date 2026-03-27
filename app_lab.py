@@ -187,13 +187,18 @@ def fetch_sensorpush_data(start_dt, end_dt):
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
     SF Standard: 6hr, Midnight, and Monday Gridlines.
-    Legend Format: Depth (SP-XXXX).
+    Legend Format: Depth (NodeNum).
     """
     display_df = df.copy()
+    
+    # FIX: Ensure no None types exist before creating labels or sorting
+    display_df['depth'] = display_df['depth'].fillna("Unknown")
+    display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown")
+    
     y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # 1. Labeling Logic: Use sensor_name (SP/TP) instead of the long ID
-    display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
+    # Labeling Logic
+    display_df['label'] = display_df['depth'].astype(str) + " (" + display_df['sensor_name'].astype(str) + ")"
     
     processed_dfs = []
     for lbl in display_df['label'].unique():
@@ -207,18 +212,21 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         processed_dfs.append(s_df)
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     
-    # 2. Trace Creation
+    # Trace Creation
     fig = go.Figure()
-    # Sort by numerical depth using the 're' module
-    labels = sorted(clean_df['label'].unique(), 
-                    key=lambda x: int(next(iter(re.findall(r'\d+', x)), 0)))
+    
+    # FIX: Safer sorting that handles potential non-numeric strings in the label
+    def natural_sort_key(s):
+        numbers = re.findall(r'\d+', s)
+        return int(numbers[0]) if numbers else 0
+
+    labels = sorted(clean_df['label'].unique(), key=natural_sort_key)
     
     for lbl in labels:
         sensor_df = clean_df[clean_df['label'] == lbl]
         fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
                                  name=lbl, mode='lines', connectgaps=False))
 
-    # 3. Formatting & Granular Gridlines
     fig.update_layout(
         title={'text': title, 'x': 0, 'xanchor': 'left'},
         plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
@@ -228,23 +236,13 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
                      gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
                      mirror=True, showline=True, linecolor='black', linewidth=2)
 
-    # X-Axis Formatting
     fig.update_xaxes(
         range=[start_view, end_view],
         mirror=True, showline=True, linecolor='black', linewidth=2,
         gridcolor='DimGray', gridwidth=1,
-        tick0=start_view, 
-        dtick=86400000, # 24 hours
         tickformat="%a\n%m/%d",
-        minor=dict(dtick=21600000, gridcolor='Silver', showgrid=True) # 6 hours
+        minor=dict(dtick=21600000, gridcolor='Silver', showgrid=True)
     )
-
-    # 4. Vertical Monday Lines
-    curr_ts = start_view
-    while curr_ts <= end_view:
-        if curr_ts.weekday() == 0: # 0 is Monday
-            fig.add_vline(x=curr_ts.timestamp() * 1000, line_width=2, line_color="DimGray")
-        curr_ts += timedelta(days=1)
 
     for val, label in active_refs:
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
@@ -368,34 +366,39 @@ elif service == "📊 Client Portal":
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
-        # Get metadata from the new master table
-        meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}`").to_dataframe()
+        # UPDATED: Filter out NULLs for cleaner dropdowns
+        meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL AND Location IS NOT NULL"
+        meta_df = client.query(meta_q).to_dataframe()
         
-        c1, c2, c3 = st.columns(3)
-        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()))
-        with c2: sel_loc = st.selectbox("Pipe / Bank", sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique()))
-        with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 1)
-
-        now = datetime.now(pytz.UTC)
-        monday_this_week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        start_view = monday_this_week - timedelta(weeks=weeks-1)
-        end_view = monday_this_week + timedelta(days=7)
-
-        # Pull using NodeNum as the sensor identifier
-        data_q = f"""
-            SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
-            FROM `{MASTER_TABLE}` 
-            WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' 
-            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
-            ORDER BY timestamp ASC
-        """
-        df_g = client.query(data_q).to_dataframe()
-        
-        if not df_g.empty:
-            df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
-            st.plotly_chart(build_standard_sf_graph(df_g, f"{sel_proj} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
+        if meta_df.empty:
+            st.warning("No data found in Master Table.")
         else:
-            st.warning("No data found for the selected criteria in the master table.")
+            c1, c2, c3 = st.columns(3)
+            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()))
+            with c2: sel_loc = st.selectbox("Pipe / Bank", sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique()))
+            with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 1)
+
+            now = datetime.now(pytz.UTC)
+            monday_this_week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            start_view = monday_this_week - timedelta(weeks=weeks-1)
+            end_view = monday_this_week + timedelta(days=7)
+
+            # Pull using NodeNum as the sensor identifier
+            data_q = f"""
+                SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
+                FROM `{MASTER_TABLE}` 
+                WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' 
+                AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
+                ORDER BY timestamp ASC
+            """
+            df_g = client.query(data_q).to_dataframe()
+            
+            if not df_g.empty:
+                df_g['timestamp'] = pd.to_datetime(df_g['timestamp'])
+                # Call the updated graph engine
+                st.plotly_chart(build_standard_sf_graph(df_g, f"{sel_proj} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
+            else:
+                st.warning(f"No data points found for {sel_loc} in the last {weeks} week(s).")
             
     except Exception as e:
         st.error(f"Diagnostics Error: {e}")
