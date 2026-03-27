@@ -281,8 +281,24 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 ###################
 # --- SIDEBAR --- #
 ###################
-# --- 4. SIDEBAR ---
+###################
+# --- SIDEBAR --- #
+###################
 st.sidebar.title("❄️ SoilFreeze Lab")
+
+# 1. Global Project Selection (Used by all services)
+try:
+    # Get all projects for the sidebar dropdown
+    proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
+    all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].unique())
+    selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
+except:
+    selected_project = None
+    st.sidebar.warning("No projects found in master_data.")
+
+st.sidebar.divider()
+
+# 2. Reference Lines
 show_32 = st.sidebar.checkbox("Freezing (32°F)", value=True)
 show_26 = st.sidebar.checkbox("Type B (26.6°F)", value=True)
 show_10 = st.sidebar.checkbox("Type A (10.2°F)", value=True)
@@ -292,7 +308,11 @@ if show_32: active_refs.append((32, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
 
-service = st.sidebar.selectbox("Select Service", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+st.sidebar.divider()
+
+# 3. Service Navigation
+service = st.sidebar.selectbox("Select Service", 
+    ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 #######################
 # --- END SIDEBAR --- #
 #######################
@@ -394,23 +414,19 @@ elif service == "📊 Client Portal":
 # --- NODE DIAGNOSTIC --- #
 ###########################  
 elif service == "📉 Node Diagnostics":
-    st.header("📉 High-Resolution Node Diagnostics")
+    st.header(f"📉 Diagnostics: {selected_project}")
     try:
-        # Pull metadata for dropdowns
-        meta_q = f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
-        meta_df = client.query(meta_q).to_dataframe()
+        # Get locations for the ALREADY selected project
+        loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project = '{selected_project}'"
+        loc_df = client.query(loc_q).to_dataframe()
         
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns([2, 1])
         with c1: 
-            projs = sorted(meta_df['Project'].dropna().unique())
-            sel_proj = st.selectbox("Project", projs)
+            sel_loc = st.selectbox("Pipe / Bank", sorted(loc_df['Location'].dropna().unique()))
         with c2: 
-            locs = sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].dropna().unique())
-            sel_loc = st.selectbox("Pipe / Bank", locs)
-        with c3: 
-            weeks = st.slider("Lookback (Weeks)", 1, 12, 6) # Defaulting to 6
+            weeks = st.slider("Lookback (Weeks)", 1, 12, 6)
 
-        # Robust Date Calculation
+        # Date Math
         now = pd.Timestamp.now(tz=pytz.UTC)
         monday_this_week = (now - pd.offsets.Day(now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = monday_this_week - pd.offsets.Week(int(weeks)-1)
@@ -419,19 +435,18 @@ elif service == "📉 Node Diagnostics":
         data_q = f"""
             SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
             FROM `{PROJECT_ID}.Temperature.master_data` 
-            WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' 
+            WHERE Project = '{selected_project}' AND Location = '{sel_loc}' 
             AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
             ORDER BY timestamp ASC
         """
         df_g = client.query(data_q).to_dataframe()
         
         if not df_g.empty:
-            st.plotly_chart(build_standard_sf_graph(df_g, f"{sel_proj} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
+            st.plotly_chart(build_standard_sf_graph(df_g, f"{selected_project} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
         else:
-            st.warning("No data found for this range.")
-            
+            st.warning("No data found.")
     except Exception as e:
-        st.error(f"Diagnostics Logic Error: {e}")
+        st.error(f"Diagnostics Error: {e}")
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
@@ -585,83 +600,53 @@ elif service == "🛠️ Admin Tools":
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
     METADATA = f"{PROJECT_ID}.Temperature.master_metadata"
 
-    tab_scrub, tab_approve = st.tabs(["🧹 Raw Data Scrubber", "✅ Approval Manager"])
+    tab_approve, tab_scrub = st.tabs(["✅ Approval Manager", "🧹 Raw Data Scrubber"])
     
-    # --- 1. RAW DATA SCRUBBER ---
-    with tab_scrub:
-        st.subheader("Direct Raw Source Cleaning")
-        st.info("Deletes data from raw ingestion tables. Does not affect the view until refreshed.")
-        
-        try:
-            # Get project list from metadata
-            meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{METADATA}`").to_dataframe()
-            
-            col_s1, col_s2 = st.columns(2)
-            with col_s1:
-                source_type = st.radio("Target Raw Source", ["SensorPush", "Lord"])
-                target_table = RAW_SP if source_type == "SensorPush" else RAW_LORD
-                id_col = "sensor_id" if source_type == "SensorPush" else "nodenumber"
-                
-                projs = sorted(meta_df['Project'].dropna().unique())
-                sel_scrub_proj = st.selectbox("Select Project", projs, key="scrub_p_final")
-            
-            with col_s2:
-                pipes = sorted(meta_df[meta_df['Project'] == sel_scrub_proj]['Location'].dropna().unique())
-                sel_scrub_pipe = st.selectbox("Select Pipe", pipes, key="scrub_l_final")
-                
-            confirm = st.text_input(f"To wipe {source_type} data for {sel_scrub_pipe}, type 'DELETE'", key="scrub_c_final")
-            
-            if st.button("🔥 PERMANENTLY DELETE FROM RAW"):
-                if confirm == "DELETE":
-                    with st.spinner("Scrubbing source files..."):
-                        # Subquery looks up the correct sensor IDs from metadata
-                        scrub_sql = f"""
-                            DELETE FROM `{target_table}`
-                            WHERE {id_col} IN (
-                                SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` 
-                                WHERE Project = '{sel_scrub_proj}' AND Location = '{sel_scrub_pipe}'
-                            )
-                        """
-                        client.query(scrub_sql).result()
-                        st.success(f"✅ Scrubbed {sel_scrub_pipe} from {source_type} raw table.")
-                else:
-                    st.error("Confirmation text must match 'DELETE'.")
-        except Exception as e:
-            st.error(f"Scrubber Error: {e}")
-
-    # --- 2. APPROVAL MANAGER ---
     with tab_approve:
-        st.subheader("Data Validation")
-        
-        # Approve All
+        st.subheader("Global & Targeted Approval")
         if st.button("🔓 APPROVE ALL HISTORIC DATA"):
-            with st.spinner("Updating master table..."):
-                all_q = f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'"
-                try:
-                    client.query(all_q).result()
-                    st.success("✅ Global approval complete.")
-                except Exception as e:
-                    st.error(f"Global Approval Failed: {e} (Ensure 'master_data' is a Table, not a View)")
+            with st.spinner("Updating records..."):
+                client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'").result()
+                st.success("Global approval complete.")
         
         st.divider()
+        # Targeted approval for the sidebar-selected project
+        st.write(f"**Targeted Approval for {selected_project}**")
+        un_q = f"SELECT DISTINCT Location FROM `{MASTER_TABLE}` WHERE Project = '{selected_project}' AND (approve IS NULL OR approve != 'TRUE')"
+        un_df = client.query(un_q).to_dataframe()
         
-        # Targeted Approval
-        try:
-            un_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE approve IS NULL OR approve != 'TRUE'"
-            un_df = client.query(un_q).to_dataframe()
-            if not un_df.empty:
-                c1, c2 = st.columns(2)
-                with c1: sel_app_proj = st.selectbox("Project", sorted(un_df['Project'].dropna().unique()), key="app_p_final")
-                with c2: sel_app_pipe = st.selectbox("Location", sorted(un_df[un_df['Project'] == sel_app_proj]['Location'].dropna().unique()), key="app_l_final")
-                
-                if st.button(f"🚀 Approve {sel_app_pipe}"):
-                    client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{sel_app_proj}' AND Location = '{sel_app_pipe}'").result()
-                    st.success(f"✅ {sel_app_pipe} approved.")
-                    st.rerun()
+        if not un_df.empty:
+            sel_app_pipe = st.selectbox("Select Pipe to Approve", sorted(un_df['Location'].unique()))
+            if st.button(f"🚀 Approve {sel_app_pipe}"):
+                client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{selected_project}' AND Location = '{sel_app_pipe}'").result()
+                st.success(f"Approved {sel_app_pipe}!")
+                st.rerun()
+        else:
+            st.info("No unapproved data for this project.")
+
+    with tab_scrub:
+        st.subheader("🧹 Raw Source Scrubber")
+        st.warning("This deletes data from the source (Raw) tables.")
+        
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            source_type = st.radio("Source", ["SensorPush", "Lord"])
+            target_t = RAW_SP if source_type == "SensorPush" else RAW_LORD
+            id_f = "sensor_id" if source_type == "SensorPush" else "nodenumber"
+        with col_s2:
+            # Use current project from sidebar, but let user pick the pipe
+            pipe_q = f"SELECT DISTINCT Location FROM `{METADATA}` WHERE Project = '{selected_project}'"
+            pipes = client.query(pipe_q).to_dataframe()['Location'].unique()
+            sel_scrub_pipe = st.selectbox("Pipe to Wipe", sorted(pipes))
+
+        confirm = st.text_input(f"Type 'DELETE' to wipe {sel_scrub_pipe}", key="scrub_conf")
+        if st.button("🔥 PERMANENTLY DELETE"):
+            if confirm == "DELETE":
+                scrub_sql = f"DELETE FROM `{target_t}` WHERE {id_f} IN (SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` WHERE Project = '{selected_project}' AND Location = '{sel_scrub_pipe}')"
+                client.query(scrub_sql).result()
+                st.success("Raw data scrubbed!")
             else:
-                st.info("No unapproved data found.")
-        except Exception as e:
-            st.error(f"Approval Error: {e}")
+                st.error("Please type 'DELETE' to confirm.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
