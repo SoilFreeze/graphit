@@ -517,7 +517,7 @@ if service == "🏠 Executive Summary":
     except Exception as e:
         # FIXED: Line split here to prevent SyntaxError
         st.error(f"Executive Summary Error: {e}")
-
+        st.sidebar.divider()
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
