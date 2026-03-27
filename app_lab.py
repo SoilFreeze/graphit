@@ -187,12 +187,11 @@ def fetch_sensorpush_data(start_dt, end_dt):
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
     SF Standard with Robust Gridlines.
-    Bypasses Plotly's annotation bug by using separate annotation calls.
+    - 10.2 Line: Burgundy
+    - Grid: Monday (DimGray), Daily (DarkGray), 6H (LightGray)
     """
     try:
         display_df = df.copy()
-        
-        # 1. Force strict types
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         display_df['depth'] = display_df['depth'].fillna("Unknown").astype(str)
         display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
@@ -200,9 +199,10 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         start_ts = pd.to_datetime(start_view)
         end_ts = pd.to_datetime(end_view)
         
-        # 2. Labeling & Gap Handling
+        # 1. Labeling
         display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
         
+        # 2. Gap Handling
         processed_dfs = []
         for lbl in display_df['label'].unique():
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
@@ -214,12 +214,11 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
             processed_dfs.append(s_df)
-        
         clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
         
         fig = go.Figure()
         
-        # 3. Trace Creation
+        # 3. Traces
         def natural_sort_key(s):
             nums = re.findall(r'\d+', s)
             return int(nums[0]) if nums else 0
@@ -230,7 +229,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
             fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
                                      name=lbl, mode='lines', connectgaps=False))
 
-        # 4. Layout
+        # 4. Layout & X-Axis (Disabled minor grid to stop the bunching)
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left'},
             plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
@@ -241,31 +240,32 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
                          mirror=True, showline=True, linecolor='black', linewidth=2)
 
         fig.update_xaxes(range=[start_ts, end_ts], mirror=True, showline=True, linecolor='black',
-                         linewidth=2, showgrid=False, tickformat="%a\n%m/%d")
+                         linewidth=2, showgrid=False, tickformat="%a\n%m/%d",
+                         minor=dict(showgrid=False)) # TURNED OFF MINOR GRID HERE
 
-        # 5. GRIDLINES (Manual Loop using pd.date_range)
+        # 5. CUSTOM GRIDLINES (Clean 6-Hour Loop)
         grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6H')
         for ts in grid_times:
             if ts.hour == 0:
-                color, width = ("DimGray", 2) if ts.weekday() == 0 else ("DarkGray", 1.5)
+                color, width = ("DimGray", 2.5) if ts.weekday() == 0 else ("DarkGray", 1.5)
             else:
-                color, width = "LightGray", 0.8
+                color, width = "Gainsboro", 0.5 # Subtle light gray
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 6. NOW MARKER (FIXED: Bypassing the Plotly Bug)
+        # 6. NOW MARKER
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
-        # We draw the line WITHOUT text to avoid the error
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above')
-        # We add the text as a separate annotation
         fig.add_annotation(x=now_marker, y=1, yref="paper", text="NOW", 
                            showarrow=False, font=dict(color="Red", size=12), xanchor="left")
 
-        # 7. HORIZONTAL REFERENCES
+        # 7. HORIZONTAL REFERENCES (10.2 = Burgundy)
         for val, label in active_refs:
-            fig.add_hline(y=val, line_dash="dash", line_color="blue")
-            # Separate annotation for horizontal lines too
+            # Check for the specific 10.2 line
+            line_color = "#800020" if str(val) == "10.2" else "blue"
+            
+            fig.add_hline(y=val, line_dash="dash", line_color=line_color)
             fig.add_annotation(x=1, xref="paper", y=val, text=f"{label} {val}°", 
-                               showarrow=False, font=dict(color="blue"), xanchor="left")
+                               showarrow=False, font=dict(color=line_color), xanchor="left")
         
         return fig
     except Exception as e:
