@@ -397,7 +397,7 @@ if show_10: active_refs.append((10.2, "Type A"))
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # 1. QUERY (Using exact Case-Sensitive names from your schema)
+    # 1. QUERY (Using Case-Sensitive Schema: Project, Location, Depth, NodeNum)
     summary_q = f"""
         SELECT Project, Location, Depth, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
@@ -427,11 +427,15 @@ if service == "🏠 Executive Summary":
                 group = group.sort_values('timestamp', ascending=False)
                 last_rec = group.iloc[0]
                 
-                # A. Depth Formatting (Feet vs. Bank)
-                d_val = str(depth)
-                depth_display = f"{d_val} ft" if d_val.replace('.','',1).isdigit() else d_val
+                # A. SAFE DEPTH FORMATTING (Fixes the str/int error)
+                d_val = str(depth).strip()
+                # Check if it's purely a number (integer or float)
+                if re.match(r"^\d+(\.\d+)?$", d_val):
+                    depth_display = f"{d_val} ft"
+                else:
+                    depth_display = d_val # Leaves S1, R1, Bank as-is
 
-                # B. Status Latency Color Coding
+                # B. STATUS LATENCY (Color Coding)
                 ts = last_rec['timestamp']
                 if ts.tzinfo is None: ts = ts.tz_localize(pytz.UTC)
                 
@@ -441,7 +445,7 @@ if service == "🏠 Executive Summary":
                 elif latency_hrs > 6: status = "🟡 Yellow (>6h)"
                 else: status = "🟢 Green"
 
-                # C. 24-Hour Min/Max/Delta
+                # C. 24-HOUR TRENDS
                 day_ago = now - pd.Timedelta(hours=24)
                 last_24h = group[group['timestamp'] >= day_ago]
                 
@@ -469,9 +473,11 @@ if service == "🏠 Executive Summary":
             # 3. COLOR CODING THE CHANGE
             def color_delta(val):
                 if val is None: return ""
+                # Positive (Warming)
                 if val >= 5: return 'background-color: #ff4b4b; color: white'
                 if val >= 2: return 'background-color: #ffa500'
                 if val >= 1: return 'background-color: #ffff00'
+                # Negative (Cooling)
                 if val <= -1: return 'background-color: #0000ff; color: white'
                 if val <= -0.5: return 'background-color: #4169e1; color: white'
                 if val <= -0.25: return 'background-color: #add8e6'
@@ -495,9 +501,7 @@ if service == "🏠 Executive Summary":
             st.table(styled_view)
 
     except Exception as e:
-        # FIXED: Line split here to prevent SyntaxError
         st.error(f"Executive Summary Error: {e}")
-        st.sidebar.divider()
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
