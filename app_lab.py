@@ -402,7 +402,7 @@ st.sidebar.divider()
 #############################
 # --- EXECUTIVE SUMMARY --- #
 #############################
-elif service == "🏠 Executive Summary":
+if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
     # 1. QUERY (Using exact Case-Sensitive names from your schema)
