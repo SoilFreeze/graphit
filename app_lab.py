@@ -184,46 +184,138 @@ def fetch_sensorpush_data(start_dt, end_dt):
 ########################
 # --- GRAPH ENGINE --- #
 ########################
-########################
-# --- GRAPH ENGINE --- #
-########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
+    """
+    SF Standard Graph Engine:
+    - Unit Conversion (F/C Toggle)
+    - Manual 6-Hour Gridlines (Gainsboro)
+    - Monday Midnight Bold (DimGray)
+    - Burgundy Reference Line (10.2F)
+    - Red 'NOW' Marker
+    """
     try:
         display_df = df.copy()
-        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         
-        # --- UNIT CONVERSION ---
+        # 1. Force strict types for math and sorting
+        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+        display_df['depth'] = display_df['depth'].fillna("Unknown").astype(str)
+        display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
+        
+        # 2. UNIT CONVERSION (Based on Sidebar Toggle)
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
+            y_range = [-30, 30]
+        else:
+            y_range = [-20, 80]
+            
+        start_ts = pd.to_datetime(start_view)
+        end_ts = pd.to_datetime(end_view)
         
-        display_df['label'] = display_df['depth'].astype(str) + " (" + display_df['sensor_name'].astype(str) + ")"
+        # 3. Labeling & Gap Handling (Data Scrubbed version)
+        display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
         
-        # ... [Keep your existing gap handling and sorting logic here] ...
-
+        processed_dfs = []
+        for lbl in display_df['label'].unique():
+            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
+            # Insert None for gaps > 6 hours to prevent diagonal 'streaks'
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            gap_mask = s_df['gap_hrs'] > 6.0
+            if gap_mask.any():
+                gaps = s_df[gap_mask].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                # Ignore FutureWarning for empty concat
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            processed_dfs.append(s_df)
+            
+        clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
+        
+        # 4. Create the Figure
         fig = go.Figure()
-        # [Keep your trace creation loop here]
-
-        # Dynamic Y-Axis based on Units
-        y_min, y_max = (-30, 30) if unit_mode == "Celsius" else (-20, 80)
         
+        # Natural sorting for depths in the legend
+        def natural_sort_key(s):
+            nums = re.findall(r'\d+', s)
+            return int(nums[0]) if nums else 0
+        
+        labels = sorted(clean_df['label'].unique(), key=natural_sort_key)
+        
+        for lbl in labels:
+            sensor_df = clean_df[clean_df['label'] == lbl]
+            fig.add_trace(go.Scatter(
+                x=sensor_df['timestamp'], 
+                y=sensor_df['temperature'], 
+                name=lbl, 
+                mode='lines', 
+                connectgaps=False
+            ))
+
+        # 5. Axis & Layout Formatting
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left'},
-            plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
+            plot_bgcolor='white', 
+            hovermode="x unified", 
+            margin=dict(t=50, l=50, r=150), 
+            height=750
         )
         
-        fig.update_yaxes(title=f"Temp ({unit_label})", range=[y_min, y_max], gridcolor='DimGray')
+        fig.update_yaxes(
+            title=f"Temp ({unit_label})", 
+            range=y_range, 
+            gridcolor='DimGray', 
+            gridwidth=1.5,
+            minor=dict(dtick=5 if unit_mode == "Fahrenheit" else 2, gridcolor='Silver', showgrid=True),
+            mirror=True, showline=True, linecolor='black', linewidth=2
+        )
 
-        # --- CONVERT REFERENCE LINES ---
+        fig.update_xaxes(
+            range=[start_ts, end_ts],
+            mirror=True, showline=True, linecolor='black', linewidth=2,
+            showgrid=False, # We draw our own grid below
+            tickformat="%a\n%m/%d",
+            minor=dict(showgrid=False)
+        )
+
+        # 6. CUSTOM GRIDLINES (Clean 6-Hour Loop)
+        # Using lowercase 'h' as requested by the deprecation warning
+        grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6h')
+        for ts in grid_times:
+            if ts.hour == 0:
+                # Monday Midnight: Thickest; Daily: Medium
+                color, width = ("DimGray", 2.5) if ts.weekday() == 0 else ("DarkGray", 1.5)
+            else:
+                # 6h Shift Marks: Very subtle
+                color, width = "Gainsboro", 0.5
+            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+
+        # 7. RED 'NOW' MARKER (Bug-Free Version)
+        now_marker = pd.Timestamp.now(tz=pytz.UTC)
+        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above')
+        fig.add_annotation(
+            x=now_marker, y=1, yref="paper", text="NOW", 
+            showarrow=False, font=dict(color="Red", size=12), xanchor="left"
+        )
+
+        # 8. HORIZONTAL REFERENCES (with 10.2 Burgundy logic)
         for val, label in active_refs:
-            c_val = convert_temp(val)
+            # Convert reference value to active unit (F or C)
+            c_val = convert_val(val) # Uses the helper function from sidebar
+            
+            # Specific Burgundy color for 10.2F
             line_color = "#800020" if str(val) == "10.2" else "blue"
+            
             fig.add_hline(y=c_val, line_dash="dash", line_color=line_color)
-            fig.add_annotation(x=1, xref="paper", y=c_val, text=f"{label} {round(c_val,1)}{unit_label}", 
-                               showarrow=False, font=dict(color=line_color), xanchor="left")
+            fig.add_annotation(
+                x=1, xref="paper", y=c_val, 
+                text=f"{label} {round(c_val, 1)}{unit_label}", 
+                showarrow=False, font=dict(color=line_color, size=11), 
+                xanchor="left", bgcolor="white", opacity=0.8
+            )
         
         return fig
+
     except Exception as e:
-        st.error(f"Graph Error: {e}")
+        st.error(f"Graph Logic Error: {e}")
         return go.Figure()
 ############################
 # --- END GRAPH ENGINE --- #
@@ -231,9 +323,12 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 ###################
 # --- SIDEBAR --- #
 ###################
+#######################
+# --- GLOBAL SIDEBAR --- #
+#######################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# 1. PAGE SELECTION
+# 1. PAGE SELECTION (First)
 service = st.sidebar.selectbox("📂 Select Page", 
     ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 
@@ -250,17 +345,33 @@ def convert_val(f_val):
 st.sidebar.divider()
 
 # 3. PROJECT SELECTION
+# Only show the project selector if the page actually needs it
 needs_project = service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]
 if needs_project:
     try:
         proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
         all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].dropna().unique())
         selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
-    except:
+    except Exception:
         selected_project = None
-        st.sidebar.error("Error loading projects.")
+        st.sidebar.error("Could not load Projects.")
 else:
     st.sidebar.selectbox("🎯 Active Project", ["(Not Required)"], disabled=True)
+    selected_project = None
+
+st.sidebar.divider()
+
+# 4. REFERENCE LINE CHECKBOXES
+st.sidebar.write("### 📏 Reference Lines")
+show_32 = st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True)
+show_26 = st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True)
+show_10 = st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True)
+
+# Build the list for the Graph Engine to consume
+active_refs = []
+if show_32: active_refs.append((32.0, "Freezing"))
+if show_26: active_refs.append((26.6, "Type B"))
+if show_10: active_refs.append((10.2, "Type A"))
     selected_project = None
 #######################
 # --- END SIDEBAR --- #
@@ -536,18 +647,22 @@ elif service == "🛠️ Admin Tools":
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
     METADATA = f"{PROJECT_ID}.Temperature.master_metadata"
 
-    tab_scrub, tab_approve = st.tabs(["🧹 Hourly Data Scrubber", "✅ Raw Bulk Approval"])
+    tab_scrub, tab_approve = st.tabs(["🧹 Deep Data Scrubber", "✅ Raw Bulk Approval"])
     
     with tab_scrub:
-        st.subheader("🧹 Hourly Raw Data Reduction")
-        st.info("Keeps only 1 point per hour per sensor in the RAW tables.")
-        scrub_target = st.radio("Select Table", ["SensorPush", "Lord"], horizontal=True)
+        st.subheader("🧹 Deep Raw Source Cleaning")
+        st.info("This keeps 1 point per hour and **removes all NULL temperatures** from RAW tables.")
+        
+        scrub_target = st.radio("Select Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_t")
         target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
         
-        if st.button(f"🚀 Scrub {scrub_target} to 1pt/Hour"):
-            with st.spinner(f"Cleaning {target_table}..."):
-                # Logic: Deletes everything EXCEPT the earliest reading in every hour block
-                scrub_sql = f"""
+        if st.button(f"🚀 Run Deep Clean on {scrub_target}"):
+            with st.spinner(f"Surgery in progress on {target_table}..."):
+                # 1. DELETE NULLS FIRST
+                null_sql = f"DELETE FROM `{target_table}` WHERE temperature IS NULL"
+                
+                # 2. HOURLY DEDUPLICATION
+                dedup_sql = f"""
                 DELETE FROM `{target_table}`
                 WHERE STRUCT(NodeNum, timestamp) NOT IN (
                     SELECT AS STRUCT NodeNum, MIN(timestamp)
@@ -555,17 +670,30 @@ elif service == "🛠️ Admin Tools":
                     GROUP BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR)
                 )
                 """
-                client.query(scrub_sql).result()
-                st.success(f"✅ Cleaned! {target_table} is now 1pt/hour.")
+                
+                try:
+                    # Run Null Cleanup
+                    n_job = client.query(null_sql)
+                    n_job.result()
+                    
+                    # Run Dedup Cleanup
+                    d_job = client.query(dedup_sql)
+                    d_job.result()
+                    
+                    st.success(f"✅ Deep Clean Complete! Nulls removed and data reduced to 1pt/hour.")
+                    st.balloons()
+                except Exception as e:
+                    st.error(f"Scrub Error: {e}")
 
     with tab_approve:
         st.subheader("✅ Raw Bulk Approval")
-        app_target = st.radio("Select Table", ["SensorPush", "Lord"], key="app_r", horizontal=True)
+        app_target = st.radio("Select Table", ["SensorPush", "Lord"], key="app_r_final", horizontal=True)
         t_table = RAW_SP if app_target == "SensorPush" else RAW_LORD
         
+        # Ensure 'approve' column exists
         if st.button(f"🛠️ Initialize 'approve' Column"):
             client.query(f"ALTER TABLE `{t_table}` ADD COLUMN IF NOT EXISTS approve STRING").result()
-            st.success(f"Column 'approve' verified in {app_target}.")
+            st.success(f"Column 'approve' verified.")
 
         if selected_project and st.button(f"🔓 APPROVE {selected_project} RAW DATA"):
             bulk_app_sql = f"""
