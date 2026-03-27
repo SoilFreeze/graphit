@@ -342,11 +342,11 @@ service = st.sidebar.selectbox(
 
 st.sidebar.divider()
 
-# 2. UNIT SELECTION (Global)
+# 2. UNIT SELECTION
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Helper for conversions used in graphs/tables
+# Global helper for unit conversion
 def convert_val(f_val):
     if f_val is None: return None
     return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
@@ -354,12 +354,11 @@ def convert_val(f_val):
 st.sidebar.divider()
 
 # 3. PROJECT SELECTION
-# Logic: We only show the active project selector for pages that require it
 needs_project = service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]
 
 if needs_project:
     try:
-        # Querying Project list from your master_data table
+        # Querying using Proper Case to match your BigQuery schema
         proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
         proj_df = client.query(proj_q).to_dataframe()
         all_projs = sorted(proj_df['Project'].dropna().unique())
@@ -367,13 +366,13 @@ if needs_project:
         if all_projs:
             selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
         else:
-            st.sidebar.warning("No projects found in database.")
+            st.sidebar.warning("No projects found.")
             selected_project = None
     except Exception as e:
-        st.sidebar.error(f"Metadata Error: {e}")
+        st.sidebar.error(f"Connection Error: {e}")
         selected_project = None
 else:
-    # Keeps the UI consistent on Executive Summary/Intake pages
+    # Critical: Defines variable for Executive Summary/Intake pages
     st.sidebar.selectbox("🎯 Active Project", ["(Not Required)"], disabled=True)
     selected_project = None
 
@@ -385,24 +384,109 @@ show_32 = st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True)
 show_26 = st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True)
 show_10 = st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True)
 
-# Package these for the Graph Engine
 active_refs = []
 if show_32: active_refs.append((32.0, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
-
-st.sidebar.divider()
 #######################
 # --- END SIDEBAR --- #
 #######################  
-st.sidebar.divider()
-# --- END SIDEBAR ---
+##########################
+# --- PAGE ROUTING --- #
+##########################
 
-# --- PAGE ROUTING ---
-# Every page after the first 'if' should use 'elif'
+# --- FIX: Change 'elif' to 'if' here to solve the SyntaxError ---
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
-    # ... (Rest of your Summary code)
+    
+    # 1. QUERY (Using Case-Sensitive Schema: Project, Location, Depth, NodeNum)
+    summary_q = f"""
+        SELECT Project, Location, Depth, NodeNum, temperature, timestamp
+        FROM `{PROJECT_ID}.Temperature.master_data`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
+    """
+    if selected_project:
+        summary_q += f" AND Project = '{selected_project}'"
+    
+    try:
+        with st.spinner("Processing sensor health..."):
+            raw_summary = client.query(summary_q).to_dataframe()
+        
+        if raw_summary.empty:
+            st.warning("📡 No data found in the last 72 hours.")
+        else:
+            summary_rows = []
+            now = pd.Timestamp.now(tz=pytz.UTC)
+            
+            # 2. DATA AGGREGATION
+            for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
+                group = group.sort_values('timestamp', ascending=False)
+                last_rec = group.iloc[0]
+                
+                # Depth Formatting (Feet vs. Bank)
+                d_val = str(depth)
+                depth_display = f"{d_val} ft" if d_val.replace('.','',1).isdigit() else d_val
+
+                # Latency Logic (Status Color)
+                ts = last_rec['timestamp']
+                if ts.tzinfo is None: ts = ts.tz_localize(pytz.UTC)
+                
+                latency_hrs = (now - ts).total_seconds() / 3600
+                if latency_hrs > 24: status = "🔴 Red (>24h)"
+                elif latency_hrs > 12: status = "🟠 Orange (>12h)"
+                elif latency_hrs > 6: status = "🟡 Yellow (>6h)"
+                else: status = "🟢 Green"
+
+                # 24-Hour Delta Logic
+                last_24h = group[group['timestamp'] >= (now - pd.Timedelta(hours=24))]
+                if not last_24h.empty:
+                    t_min, t_max = last_24h['temperature'].min(), last_24h['temperature'].max()
+                    t_start = last_24h.sort_values('timestamp').iloc[0]['temperature']
+                    t_change = last_rec['temperature'] - t_start
+                else:
+                    t_min = t_max = t_change = None
+
+                # Unit Formatting
+                def u_fmt(v):
+                    if v is None: return "N/A"
+                    val = (v - 32) * 5/9 if unit_mode == "Celsius" else v
+                    return f"{round(val, 1)}{unit_label}"
+
+                summary_rows.append({
+                    "Pipe": loc, "Depth": depth_display, "Sensor": node,
+                    "Current": u_fmt(last_rec['temperature']), "Status": status,
+                    "24h Min": u_fmt(t_min), "24h Max": u_fmt(t_max),
+                    "raw_delta": t_change, "Last Seen": ts.strftime('%m/%d %H:%M')
+                })
+
+            summary_df = pd.DataFrame(summary_rows)
+
+            # 3. COLOR CODING & DISPLAY
+            def color_delta(val):
+                if val is None: return ""
+                if val >= 5: return 'background-color: #ff4b4b; color: white'
+                if val >= 2: return 'background-color: #ffa500'
+                if val >= 1: return 'background-color: #ffff00'
+                if val <= -1: return 'background-color: #0000ff; color: white'
+                if val <= -0.5: return 'background-color: #4169e1; color: white'
+                if val <= -0.25: return 'background-color: #add8e6'
+                return ""
+
+            def delta_label(x):
+                if x is None: return "N/A"
+                val = x * 5/9 if unit_mode == "Celsius" else x
+                return f"{'+' if val > 0 else ''}{round(val, 2)}{unit_label}"
+
+            summary_df['24h Change'] = summary_df['raw_delta'].apply(delta_label)
+            final_cols = ["Pipe", "Depth", "Current", "24h Change", "Status", "24h Min", "24h Max", "Last Seen"]
+            
+            st.subheader("📡 Engineering Command Center")
+            st.table(summary_df[final_cols].style.applymap(color_delta, subset=['24h Change']))
+
+    except Exception as e:
+        st.error(f"Executive Summary Error: {e}")st.sidebar.divider()
+# --- END SIDEBAR ---
+
 ####################
 # --- SERVICES --- #
 ####################
@@ -748,70 +832,42 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    # Updated Table References - Using master_data since master_metadata was not found
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
-    # This is the table/view that actually exists and links NodeNum to Projects
     MAPPING_TABLE = f"{PROJECT_ID}.Temperature.master_data" 
 
     tab_scrub, tab_approve = st.tabs(["🧹 Deep Data Scrubber", "✅ Raw Bulk Approval"])
     
     with tab_scrub:
         st.subheader("🧹 Deep Raw Source Cleaning")
-        st.write("This cleans the **Raw Tables** based on the logic in your master mapping.")
-        
-        scrub_target = st.radio("Select Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_v4")
+        scrub_target = st.radio("Select Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_final")
         target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
         
-        if st.button(f"🚀 Run Scrub on {scrub_target}"):
+        if st.button(f"🚀 Run Deep Scrub on {scrub_target}"):
             with st.spinner(f"Cleaning {target_table}..."):
-                # 1. DELETE NULL TEMPERATURES, NULL PROJECTS, AND NULL LOCATIONS
-                # This query looks at the master mapping to see what should be deleted
+                # 1. PURGE NULLS (Temperature, Location, Project)
                 purge_sql = f"""
                 DELETE FROM `{target_table}` 
                 WHERE temperature IS NULL 
                 OR NodeNum NOT IN (
-                    SELECT DISTINCT CAST(NodeNum AS STRING) 
-                    FROM `{MAPPING_TABLE}` 
-                    WHERE Project IS NOT NULL 
-                    AND Location IS NOT NULL
+                    SELECT DISTINCT CAST(NodeNum AS STRING) FROM `{MAPPING_TABLE}` 
+                    WHERE Project IS NOT NULL AND Location IS NOT NULL
                 )
                 """
-                
-                # 2. HOURLY DEDUPLICATION (1pt/hour)
+                # 2. DEDUPLICATE (1pt/hour)
                 dedup_sql = f"""
                 DELETE FROM `{target_table}`
                 WHERE STRUCT(NodeNum, timestamp) NOT IN (
                     SELECT AS STRUCT NodeNum, MIN(timestamp)
-                    FROM `{target_table}`
-                    GROUP BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR)
+                    FROM `{target_table}` GROUP BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR)
                 )
                 """
-                
                 try:
                     client.query(purge_sql).result()
                     client.query(dedup_sql).result()
-                    st.success(f"✅ Cleaned {scrub_target}! Removed Nulls and reduced to 1pt/hour.")
+                    st.success("✅ Cleaned! Nulls removed and data reduced to 1pt/hour.")
                 except Exception as e:
                     st.error(f"Scrub Error: {e}")
-
-    with tab_approve:
-        st.subheader("✅ Raw Bulk Approval")
-        # Ensure your approval logic also uses MAPPING_TABLE
-        if selected_project and st.button(f"🔓 APPROVE {selected_project} RAW DATA"):
-            try:
-                bulk_app_sql = f"""
-                UPDATE `{target_table}` SET approve = 'TRUE'
-                WHERE NodeNum IN (
-                    SELECT DISTINCT CAST(NodeNum AS STRING) 
-                    FROM `{MAPPING_TABLE}` 
-                    WHERE Project = '{selected_project}'
-                )
-                """
-                client.query(bulk_app_sql).result()
-                st.success(f"✅ Raw records for {selected_project} marked as Approved.")
-            except Exception as e:
-                st.error(f"Approval Error: {e}")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
