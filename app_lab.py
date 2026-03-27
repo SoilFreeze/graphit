@@ -423,7 +423,7 @@ if service == "🏠 Executive Summary":
                 return f"{round(val, 1)}{unit_label}"
 
             # 2. DATA AGGREGATION
-            # Explicitly cast Depth to string to avoid comparison errors
+            # FIX: Explicitly cast Depth to string to avoid comparison errors
             raw_summary['Depth'] = raw_summary['Depth'].astype(str)
             
             for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
@@ -443,18 +443,18 @@ if service == "🏠 Executive Summary":
                 if ts.tzinfo is None: ts = ts.tz_localize(pytz.UTC)
                 
                 latency_hrs = (now - ts).total_seconds() / 3600
-                if latency_hrs > 24: status = "🔴 Red (>24h)"
-                elif latency_hrs > 12: status = "🟠 Orange (>12h)"
-                elif latency_hrs > 6: status = "🟡 Yellow (>6h)"
-                else: status = "🟢 Green"
+                if latency_hrs > 24: status = "🔴 Red (>24h)" #
+                elif latency_hrs > 12: status = "🟠 Orange (>12h)" #
+                elif latency_hrs > 6: status = "🟡 Yellow (>6h)" #
+                else: status = "🟢 Green" #
 
                 # C. 24-HOUR TRENDS
                 day_ago = now - pd.Timedelta(hours=24)
                 last_24h = group[group['timestamp'] >= day_ago]
                 
                 if not last_24h.empty:
-                    t_min = last_24h['temperature'].min()
-                    t_max = last_24h['temperature'].max()
+                    t_min = last_24h['temperature'].min() #
+                    t_max = last_24h['temperature'].max() #
                     # Change is Current Temp minus Temp from 24h ago
                     t_start = last_24h.sort_values('timestamp').iloc[0]['temperature']
                     t_change = last_rec['temperature'] - t_start
