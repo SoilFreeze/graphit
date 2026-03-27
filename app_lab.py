@@ -186,36 +186,41 @@ def fetch_sensorpush_data(start_dt, end_dt):
 ########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
-    SF Standard: 6hr, Midnight, and Monday Gridlines.
-    Legend Format: Depth (NodeNum).
+    SF Standard with Enhanced Gridlines:
+    - Monday Midnight: Dark Gray
+    - Other Midnights: Medium Gray
+    - 6-Hour Intervals: Light Gray
+    - Current Time: Red Line
     """
     display_df = df.copy()
     
-    # FIX: Ensure no None types exist before creating labels or sorting
+    # Ensure no None types exist to prevent sorting crashes
     display_df['depth'] = display_df['depth'].fillna("Unknown")
     display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown")
     
     y_range, y_ticks, y_label, m_step = [-20, 80], [-20, 0, 20, 40, 60, 80], "Temp (°F)", 5
 
-    # Labeling Logic
+    # Labeling Logic: Depth (Node ID)
     display_df['label'] = display_df['depth'].astype(str) + " (" + display_df['sensor_name'].astype(str) + ")"
     
     processed_dfs = []
     for lbl in display_df['label'].unique():
         s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
         s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        # Insert None to break lines for gaps > 6 hours
         gaps = s_df[s_df['gap'] > 6.0].copy()
         if not gaps.empty:
             gaps['temperature'] = None
             gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
         processed_dfs.append(s_df)
+    
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
     
     # Trace Creation
     fig = go.Figure()
     
-    # FIX: Safer sorting that handles potential non-numeric strings in the label
+    # Natural sorting for depths (e.g., 5ft before 10ft)
     def natural_sort_key(s):
         numbers = re.findall(r'\d+', s)
         return int(numbers[0]) if numbers else 0
@@ -224,26 +229,69 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     
     for lbl in labels:
         sensor_df = clean_df[clean_df['label'] == lbl]
-        fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
-                                 name=lbl, mode='lines', connectgaps=False))
+        fig.add_trace(go.Scatter(
+            x=sensor_df['timestamp'], 
+            y=sensor_df['temperature'], 
+            name=lbl, 
+            mode='lines', 
+            connectgaps=False
+        ))
 
+    # 3. Formatting & Layout
     fig.update_layout(
         title={'text': title, 'x': 0, 'xanchor': 'left'},
-        plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
+        plot_bgcolor='white', 
+        hovermode="x unified", 
+        margin=dict(t=50, l=50, r=150), 
+        height=750
     )
     
-    fig.update_yaxes(title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
-                     gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
-                     mirror=True, showline=True, linecolor='black', linewidth=2)
+    # Y-Axis Formatting
+    fig.update_yaxes(
+        title=y_label, tickmode='array', tickvals=y_ticks, range=y_range,
+        gridcolor='DimGray', gridwidth=1.5, 
+        minor=dict(dtick=m_step, gridcolor='Silver', showgrid=True),
+        mirror=True, showline=True, linecolor='black', linewidth=2
+    )
 
+    # X-Axis Formatting: Disable default grid to use custom lines
     fig.update_xaxes(
         range=[start_view, end_view],
         mirror=True, showline=True, linecolor='black', linewidth=2,
-        gridcolor='DimGray', gridwidth=1,
-        tickformat="%a\n%m/%d",
-        minor=dict(dtick=21600000, gridcolor='Silver', showgrid=True)
+        showgrid=False, 
+        tickformat="%a\n%m/%d"
     )
 
+    # 4. CUSTOM GRIDLINE LOGIC
+    # Loop from start to end in 6-hour chunks
+    curr_ts = start_view
+    while curr_ts <= end_view:
+        if curr_ts.hour == 0:
+            if curr_ts.weekday() == 0:
+                # Monday Midnight: Dark Gray
+                l_color, l_width = "DarkGray", 2
+            else:
+                # Daily Midnight: Medium Gray
+                l_color, l_width = "Gray", 1.5
+        else:
+            # 6:00, 12:00, 18:00: Light Gray
+            l_color, l_width = "Gainsboro", 1 # Gainsboro is a very light gray
+            
+        fig.add_vline(x=curr_ts, line_width=l_width, line_color=l_color, layer='below')
+        curr_ts += timedelta(hours=6)
+
+    # 5. CURRENT TIME MARKER
+    now_marker = datetime.now(pytz.UTC)
+    fig.add_vline(
+        x=now_marker, 
+        line_width=2, 
+        line_color="Red", 
+        layer='above',
+        annotation_text="NOW", 
+        annotation_position="top"
+    )
+
+    # 6. Reference Horizontal Lines (32°, 26°, etc)
     for val, label in active_refs:
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
     
