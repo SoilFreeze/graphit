@@ -325,9 +325,6 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 ############################
 # --- END GRAPH ENGINE --- #
 ############################
-###################
-# --- SIDEBAR --- #
-###################
 #######################
 # --- SIDEBAR UI --- #
 #######################
@@ -371,7 +368,7 @@ if needs_project:
         st.sidebar.error(f"Connection Error: {e}")
         selected_project = None
 else:
-    # Critical: Defines variable for Executive Summary/Intake pages
+    # Keeps the variable defined for the Executive Summary page
     st.sidebar.selectbox("🎯 Active Project", ["(Not Required)"], disabled=True)
     selected_project = None
 
@@ -387,6 +384,8 @@ active_refs = []
 if show_32: active_refs.append((32.0, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
+
+# --- END SIDEBAR ---
 #######################
 # --- END SIDEBAR --- #
 #######################  
@@ -411,13 +410,16 @@ if service == "🏠 Executive Summary":
 #############################
 # --- EXECUTIVE SUMMARY --- #
 #############################
+##########################
+# --- PAGE ROUTING --- #
+##########################
+
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
     # 1. QUERY (Using exact Case-Sensitive names from your schema)
     summary_q = f"""
-        SELECT 
-            Project, Location, Depth, NodeNum, temperature, timestamp
+        SELECT Project, Location, Depth, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
     """
@@ -441,7 +443,6 @@ if service == "🏠 Executive Summary":
                 return f"{round(val, 1)}{unit_label}"
 
             # 2. DATA AGGREGATION
-            # Grouping by exact column names from your screenshot
             for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
                 group = group.sort_values('timestamp', ascending=False)
                 last_rec = group.iloc[0]
@@ -452,7 +453,6 @@ if service == "🏠 Executive Summary":
 
                 # B. Status Latency Color Coding
                 ts = last_rec['timestamp']
-                # Ensure timestamp is offset-aware for comparison
                 if ts.tzinfo is None: ts = ts.tz_localize(pytz.UTC)
                 
                 latency_hrs = (now - ts).total_seconds() / 3600
@@ -489,17 +489,14 @@ if service == "🏠 Executive Summary":
             # 3. COLOR CODING THE CHANGE
             def color_delta(val):
                 if val is None: return ""
-                # Positive (Warming)
                 if val >= 5: return 'background-color: #ff4b4b; color: white'
                 if val >= 2: return 'background-color: #ffa500'
                 if val >= 1: return 'background-color: #ffff00'
-                # Negative (Cooling)
                 if val <= -1: return 'background-color: #0000ff; color: white'
                 if val <= -0.5: return 'background-color: #4169e1; color: white'
                 if val <= -0.25: return 'background-color: #add8e6'
                 return ""
 
-            # Formatting Delta Label
             def delta_label(x):
                 if x is None: return "N/A"
                 val = x * 5/9 if unit_mode == "Celsius" else x
@@ -510,18 +507,17 @@ if service == "🏠 Executive Summary":
 
             # 4. FINAL TABLE DISPLAY
             final_cols = ["Pipe", "Depth", "Current", "24h Change", "Status", "24h Min", "24h Max", "Last Seen"]
-            
             st.subheader("📡 Engineering Command Center")
             
-            # Apply styling to the Change column
             styled_view = summary_df[final_cols].style.applymap(
                 color_delta, subset=['24h Change']
             )
-
             st.table(styled_view)
 
     except Exception as e:
-        st.error(f"Logic Error: {e}")
+        # FIXED: Line split here to prevent SyntaxError
+        st.error(f"Executive Summary Error: {e}")
+
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
