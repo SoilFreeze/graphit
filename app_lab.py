@@ -194,12 +194,12 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
     display_df = df.copy()
     
-    # Ensure types are correct for labeling and sorting
+    # 1. Strict Type Casting to prevent 'int + datetime' errors
     display_df['depth'] = display_df['depth'].fillna("Unknown")
     display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown")
     display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
     
-    # Ensure start/end view are Timestamps for comparison
+    # Force start/end views to be Pandas Timestamps
     start_view = pd.to_datetime(start_view)
     end_view = pd.to_datetime(end_view)
     
@@ -215,7 +215,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         gaps = s_df[s_df['gap'] > 6.0].copy()
         if not gaps.empty:
             gaps['temperature'] = None
-            gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
+            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
         processed_dfs.append(s_df)
     clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
@@ -245,12 +245,12 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     fig.update_xaxes(
         range=[start_view, end_view],
         mirror=True, showline=True, linecolor='black', linewidth=2,
-        showgrid=False, # Disable default grid to use our custom lines
+        showgrid=False, # Disable default grid to use custom logic
         tickformat="%a\n%m/%d"
     )
 
-    # 1. CUSTOM GRIDLINES (6-hour intervals)
-    # Using date_range is safer than a while loop to avoid type errors
+    # 2. CUSTOM GRIDLINES (6-hour intervals)
+    # pd.date_range is much safer than manual increments for avoiding type errors
     grid_times = pd.date_range(start=start_view, end=end_view, freq='6H')
     
     for ts in grid_times:
@@ -267,13 +267,12 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
             
         fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    # 2. CURRENT TIME MARKER (Red Line)
-    # Match the timezone of your data (usually UTC from BigQuery)
+    # 3. CURRENT TIME MARKER (Red Line)
     now_marker = datetime.now(pytz.UTC)
     fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above',
                   annotation_text="NOW", annotation_position="top")
 
-    # 3. Reference Horizontal Lines
+    # 4. Reference Horizontal Lines
     for val, label in active_refs:
         fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
     
