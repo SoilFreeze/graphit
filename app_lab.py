@@ -233,50 +233,35 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 ###################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# 1. PAGE SELECTION (Now First)
+# 1. PAGE SELECTION
 service = st.sidebar.selectbox("📂 Select Page", 
     ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 
 st.sidebar.divider()
 
-# 2. CONTEXTUAL PROJECT SELECTION
-# Pages that NEED a project: Client Portal, Node Diagnostics, Admin Tools (for targeted scrub)
-needs_project = service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]
+# 2. UNIT SELECTION
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
+# Helper for reference line conversion
+def convert_val(f_val):
+    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
+
+st.sidebar.divider()
+
+# 3. PROJECT SELECTION
+needs_project = service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]
 if needs_project:
     try:
-        # Get all projects
         proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
-        all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].unique())
+        all_projs = sorted(client.query(proj_list_q).to_dataframe()['Project'].dropna().unique())
         selected_project = st.sidebar.selectbox("🎯 Active Project", all_projs)
     except:
         selected_project = None
         st.sidebar.error("Error loading projects.")
 else:
-    # Greyed out / Disabled state
-    st.sidebar.selectbox("🎯 Active Project", ["(Not Required for this Page)"], disabled=True)
+    st.sidebar.selectbox("🎯 Active Project", ["(Not Required)"], disabled=True)
     selected_project = None
-
-st.sidebar.divider()
-
-# 3. GRAPH SETTINGS
-st.sidebar.write("### Graph Settings")
-show_32 = st.sidebar.checkbox("Freezing (32°F)", value=True)
-show_26 = st.sidebar.checkbox("Type B (26.6°F)", value=True)
-show_10 = st.sidebar.checkbox("Type A (10.2°F)", value=True)
-
-active_refs = []
-if show_32: active_refs.append((32, "Freezing"))
-if show_26: active_refs.append((26.6, "Type B"))
-if show_10: active_refs.append((10.2, "Type A"))
-
-# --- Unit Selection ---
-unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
-unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
-
-# Helper to convert values for reference lines
-def convert_temp(val):
-    return (val - 32) * 5/9 if unit_mode == "Celsius" else val
 #######################
 # --- END SIDEBAR --- #
 #######################
@@ -545,7 +530,7 @@ elif service == "📤 Data Intake Lab":
 # --- ADMIN TOOLS --- #
 #######################             
 elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools (Raw Source Control)")
+    st.header("🛠️ Engineering Admin Tools")
     
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
@@ -555,61 +540,43 @@ elif service == "🛠️ Admin Tools":
     
     with tab_scrub:
         st.subheader("🧹 Hourly Raw Data Reduction")
-        scrub_target = st.radio("Select Table to Scrub", ["SensorPush", "Lord"], horizontal=True)
+        st.info("Keeps only 1 point per hour per sensor in the RAW tables.")
+        scrub_target = st.radio("Select Table", ["SensorPush", "Lord"], horizontal=True)
         target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
         
-        # CORRECTED MAPPING: 
-        # SensorPush raw usually uses 'id' or 'sensor'
-        # Lord raw usually uses 'nodenumber'
-        if scrub_target == "SensorPush":
-            id_field = "id" # Change to 'sensor' if your BigQuery column is named 'sensor'
-        else:
-            id_field = "nodenumber"
-
         if st.button(f"🚀 Scrub {scrub_target} to 1pt/Hour"):
-            with st.spinner(f"Reducing {scrub_target} data..."):
-                # Using a 'ROW_NUMBER' approach which is safer for BigQuery Deduplication
+            with st.spinner(f"Cleaning {target_table}..."):
+                # Logic: Deletes everything EXCEPT the earliest reading in every hour block
                 scrub_sql = f"""
                 DELETE FROM `{target_table}`
-                WHERE STRUCT({id_field}, timestamp) NOT IN (
-                    SELECT AS STRUCT {id_field}, MIN(timestamp)
+                WHERE STRUCT(NodeNum, timestamp) NOT IN (
+                    SELECT AS STRUCT NodeNum, MIN(timestamp)
                     FROM `{target_table}`
-                    GROUP BY {id_field}, TIMESTAMP_TRUNC(timestamp, HOUR)
+                    GROUP BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR)
                 )
                 """
-                try:
-                    client.query(scrub_sql).result()
-                    st.success(f"✅ Cleaned! {target_table} now contains only 1 point per hour.")
-                except Exception as e:
-                    st.error(f"Scrub Error: {e}. (Verify if '{id_field}' is the correct column name in BigQuery)")
+                client.query(scrub_sql).result()
+                st.success(f"✅ Cleaned! {target_table} is now 1pt/hour.")
 
     with tab_approve:
-        st.subheader("✅ Raw Table Approval Tool")
-        app_target = st.radio("Select Table to Approve", ["SensorPush", "Lord"], horizontal=True, key="app_r")
+        st.subheader("✅ Raw Bulk Approval")
+        app_target = st.radio("Select Table", ["SensorPush", "Lord"], key="app_r", horizontal=True)
         t_table = RAW_SP if app_target == "SensorPush" else RAW_LORD
-        t_id = "id" if app_target == "SensorPush" else "nodenumber"
-
-        if st.button(f"🛠️ Step 1: Initialize 'approve' Column in {app_target}"):
+        
+        if st.button(f"🛠️ Initialize 'approve' Column"):
             client.query(f"ALTER TABLE `{t_table}` ADD COLUMN IF NOT EXISTS approve STRING").result()
-            st.success("Column 'approve' is ready in raw table.")
+            st.success(f"Column 'approve' verified in {app_target}.")
 
-        st.divider()
-
-        if selected_project:
-            if st.button(f"🔓 APPROVE ALL {selected_project} RAW DATA"):
-                bulk_app_sql = f"""
-                UPDATE `{t_table}`
-                SET approve = 'TRUE'
-                WHERE {t_id} IN (
-                    SELECT CAST(NodeNum AS STRING) 
-                    FROM `{METADATA}` 
-                    WHERE Project = '{selected_project}'
-                )
-                """
-                client.query(bulk_app_sql).result()
-                st.success(f"✅ Raw {app_target} data for {selected_project} is now Approved.")
-        else:
-            st.warning("Please select a project in the sidebar.")
+        if selected_project and st.button(f"🔓 APPROVE {selected_project} RAW DATA"):
+            bulk_app_sql = f"""
+            UPDATE `{t_table}` SET approve = 'TRUE'
+            WHERE NodeNum IN (
+                SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` 
+                WHERE Project = '{selected_project}'
+            )
+            """
+            client.query(bulk_app_sql).result()
+            st.success(f"✅ Raw records for {selected_project} are now marked 'TRUE'.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
