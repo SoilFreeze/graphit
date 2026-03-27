@@ -385,35 +385,15 @@ if show_32: active_refs.append((32.0, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
 
-# --- END SIDEBAR ---
 #######################
 # --- END SIDEBAR --- #
 #######################  
-##########################
-# --- PAGE ROUTING --- #
-##########################
-# --- FIX: Change 'elif' to 'if' here to solve the SyntaxError ---
-if service == "🏠 Executive Summary":
-    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
-    
-    # 1. QUERY (Using Case-Sensitive Schema: Project, Location, Depth, NodeNum)
-    summary_q = f"""
-        SELECT Project, Location, Depth, NodeNum, temperature, timestamp
-        FROM `{PROJECT_ID}.Temperature.master_data`
-        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
-    """
-    if selected_project:
-        summary_q += f" AND Project = '{selected_project}'"
 ####################
 # --- SERVICES --- #
 ####################
 #############################
 # --- EXECUTIVE SUMMARY --- #
 #############################
-##########################
-# --- PAGE ROUTING --- #
-##########################
-
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
