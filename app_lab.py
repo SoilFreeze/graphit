@@ -186,40 +186,36 @@ def fetch_sensorpush_data(start_dt, end_dt):
 ########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
-    SF Standard with Robust Gridlines.
-    Uses pd.offsets to prevent 'int + Timestamp' errors.
+    SF Standard with Enhanced Gridlines.
+    Uses pd.Timedelta to prevent 'int + Timestamp' errors.
     """
     try:
+        # 1. Force strict types immediately
         display_df = df.copy()
-        
-        # 1. Force strict types for every column
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         display_df['depth'] = display_df['depth'].fillna("Unknown").astype(str)
         display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
         
-        # Force axis boundaries to be Pandas Timestamps
+        # Force boundaries to be Pandas Timestamps
         start_ts = pd.to_datetime(start_view)
         end_ts = pd.to_datetime(end_view)
         
-        y_range, y_ticks = [-20, 80], [-20, 0, 20, 40, 60, 80]
-
         # 2. Labeling Logic
         display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
         
-        # 3. Gap Handling (Safe version using pd.offsets)
+        # 3. Gap Handling (Safely using pd.Timedelta)
         processed_dfs = []
         for lbl in display_df['label'].unique():
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-            # Calculate gap in hours
+            # Gap detection
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             
-            # Find points where gap > 6 hours
             gap_mask = s_df['gap_hrs'] > 6.0
             if gap_mask.any():
                 gaps = s_df[gap_mask].copy()
                 gaps['temperature'] = None
-                # FIXED: Use pd.offsets.Minute instead of - pd.Timedelta
-                gaps['timestamp'] = gaps['timestamp'] + pd.offsets.Minute(-1)
+                # FIXED: Using pd.Timedelta instead of integer subtraction
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
             processed_dfs.append(s_df)
         
@@ -227,7 +223,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         
         fig = go.Figure()
         
-        # Natural sorting for legend
+        # 4. Natural Sorting (For legend order)
         def natural_sort_key(s):
             nums = re.findall(r'\d+', s)
             return int(nums[0]) if nums else 0
@@ -239,23 +235,20 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
             fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
                                      name=lbl, mode='lines', connectgaps=False))
 
-        # 4. Layout
+        # 5. Visual Formatting (Gridlines)
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left'},
             plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
         )
         
-        fig.update_yaxes(title="Temp (°F)", tickmode='array', tickvals=y_ticks, range=y_range,
-                         gridcolor='DimGray', gridwidth=1.5, minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
+        fig.update_yaxes(title="Temp (°F)", range=[-20, 80], gridcolor='DimGray', gridwidth=1.5,
+                         minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
                          mirror=True, showline=True, linecolor='black', linewidth=2)
 
-        fig.update_xaxes(
-            range=[start_ts, end_ts],
-            mirror=True, showline=True, linecolor='black', linewidth=2,
-            showgrid=False, tickformat="%a\n%m/%d"
-        )
+        fig.update_xaxes(range=[start_ts, end_ts], mirror=True, showline=True, linecolor='black',
+                         linewidth=2, showgrid=False, tickformat="%a\n%m/%d")
 
-        # 5. CUSTOM GRIDLINES (Safely using date_range)
+        # 6. CUSTOM GRIDLINES (Monday = Dark, Day = Medium, 6H = Light)
         grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6H')
         for ts in grid_times:
             if ts.hour == 0:
@@ -264,12 +257,12 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
                 color, width = "LightGray", 0.8
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 6. NOW MARKER
+        # 7. RED "NOW" LINE
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above',
                       annotation_text="NOW", annotation_position="top")
 
-        # 7. Reference Lines
+        # 8. Reference Horizontal Lines
         for val, label in active_refs:
             fig.add_hline(y=val, line_dash="dash", line_color="blue", annotation_text=f"{label} {val}°")
         
@@ -577,7 +570,7 @@ elif service == "🛠️ Admin Tools":
 
     with tab_approve:
         try:
-            unapproved_meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE (is_approved IS FALSE OR is_approved IS NULL)"
+            unapproved_meta_q = f"SELECT DISTINCT project, location FROM `{PROJECT_ID}.{DATASET_ID}.master_data` WHERE (is_approved IS FALSE OR is_approved IS NULL)"
             un_meta = client.query(unapproved_meta_q).to_dataframe()
             if not un_meta.empty:
                 app_proj = st.selectbox("Project", un_meta['project'].unique(), key="app_p")
