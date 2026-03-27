@@ -397,7 +397,7 @@ if show_10: active_refs.append((10.2, "Type A"))
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # 1. QUERY (Proper Case Schema)
+    # 1. QUERY
     summary_q = f"""
         SELECT Project, Location, Depth, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
@@ -413,44 +413,38 @@ if service == "🏠 Executive Summary":
         if raw_summary.empty:
             st.warning("📡 No data found in the last 72 hours.")
         else:
-            # --- CRITICAL FIX: FORCE DEPTH TO STRING IMMEDIATELY ---
-            # This prevents the 'str' vs 'int' comparison error during groupby
-            raw_summary['Depth'] = raw_summary['Depth'].fillna("0").astype(str)
+            # --- THE FIX: HANDLE MIXED TYPES ---
+            # 1. Store the original as a string for grouping/display
+            raw_summary['Depth_Display'] = raw_summary['Depth'].astype(str).fillna("0")
             
+            # 2. Create a numeric version for sorting/math (non-numbers become NaN)
+            raw_summary['Depth_Numeric'] = pd.to_numeric(raw_summary['Depth'], errors='coerce')
+
             summary_rows = []
             now = pd.Timestamp.now(tz=pytz.UTC)
             
-            # Helper: Unit conversion based on sidebar toggle
-            def u_fmt(v):
-                if v is None: return "N/A"
-                val = (v - 32) * 5/9 if unit_mode == "Celsius" else v
-                return f"{round(val, 1)}{unit_label}"
-
             # 2. DATA AGGREGATION
-            # Grouping now works because all 'Depth' values are strings
-            for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
+            # Group by 'Depth_Display' (String) to avoid comparison crashes
+            for (proj, loc, d_disp, node), group in raw_summary.groupby(['Project', 'Location', 'Depth_Display', 'NodeNum']):
                 group = group.sort_values('timestamp', ascending=False)
                 last_rec = group.iloc[0]
                 
-                # A. SAFE DEPTH FORMATTING
-                d_val = depth.strip()
-                # Regex check: if it's a number (int or float), add 'ft'
-                if re.match(r"^\d+(\.\d+)?$", d_val):
-                    depth_display = f"{d_val} ft"
-                else:
-                    depth_display = d_val # Leaves S1, R1, Bank as-is
+                # A. Format Depth Label
+                # If Depth_Numeric is NOT NaN, it's a measurement; otherwise, it's a Bank label
+                is_numeric = not pd.isna(last_rec['Depth_Numeric'])
+                depth_label = f"{d_disp} ft" if is_numeric else d_disp
 
-                # B. STATUS LATENCY (Color Coding)
+                # B. Latency Logic
                 ts = last_rec['timestamp']
                 if ts.tzinfo is None: ts = ts.tz_localize(pytz.UTC)
-                
                 latency_hrs = (now - ts).total_seconds() / 3600
+                
                 if latency_hrs > 24: status = "🔴 Red (>24h)"
                 elif latency_hrs > 12: status = "🟠 Orange (>12h)"
                 elif latency_hrs > 6: status = "🟡 Yellow (>6h)"
                 else: status = "🟢 Green"
 
-                # C. 24-HOUR TRENDS
+                # C. 24-Hour Trends
                 day_ago = now - pd.Timedelta(hours=24)
                 last_24h = group[group['timestamp'] >= day_ago]
                 
@@ -462,9 +456,15 @@ if service == "🏠 Executive Summary":
                 else:
                     t_min = t_max = t_change = None
 
+                # D. Unit Formatting Helper
+                def u_fmt(v):
+                    if v is None: return "N/A"
+                    val = (v - 32) * 5/9 if unit_mode == "Celsius" else v
+                    return f"{round(val, 1)}{unit_label}"
+
                 summary_rows.append({
                     "Pipe": loc,
-                    "Depth": depth_display,
+                    "Depth": depth_label,
                     "Current": u_fmt(last_rec['temperature']),
                     "Status": status,
                     "24h Min": u_fmt(t_min),
@@ -475,7 +475,7 @@ if service == "🏠 Executive Summary":
 
             summary_df = pd.DataFrame(summary_rows)
 
-            # 3. COLOR CODING THE CHANGE
+            # 3. COLOR CODING
             def color_delta(val):
                 if val is None: return ""
                 if val >= 5: return 'background-color: #ff4b4b; color: white'
@@ -486,22 +486,15 @@ if service == "🏠 Executive Summary":
                 if val <= -0.25: return 'background-color: #add8e6'
                 return ""
 
-            def delta_label(x):
-                if x is None: return "N/A"
-                val = x * 5/9 if unit_mode == "Celsius" else x
-                pref = "+" if val > 0 else ""
-                return f"{pref}{round(val, 2)}{unit_label}"
-
-            summary_df['24h Change'] = summary_df['raw_delta'].apply(delta_label)
-
-            # 4. FINAL TABLE DISPLAY
-            final_cols = ["Pipe", "Depth", "Current", "24h Change", "Status", "24h Min", "24h Max", "Last Seen"]
-            st.subheader("📡 Engineering Command Center")
-            
-            styled_view = summary_df[final_cols].style.applymap(
-                color_delta, subset=['24h Change']
+            summary_df['24h Change'] = summary_df['raw_delta'].apply(
+                lambda x: f"{'+' if x and x > 0 else ''}{round(x * 5/9 if unit_mode == 'Celsius' else x, 2)}{unit_label}" if x is not None else "N/A"
             )
-            st.table(styled_view)
+
+            # 4. DISPLAY
+            st.subheader("📡 Engineering Command Center")
+            st.table(summary_df[["Pipe", "Depth", "Current", "24h Change", "Status", "24h Min", "24h Max", "Last Seen"]].style.applymap(
+                color_delta, subset=['24h Change']
+            ))
 
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
