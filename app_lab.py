@@ -184,14 +184,21 @@ def fetch_sensorpush_data(start_dt, end_dt):
 ########################
 # --- GRAPH ENGINE --- #
 ########################
+########################
+# --- GRAPH ENGINE --- #
+########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
-    SF Standard with Robust Gridlines.
+    SF Standard with Enhanced Gridlines:
+    - Monday Midnight: DimGray (2.5)
+    - Daily Midnight: DarkGray (1.5)
+    - 6-Hour Marks: Gainsboro (0.5)
     - 10.2 Line: Burgundy
-    - Grid: Monday (DimGray), Daily (DarkGray), 6H (LightGray)
     """
     try:
         display_df = df.copy()
+        
+        # 1. Force strict types to prevent math/sorting crashes
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         display_df['depth'] = display_df['depth'].fillna("Unknown").astype(str)
         display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
@@ -199,10 +206,9 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         start_ts = pd.to_datetime(start_view)
         end_ts = pd.to_datetime(end_view)
         
-        # 1. Labeling
+        # 2. Labeling & Gap Handling
         display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
         
-        # 2. Gap Handling
         processed_dfs = []
         for lbl in display_df['label'].unique():
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
@@ -218,7 +224,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         
         fig = go.Figure()
         
-        # 3. Traces
+        # 3. Traces (Numerical Depth Sorting)
         def natural_sort_key(s):
             nums = re.findall(r'\d+', s)
             return int(nums[0]) if nums else 0
@@ -229,7 +235,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
             fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
                                      name=lbl, mode='lines', connectgaps=False))
 
-        # 4. Layout & X-Axis (Disabled minor grid to stop the bunching)
+        # 4. Layout
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left'},
             plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
@@ -241,18 +247,18 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 
         fig.update_xaxes(range=[start_ts, end_ts], mirror=True, showline=True, linecolor='black',
                          linewidth=2, showgrid=False, tickformat="%a\n%m/%d",
-                         minor=dict(showgrid=False)) # TURNED OFF MINOR GRID HERE
+                         minor=dict(showgrid=False)) # Disabled minor auto-grid to stop "bunching"
 
-        # 5. CUSTOM GRIDLINES (Clean 6-Hour Loop)
+        # 5. CUSTOM GRIDLINES (Clean 6-Hour Intervals)
         grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6H')
         for ts in grid_times:
             if ts.hour == 0:
                 color, width = ("DimGray", 2.5) if ts.weekday() == 0 else ("DarkGray", 1.5)
             else:
-                color, width = "Gainsboro", 0.5 # Subtle light gray
+                color, width = "Gainsboro", 0.5
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 6. NOW MARKER
+        # 6. NOW MARKER (Separate annotation to prevent Plotly crash)
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above')
         fig.add_annotation(x=now_marker, y=1, yref="paper", text="NOW", 
@@ -260,9 +266,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 
         # 7. HORIZONTAL REFERENCES (10.2 = Burgundy)
         for val, label in active_refs:
-            # Check for the specific 10.2 line
             line_color = "#800020" if str(val) == "10.2" else "blue"
-            
             fig.add_hline(y=val, line_dash="dash", line_color=line_color)
             fig.add_annotation(x=1, xref="paper", y=val, text=f"{label} {val}°", 
                                showarrow=False, font=dict(color=line_color), xanchor="left")
@@ -386,27 +390,35 @@ elif service == "📊 Client Portal":
 ###########################
 # --- NODE DIAGNOSTIC --- #
 ###########################  
+###########################
+# --- NODE DIAGNOSTIC --- #
+###########################  
 elif service == "📉 Node Diagnostics":
     st.header("📉 High-Resolution Node Diagnostics")
     try:
-        meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
+        # Pull metadata for dropdowns
+        meta_q = f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project IS NOT NULL"
         meta_df = client.query(meta_q).to_dataframe()
         
         c1, c2, c3 = st.columns(3)
-        with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()))
-        with c2: sel_loc = st.selectbox("Pipe / Bank", sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique()))
-        # UPDATED: Default is now 6
-        with c3: weeks = st.slider("Lookback (Weeks)", 1, 12, 6) 
+        with c1: 
+            projs = sorted(meta_df['Project'].dropna().unique())
+            sel_proj = st.selectbox("Project", projs)
+        with c2: 
+            locs = sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].dropna().unique())
+            sel_loc = st.selectbox("Pipe / Bank", locs)
+        with c3: 
+            weeks = st.slider("Lookback (Weeks)", 1, 12, 6) # Defaulting to 6
 
+        # Robust Date Calculation
         now = pd.Timestamp.now(tz=pytz.UTC)
         monday_this_week = (now - pd.offsets.Day(now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        
         start_view = monday_this_week - pd.offsets.Week(int(weeks)-1)
         end_view = monday_this_week + pd.offsets.Day(7)
 
         data_q = f"""
             SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
-            FROM `{MASTER_TABLE}` 
+            FROM `{PROJECT_ID}.Temperature.master_data` 
             WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' 
             AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
             ORDER BY timestamp ASC
@@ -416,7 +428,7 @@ elif service == "📉 Node Diagnostics":
         if not df_g.empty:
             st.plotly_chart(build_standard_sf_graph(df_g, f"{sel_proj} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
         else:
-            st.warning("No data points found for this range.")
+            st.warning("No data found for this range.")
             
     except Exception as e:
         st.error(f"Diagnostics Logic Error: {e}")
@@ -558,85 +570,98 @@ elif service == "🛠️ Admin Tools":
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
 
-    tab_approve, tab_scrub = st.tabs(["✅ Approval Manager", "🧹 Raw Data Scrubber"])
+#######################
+# --- ADMIN TOOLS --- #
+#######################             
+#######################
+# --- ADMIN TOOLS --- #
+#######################             
+elif service == "🛠️ Admin Tools":
+    st.header("🛠️ Engineering Admin Tools")
     
-    # --- 1. APPROVAL MANAGER ---
-    with tab_approve:
-        st.subheader("Data Validation & Approval")
+    # Table Definitions
+    MASTER_TABLE = f"{PROJECT_ID}.Temperature.master_data"
+    RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
+    RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
+    METADATA = f"{PROJECT_ID}.Temperature.master_metadata"
+
+    tab_scrub, tab_approve = st.tabs(["🧹 Raw Data Scrubber", "✅ Approval Manager"])
+    
+    # --- 1. RAW DATA SCRUBBER ---
+    with tab_scrub:
+        st.subheader("Direct Raw Source Cleaning")
+        st.info("Deletes data from raw ingestion tables. Does not affect the view until refreshed.")
         
-        # Action A: Approve All Historic Data
-        st.write("### 🏛️ Global Actions")
-        if st.button("🔓 APPROVE ALL HISTORIC DATA", help="Sets the 'approve' flag to 'TRUE' for every record in the master table."):
-            with st.spinner("Updating all records..."):
+        try:
+            # Get project list from metadata
+            meta_df = client.query(f"SELECT DISTINCT Project, Location FROM `{METADATA}`").to_dataframe()
+            
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                source_type = st.radio("Target Raw Source", ["SensorPush", "Lord"])
+                target_table = RAW_SP if source_type == "SensorPush" else RAW_LORD
+                id_col = "sensor_id" if source_type == "SensorPush" else "nodenumber"
+                
+                projs = sorted(meta_df['Project'].dropna().unique())
+                sel_scrub_proj = st.selectbox("Select Project", projs, key="scrub_p_final")
+            
+            with col_s2:
+                pipes = sorted(meta_df[meta_df['Project'] == sel_scrub_proj]['Location'].dropna().unique())
+                sel_scrub_pipe = st.selectbox("Select Pipe", pipes, key="scrub_l_final")
+                
+            confirm = st.text_input(f"To wipe {source_type} data for {sel_scrub_pipe}, type 'DELETE'", key="scrub_c_final")
+            
+            if st.button("🔥 PERMANENTLY DELETE FROM RAW"):
+                if confirm == "DELETE":
+                    with st.spinner("Scrubbing source files..."):
+                        # Subquery looks up the correct sensor IDs from metadata
+                        scrub_sql = f"""
+                            DELETE FROM `{target_table}`
+                            WHERE {id_col} IN (
+                                SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` 
+                                WHERE Project = '{sel_scrub_proj}' AND Location = '{sel_scrub_pipe}'
+                            )
+                        """
+                        client.query(scrub_sql).result()
+                        st.success(f"✅ Scrubbed {sel_scrub_pipe} from {source_type} raw table.")
+                else:
+                    st.error("Confirmation text must match 'DELETE'.")
+        except Exception as e:
+            st.error(f"Scrubber Error: {e}")
+
+    # --- 2. APPROVAL MANAGER ---
+    with tab_approve:
+        st.subheader("Data Validation")
+        
+        # Approve All
+        if st.button("🔓 APPROVE ALL HISTORIC DATA"):
+            with st.spinner("Updating master table..."):
                 all_q = f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'"
-                client.query(all_q).result()
-                st.success("✅ All historic data has been marked as Approved.")
+                try:
+                    client.query(all_q).result()
+                    st.success("✅ Global approval complete.")
+                except Exception as e:
+                    st.error(f"Global Approval Failed: {e} (Ensure 'master_data' is a Table, not a View)")
         
         st.divider()
-
-        # Action B: Individual Project / Pipe Approval
-        st.write("### 📍 Targeted Approval")
+        
+        # Targeted Approval
         try:
-            # Get current unapproved projects
-            unapproved_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE approve IS NULL OR approve != 'TRUE'"
-            un_df = client.query(unapproved_q).to_dataframe()
-            
-            if un_df.empty:
-                st.info("No unapproved data found in the master table.")
-            else:
+            un_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE approve IS NULL OR approve != 'TRUE'"
+            un_df = client.query(un_q).to_dataframe()
+            if not un_df.empty:
                 c1, c2 = st.columns(2)
-                with c1:
-                    sel_app_proj = st.selectbox("Select Project", sorted(un_df['Project'].unique()), key="app_proj")
-                with c2:
-                    pipes = sorted(un_df[un_df['Project'] == sel_app_proj]['Location'].unique())
-                    sel_app_pipe = st.selectbox("Select Temperature Pipe", pipes, key="app_pipe")
+                with c1: sel_app_proj = st.selectbox("Project", sorted(un_df['Project'].dropna().unique()), key="app_p_final")
+                with c2: sel_app_pipe = st.selectbox("Location", sorted(un_df[un_df['Project'] == sel_app_proj]['Location'].dropna().unique()), key="app_l_final")
                 
                 if st.button(f"🚀 Approve {sel_app_pipe}"):
-                    spec_q = f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{sel_app_proj}' AND Location = '{sel_app_pipe}'"
-                    client.query(spec_q).result()
-                    st.success(f"✅ Data for {sel_app_pipe} is now approved.")
-                    st.rerun() # Refresh list
+                    client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{sel_app_proj}' AND Location = '{sel_app_pipe}'").result()
+                    st.success(f"✅ {sel_app_pipe} approved.")
+                    st.rerun()
+            else:
+                st.info("No unapproved data found.")
         except Exception as e:
             st.error(f"Approval Error: {e}")
-
-    # --- 2. RAW DATA SCRUBBER ---
-    with tab_scrub:
-        st.subheader("Raw Ingestion Scrubbing")
-        st.warning("This deletes data from the raw source tables. This is permanent.")
-        
-        # Selection logic to target the right raw table
-        col_t1, col_t2 = st.columns(2)
-        with col_t1:
-            scrub_source = st.radio("Target Raw Source", ["SensorPush", "Lord"])
-            target_raw_table = RAW_SP if scrub_source == "SensorPush" else RAW_LORD
-            # Lord uses 'nodenumber', SensorPush uses 'sensor_id'
-            id_field = "sensor_id" if scrub_source == "SensorPush" else "nodenumber"
-        
-        with col_t2:
-            # Look up metadata to find which nodes belong to which project/pipe
-            meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}`"
-            meta_df = client.query(meta_q).to_dataframe()
-            
-            sel_scrub_proj = st.selectbox("Project to Clean", sorted(meta_df['Project'].unique()), key="scrub_proj")
-            sel_scrub_pipe = st.selectbox("Pipe to Clean", sorted(meta_df[meta_df['Project'] == sel_scrub_proj]['Location'].unique()), key="scrub_pipe")
-
-        confirm_text = st.text_input(f"To delete {scrub_source} data for {sel_scrub_pipe}, type 'DELETE'", key="scrub_conf")
-        
-        if st.button("🔥 DELETE RAW DATA"):
-            if confirm_text == "DELETE":
-                with st.spinner("Scrubbing raw files..."):
-                    # This joins the raw table with the master mapping to find the right sensors to wipe
-                    scrub_sql = f"""
-                        DELETE FROM `{target_raw_table}`
-                        WHERE {id_field} IN (
-                            SELECT NodeNum FROM `{MASTER_TABLE}` 
-                            WHERE Project = '{sel_scrub_proj}' AND Location = '{sel_scrub_pipe}'
-                        )
-                    """
-                    client.query(scrub_sql).result()
-                    st.success(f"✅ Raw {scrub_source} data for {sel_scrub_pipe} has been wiped.")
-            else:
-                st.error("Confirmation text must match 'DELETE'.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
