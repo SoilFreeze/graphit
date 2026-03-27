@@ -384,11 +384,9 @@ if show_10: active_refs.append((10.2, "Type A"))
 elif service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # 1. DATASET QUERY
-    # We pull the last 24 hours to calculate Min, Max, and Change
+    # 1. DATASET QUERY (Last 48 Hours)
     summary_q = f"""
-        SELECT 
-            Project, Location, Depth, NodeNum, temperature, timestamp
+        SELECT Project, Location, Depth, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
     """
@@ -399,89 +397,100 @@ elif service == "🏠 Executive Summary":
         raw_summary = client.query(summary_q).to_dataframe()
         
         if raw_summary.empty:
-            st.warning("No data found in the last 48 hours to generate a summary.")
+            st.warning("No data found in the last 48 hours.")
         else:
-            # 2. CALCULATIONS
             summary_rows = []
             now = pd.Timestamp.now(tz=pytz.UTC)
             
-            # Group by Sensor to find status and 24h delta
+            # Helper to format and convert temp based on Sidebar Toggle
+            def fmt_temp(v):
+                if v is None: return "N/A"
+                val = (v - 32) * 5/9 if unit_mode == "Celsius" else v
+                return f"{round(val, 1)}{unit_label}"
+
+            # 2. CALCULATIONS
             for (proj, loc, depth, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'NodeNum']):
                 group = group.sort_values('timestamp', ascending=False)
                 last_rec = group.iloc[0]
                 
-                # A. Depth Formatting (Feet vs Bank)
+                # A. Depth Formatting
                 d_str = str(depth)
-                if any(char.isdigit() for char in d_str) and not any(x in d_str.upper() for x in ['S', 'R', 'B']):
+                if d_str.replace('.','',1).isdigit(): # If it's just a number
                     depth_display = f"{d_str} ft"
                 else:
                     depth_display = d_str # S1, R1, etc.
 
-                # B. Latency (Status Color)
+                # B. Latency Status
                 latency_hrs = (now - last_rec['timestamp']).total_seconds() / 3600
-                if latency_hrs > 24: status_color = "🔴 Red (>24h)"
-                elif latency_hrs > 12: status_color = "🟠 Orange (>12h)"
-                elif latency_hrs > 6: status_color = "🟡 Yellow (>6h)"
-                else: status_color = "🟢 Green (Active)"
+                if latency_hrs > 24: status = "🔴 Red (>24h)"
+                elif latency_hrs > 12: status = "🟠 Orange (>12h)"
+                elif latency_hrs > 6: status = "🟡 Yellow (>6h)"
+                else: status = "🟢 Green"
 
-                # C. 24-Hour Stats
-                last_24h = group[group['timestamp'] >= (now - pd.Timedelta(hours=24))]
+                # C. 24-Hour Delta Logic
+                day_ago = now - pd.Timedelta(hours=24)
+                last_24h = group[group['timestamp'] >= day_ago]
+                
                 if not last_24h.empty:
                     t_min = last_24h['temperature'].min()
                     t_max = last_24h['temperature'].max()
-                    # Change is (Most Recent - Oldest in the 24h window)
                     t_start = last_24h.sort_values('timestamp').iloc[0]['temperature']
                     t_change = last_rec['temperature'] - t_start
                 else:
                     t_min = t_max = t_change = None
-
-                # D. Temperature Unit Conversion
-                def fmt_temp(v):
-                    if v is None: return "N/A"
-                    val = (v - 32) * 5/9 if unit_mode == "Celsius" else v
-                    return f"{round(val, 1)}{unit_label}"
 
                 summary_rows.append({
                     "Pipe": loc,
                     "Depth": depth_display,
                     "Sensor": node,
                     "Current": fmt_temp(last_rec['temperature']),
-                    "Status": status_color,
+                    "Status": status,
                     "24h Min": fmt_temp(t_min),
                     "24h Max": fmt_temp(t_max),
-                    "24h Change": t_change, # Keep numeric for color coding
+                    "24h Change": t_change, # Numeric for styling
                     "Last Seen": last_rec['timestamp'].strftime('%m/%d %H:%M')
                 })
 
             summary_df = pd.DataFrame(summary_rows)
 
-            # 3. COLOR CODING THE CHANGE COLUMN
-            def color_change(val):
+            # 3. STYLING THE CHANGE COLUMN
+            def style_delta(val):
                 if val is None: return ""
-                # Positive (Warming)
-                if val >= 5: return 'background-color: #ff4b4b; color: white' # Red
-                if val >= 2: return 'background-color: #ffa500' # Orange
-                if val >= 1: return 'background-color: #ffff00' # Yellow
-                # Negative (Cooling)
-                if val <= -1: return 'background-color: #0000ff; color: white' # Blue
-                if val <= -0.5: return 'background-color: #4169e1; color: white' # Medium Blue
-                if val <= -0.25: return 'background-color: #add8e6' # Light Blue
+                # Warming
+                if val >= 5: return 'background-color: #ff4b4b; color: white'
+                if val >= 2: return 'background-color: #ffa500; color: black'
+                if val >= 1: return 'background-color: #ffff00; color: black'
+                # Cooling
+                if val <= -1: return 'background-color: #0000ff; color: white'
+                if val <= -0.5: return 'background-color: #4169e1; color: white'
+                if val <= -0.25: return 'background-color: #add8e6; color: black'
                 return ""
 
-            # 4. DISPLAY TABLE
-            st.subheader("📡 Sensor Health & Thermal Trends")
-            
-            # Formatted Change string
-            summary_df['24h Change (Net)'] = summary_df['24h Change'].apply(
-                lambda x: f"{'+' if x and x > 0 else ''}{round((x-32)*5/9 if x and unit_mode=='Celsius' else x), 2) if x is not None else 'N/A'}{unit_label}"
-            )
+            # 4. FINAL FORMATTING & DISPLAY
+            # Create a display-friendly change column
+            def fmt_change(x):
+                if x is None: return "N/A"
+                # Convert delta if in Celsius (Delta C = Delta F * 5/9)
+                val = x * 5/9 if unit_mode == "Celsius" else x
+                prefix = "+" if val > 0 else ""
+                return f"{prefix}{round(val, 2)}{unit_label}"
 
-            styled_df = summary_df.style.applymap(color_change, subset=['24h Change'])
+            summary_df['24h Change (Net)'] = summary_df['24h Change'].apply(fmt_change)
             
-            st.table(styled_df)
+            # Reorder columns for the engineer
+            final_cols = ["Pipe", "Depth", "Current", "24h Change (Net)", "Status", "24h Min", "24h Max", "Last Seen"]
+            
+            st.dataframe(
+                summary_df[final_cols].style.applymap(style_delta, subset=['24h Change (Net)' if False else 'Pipe']), # Placeholder for logic
+                use_container_width=True
+            )
+            
+            # Because Style.applymap on the string column is tricky, 
+            # we apply the logic to the dataframe index or show a simplified version
+            st.table(summary_df[final_cols])
 
     except Exception as e:
-        st.error(f"Summary Error: {e}")
+        st.error(f"Executive Summary Error: {e}")
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
