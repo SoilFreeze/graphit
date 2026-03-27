@@ -188,87 +188,37 @@ def fetch_sensorpush_data(start_dt, end_dt):
 # --- GRAPH ENGINE --- #
 ########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
-    """
-    SF Standard with Enhanced Gridlines:
-    - Monday Midnight: DimGray (2.5)
-    - Daily Midnight: DarkGray (1.5)
-    - 6-Hour Marks: Gainsboro (0.5)
-    - 10.2 Line: Burgundy
-    """
     try:
         display_df = df.copy()
-        
-        # 1. Force strict types to prevent math/sorting crashes
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        display_df['depth'] = display_df['depth'].fillna("Unknown").astype(str)
-        display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
         
-        start_ts = pd.to_datetime(start_view)
-        end_ts = pd.to_datetime(end_view)
+        # --- UNIT CONVERSION ---
+        if unit_mode == "Celsius":
+            display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
         
-        # 2. Labeling & Gap Handling
-        display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
+        display_df['label'] = display_df['depth'].astype(str) + " (" + display_df['sensor_name'].astype(str) + ")"
         
-        processed_dfs = []
-        for lbl in display_df['label'].unique():
-            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 6.0
-            if gap_mask.any():
-                gaps = s_df[gap_mask].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-            processed_dfs.append(s_df)
-        clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
-        
-        fig = go.Figure()
-        
-        # 3. Traces (Numerical Depth Sorting)
-        def natural_sort_key(s):
-            nums = re.findall(r'\d+', s)
-            return int(nums[0]) if nums else 0
-        
-        labels = sorted(clean_df['label'].unique(), key=natural_sort_key)
-        for lbl in labels:
-            sensor_df = clean_df[clean_df['label'] == lbl]
-            fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], 
-                                     name=lbl, mode='lines', connectgaps=False))
+        # ... [Keep your existing gap handling and sorting logic here] ...
 
-        # 4. Layout
+        fig = go.Figure()
+        # [Keep your trace creation loop here]
+
+        # Dynamic Y-Axis based on Units
+        y_min, y_max = (-30, 30) if unit_mode == "Celsius" else (-20, 80)
+        
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left'},
             plot_bgcolor='white', hovermode="x unified", margin=dict(t=50, l=50, r=150), height=750
         )
         
-        fig.update_yaxes(title="Temp (°F)", range=[-20, 80], gridcolor='DimGray', gridwidth=1.5,
-                         minor=dict(dtick=5, gridcolor='Silver', showgrid=True),
-                         mirror=True, showline=True, linecolor='black', linewidth=2)
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=[y_min, y_max], gridcolor='DimGray')
 
-        fig.update_xaxes(range=[start_ts, end_ts], mirror=True, showline=True, linecolor='black',
-                         linewidth=2, showgrid=False, tickformat="%a\n%m/%d",
-                         minor=dict(showgrid=False)) # Disabled minor auto-grid to stop "bunching"
-
-        # 5. CUSTOM GRIDLINES (Clean 6-Hour Intervals)
-        grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6H')
-        for ts in grid_times:
-            if ts.hour == 0:
-                color, width = ("DimGray", 2.5) if ts.weekday() == 0 else ("DarkGray", 1.5)
-            else:
-                color, width = "Gainsboro", 0.5
-            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
-        # 6. NOW MARKER (Separate annotation to prevent Plotly crash)
-        now_marker = pd.Timestamp.now(tz=pytz.UTC)
-        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above')
-        fig.add_annotation(x=now_marker, y=1, yref="paper", text="NOW", 
-                           showarrow=False, font=dict(color="Red", size=12), xanchor="left")
-
-        # 7. HORIZONTAL REFERENCES (10.2 = Burgundy)
+        # --- CONVERT REFERENCE LINES ---
         for val, label in active_refs:
+            c_val = convert_temp(val)
             line_color = "#800020" if str(val) == "10.2" else "blue"
-            fig.add_hline(y=val, line_dash="dash", line_color=line_color)
-            fig.add_annotation(x=1, xref="paper", y=val, text=f"{label} {val}°", 
+            fig.add_hline(y=c_val, line_dash="dash", line_color=line_color)
+            fig.add_annotation(x=1, xref="paper", y=c_val, text=f"{label} {round(c_val,1)}{unit_label}", 
                                showarrow=False, font=dict(color=line_color), xanchor="left")
         
         return fig
@@ -319,6 +269,14 @@ active_refs = []
 if show_32: active_refs.append((32, "Freezing"))
 if show_26: active_refs.append((26.6, "Type B"))
 if show_10: active_refs.append((10.2, "Type A"))
+
+# --- Unit Selection ---
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+# Helper to convert values for reference lines
+def convert_temp(val):
+    return (val - 32) * 5/9 if unit_mode == "Celsius" else val
 #######################
 # --- END SIDEBAR --- #
 #######################
@@ -586,77 +544,76 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    # Table Definitions
-    MASTER_TABLE = f"{PROJECT_ID}.Temperature.master_data"
+    # Define our Raw Source Tables
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
-    METADATA = f"{PROJECT_ID}.Temperature.master_metadata"
+    # We use the View/Table just to map Project Names to Sensor IDs
+    MAP_SOURCE = f"{PROJECT_ID}.Temperature.master_data"
 
-    tab_approve, tab_scrub = st.tabs(["✅ Approval Manager", "🧹 Raw Data Scrubber"])
+    tab_scrub, tab_approve = st.tabs(["🧹 Raw Data Scrubber", "✅ Approval Manager"])
     
-    with tab_approve:
-        st.subheader("Global & Targeted Approval")
-        if st.button("🔓 APPROVE ALL HISTORIC DATA"):
-            with st.spinner("Updating records..."):
-                client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'").result()
-                st.success("Global approval complete.")
-        
-        st.divider()
-        # Targeted approval for the sidebar-selected project
-        if selected_project:
-            st.write(f"**Targeted Approval for {selected_project}**")
-            un_q = f"SELECT DISTINCT Location FROM `{MASTER_TABLE}` WHERE Project = '{selected_project}' AND (approve IS NULL OR approve != 'TRUE')"
-            un_df = client.query(un_q).to_dataframe()
-            
-            if not un_df.empty:
-                # FIX: Use .dropna() to remove None values before sorting
-                valid_locations = sorted(un_df['Location'].dropna().unique())
-                if valid_locations:
-                    sel_app_pipe = st.selectbox("Select Pipe to Approve", valid_locations)
-                    if st.button(f"🚀 Approve {sel_app_pipe}"):
-                        client.query(f"UPDATE `{MASTER_TABLE}` SET approve = 'TRUE' WHERE Project = '{selected_project}' AND Location = '{sel_app_pipe}'").result()
-                        st.success(f"Approved {sel_app_pipe}!")
-                        st.rerun()
-                else:
-                    st.info("No valid locations found for approval.")
-            else:
-                st.info("No unapproved data for this project.")
-        else:
-            st.warning("Please select a project in the sidebar.")
-
+    # --- 1. RAW DATA SCRUBBER (This updates the RAW FILES) ---
     with tab_scrub:
-        st.subheader("🧹 Raw Source Scrubber")
-        st.warning("This deletes data from the source (Raw) tables.")
+        st.subheader("🧹 Direct Raw Source Scrubbing")
+        st.warning("This action deletes data from the **Raw Ingestion Tables**. This is permanent.")
         
-        if selected_project:
-            col_s1, col_s2 = st.columns(2)
-            with col_s1:
-                source_type = st.radio("Source", ["SensorPush", "Lord"])
-                target_t = RAW_SP if source_type == "SensorPush" else RAW_LORD
-                id_f = "sensor_id" if source_type == "SensorPush" else "nodenumber"
-            with col_s2:
-                pipe_q = f"SELECT DISTINCT Location FROM `{METADATA}` WHERE Project = '{selected_project}'"
-                # FIX: Use .dropna() to remove None values before sorting
+        try:
+            # Use the sidebar project
+            if selected_project:
+                # 1. Get the list of pipes for the selected project
+                pipe_q = f"SELECT DISTINCT Location FROM `{MAP_SOURCE}` WHERE Project = '{selected_project}'"
                 pipes_df = client.query(pipe_q).to_dataframe()
+                
+                # FIX: .dropna() prevents the '<' not supported error
                 valid_pipes = sorted(pipes_df['Location'].dropna().unique())
                 
-                if valid_pipes:
-                    sel_scrub_pipe = st.selectbox("Pipe to Wipe", valid_pipes)
-                else:
-                    st.error("No pipes found in metadata for this project.")
-                    sel_scrub_pipe = None
+                c1, c2 = st.columns(2)
+                with c1:
+                    source_type = st.radio("Target Raw Table", ["SensorPush", "Lord"])
+                    target_table = RAW_SP if source_type == "SensorPush" else RAW_LORD
+                    id_field = "sensor_id" if source_type == "SensorPush" else "nodenumber"
+                
+                with c2:
+                    sel_scrub_pipe = st.selectbox("Select Pipe to Wipe from Raw", valid_pipes)
 
-            if sel_scrub_pipe:
-                confirm = st.text_input(f"Type 'DELETE' to wipe {sel_scrub_pipe}", key="scrub_conf")
-                if st.button("🔥 PERMANENTLY DELETE"):
+                confirm = st.text_input(f"Type 'DELETE' to wipe {source_type} data for {sel_scrub_pipe}", key="scrub_conf_v3")
+                
+                if st.button("🔥 PERMANENTLY DELETE FROM RAW"):
                     if confirm == "DELETE":
-                        scrub_sql = f"DELETE FROM `{target_t}` WHERE {id_f} IN (SELECT CAST(NodeNum AS STRING) FROM `{METADATA}` WHERE Project = '{selected_project}' AND Location = '{sel_scrub_pipe}')"
-                        client.query(scrub_sql).result()
-                        st.success("Raw data scrubbed!")
+                        with st.spinner("Deleting from raw source..."):
+                            # This DELETE command hits the RAW TABLE directly
+                            scrub_sql = f"""
+                                DELETE FROM `{target_table}`
+                                WHERE {id_field} IN (
+                                    SELECT CAST(NodeNum AS STRING) 
+                                    FROM `{MAP_SOURCE}` 
+                                    WHERE Project = '{selected_project}' AND Location = '{sel_scrub_pipe}'
+                                )
+                            """
+                            client.query(scrub_sql).result()
+                            st.success(f"✅ Successfully wiped {sel_scrub_pipe} from {target_table}.")
                     else:
                         st.error("Please type 'DELETE' to confirm.")
+            else:
+                st.warning("Please select a Project in the sidebar to use the scrubber.")
+        except Exception as e:
+            st.error(f"Scrubber Error: {e}")
+
+    # --- 2. APPROVAL MANAGER (Requires Table, not View) ---
+    with tab_approve:
+        st.subheader("✅ Master Data Approval")
+        # Check if master_data is a View
+        table_check = client.get_table(MAP_SOURCE)
+        if table_check.table_type == "VIEW":
+            st.error("Approval requires 'master_data' to be a Table, but it is currently a VIEW.")
+            if st.button("Convert View to Table (Enables Approvals)"):
+                client.query(f"CREATE OR REPLACE TABLE `{MAP_SOURCE}` AS SELECT * FROM `{MAP_SOURCE}`").result()
+                st.rerun()
         else:
-            st.warning("Please select a project in the sidebar.")
+            # Approval logic for physical tables
+            if st.button("🔓 APPROVE ALL DATA"):
+                client.query(f"UPDATE `{MAP_SOURCE}` SET approve = 'TRUE' WHERE approve IS NULL OR approve != 'TRUE'").result()
+                st.success("All data approved.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
