@@ -214,10 +214,6 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     - Burgundy Reference Line (10.2F)
     - Red 'NOW' Marker
     """
-    def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
-    """
-    SF Standard Graph Engine (Updated for Bank & Depth support)
-    """
     try:
         display_df = df.copy()
         
