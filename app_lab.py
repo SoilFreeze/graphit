@@ -214,15 +214,24 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     - Burgundy Reference Line (10.2F)
     - Red 'NOW' Marker
     """
+    def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
+    """
+    SF Standard Graph Engine (Updated for Bank & Depth support)
+    """
     try:
         display_df = df.copy()
         
-        # 1. Force strict types for math and sorting
+        # 1. Force strict types and ensure 'Bank' column exists
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        display_df['depth'] = display_df['depth'].fillna("Unknown").astype(str)
         display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
         
-        # 2. UNIT CONVERSION (Based on Sidebar Toggle)
+        # Ensure Bank and Depth columns exist to avoid KeyErrors
+        if 'Bank' not in display_df.columns:
+            display_df['Bank'] = None
+        if 'Depth' not in display_df.columns:
+            display_df['Depth'] = None
+
+        # 2. UNIT CONVERSION
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
             y_range = [-30, 30]
@@ -232,29 +241,36 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         start_ts = pd.to_datetime(start_view)
         end_ts = pd.to_datetime(end_view)
         
-        # 3. Labeling & Gap Handling (Data Scrubbed version)
-        display_df['label'] = display_df['depth'] + " (" + display_df['sensor_name'] + ")"
+        # 3. SMART LABELING: Bank vs Depth logic
+        def create_label(row):
+            # Prioritize Bank if it has a value
+            if pd.notnull(row['Bank']) and str(row['Bank']).strip() != "":
+                return f"Bank {row['Bank']} ({row['sensor_name']})"
+            # Fallback to Depth
+            d_val = str(row['Depth']) if pd.notnull(row['Depth']) else "Unknown"
+            return f"{d_val}ft ({row['sensor_name']})"
+
+        display_df['label'] = display_df.apply(create_label, axis=1)
         
+        # 4. Gap Handling (Data Scrubbed version)
         processed_dfs = []
         for lbl in display_df['label'].unique():
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-            # Insert None for gaps > 6 hours to prevent diagonal 'streaks'
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             gap_mask = s_df['gap_hrs'] > 6.0
             if gap_mask.any():
                 gaps = s_df[gap_mask].copy()
                 gaps['temperature'] = None
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-                # Ignore FutureWarning for empty concat
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
             processed_dfs.append(s_df)
             
         clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
         
-        # 4. Create the Figure
+        # 5. Create the Figure
         fig = go.Figure()
         
-        # Natural sorting for depths in the legend
+        # Natural sorting: Extracts numbers from the label (Depth or Bank ID)
         def natural_sort_key(s):
             nums = re.findall(r'\d+', s)
             return int(nums[0]) if nums else 0
@@ -271,7 +287,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
                 connectgaps=False
             ))
 
-        # 5. Axis & Layout Formatting
+        # 6. Axis & Layout Formatting
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left'},
             plot_bgcolor='white', 
@@ -292,24 +308,21 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         fig.update_xaxes(
             range=[start_ts, end_ts],
             mirror=True, showline=True, linecolor='black', linewidth=2,
-            showgrid=False, # We draw our own grid below
+            showgrid=False,
             tickformat="%a\n%m/%d",
             minor=dict(showgrid=False)
         )
 
-        # 6. CUSTOM GRIDLINES (Clean 6-Hour Loop)
-        # Using lowercase 'h' as requested by the deprecation warning
+        # 7. CUSTOM GRIDLINES
         grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6h')
         for ts in grid_times:
             if ts.hour == 0:
-                # Monday Midnight: Thickest; Daily: Medium
                 color, width = ("DimGray", 2.5) if ts.weekday() == 0 else ("DarkGray", 1.5)
             else:
-                # 6h Shift Marks: Very subtle
                 color, width = "Gainsboro", 0.5
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 7. RED 'NOW' MARKER (Bug-Free Version)
+        # 8. RED 'NOW' MARKER
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above')
         fig.add_annotation(
@@ -317,12 +330,9 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
             showarrow=False, font=dict(color="Red", size=12), xanchor="left"
         )
 
-        # 8. HORIZONTAL REFERENCES (with 10.2 Burgundy logic)
+        # 9. HORIZONTAL REFERENCES
         for val, label in active_refs:
-            # Convert reference value to active unit (F or C)
-            c_val = convert_val(val) # Uses the helper function from sidebar
-            
-            # Specific Burgundy color for 10.2F
+            c_val = convert_val(val) 
             line_color = "#800020" if str(val) == "10.2" else "blue"
             
             fig.add_hline(y=c_val, line_dash="dash", line_color=line_color)
