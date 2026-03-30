@@ -207,27 +207,33 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
 ########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
     """
-    SF Standard Graph Engine:
-    - Unit Conversion (F/C Toggle)
-    - Manual 6-Hour Gridlines (Gainsboro)
-    - Monday Midnight Bold (DimGray)
-    - Burgundy Reference Line (10.2F)
-    - Red 'NOW' Marker
+    SF Standard Graph Engine (v3.0)
+    - Auto-detects 'Bank' vs 'Depth' for labeling
+    - Unit Conversion (F/C)
+    - High-fidelity 6-hour gridlines
+    - Gap handling (>6hrs) to prevent diagonal streaks
     """
+    import re
+    import pytz
+    import pandas as pd
+    import plotly.graph_objects as go
+
     try:
         display_df = df.copy()
-        
-        # 1. Force strict types and ensure 'Bank' column exists
-        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        display_df['sensor_name'] = display_df['sensor_name'].fillna("Unknown").astype(str)
-        
-        # Ensure Bank and Depth columns exist to avoid KeyErrors
-        if 'Bank' not in display_df.columns:
-            display_df['Bank'] = None
-        if 'Depth' not in display_df.columns:
-            display_df['Depth'] = None
+        if display_df.empty:
+            return go.Figure()
 
-        # 2. UNIT CONVERSION
+        # 1. CASE PROTECTOR: Standardize all columns to lowercase
+        display_df.columns = [c.lower() for c in display_df.columns]
+
+        # 2. DATA CLEANING & TYPES
+        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+        
+        # Identify the sensor name column (usually nodenum or sensor_name)
+        name_col = 'nodenum' if 'nodenum' in display_df.columns else 'sensor_name'
+        display_df['sensor_id'] = display_df[name_col].fillna("Unknown").astype(str)
+
+        # 3. UNIT CONVERSION (Based on Sidebar Toggle)
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
             y_range = [-30, 30]
@@ -237,42 +243,50 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         start_ts = pd.to_datetime(start_view)
         end_ts = pd.to_datetime(end_view)
         
-        # 3. SMART LABELING: Bank vs Depth logic
+        # 4. SMART LABELING: Bank vs Depth
         def create_label(row):
-            # Prioritize Bank if it has a value
-            if pd.notnull(row['Bank']) and str(row['Bank']).strip() != "":
-                return f"Bank {row['Bank']} ({row['sensor_name']})"
+            # Try Bank first
+            if 'bank' in row and pd.notnull(row['bank']) and str(row['bank']).strip() not in ["", "None", "nan"]:
+                return f"Bank {row['bank']} ({row['sensor_id']})"
             # Fallback to Depth
-            d_val = str(row['Depth']) if pd.notnull(row['Depth']) else "Unknown"
-            return f"{d_val}ft ({row['sensor_name']})"
+            if 'depth' in row and pd.notnull(row['depth']) and str(row['depth']).strip() not in ["", "None", "nan", "Unknown"]:
+                return f"{row['depth']}ft ({row['sensor_id']})"
+            # Absolute Fallback
+            return f"Unmapped ({row['sensor_id']})"
 
         display_df['label'] = display_df.apply(create_label, axis=1)
         
-        # 4. Gap Handling (Data Scrubbed version)
+        # 5. GAP HANDLING: Insert NaNs for gaps > 6 hours
         processed_dfs = []
         for lbl in display_df['label'].unique():
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
+            
+            # Calculate gap in hours
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             gap_mask = s_df['gap_hrs'] > 6.0
+            
             if gap_mask.any():
+                # Create 'ghost' rows with None temperature 1 minute before the data resumes
                 gaps = s_df[gap_mask].copy()
                 gaps['temperature'] = None
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            
             processed_dfs.append(s_df)
             
         clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
         
-        # 5. Create the Figure
+        # 6. FIGURE INITIALIZATION
         fig = go.Figure()
         
-        # Natural sorting: Extracts numbers from the label (Depth or Bank ID)
+        # Natural sorting helper (for legend order: 2ft, 5ft, 10ft)
         def natural_sort_key(s):
             nums = re.findall(r'\d+', s)
             return int(nums[0]) if nums else 0
         
         labels = sorted(clean_df['label'].unique(), key=natural_sort_key)
         
+        # 7. ADD TRACES
         for lbl in labels:
             sensor_df = clean_df[clean_df['label'] == lbl]
             fig.add_trace(go.Scatter(
@@ -280,73 +294,81 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
                 y=sensor_df['temperature'], 
                 name=lbl, 
                 mode='lines', 
-                connectgaps=False
+                connectgaps=False, # Crucial for gap handling
+                line=dict(width=2)
             ))
 
-        # 6. Axis & Layout Formatting
+        # 8. AXIS & LAYOUT
         fig.update_layout(
-            title={'text': title, 'x': 0, 'xanchor': 'left'},
+            title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=20)},
             plot_bgcolor='white', 
             hovermode="x unified", 
-            margin=dict(t=50, l=50, r=150), 
-            height=750
+            margin=dict(t=80, l=50, r=180, b=50), 
+            height=750,
+            legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
         fig.update_yaxes(
-            title=f"Temp ({unit_label})", 
+            title=f"Temperature ({unit_label})", 
             range=y_range, 
-            gridcolor='DimGray', 
-            gridwidth=1.5,
-            minor=dict(dtick=5 if unit_mode == "Fahrenheit" else 2, gridcolor='Silver', showgrid=True),
-            mirror=True, showline=True, linecolor='black', linewidth=2
+            gridcolor='Gainsboro', 
+            gridwidth=0.5,
+            minor=dict(dtick=5 if unit_mode == "Fahrenheit" else 2, gridcolor='WhiteSmoke', showgrid=True),
+            mirror=True, showline=True, linecolor='black', linewidth=1
         )
 
         fig.update_xaxes(
             range=[start_ts, end_ts],
-            mirror=True, showline=True, linecolor='black', linewidth=2,
+            mirror=True, showline=True, linecolor='black', linewidth=1,
             showgrid=False,
             tickformat="%a\n%m/%d",
-            minor=dict(showgrid=False)
+            hoverformat="%I:%M %p, %b %d"
         )
 
-        # 7. CUSTOM GRIDLINES
+        # 9. CUSTOM VERTICAL GRIDLINES (6-Hour Frequency)
         grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6h')
         for ts in grid_times:
             if ts.hour == 0:
-                color, width = ("DimGray", 2.5) if ts.weekday() == 0 else ("DarkGray", 1.5)
+                # Midnight: Bold for Monday, medium for other days
+                color, width = ("DimGray", 2) if ts.weekday() == 0 else ("DarkGray", 1)
             else:
-                color, width = "Gainsboro", 0.5
+                # 6am, 12pm, 6pm: Subtle
+                color, width = "GhostWhite", 0.5
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 8. RED 'NOW' MARKER
+        # 10. RED 'NOW' MARKER
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
-        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above')
+        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
         fig.add_annotation(
-            x=now_marker, y=1, yref="paper", text="NOW", 
-            showarrow=False, font=dict(color="Red", size=12), xanchor="left"
+            x=now_marker, y=1.02, yref="paper", text="NOW", 
+            showarrow=False, font=dict(color="Red", size=10, bold=True)
         )
 
-        # 9. HORIZONTAL REFERENCES
+        # 11. HORIZONTAL REFERENCES (e.g., 10.2F Burgundy Line)
         for val, label in active_refs:
-            c_val = convert_val(val) 
-            line_color = "#800020" if str(val) == "10.2" else "blue"
+            c_val = convert_val(val) # Assumes convert_val is defined in your script
+            l_color = "#800020" if str(val) == "10.2" else "RoyalBlue"
             
-            fig.add_hline(y=c_val, line_dash="dash", line_color=line_color)
+            fig.add_hline(y=c_val, line_dash="dash", line_color=l_color, line_width=1.5)
             fig.add_annotation(
                 x=1, xref="paper", y=c_val, 
-                text=f"{label} {round(c_val, 1)}{unit_label}", 
-                showarrow=False, font=dict(color=line_color, size=11), 
-                xanchor="left", bgcolor="white", opacity=0.8
+                text=f"{label}: {round(c_val, 1)}{unit_label}", 
+                showarrow=False, font=dict(color=l_color, size=11), 
+                xanchor="left", bgcolor="rgba(255,255,255,0.8)"
             )
         
         return fig
 
     except Exception as e:
-        st.error(f"Graph Logic Error: {e}")
+        st.error(f"Critical Graph Error: {e}")
         return go.Figure()
 ############################
 # --- END GRAPH ENGINE --- #
 ############################
+def convert_val(val):
+    if unit_mode == "Celsius":
+        return (float(val) - 32) * 5/9
+    return float(val)
 #######################
 # --- SIDEBAR UI --- #
 #######################
