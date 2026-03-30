@@ -219,8 +219,8 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
 
         # 2. Setup IDs and Types
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        # Master View provides 'nodenum' (the friendly SP-0001 name)
-        display_df['sensor_id'] = display_df['nodenum'].fillna("Unknown").astype(str)
+        # Master View provides 'NodeNum' (the friendly SP-0001 name)
+        display_df['sensor_id'] = display_df['NodeNum'].fillna("Unknown").astype(str)
 
         # 3. UNIT CONVERSION
         if unit_mode == "Celsius":
