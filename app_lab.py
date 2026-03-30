@@ -110,7 +110,9 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
+
+            # STRIP ALL NON-DIGITS: '17014898.44' -> '17014898'
+            raw_id = str(row['PhysicalID']).def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     import time
     import re
     ACCOUNTS = [
@@ -118,9 +120,11 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
         {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
     ]
     BASE_URL = "https://api.sensorpush.com/api/v1"
-    all_records = []
+    
+    # Initialize the list correctly
+    all_records = [] 
 
-    # --- 1. PREPARE CLEAN SENSOR LIST ---
+    # --- 1. PREPARE SENSOR LIST ---
     name_map = {}
     try:
         query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
@@ -129,7 +133,7 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
         
         meta_df = client.query(query).to_dataframe()
         for _, row in meta_df.iterrows():
-            # STRIP ALL NON-DIGITS: '17014898.44' -> '17014898'
+            # Strip decimals and colons to get a pure number string
             raw_id = str(row['PhysicalID']).split('.')[0]
             clean_id = re.sub(r'[^0-9]', '', raw_id)
             if clean_id:
@@ -145,10 +149,10 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
             # --- 2. AUTHENTICATION ---
             auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
             token = requests.post(f"{BASE_URL}/oauth/accesstoken", 
-                                   json={"authorization": auth_r.get('authorization')}, timeout=15).json().get('accesstoken')
+                                   json={"authorization": auth_r.get('authorization')}, 
+                                   timeout=15).json().get('accesstoken')
             
             # --- 3. FETCH SAMPLES ---
-            # Using the clean integer IDs for the API request
             api_sensor_ids = list(name_map.keys())
             
             payload = {
@@ -157,15 +161,12 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                 "endTime": end_dt.strftime('%Y-%m-%dT%H:%M:%S+0000'),
                 "sensors": api_sensor_ids
             }
-            
-            # Debugging tool: See what we are actually sending
-            # st.write(f"DEBUG: IDs sent to API: {api_sensor_ids[:5]}...") 
 
             r = requests.post(f"{BASE_URL}/samples", headers={"Authorization": token}, json=payload, timeout=60).json()
             
             samples_data = r.get('sensors', {})
             for s_id, samples in samples_data.items():
-                # Match incoming ID back to friendly name using integer part
+                # Match incoming ID back to friendly name
                 lookup_id = re.sub(r'[^0-9]', '', str(s_id).split('.')[0])
                 friendly_name = name_map.get(lookup_id, s_id)
                 
@@ -176,7 +177,8 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                         temp = (float(s['temp_c']) * 1.8) + 32
                     
                     if temp is not None:
-                        all_rows.append({
+                        # Append to the CORRECTLY named list
+                        all_records.append({
                             "timestamp": pd.to_datetime(s['observed']),   
                             "NodeNum": str(friendly_name),
                             "PhysicalID": str(s_id),
@@ -186,7 +188,8 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
         except Exception as e:
             st.error(f"Account {acc['email']} failed: {e}")
             
-    return pd.DataFrame(all_rows)
+    # Return the correct list as a DataFrame
+    return pd.DataFrame(all_records)
 ################################
 # --- END FETCH SENSORPUSH --- #
 ################################
