@@ -340,8 +340,14 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
         fig.add_annotation(
-            x=now_marker, y=1.02, yref="paper", text="NOW", 
-            showarrow=False, font=dict(color="Red", size=10, bold=True)
+            x=now_marker, 
+            y=1.02, 
+            yref="paper", 
+            text="NOW", 
+            showarrow=False, 
+            # FIX: Changed 'bold=True' to 'weight="bold"'
+            font=dict(color="Red", size=10, weight="bold"), 
+            xanchor="left"
         )
 
         # 11. HORIZONTAL REFERENCES (e.g., 10.2F Burgundy Line)
@@ -353,7 +359,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
             fig.add_annotation(
                 x=1, xref="paper", y=c_val, 
                 text=f"{label}: {round(c_val, 1)}{unit_label}", 
-                showarrow=False, font=dict(color=l_color, size=11), 
+                showarrow=False, font=dict(color=l_color, size=11, weight="bold"), 
                 xanchor="left", bgcolor="rgba(255,255,255,0.8)"
             )
         
