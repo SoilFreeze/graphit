@@ -11,11 +11,6 @@ import json
 import traceback
 import re
 
- ###########################
-# --- GLOBAL SETTINGS --- #
-###########################
-PROJECT_ID = "sensorpush-export"
-
 #########################
 # --- CONFIGURATION --- #
 #########################
@@ -27,6 +22,7 @@ DATASET_ID = "Temperature"
 PROJECT_ID = "sensorpush-export"
 # The full table name is now sensorpush-export.Temperature.master_data
 MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+METADATA_TABLE = "metadata"
 
 @st.cache_resource
 def get_bq_client():
@@ -115,9 +111,9 @@ def rebuild_master_table(mode="preserve"):
 ############################
 def fetch_sensorpush_data(start_dt, end_dt):
     """
-    Enhanced Backfill Engine:
+    Enhanced Backfill Engine for Streamlit:
+    - Points to 'metadata' table (fixes 404 error)
     - Uses Integer-Only ID mapping (17014898.xxx -> SP-0001)
-    - Pulls from BigQuery metadata for friendly names
     - Specifically handles Thermocouple (TC.x) data fields
     """
     ACCOUNTS = [
@@ -128,17 +124,18 @@ def fetch_sensorpush_data(start_dt, end_dt):
     all_records = []
 
     # --- 1. LOAD FRIENDLY NAMES FROM BIGQUERY ---
-    # We use the integer part of the PhysicalID for the most reliable match
     name_map = {}
     try:
-        # Using the snapshot we created or your master_metadata table
-        meta_q = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`"
+        # UPDATED: Table name changed from 'master_metadata' to 'metadata'
+        meta_q = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
         meta_df = client.query(meta_q).to_dataframe()
         for _, row in meta_df.iterrows():
-            clean_id = str(row['PhysicalID']).split('.')[0].strip()
-            name_map[clean_id] = str(row['NodeNum']).strip()
+            # Integer-only cleaning for reliable matching (e.g., '17014898.44' -> '17014898')
+            p_id = str(row['PhysicalID']).split('.')[0].strip()
+            name_map[p_id] = str(row['NodeNum']).strip()
+        st.sidebar.success(f"✅ Loaded {len(name_map)} sensor mappings.")
     except Exception as e:
-        st.warning(f"Metadata lookup failed, using API default names: {e}")
+        st.error(f"Metadata lookup failed (Check if table 'metadata' exists): {e}")
 
     for acc in ACCOUNTS:
         try:
@@ -152,12 +149,10 @@ def fetch_sensorpush_data(start_dt, end_dt):
             token = token_resp.get('accesstoken')
             headers = {"Authorization": token}
 
-            # --- 3. GET ALL SENSORS ---
+            # --- 3. GET SENSOR LIST ---
             dev_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20).json()
             # Support both Dict and List responses from API
             sensor_list = dev_resp.values() if isinstance(dev_resp, dict) else dev_resp
-            
-            # Create a list of physical IDs to fetch
             api_sensor_ids = [str(s.get('id')) for s in sensor_list]
 
             # --- 4. CHUNKED SAMPLES FETCH ---
@@ -165,7 +160,7 @@ def fetch_sensorpush_data(start_dt, end_dt):
             while current_start < end_dt:
                 current_end = min(current_start + timedelta(hours=12), end_dt)
                 
-                # Fetch in chunks of 10 sensors to prevent API timeouts
+                # Process in batches of 10 to prevent API timeouts
                 for i in range(0, len(api_sensor_ids), 10):
                     chunk = api_sensor_ids[i:i+10]
                     payload = {
@@ -179,12 +174,12 @@ def fetch_sensorpush_data(start_dt, end_dt):
                     if r.status_code == 200:
                         data = r.json().get('sensors', {})
                         for s_id, samples in data.items():
-                            # MATCHING LOGIC: Strip decimals to match our name_map
+                            # MAPPING: Match using integer part of ID
                             clean_api_id = str(s_id).split('.')[0]
                             friendly_name = name_map.get(clean_api_id, s_id)
                             
                             for s in samples:
-                                # TC.X LOGIC: Check for standard and thermocouple fields
+                                # TC.X SUPPORT: Check standard and thermocouple fields
                                 temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                                 
                                 # Celsius fallback
@@ -194,13 +189,12 @@ def fetch_sensorpush_data(start_dt, end_dt):
                                 if temp is not None:
                                     all_records.append({
                                         'timestamp': pd.to_datetime(s.get('observed')),
-                                        'sensor_id': str(s_id), # Keep full ID for raw storage
-                                        'sensor_name': friendly_name, # Use friendly name for UI/Analysis
+                                        'sensor_id': str(s_id),
+                                        'sensor_name': friendly_name,
                                         'temperature': round(float(temp), 2)
                                     })
-                    time.sleep(0.2) # Light rate-limiting for large backfills
-                
                 current_start = current_end
+                time.sleep(0.1) # Prevent rate limiting
                 
         except Exception as e:
             st.error(f"Fetch Error ({acc['email']}): {e}")
