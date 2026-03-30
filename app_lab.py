@@ -441,7 +441,8 @@ if service == "🏠 Executive Summary":
             
             # 2. DATA AGGREGATION
             # Group by 'Depth_Display' (String) to avoid comparison crashes
-            for (proj, loc, d_disp, node), group in raw_summary.groupby(['Project', 'Location', 'Depth_Display', 'NodeNum']):
+            # Added 'Bank' to the grouping
+            for (proj, loc, depth, bank, node), group in raw_summary.groupby(['Project', 'Location', 'Depth', 'Bank', 'NodeNum']):
                 group = group.sort_values('timestamp', ascending=False)
                 last_rec = group.iloc[0]
                 
