@@ -113,13 +113,12 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-        
-# --- 2. ENGINE: FAST API FETCH ---
-
 def fetch_sensorpush_data(start_dt, end_dt):
     """
-    Fetches data for ALL sensors (HT.w and TC.x) in 12-hour chunks 
-    to prevent timeouts.
+    Enhanced Backfill Engine:
+    - Uses Integer-Only ID mapping (17014898.xxx -> SP-0001)
+    - Pulls from BigQuery metadata for friendly names
+    - Specifically handles Thermocouple (TC.x) data fields
     """
     ACCOUNTS = [
         {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
@@ -128,61 +127,86 @@ def fetch_sensorpush_data(start_dt, end_dt):
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = []
 
+    # --- 1. LOAD FRIENDLY NAMES FROM BIGQUERY ---
+    # We use the integer part of the PhysicalID for the most reliable match
+    name_map = {}
+    try:
+        # Using the snapshot we created or your master_metadata table
+        meta_q = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.master_metadata`"
+        meta_df = client.query(meta_q).to_dataframe()
+        for _, row in meta_df.iterrows():
+            clean_id = str(row['PhysicalID']).split('.')[0].strip()
+            name_map[clean_id] = str(row['NodeNum']).strip()
+    except Exception as e:
+        st.warning(f"Metadata lookup failed, using API default names: {e}")
+
     for acc in ACCOUNTS:
         try:
-            # 1. Auth
+            # --- 2. AUTHENTICATION ---
             auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15)
             if auth_resp.status_code != 200: continue
-            token = requests.post(f"{BASE_URL}/oauth/accesstoken", 
-                                   json={"authorization": auth_resp.json().get('authorization')}, timeout=15).json().get('accesstoken')
+            
+            token_resp = requests.post(f"{BASE_URL}/oauth/accesstoken", 
+                                       json={"authorization": auth_resp.json().get('authorization')}, 
+                                       timeout=15).json()
+            token = token_resp.get('accesstoken')
             headers = {"Authorization": token}
 
-            # 2. Get All Sensors (HT.w and TC.x)
-            dev_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20)
-            name_map = {}
-            if dev_resp.status_code == 200:
-                s_list = dev_resp.json().values() if isinstance(dev_resp.json(), dict) else dev_resp.json()
-                for s in s_list:
-                    s_type = str(s.get('type', ''))
-                    # Updated Filter: Allow both HT.w and TC.x
-                    if s_type in ['HT.w', 'TC.x']:
-                        name_map[str(s.get('id'))] = s.get('name', str(s.get('id')))
+            # --- 3. GET ALL SENSORS ---
+            dev_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20).json()
+            # Support both Dict and List responses from API
+            sensor_list = dev_resp.values() if isinstance(dev_resp, dict) else dev_resp
+            
+            # Create a list of physical IDs to fetch
+            api_sensor_ids = [str(s.get('id')) for s in sensor_list]
 
-            # 3. Chunked Fetching (12-hour blocks for stability)
+            # --- 4. CHUNKED SAMPLES FETCH ---
             current_start = start_dt
             while current_start < end_dt:
                 current_end = min(current_start + timedelta(hours=12), end_dt)
-                payload = {
-                    "limit": 10000, 
-                    "startTime": current_start.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
-                    "sensors": list(name_map.keys())
-                }
-                # Increased timeout to 60s
-                r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60)
                 
-                if r.status_code == 200:
-                    data = r.json().get('sensors', {})
-                    for s_id, samples in data.items():
-                        for s in samples:
-                            ts = pd.to_datetime(s.get('observed'))
-                            if current_start <= ts <= current_end:
-                                # Logic to handle temperature from different sensor types
+                # Fetch in chunks of 10 sensors to prevent API timeouts
+                for i in range(0, len(api_sensor_ids), 10):
+                    chunk = api_sensor_ids[i:i+10]
+                    payload = {
+                        "limit": 10000, 
+                        "startTime": current_start.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
+                        "sensors": chunk
+                    }
+                    
+                    r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60)
+                    
+                    if r.status_code == 200:
+                        data = r.json().get('sensors', {})
+                        for s_id, samples in data.items():
+                            # MATCHING LOGIC: Strip decimals to match our name_map
+                            clean_api_id = str(s_id).split('.')[0]
+                            friendly_name = name_map.get(clean_api_id, s_id)
+                            
+                            for s in samples:
+                                # TC.X LOGIC: Check for standard and thermocouple fields
                                 temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                                
+                                # Celsius fallback
                                 if temp is None and s.get('temp_c') is not None:
                                     temp = (float(s['temp_c']) * 1.8) + 32
                                 
                                 if temp is not None:
                                     all_records.append({
-                                        'timestamp': ts,
-                                        'sensor_id': s_id.replace(':', '-'),
-                                        'sensor_name': name_map.get(s_id),
+                                        'timestamp': pd.to_datetime(s.get('observed')),
+                                        'sensor_id': str(s_id), # Keep full ID for raw storage
+                                        'sensor_name': friendly_name, # Use friendly name for UI/Analysis
                                         'temperature': round(float(temp), 2)
                                     })
+                    time.sleep(0.2) # Light rate-limiting for large backfills
+                
                 current_start = current_end
+                
         except Exception as e:
             st.error(f"Fetch Error ({acc['email']}): {e}")
             
     return pd.DataFrame(all_records)
+ 
 ################################
 # --- END FETCH SENSORPUSH --- #
 ################################
