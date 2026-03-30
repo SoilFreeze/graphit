@@ -112,9 +112,7 @@ def rebuild_master_table(mode="preserve"):
 ############################
 def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     import time
-    import requests
-    import pandas as pd
-    
+    import re
     ACCOUNTS = [
         {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
         {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
@@ -122,24 +120,42 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = [] 
 
+    # --- 1. LOAD MAPPINGS FROM 'metadata' (Integer-Only Map) ---
+    name_map = {}
+    try:
+        query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
+        meta_df = client.query(query).to_dataframe()
+        for _, row in meta_df.iterrows():
+            # Standardize spreadsheet IDs (remove .0 and decimals)
+            p_id = str(row['PhysicalID']).split('.')[0].strip()
+            name_map[p_id] = str(row['NodeNum']).strip()
+        st.sidebar.success(f"✅ Loaded {len(name_map)} mappings from metadata.")
+    except Exception as e:
+        st.error(f"Metadata load failed: {e}")
+
     for acc in ACCOUNTS:
         try:
-            # --- AUTHENTICATION ---
+            # --- 2. AUTHENTICATION ---
             auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
             token = requests.post(f"{BASE_URL}/oauth/accesstoken", 
                                    json={"authorization": auth_r.get('authorization')}, 
                                    timeout=15).json().get('accesstoken')
             headers = {"Authorization": token}
 
-            # --- SENSOR DISCOVERY ---
+            # --- 3. SENSOR DISCOVERY (Cloud Run Style) ---
             s_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20).json()
             sensor_list = s_resp.values() if isinstance(s_resp, dict) else s_resp
             api_sensor_ids = [str(s.get('id')) for s in sensor_list]
             
-            # --- FETCH SAMPLES IN 24H CHUNKS ---
+            # --- DIAGNOSTIC: Print IDs for your Spreadsheet ---
+            with st.expander(f"🔍 Sensors found for {acc['email']}"):
+                for s in sensor_list:
+                    st.write(f"ID: `{str(s.get('id')).split('.')[0]}` | Current Name: **{s.get('name')}**")
+
+            # --- 4. FETCH SAMPLES ---
             current_start = start_dt
             while current_start < end_dt:
-                current_end = min(current_start + pd.Timedelta(hours=24), end_dt)
+                current_end = min(current_start + timedelta(hours=24), end_dt)
                 
                 for i in range(0, len(api_sensor_ids), 10):
                     chunk = api_sensor_ids[i:i+10]
@@ -151,10 +167,14 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                     }
                     r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60).json()
                     
-                    samples_dict = r.get('sensors', {})
-                    for s_id, samples in samples_dict.items():
+                    samples_data = r.get('sensors', {})
+                    for s_id, samples in samples_data.items():
+                        # CLEAN ID: Strip decimals from API ID to match spreadsheet key
+                        clean_api_id = str(s_id).split('.')[0]
+                        friendly_name = name_map.get(clean_api_id, s_id)
+                        
                         for s in samples:
-                            # Handle standard or thermocouple temperature fields
+                            # TC.x + Standard Temp Logic
                             temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                             if temp is None and s.get('temp_c') is not None:
                                 temp = (float(s['temp_c']) * 1.8) + 32
@@ -164,7 +184,8 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                                     "timestamp": pd.to_datetime(s['observed']),   
                                     "PhysicalID": s_id, 
                                     "temperature": round(float(temp), 2),
-                                    "approve": "FALSE" # Default to FALSE for manual review
+                                    # CHANGE: Set to FALSE so data stays hidden until reviewed
+                                    "approve": "FALSE" 
                                 })
                 current_start = current_end
                 time.sleep(0.1)
@@ -173,7 +194,6 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
             
     df = pd.DataFrame(all_records)
     if not df.empty:
-        # Ensure PhysicalID matches the BigQuery 'Float/Double' schema
         df['PhysicalID'] = pd.to_numeric(df['PhysicalID'], errors='coerce')
     
     return df
@@ -194,16 +214,15 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         if display_df.empty:
             return go.Figure()
 
-        # 1. DATA PREP (Using Capitalized Column Names)
-        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        
-        # Fallback if NodeNum is missing (safety check)
-        if 'NodeNum' in display_df.columns:
-            display_df['sensor_id'] = display_df['NodeNum'].fillna("Unknown").astype(str)
-        else:
-            display_df['sensor_id'] = "Unknown"
+        # 1. Standardize column names to lowercase
+        display_df.columns = [c.lower() for c in display_df.columns]
 
-        # 2. UNIT CONVERSION
+        # 2. Setup IDs and Types
+        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+        # Master View provides 'nodenum' (the friendly SP-0001 name)
+        display_df['sensor_id'] = display_df['nodenum'].fillna("Unknown").astype(str)
+
+        # 3. UNIT CONVERSION
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
             y_range = [-30, 30]
@@ -213,28 +232,25 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         start_ts = pd.to_datetime(start_view)
         end_ts = pd.to_datetime(end_view)
         
-        # 3. LABELING LOGIC (Bank vs Depth)
+        # 4. SMART LABELING: Bank vs Depth
         def create_label(row):
-            # Check Bank (Capital B)
-            b_val = str(row.get('Bank', '')).strip()
-            # Check Depth (Capital D)
-            d_val = str(row.get('Depth', '')).strip()
-            s_name = row.get('sensor_id', 'Unknown')
+            b_val = str(row.get('bank', '')).strip().lower()
+            d_val = str(row.get('depth', '')).strip().lower()
+            s_name = str(row.get('sensor_id', 'Unknown'))
 
-            # Priority 1: Bank
-            if b_val not in ["", "None", "nan", "null", "Unknown"]:
-                return f"Bank {row['Bank']} ({s_name})"
+            # Check Bank first
+            if b_val not in ["", "none", "nan", "null", "unknown"]:
+                return f"Bank {row['bank']} ({s_name})"
             
-            # Priority 2: Depth
-            if d_val not in ["", "None", "nan", "null", "Unknown"]:
-                return f"{row['Depth']}ft ({s_name})"
+            # Check Depth
+            if d_val not in ["", "none", "nan", "null", "unknown"]:
+                return f"{row['depth']}ft ({s_name})"
             
-            # Priority 3: Unmapped
             return f"Unmapped ({s_name})"
 
         display_df['label'] = display_df.apply(create_label, axis=1)
         
-        # 4. GAP HANDLING (> 6 hours)
+        # 5. GAP HANDLING (> 6 hrs)
         processed_dfs = []
         for lbl in display_df['label'].unique():
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
@@ -249,10 +265,9 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
             
         clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
         
-        # 5. FIGURE INITIALIZATION
+        # 6. FIGURE SETUP
         fig = go.Figure()
         
-        # Natural sorting helper for the legend
         def natural_sort_key(s):
             nums = re.findall(r'\d+', s)
             return int(nums[0]) if nums else 0
@@ -266,7 +281,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
                 name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
             ))
 
-        # 6. LAYOUT & AXES
+        # 7. LAYOUT
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=20)},
             plot_bgcolor='white', hovermode="x unified", height=750,
@@ -274,15 +289,15 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
             legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
+        # 8. AXES
         fig.update_yaxes(
             title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', 
-            gridwidth=0.5, minor=dict(dtick=5 if unit_mode == "Fahrenheit" else 2, gridcolor='WhiteSmoke', showgrid=True),
-            mirror=True, showline=True, linecolor='black'
+            gridwidth=0.5, mirror=True, showline=True, linecolor='black',
+            minor=dict(dtick=5 if unit_mode == "Fahrenheit" else 2, gridcolor='WhiteSmoke', showgrid=True)
         )
-
         fig.update_xaxes(range=[start_ts, end_ts], mirror=True, showline=True, linecolor='black')
 
-        # 7. GRIDLINES (6h frequency)
+        # 9. GRIDLINES (6h frequency)
         grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6h')
         for ts in grid_times:
             if ts.hour == 0:
@@ -291,7 +306,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
                 color, width = "GhostWhite", 0.5
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 8. NOW MARKER & REFERENCES
+        # 10. MARKERS & REFERENCES
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
         fig.add_annotation(x=now_marker, y=1.02, yref="paper", text="NOW", showarrow=False, 
