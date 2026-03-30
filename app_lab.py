@@ -110,8 +110,14 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-def fetch_sensorpush_data(start_dt, end_dt):
-    import time # Local import to ensure it's defined
+def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
+    """
+    High-Speed Filtered Fetch:
+    - Filters by Location (Pipe) to reduce API load.
+    - Uses 8-digit Integer ID matching.
+    - Standardizes columns to 'NodeNum' and 'PhysicalID'.
+    """
+    import time
     ACCOUNTS = [
         {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
         {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
@@ -119,16 +125,26 @@ def fetch_sensorpush_data(start_dt, end_dt):
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = []
 
-    # --- 1. LOAD MAPPINGS FROM 'metadata' (Not 'master_metadata') ---
+    # --- 1. GET FILTERED SENSOR LIST FROM METADATA ---
+    # This is the "Speed Secret": We only fetch what we need.
     name_map = {}
     try:
-        meta_q = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
-        meta_df = client.query(meta_q).to_dataframe()
+        query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
+        if target_location:
+            query += f" WHERE Location = '{target_location}'"
+        
+        meta_df = client.query(query).to_dataframe()
         for _, row in meta_df.iterrows():
-            p_id = str(row['PhysicalID']).split('.')[0].strip()
-            name_map[p_id] = str(row['NodeNum']).strip()
+            clean_id = str(row['PhysicalID']).split('.')[0].strip()
+            name_map[clean_id] = str(row['NodeNum']).strip()
+            
+        st.info(f"🚀 Filtering fetch for {len(name_map)} sensors in {target_location if target_location else 'All Locations'}")
     except Exception as e:
-        st.error(f"Metadata lookup failed: {e}")
+        st.error(f"Metadata filter failed: {e}")
+
+    # Exit early if no sensors found for that location
+    if not name_map:
+        return pd.DataFrame()
 
     for acc in ACCOUNTS:
         try:
@@ -138,40 +154,41 @@ def fetch_sensorpush_data(start_dt, end_dt):
                                    json={"authorization": auth_resp.get('authorization')}, timeout=15).json().get('accesstoken')
             headers = {"Authorization": token}
 
-            # --- 3. SENSOR LIST ---
-            dev_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20).json()
-            sensor_list = dev_resp.values() if isinstance(dev_resp, dict) else dev_resp
-            api_sensor_ids = [str(s.get('id')) for s in sensor_list]
-
-            # --- 4. SAMPLES ---
+            # --- 3. SAMPLES (Narrowed to specific sensor IDs) ---
+            # We skip the "Get All Sensors" step and go straight to IDs from our metadata
+            api_sensor_ids = list(name_map.keys())
+            
             current_start = start_dt
             while current_start < end_dt:
-                current_end = min(current_start + timedelta(hours=12), end_dt)
-                for i in range(0, len(api_sensor_ids), 10):
-                    chunk = api_sensor_ids[i:i+10]
-                    payload = {"limit": 10000, "startTime": current_start.strftime('%Y-%m-%dT%H:%M:%S+0000'), "sensors": chunk}
-                    r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60).json()
+                current_end = min(current_start + timedelta(hours=24), end_dt)
+                
+                # Fetch only the sensors belonging to the target Pipe
+                payload = {
+                    "limit": 10000, 
+                    "startTime": current_start.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
+                    "sensors": api_sensor_ids
+                }
+                r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60).json()
+                
+                data = r.get('sensors', {})
+                for s_id, samples in data.items():
+                    clean_api_id = str(s_id).split('.')[0]
+                    friendly_name = name_map.get(clean_api_id, s_id)
                     
-                    data = r.get('sensors', {})
-                    for s_id, samples in data.items():
-                        clean_api_id = str(s_id).split('.')[0]
-                        friendly_name = name_map.get(clean_api_id, s_id)
+                    for s in samples:
+                        temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                        if temp is None and s.get('temp_c') is not None:
+                            temp = (float(s['temp_c']) * 1.8) + 32
                         
-                        for s in samples:
-                            # TC.x Support
-                            temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
-                            if temp is None and s.get('temp_c') is not None:
-                                temp = (float(s['temp_c']) * 1.8) + 32
-                            
-                            if temp is not None:
-                                all_records.append({
-                                    'timestamp': pd.to_datetime(s.get('observed')),
-                                    'NodeNum': str(friendly_name), # Matches BQ
-                                    'PhysicalID': str(s_id),      # Matches BQ
-                                    'temperature': round(float(temp), 2)
-                                })
-                    time.sleep(0.1) # Fixes the 'time' is not defined error
+                        if temp is not None:
+                            all_records.append({
+                                'timestamp': pd.to_datetime(s.get('observed')),
+                                'NodeNum': str(friendly_name),
+                                'PhysicalID': str(s_id),
+                                'temperature': round(float(temp), 2)
+                            })
                 current_start = current_end
+                time.sleep(0.1) 
         except Exception as e:
             st.error(f"Fetch Error ({acc['email']}): {e}")
             
@@ -541,9 +558,6 @@ elif service == "📊 Client Portal":
 ###########################
 # --- NODE DIAGNOSTIC --- #
 ###########################  
-###########################
-# --- NODE DIAGNOSTIC --- #
-###########################  
 elif service == "📉 Node Diagnostics":
     st.header(f"📉 Diagnostics: {selected_project}")
     try:
@@ -673,24 +687,35 @@ elif service == "📤 Data Intake Lab":
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
-        c1, c2 = st.columns(2)
-        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=7))
+        
+        # 1. ADD LOCATION FILTER
+        loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.{DATASET_ID}.metadata` ORDER BY Location"
+        loc_list = ["ALL"] + list(client.query(loc_q).to_dataframe()['Location'].dropna())
+        
+        c1, c2, c3 = st.columns(3)
+        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
         end_date = c2.date_input("End Date", datetime.now())
+        sel_loc_fetch = c3.selectbox("Filter by Pipe (Location)", loc_list)
         
         if st.button("🛰️ FETCH & SYNC"):
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            with st.spinner("Fetching from SensorPush API..."):
-                df_api = fetch_sensorpush_data(start_dt, end_dt)
+            # Use "None" if ALL is selected
+            target = None if sel_loc_fetch == "ALL" else sel_loc_fetch
+            
+            with st.spinner(f"Fetching {sel_loc_fetch} sensors..."):
+                df_api = fetch_sensorpush_data(start_dt, end_dt, target_location=target)
+                
                 if not df_api.empty:
-                    df_api['sensor_id'] = df_api['sensor_id'].astype(str).str.replace(':', '-', regex=False)
-                    # UPDATED: Pushing to the new dataset location
+                    # FIX: Column names now match BQ ('PhysicalID' instead of 'sensor_id')
+                    # We no longer need to manually replace ':' as the function handles cleaning.
                     client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    st.success(f"✅ API Sync Complete: {len(df_api)} points integrated.")
+                    st.success(f"✅ Integrated {len(df_api)} points for {sel_loc_fetch}.")
+                    st.dataframe(df_api.head())
                 else:
-                    st.warning("No data found for this range.")
-
+                    st.warning("No data found for this range/location.")
+                    
     with tab3:
         st.subheader("🛠️ Metadata Management")
         u_meta = st.file_uploader("Upload Master_Log / Metadata CSV", type=['csv'])
