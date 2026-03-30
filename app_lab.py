@@ -120,15 +120,16 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = [] 
 
-    # --- 1. LOAD MAPPINGS (Exactly like Cloud Run) ---
+    # --- 1. LOAD MAPPINGS FROM 'metadata' (Integer-Only Map) ---
     name_map = {}
     try:
         query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
         meta_df = client.query(query).to_dataframe()
         for _, row in meta_df.iterrows():
-            # Use the integer-only part for the key
+            # Standardize spreadsheet IDs (remove .0 and decimals)
             p_id = str(row['PhysicalID']).split('.')[0].strip()
             name_map[p_id] = str(row['NodeNum']).strip()
+        st.sidebar.success(f"✅ Loaded {len(name_map)} mappings from metadata.")
     except Exception as e:
         st.error(f"Metadata load failed: {e}")
 
@@ -141,12 +142,15 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                                    timeout=15).json().get('accesstoken')
             headers = {"Authorization": token}
 
-            # --- 3. GET SENSOR LIST FROM API (The "Cloud Run way") ---
-            # This ensures we use the exact IDs the API recognizes
+            # --- 3. SENSOR DISCOVERY (Cloud Run Style) ---
             s_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20).json()
-            api_sensor_ids = list(s_resp.keys()) if isinstance(s_resp, dict) else [s['id'] for s in s_resp]
+            sensor_list = s_resp.values() if isinstance(s_resp, dict) else s_resp
+            api_sensor_ids = [str(s.get('id')) for s in sensor_list]
             
-            st.info(f"📡 {acc['email']}: Found {len(api_sensor_ids)} sensors live on account.")
+            # --- DIAGNOSTIC: Print IDs for your Spreadsheet ---
+            with st.expander(f"🔍 Sensors found for {acc['email']}"):
+                for s in sensor_list:
+                    st.write(f"ID: `{str(s.get('id')).split('.')[0]}` | Current Name: **{s.get('name')}**")
 
             # --- 4. FETCH SAMPLES ---
             current_start = start_dt
@@ -179,7 +183,7 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                                 all_records.append({
                                     "timestamp": pd.to_datetime(s['observed']),   
                                     "NodeNum": str(friendly_name),
-                                    "PhysicalID": str(s_id),
+                                    "PhysicalID": s_id, # Keep raw ID here; we cast later
                                     "temperature": round(float(temp), 2)
                                 })
                 current_start = current_end
@@ -187,7 +191,14 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
         except Exception as e:
             st.error(f"Account {acc['email']} failed: {e}")
             
-    return pd.DataFrame(all_records)
+    # --- 5. TYPE FIX FOR BIGQUERY ---
+    df = pd.DataFrame(all_records)
+    if not df.empty:
+        # FORCIBLY convert PhysicalID to float to match BigQuery 'double' schema
+        # This solves the ArrowInvalid error
+        df['PhysicalID'] = pd.to_numeric(df['PhysicalID'], errors='coerce')
+    
+    return df
 ################################
 # --- END FETCH SENSORPUSH --- #
 ################################
@@ -682,34 +693,27 @@ elif service == "📤 Data Intake Lab":
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
-        
-        # 1. ADD LOCATION FILTER
-        loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.{DATASET_ID}.metadata` ORDER BY Location"
-        loc_list = ["ALL"] + list(client.query(loc_q).to_dataframe()['Location'].dropna())
-        
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
         end_date = c2.date_input("End Date", datetime.now())
-        sel_loc_fetch = c3.selectbox("Filter by Pipe (Location)", loc_list)
         
         if st.button("🛰️ FETCH & SYNC"):
+            # Level 3: Date Conversion
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            # Use "None" if ALL is selected
-            target = None if sel_loc_fetch == "ALL" else sel_loc_fetch
-            
-            with st.spinner(f"Fetching {sel_loc_fetch} sensors..."):
-                df_api = fetch_sensorpush_data(start_dt, end_dt, target_location=target)
+            with st.spinner("Fetching data..."):
+                # Level 4: Call the Function
+                df_api = fetch_sensorpush_data(start_dt, end_dt)
                 
                 if not df_api.empty:
-                    # FIX: Column names now match BQ ('PhysicalID' instead of 'sensor_id')
-                    # We no longer need to manually replace ':' as the function handles cleaning.
-                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    st.success(f"✅ Integrated {len(df_api)} points for {sel_loc_fetch}.")
-                    st.dataframe(df_api.head())
+                    # Level 5: Upload to BigQuery
+                    table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    client.load_table_from_dataframe(df_api, table_path).result()
+                    st.success(f"✅ Integrated {len(df_api)} points successfully!")
                 else:
-                    st.warning("No data found for this range/location.")
+                    # Level 5: Fallback
+                    st.warning("No data found for this range.")
                     
     with tab3:
         st.subheader("🛠️ Metadata Management")
