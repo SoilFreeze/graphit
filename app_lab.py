@@ -120,33 +120,35 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = []
 
+    # --- 1. PREPARE CLEAN SENSOR LIST ---
     name_map = {}
     try:
         query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
-        if target_location:
+        if target_location and target_location != "ALL":
             query += f" WHERE Location = '{target_location}'"
         
         meta_df = client.query(query).to_dataframe()
         for _, row in meta_df.iterrows():
-            # Logic to handle both 17014898.44 and 17:01:48:98 formats
-            pid = str(row['PhysicalID']).split('.')[0]
-            clean_id = re.sub(r'[^0-9]', '', pid)
-            name_map[clean_id] = str(row['NodeNum']).strip()
+            # STRIP ALL NON-DIGITS: '17014898.44' -> '17014898'
+            raw_id = str(row['PhysicalID']).split('.')[0]
+            clean_id = re.sub(r'[^0-9]', '', raw_id)
+            if clean_id:
+                name_map[clean_id] = str(row['NodeNum']).strip()
+        
+        st.info(f"🚀 API Request: Searching for {len(name_map)} sensors...")
     except Exception as e:
         st.error(f"Metadata Error: {e}")
-
-    if not name_map:
-        st.warning("No sensors found in metadata for this location.")
         return pd.DataFrame()
 
     for acc in ACCOUNTS:
         try:
-            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=acc).json()
+            # --- 2. AUTHENTICATION ---
+            auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
             token = requests.post(f"{BASE_URL}/oauth/accesstoken", 
-                                   json={"authorization": auth_resp.get('authorization')}).json().get('accesstoken')
-            headers = {"Authorization": token}
-
-            # Map the clean metadata IDs back to what SensorPush expects (usually just the number)
+                                   json={"authorization": auth_r.get('authorization')}, timeout=15).json().get('accesstoken')
+            
+            # --- 3. FETCH SAMPLES ---
+            # Using the clean integer IDs for the API request
             api_sensor_ids = list(name_map.keys())
             
             payload = {
@@ -156,29 +158,35 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                 "sensors": api_sensor_ids
             }
             
-            r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60).json()
+            # Debugging tool: See what we are actually sending
+            # st.write(f"DEBUG: IDs sent to API: {api_sensor_ids[:5]}...") 
+
+            r = requests.post(f"{BASE_URL}/samples", headers={"Authorization": token}, json=payload, timeout=60).json()
             
-            for s_id, samples in r.get('sensors', {}).items():
-                # Matching
+            samples_data = r.get('sensors', {})
+            for s_id, samples in samples_data.items():
+                # Match incoming ID back to friendly name using integer part
                 lookup_id = re.sub(r'[^0-9]', '', str(s_id).split('.')[0])
                 friendly_name = name_map.get(lookup_id, s_id)
                 
                 for s in samples:
+                    # TC.x + Standard Temp Logic
                     temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                     if temp is None and s.get('temp_c') is not None:
                         temp = (float(s['temp_c']) * 1.8) + 32
                     
                     if temp is not None:
-                        all_records.append({
-                            'timestamp': pd.to_datetime(s.get('observed')),
-                            'NodeNum': friendly_name,
-                            'PhysicalID': str(s_id),
-                            'temperature': round(float(temp), 2)
+                        all_rows.append({
+                            "timestamp": pd.to_datetime(s['observed']),   
+                            "NodeNum": str(friendly_name),
+                            "PhysicalID": str(s_id),
+                            "temperature": round(float(temp), 2)
                         })
+            time.sleep(0.1)
         except Exception as e:
-            st.error(f"Account Error: {e}")
+            st.error(f"Account {acc['email']} failed: {e}")
             
-    return pd.DataFrame(all_records)
+    return pd.DataFrame(all_rows)
 ################################
 # --- END FETCH SENSORPUSH --- #
 ################################
