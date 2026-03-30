@@ -110,9 +110,7 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-
-            # STRIP ALL NON-DIGITS: '17014898.44' -> '17014898'
-            raw_id = str(row['PhysicalID']).def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
+def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     import time
     import re
     ACCOUNTS = [
@@ -120,8 +118,6 @@ def rebuild_master_table(mode="preserve"):
         {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
     ]
     BASE_URL = "https://api.sensorpush.com/api/v1"
-    
-    # Initialize the list correctly
     all_records = [] 
 
     # --- 1. PREPARE SENSOR LIST ---
@@ -133,7 +129,7 @@ def rebuild_master_table(mode="preserve"):
         
         meta_df = client.query(query).to_dataframe()
         for _, row in meta_df.iterrows():
-            # Strip decimals and colons to get a pure number string
+            # Standardizing ID to pure integer string
             raw_id = str(row['PhysicalID']).split('.')[0]
             clean_id = re.sub(r'[^0-9]', '', raw_id)
             if clean_id:
@@ -154,7 +150,6 @@ def rebuild_master_table(mode="preserve"):
             
             # --- 3. FETCH SAMPLES ---
             api_sensor_ids = list(name_map.keys())
-            
             payload = {
                 "limit": 10000, 
                 "startTime": start_dt.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
@@ -171,13 +166,12 @@ def rebuild_master_table(mode="preserve"):
                 friendly_name = name_map.get(lookup_id, s_id)
                 
                 for s in samples:
-                    # TC.x + Standard Temp Logic
+                    # Check for Standard or Thermocouple Temp
                     temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                     if temp is None and s.get('temp_c') is not None:
                         temp = (float(s['temp_c']) * 1.8) + 32
                     
                     if temp is not None:
-                        # Append to the CORRECTLY named list
                         all_records.append({
                             "timestamp": pd.to_datetime(s['observed']),   
                             "NodeNum": str(friendly_name),
@@ -188,7 +182,6 @@ def rebuild_master_table(mode="preserve"):
         except Exception as e:
             st.error(f"Account {acc['email']} failed: {e}")
             
-    # Return the correct list as a DataFrame
     return pd.DataFrame(all_records)
 ################################
 # --- END FETCH SENSORPUSH --- #
