@@ -182,20 +182,18 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                             if temp is not None:
                                 all_records.append({
                                     "timestamp": pd.to_datetime(s['observed']),   
-                                    "NodeNum": str(friendly_name),
-                                    "PhysicalID": s_id, # Keep raw ID here; we cast later
-                                    "temperature": round(float(temp), 2)
+                                    "PhysicalID": s_id, 
+                                    "temperature": round(float(temp), 2),
+                                    # CHANGE: Set to FALSE so data stays hidden until reviewed
+                                    "approve": "FALSE" 
                                 })
                 current_start = current_end
                 time.sleep(0.1)
         except Exception as e:
             st.error(f"Account {acc['email']} failed: {e}")
             
-    # --- 5. TYPE FIX FOR BIGQUERY ---
     df = pd.DataFrame(all_records)
     if not df.empty:
-        # FORCIBLY convert PhysicalID to float to match BigQuery 'double' schema
-        # This solves the ArrowInvalid error
         df['PhysicalID'] = pd.to_numeric(df['PhysicalID'], errors='coerce')
     
     return df
@@ -206,13 +204,6 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
 # --- GRAPH ENGINE --- #
 ########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
-    """
-    SF Standard Graph Engine (v3.0)
-    - Auto-detects 'Bank' vs 'Depth' for labeling
-    - Unit Conversion (F/C)
-    - High-fidelity 6-hour gridlines
-    - Gap handling (>6hrs) to prevent diagonal streaks
-    """
     import re
     import pytz
     import pandas as pd
@@ -223,17 +214,15 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         if display_df.empty:
             return go.Figure()
 
-        # 1. CASE PROTECTOR: Standardize all columns to lowercase
+        # 1. Standardize column names to lowercase
         display_df.columns = [c.lower() for c in display_df.columns]
 
-        # 2. DATA CLEANING & TYPES
+        # 2. Setup IDs and Types
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        
-        # Identify the sensor name column (usually nodenum or sensor_name)
-        name_col = 'nodenum' if 'nodenum' in display_df.columns else 'sensor_name'
-        display_df['sensor_id'] = display_df[name_col].fillna("Unknown").astype(str)
+        # Master View provides 'nodenum' (the friendly SP-0001 name)
+        display_df['sensor_id'] = display_df['nodenum'].fillna("Unknown").astype(str)
 
-        # 3. UNIT CONVERSION (Based on Sidebar Toggle)
+        # 3. UNIT CONVERSION
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
             y_range = [-30, 30]
@@ -245,126 +234,93 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs):
         
         # 4. SMART LABELING: Bank vs Depth
         def create_label(row):
-            # Try Bank first
-            if 'bank' in row and pd.notnull(row['bank']) and str(row['bank']).strip() not in ["", "None", "nan"]:
-                return f"Bank {row['bank']} ({row['sensor_id']})"
-            # Fallback to Depth
-            if 'depth' in row and pd.notnull(row['depth']) and str(row['depth']).strip() not in ["", "None", "nan", "Unknown"]:
-                return f"{row['depth']}ft ({row['sensor_id']})"
-            # Absolute Fallback
-            return f"Unmapped ({row['sensor_id']})"
+            b_val = str(row.get('bank', '')).strip().lower()
+            d_val = str(row.get('depth', '')).strip().lower()
+            s_name = str(row.get('sensor_id', 'Unknown'))
+
+            # Check Bank first
+            if b_val not in ["", "none", "nan", "null", "unknown"]:
+                return f"Bank {row['bank']} ({s_name})"
+            
+            # Check Depth
+            if d_val not in ["", "none", "nan", "null", "unknown"]:
+                return f"{row['depth']}ft ({s_name})"
+            
+            return f"Unmapped ({s_name})"
 
         display_df['label'] = display_df.apply(create_label, axis=1)
         
-        # 5. GAP HANDLING: Insert NaNs for gaps > 6 hours
+        # 5. GAP HANDLING (> 6 hrs)
         processed_dfs = []
         for lbl in display_df['label'].unique():
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-            
-            # Calculate gap in hours
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             gap_mask = s_df['gap_hrs'] > 6.0
-            
             if gap_mask.any():
-                # Create 'ghost' rows with None temperature 1 minute before the data resumes
                 gaps = s_df[gap_mask].copy()
                 gaps['temperature'] = None
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-            
             processed_dfs.append(s_df)
             
         clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
         
-        # 6. FIGURE INITIALIZATION
+        # 6. FIGURE SETUP
         fig = go.Figure()
         
-        # Natural sorting helper (for legend order: 2ft, 5ft, 10ft)
         def natural_sort_key(s):
             nums = re.findall(r'\d+', s)
             return int(nums[0]) if nums else 0
         
         labels = sorted(clean_df['label'].unique(), key=natural_sort_key)
         
-        # 7. ADD TRACES
         for lbl in labels:
             sensor_df = clean_df[clean_df['label'] == lbl]
             fig.add_trace(go.Scatter(
-                x=sensor_df['timestamp'], 
-                y=sensor_df['temperature'], 
-                name=lbl, 
-                mode='lines', 
-                connectgaps=False, # Crucial for gap handling
-                line=dict(width=2)
+                x=sensor_df['timestamp'], y=sensor_df['temperature'], 
+                name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
             ))
 
-        # 8. AXIS & LAYOUT
+        # 7. LAYOUT
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=20)},
-            plot_bgcolor='white', 
-            hovermode="x unified", 
-            margin=dict(t=80, l=50, r=180, b=50), 
-            height=750,
+            plot_bgcolor='white', hovermode="x unified", height=750,
+            margin=dict(t=80, l=50, r=180, b=50),
             legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
+        # 8. AXES
         fig.update_yaxes(
-            title=f"Temperature ({unit_label})", 
-            range=y_range, 
-            gridcolor='Gainsboro', 
-            gridwidth=0.5,
-            minor=dict(dtick=5 if unit_mode == "Fahrenheit" else 2, gridcolor='WhiteSmoke', showgrid=True),
-            mirror=True, showline=True, linecolor='black', linewidth=1
+            title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', 
+            gridwidth=0.5, mirror=True, showline=True, linecolor='black',
+            minor=dict(dtick=5 if unit_mode == "Fahrenheit" else 2, gridcolor='WhiteSmoke', showgrid=True)
         )
+        fig.update_xaxes(range=[start_ts, end_ts], mirror=True, showline=True, linecolor='black')
 
-        fig.update_xaxes(
-            range=[start_ts, end_ts],
-            mirror=True, showline=True, linecolor='black', linewidth=1,
-            showgrid=False,
-            tickformat="%a\n%m/%d",
-            hoverformat="%I:%M %p, %b %d"
-        )
-
-        # 9. CUSTOM VERTICAL GRIDLINES (6-Hour Frequency)
+        # 9. GRIDLINES (6h frequency)
         grid_times = pd.date_range(start=start_ts, end=end_ts, freq='6h')
         for ts in grid_times:
             if ts.hour == 0:
-                # Midnight: Bold for Monday, medium for other days
                 color, width = ("DimGray", 2) if ts.weekday() == 0 else ("DarkGray", 1)
             else:
-                # 6am, 12pm, 6pm: Subtle
                 color, width = "GhostWhite", 0.5
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 10. RED 'NOW' MARKER
+        # 10. MARKERS & REFERENCES
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
-        fig.add_annotation(
-            x=now_marker, 
-            y=1.02, 
-            yref="paper", 
-            text="NOW", 
-            showarrow=False, 
-            # FIX: Changed 'bold=True' to 'weight="bold"'
-            font=dict(color="Red", size=10, weight="bold"), 
-            xanchor="left"
-        )
+        fig.add_annotation(x=now_marker, y=1.02, yref="paper", text="NOW", showarrow=False, 
+                           font=dict(color="Red", size=10, weight="bold"))
 
-        # 11. HORIZONTAL REFERENCES (e.g., 10.2F Burgundy Line)
         for val, label in active_refs:
-            c_val = convert_val(val) # Assumes convert_val is defined in your script
+            c_val = convert_val(val) 
             l_color = "#800020" if str(val) == "10.2" else "RoyalBlue"
-            
-            fig.add_hline(y=c_val, line_dash="dash", line_color=l_color, line_width=1.5)
-            fig.add_annotation(
-                x=1, xref="paper", y=c_val, 
-                text=f"{label}: {round(c_val, 1)}{unit_label}", 
-                showarrow=False, font=dict(color=l_color, size=11, weight="bold"), 
-                xanchor="left", bgcolor="rgba(255,255,255,0.8)"
-            )
+            fig.add_hline(y=c_val, line_dash="dash", line_color=l_color)
+            fig.add_annotation(x=1, xref="paper", y=c_val, text=f"{label}: {round(c_val, 1)}{unit_label}", 
+                               showarrow=False, font=dict(color=l_color, size=11, weight="bold"), 
+                               xanchor="left", bgcolor="rgba(255,255,255,0.8)")
         
         return fig
-
     except Exception as e:
         st.error(f"Critical Graph Error: {e}")
         return go.Figure()
