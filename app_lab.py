@@ -120,26 +120,17 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = [] 
 
-   # --- 1. PREPARE SENSOR LIST ---
+    # --- 1. LOAD MAPPINGS (Exactly like Cloud Run) ---
     name_map = {}
     try:
-        query = f"SELECT CAST(PhysicalID AS STRING) as PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
-        if target_location and target_location != "ALL":
-            query += f" WHERE Location = '{target_location}'"
-        
+        query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
         meta_df = client.query(query).to_dataframe()
         for _, row in meta_df.iterrows():
-            # FORCIBLY remove decimals and extra spaces
-            raw_id = str(row['PhysicalID']).split('.')[0].replace('.0', '').strip()
-            clean_id = re.sub(r'[^0-9]', '', raw_id)
-            
-            if clean_id:
-                name_map[clean_id] = str(row['NodeNum']).strip()
-        
-        st.info(f"🚀 API Request: Searching for {len(name_map)} sensors...")
+            # Use the integer-only part for the key
+            p_id = str(row['PhysicalID']).split('.')[0].strip()
+            name_map[p_id] = str(row['NodeNum']).strip()
     except Exception as e:
-        st.error(f"Metadata Error: {e}")
-        return pd.DataFrame()
+        st.error(f"Metadata load failed: {e}")
 
     for acc in ACCOUNTS:
         try:
@@ -148,40 +139,51 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
             token = requests.post(f"{BASE_URL}/oauth/accesstoken", 
                                    json={"authorization": auth_r.get('authorization')}, 
                                    timeout=15).json().get('accesstoken')
+            headers = {"Authorization": token}
+
+            # --- 3. GET SENSOR LIST FROM API (The "Cloud Run way") ---
+            # This ensures we use the exact IDs the API recognizes
+            s_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20).json()
+            api_sensor_ids = list(s_resp.keys()) if isinstance(s_resp, dict) else [s['id'] for s in s_resp]
             
-            # --- 3. FETCH SAMPLES ---
-            api_sensor_ids = list(name_map.keys())
-            payload = {
-                "limit": 10000, 
-                "startTime": start_dt.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
-                "endTime": end_dt.strftime('%Y-%m-%dT%H:%M:%S+0000'),
-                "sensors": api_sensor_ids
-            }
-            
-            # Temporary debug to see what the API is actually being asked
-            st.write("DEBUG - API Payload:", {"sensors": list(name_map.keys())[:3], "startTime": start_dt.strftime('%Y-%m-%dT%H:%M:%S+0000')})
-            r = requests.post(f"{BASE_URL}/samples", headers={"Authorization": token}, json=payload, timeout=60).json()
-            
-            samples_data = r.get('sensors', {})
-            for s_id, samples in samples_data.items():
-                # Match incoming ID back to friendly name
-                lookup_id = re.sub(r'[^0-9]', '', str(s_id).split('.')[0])
-                friendly_name = name_map.get(lookup_id, s_id)
+            st.info(f"📡 {acc['email']}: Found {len(api_sensor_ids)} sensors live on account.")
+
+            # --- 4. FETCH SAMPLES ---
+            current_start = start_dt
+            while current_start < end_dt:
+                current_end = min(current_start + timedelta(hours=24), end_dt)
                 
-                for s in samples:
-                    # Check for Standard or Thermocouple Temp
-                    temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
-                    if temp is None and s.get('temp_c') is not None:
-                        temp = (float(s['temp_c']) * 1.8) + 32
+                for i in range(0, len(api_sensor_ids), 10):
+                    chunk = api_sensor_ids[i:i+10]
+                    payload = {
+                        "limit": 10000, 
+                        "startTime": current_start.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
+                        "endTime": current_end.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                        "sensors": chunk
+                    }
+                    r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60).json()
                     
-                    if temp is not None:
-                        all_records.append({
-                            "timestamp": pd.to_datetime(s['observed']),   
-                            "NodeNum": str(friendly_name),
-                            "PhysicalID": str(s_id),
-                            "temperature": round(float(temp), 2)
-                        })
-            time.sleep(0.1)
+                    samples_data = r.get('sensors', {})
+                    for s_id, samples in samples_data.items():
+                        # CLEAN ID: Strip decimals from API ID to match spreadsheet key
+                        clean_api_id = str(s_id).split('.')[0]
+                        friendly_name = name_map.get(clean_api_id, s_id)
+                        
+                        for s in samples:
+                            # TC.x + Standard Temp Logic
+                            temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                            if temp is None and s.get('temp_c') is not None:
+                                temp = (float(s['temp_c']) * 1.8) + 32
+                            
+                            if temp is not None:
+                                all_records.append({
+                                    "timestamp": pd.to_datetime(s['observed']),   
+                                    "NodeNum": str(friendly_name),
+                                    "PhysicalID": str(s_id),
+                                    "temperature": round(float(temp), 2)
+                                })
+                current_start = current_end
+                time.sleep(0.1)
         except Exception as e:
             st.error(f"Account {acc['email']} failed: {e}")
             
