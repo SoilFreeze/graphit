@@ -111,13 +111,8 @@ def rebuild_master_table(mode="preserve"):
 # --- FETCH SENSORPUSH --- #
 ############################
 def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
-    """
-    High-Speed Filtered Fetch:
-    - Filters by Location (Pipe) to reduce API load.
-    - Uses 8-digit Integer ID matching.
-    - Standardizes columns to 'NodeNum' and 'PhysicalID'.
-    """
     import time
+    import re
     ACCOUNTS = [
         {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
         {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
@@ -125,8 +120,6 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = []
 
-    # --- 1. GET FILTERED SENSOR LIST FROM METADATA ---
-    # This is the "Speed Secret": We only fetch what we need.
     name_map = {}
     try:
         query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
@@ -135,62 +128,55 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
         
         meta_df = client.query(query).to_dataframe()
         for _, row in meta_df.iterrows():
-            clean_id = str(row['PhysicalID']).split('.')[0].strip()
+            # Logic to handle both 17014898.44 and 17:01:48:98 formats
+            pid = str(row['PhysicalID']).split('.')[0]
+            clean_id = re.sub(r'[^0-9]', '', pid)
             name_map[clean_id] = str(row['NodeNum']).strip()
-            
-        st.info(f"🚀 Filtering fetch for {len(name_map)} sensors in {target_location if target_location else 'All Locations'}")
     except Exception as e:
-        st.error(f"Metadata filter failed: {e}")
+        st.error(f"Metadata Error: {e}")
 
-    # Exit early if no sensors found for that location
     if not name_map:
+        st.warning("No sensors found in metadata for this location.")
         return pd.DataFrame()
 
     for acc in ACCOUNTS:
         try:
-            # --- 2. AUTH ---
-            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
+            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=acc).json()
             token = requests.post(f"{BASE_URL}/oauth/accesstoken", 
-                                   json={"authorization": auth_resp.get('authorization')}, timeout=15).json().get('accesstoken')
+                                   json={"authorization": auth_resp.get('authorization')}).json().get('accesstoken')
             headers = {"Authorization": token}
 
-            # --- 3. SAMPLES (Narrowed to specific sensor IDs) ---
-            # We skip the "Get All Sensors" step and go straight to IDs from our metadata
+            # Map the clean metadata IDs back to what SensorPush expects (usually just the number)
             api_sensor_ids = list(name_map.keys())
             
-            current_start = start_dt
-            while current_start < end_dt:
-                current_end = min(current_start + timedelta(hours=24), end_dt)
+            payload = {
+                "limit": 10000, 
+                "startTime": start_dt.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
+                "endTime": end_dt.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                "sensors": api_sensor_ids
+            }
+            
+            r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60).json()
+            
+            for s_id, samples in r.get('sensors', {}).items():
+                # Matching
+                lookup_id = re.sub(r'[^0-9]', '', str(s_id).split('.')[0])
+                friendly_name = name_map.get(lookup_id, s_id)
                 
-                # Fetch only the sensors belonging to the target Pipe
-                payload = {
-                    "limit": 10000, 
-                    "startTime": current_start.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
-                    "sensors": api_sensor_ids
-                }
-                r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60).json()
-                
-                data = r.get('sensors', {})
-                for s_id, samples in data.items():
-                    clean_api_id = str(s_id).split('.')[0]
-                    friendly_name = name_map.get(clean_api_id, s_id)
+                for s in samples:
+                    temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                    if temp is None and s.get('temp_c') is not None:
+                        temp = (float(s['temp_c']) * 1.8) + 32
                     
-                    for s in samples:
-                        temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
-                        if temp is None and s.get('temp_c') is not None:
-                            temp = (float(s['temp_c']) * 1.8) + 32
-                        
-                        if temp is not None:
-                            all_records.append({
-                                'timestamp': pd.to_datetime(s.get('observed')),
-                                'NodeNum': str(friendly_name),
-                                'PhysicalID': str(s_id),
-                                'temperature': round(float(temp), 2)
-                            })
-                current_start = current_end
-                time.sleep(0.1) 
+                    if temp is not None:
+                        all_records.append({
+                            'timestamp': pd.to_datetime(s.get('observed')),
+                            'NodeNum': friendly_name,
+                            'PhysicalID': str(s_id),
+                            'temperature': round(float(temp), 2)
+                        })
         except Exception as e:
-            st.error(f"Fetch Error ({acc['email']}): {e}")
+            st.error(f"Account Error: {e}")
             
     return pd.DataFrame(all_records)
 ################################
