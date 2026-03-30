@@ -120,18 +120,19 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
     BASE_URL = "https://api.sensorpush.com/api/v1"
     all_records = [] 
 
-    # --- 1. PREPARE SENSOR LIST ---
+   # --- 1. PREPARE SENSOR LIST ---
     name_map = {}
     try:
-        query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
+        query = f"SELECT CAST(PhysicalID AS STRING) as PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
         if target_location and target_location != "ALL":
             query += f" WHERE Location = '{target_location}'"
         
         meta_df = client.query(query).to_dataframe()
         for _, row in meta_df.iterrows():
-            # Standardizing ID to pure integer string
-            raw_id = str(row['PhysicalID']).split('.')[0]
+            # FORCIBLY remove decimals and extra spaces
+            raw_id = str(row['PhysicalID']).split('.')[0].replace('.0', '').strip()
             clean_id = re.sub(r'[^0-9]', '', raw_id)
+            
             if clean_id:
                 name_map[clean_id] = str(row['NodeNum']).strip()
         
@@ -156,7 +157,9 @@ def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
                 "endTime": end_dt.strftime('%Y-%m-%dT%H:%M:%S+0000'),
                 "sensors": api_sensor_ids
             }
-
+            
+            # Temporary debug to see what the API is actually being asked
+            st.write("DEBUG - API Payload:", {"sensors": list(name_map.keys())[:3], "startTime": start_dt.strftime('%Y-%m-%dT%H:%M:%S+0000')})
             r = requests.post(f"{BASE_URL}/samples", headers={"Authorization": token}, json=payload, timeout=60).json()
             
             samples_data = r.get('sensors', {})
