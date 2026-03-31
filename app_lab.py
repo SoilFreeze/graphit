@@ -406,12 +406,12 @@ elif service == "📊 Client Portal":
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
         # --- DATA PREPARATION ---
-        # FIXED: Using 'approve IS TRUE' for BigQuery Boolean compatibility
+        # FIXED: Using 'approve = "TRUE"' (String comparison) to match your BQ schema
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
             WHERE Project = '{target_proj}' 
-            AND approve IS TRUE
+            AND approve = 'TRUE'
             AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
             ORDER BY timestamp ASC
         """
@@ -451,6 +451,7 @@ elif service == "📊 Client Portal":
                 # ---------------------------------------------------------
                 with tab_depth:
                     st.subheader("Vertical Temperature Profiles")
+                    # Ensure Depth is treated as a number for the Y-axis
                     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
                     depth_df = p_df.dropna(subset=['Depth_Num'])
                     
@@ -467,7 +468,7 @@ elif service == "📊 Client Portal":
 
                         for loc in d_locs_batch:
                             with st.expander(f"📏 Depth Profile: {loc}", expanded=True):
-                                # Get latest reading per depth level
+                                # Get latest reading per depth level for this pipe
                                 latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(20)
                                 
                                 fig_depth = px.line(latest_profile, x="temperature", y="Depth_Num", 
@@ -475,7 +476,7 @@ elif service == "📊 Client Portal":
                                                     labels={"temperature": "Temp (°F)", "Depth_Num": "Depth (ft)"},
                                                     title=f"Current Vertical Profile: {loc}")
                                 
-                                fig_depth.update_yaxes(autorange="reversed") # 0ft at the top
+                                fig_depth.update_yaxes(autorange="reversed") # Surface (0) at top
                                 fig_depth.update_layout(plot_bgcolor='white', height=450)
                                 fig_depth.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
                                 
@@ -486,10 +487,11 @@ elif service == "📊 Client Portal":
                 # ---------------------------------------------------------
                 with tab_table:
                     st.subheader("Current Project Readings")
+                    # FIXED: Match the STRING 'TRUE' schema
                     latest_q = f"""
                         SELECT Location, Depth, Bank, temperature, timestamp
                         FROM `{MASTER_TABLE}`
-                        WHERE Project = '{target_proj}' AND approve IS TRUE
+                        WHERE Project = '{target_proj}' AND approve = 'TRUE'
                         QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1
                     """
                     l_df = client.query(latest_q).to_dataframe()
