@@ -831,58 +831,86 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    # 1. SIMPLE UI FOR SELECTION
-    st.subheader("🧹 Deep Data Scrub")
-    scrub_target = st.radio("Select Source Table to Clean", ["SensorPush", "Lord"], horizontal=True)
-    
-    # Set variables strictly based on the radio selection
-    if scrub_target == "SensorPush":
-        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-        # If 'sensor_id' failed, it is likely 'NodeNum' or 'sensor_name'
-        # Adjust this string to match your BigQuery Column name exactly
-        id_col = "sensor_id" 
-    else:
-        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-        id_col = "NodeNum"
+    # 1. TAB NAVIGATION
+    tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
 
-    st.divider()
+    with tab_scrub:
+        st.subheader("🧹 Deep Data Scrub")
+        scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
+        
+        # Mapping table and ID column based on your script's internal logic
+        if scrub_target == "SensorPush":
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+            id_col = "sensor_id" # Matches rebuild_master_table logic
+        else:
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+            id_col = "NodeNum" # Matches rebuild_master_table logic
 
-    # 2. THE SCRUB BUTTON
-    if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
-        with st.spinner(f"Cleaning {scrub_target}..."):
-            # This is a 'flat' query. It does not reference other tables or subqueries.
-            dedup_sql = f"""
-            CREATE OR REPLACE TABLE `{target_table}` AS 
-            SELECT * EXCEPT(rn) FROM (
-                SELECT *, 
-                       ROW_NUMBER() OVER(
-                           PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                           ORDER BY timestamp DESC
-                       ) as rn
-                FROM `{target_table}` 
-                WHERE temperature IS NOT NULL
-            ) WHERE rn = 1
-            """
+        if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
+            with st.spinner(f"Cleaning {scrub_target}..."):
+                # Flat query to remove NULLs and keep 1 reading per hour
+                dedup_sql = f"""
+                CREATE OR REPLACE TABLE `{target_table}` AS 
+                SELECT * EXCEPT(rn) FROM (
+                    SELECT *, 
+                           ROW_NUMBER() OVER(
+                               PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                               ORDER BY timestamp DESC
+                           ) as rn
+                    FROM `{target_table}` 
+                    WHERE temperature IS NOT NULL
+                ) WHERE rn = 1
+                """
+                try:
+                    client.query(dedup_sql).result()
+                    st.success(f"Success! {scrub_target} cleaned (1 reading per hour).")
+                    st.balloons()
+                except Exception as e:
+                    st.error(f"Scrub Error: {e}")
+
+    with tab_approve:
+        st.subheader("✅ Bulk Approval")
+        if st.button("Mark All Data as Approved"):
             try:
-                client.query(dedup_sql).result()
-                st.success(f"Success! {scrub_target} has been cleaned (1 reading per hour).")
-                st.balloons()
+                # Direct update to the master table
+                approve_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` SET is_approved = TRUE WHERE Project = '{selected_project}'"
+                job = client.query(approve_sql)
+                job.result()
+                st.success(f"Updated {job.num_dml_affected_rows} rows to Approved.")
             except Exception as e:
-                st.error(f"Scrub Error: {e}")
-                st.info("Check if the column name for SensorPush is actually 'sensor_id' in BigQuery.")
+                st.error(f"Approval Error: {e}")
 
-    st.divider()
+    with tab_cleaner:
+        st.subheader("🧨 Surgical Data Cleaner")
+        clean_mode = st.radio("Scope", ["Single Pipe/Bank", "Global (Entire Project)"], horizontal=True)
+        
+        col1, col2 = st.columns(2)
+        start_del = col1.date_input("Start Date", datetime.now() - timedelta(days=1))
+        end_del = col2.date_input("End Date", datetime.now())
+        
+        target_loc = None
+        if clean_mode == "Single Pipe/Bank":
+            try:
+                loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE Project = '{selected_project}'"
+                loc_df = client.query(loc_q).to_dataframe()
+                target_loc = st.selectbox("Select Pipe", sorted(loc_df['Location'].dropna().unique()))
+            except:
+                st.warning("Could not load locations. Ensure project is selected.")
 
-    # 3. BULK APPROVAL BUTTON
-    st.subheader("✅ Bulk Approval")
-    if st.button("Mark All Project Data as Approved"):
-        try:
-            approve_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` SET is_approved = TRUE WHERE Project = '{selected_project}'"
-            job = client.query(approve_sql)
-            job.result()
-            st.success(f"Updated {job.num_dml_affected_rows} rows to Approved.")
-        except Exception as e:
-            st.error(f"Approval Error: {e}")
+        if st.button("🔥 DELETE SELECTED DATA"):
+            # Constructing the deletion clause
+            del_clause = f"Project = '{selected_project}' AND CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
+            if clean_mode == "Single Pipe/Bank" and target_loc:
+                del_clause += f" AND Location = '{target_loc}'"
+            
+            delete_sql = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE {del_clause}"
+            try:
+                with st.spinner("Deleting data..."):
+                    del_job = client.query(delete_sql)
+                    del_job.result()
+                    st.success(f"Purge complete. Removed {del_job.num_dml_affected_rows} records.")
+            except Exception as e:
+                st.error(f"Delete Error: {e}")
 
 ###########################
 # --- END ADMIN TOOLS --- #
