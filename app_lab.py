@@ -1076,11 +1076,12 @@ elif service == "🛠️ Admin Tools":
     if not selected_project:
         st.warning("Please select an Active Project in the sidebar to use Admin Tools.")
     else:
-        # Table References
+        # Define table paths
         RAW_SP = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
         RAW_LORD = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
         MASTER = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
 
+        # Using tabs to separate functionality
         tab_scrub, tab_approve, tab_cleaner = st.tabs([
             "🧹 Deep Data Scrub", 
             "✅ Raw Bulk Approval", 
@@ -1089,19 +1090,16 @@ elif service == "🛠️ Admin Tools":
         
         # --- TAB 1: DEEP DATA SCRUB ---
         with tab_scrub:
-            st.subheader("🧹 Database Optimization")
-            st.info("This action removes NULL temperatures and ensures exactly one reading exists per sensor, per hour.")
+            st.subheader("🧹 Database Scrub & Optimization")
+            st.info("This removes NULL temperatures and ensures exactly one reading exists per sensor, per hour.")
             
-            scrub_target = st.radio("Select Source Table to Clean", ["SensorPush", "Lord"], horizontal=True)
+            scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
             target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
             id_col = "sensor_id" if scrub_target == "SensorPush" else "NodeNum"
 
             if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
-                with st.spinner(f"Optimizing {scrub_target} table..."):
-                    # This SQL avoids all correlated subqueries by using a simple Window Function
-                    # 1. Filters out NULLs
-                    # 2. Groups by Node and Hour
-                    # 3. Picks the most recent reading in that hour
+                with st.spinner(f"Cleaning {scrub_target}..."):
+                    # Standard deduplication query using window functions (Safe from 400 errors)
                     dedup_sql = f"""
                     CREATE OR REPLACE TABLE `{target_table}` AS 
                     SELECT * EXCEPT(rn) FROM (
@@ -1116,7 +1114,7 @@ elif service == "🛠️ Admin Tools":
                     """
                     try:
                         client.query(dedup_sql).result()
-                        st.success(f"Success! {scrub_target} has been cleaned and downsampled to 1 reading/hour.")
+                        st.success(f"Success! {scrub_target} has been scrubbed and deduplicated.")
                         st.balloons()
                     except Exception as e:
                         st.error(f"Scrub Error: {e}")
@@ -1124,42 +1122,50 @@ elif service == "🛠️ Admin Tools":
         # --- TAB 2: RAW BULK APPROVAL ---
         with tab_approve:
             st.subheader("✅ Bulk Data Approval")
-            st.write(f"Mark all current data points for **{selected_project}** as approved.")
+            st.write(f"This will mark ALL data points for project **{selected_project}** as 'Approved'.")
             if st.button(f"Confirm Bulk Approval"):
                 approve_sql = f"UPDATE `{MASTER}` SET is_approved = TRUE WHERE Project = '{selected_project}'"
                 try:
-                    job = client.query(approve_sql)
-                    job.result()
-                    st.success(f"Approval Complete: {job.num_dml_affected_rows} rows updated.")
+                    with st.spinner("Updating records..."):
+                        job = client.query(approve_sql)
+                        job.result()
+                        st.success(f"Done! {job.num_dml_affected_rows} rows marked as approved.")
                 except Exception as e:
                     st.error(f"Approval Error: {e}")
 
         # --- TAB 3: SURGICAL DATA CLEANER ---
         with tab_cleaner:
-            st.subheader("🧨 Surgical Data Cleaner")
-            clean_scope = st.radio("Cleaning Scope", ["Single Pipe/Bank", "Entire Project"], horizontal=True)
+            st.subheader("🧨 Surgical Data Removal")
+            st.write("Remove erroneous data points by time range and location.")
+            
+            clean_mode = st.selectbox("Cleaning Scope", ["Single Pipe/Bank", "Global (Entire Project)"])
             
             col1, col2 = st.columns(2)
-            start_date = col1.date_input("Start of Bad Data", datetime.now() - timedelta(days=1))
-            end_date = col2.date_input("End of Bad Data", datetime.now())
+            start_del = col1.date_input("Start Date of Bad Data", datetime.now() - timedelta(days=1))
+            end_del = col2.date_input("End Date of Bad Data", datetime.now())
             
             target_loc = None
-            if clean_scope == "Single Pipe/Bank":
-                # Basic query to get locations for the dropdown
-                loc_list = client.query(f"SELECT DISTINCT Location FROM `{MASTER}` WHERE Project = '{selected_project}'").to_dataframe()
-                target_loc = st.selectbox("Select Pipe", sorted(loc_list['Location'].dropna().unique()))
-
-            if st.button("🔥 DELETE DATA"):
-                # Construct the logic
-                del_clause = f"Project = '{selected_project}' AND timestamp BETWEEN '{start_date}' AND '{end_date}'"
-                if clean_scope == "Single Pipe/Bank":
-                    del_clause += f" AND Location = '{target_loc}'"
-                
-                delete_sql = f"DELETE FROM `{MASTER}` WHERE {del_clause}"
+            if clean_mode == "Single Pipe/Bank":
                 try:
-                    del_job = client.query(delete_sql)
-                    del_job.result()
-                    st.success(f"Purge successful. Deleted {del_job.num_dml_affected_rows} records.")
+                    loc_q = f"SELECT DISTINCT Location FROM `{MASTER}` WHERE Project = '{selected_project}'"
+                    loc_df = client.query(loc_q).to_dataframe()
+                    target_loc = st.selectbox("Select Pipe to Clean", sorted(loc_df['Location'].dropna().unique()))
+                except:
+                    st.error("No location metadata found for this project.")
+
+            st.error(f"DANGER ZONE: This will permanently delete data from {start_del} to {end_del}.")
+            
+            if st.button("🔥 EXECUTE DATA DELETE"):
+                where_clause = f"Project = '{selected_project}' AND timestamp BETWEEN '{start_del}' AND '{end_del}'"
+                if clean_mode == "Single Pipe/Bank" and target_loc:
+                    where_clause += f" AND Location = '{target_loc}'"
+                
+                delete_sql = f"DELETE FROM `{MASTER}` WHERE {where_clause}"
+                try:
+                    with st.spinner("Deleting data..."):
+                        del_job = client.query(delete_sql)
+                        del_job.result()
+                        st.success(f"Purge complete. Removed {del_job.num_dml_affected_rows} data points.")
                 except Exception as e:
                     st.error(f"Delete Error: {e}")
 ###########################
