@@ -394,42 +394,43 @@ if service == "🏠 Executive Summary":
 # --- CLIENT PORTAL --- #
 #########################
 elif service == "📊 Client Portal":
-    # 1. Input: Project ID (Passed as a string to match BigQuery schema)
-    # You can replace 'selected_project' with a hardcoded number like '2541' if needed
+    # --- CONFIGURATION: HARD-WIRE HERE ---
+    # To hard-code for a client, change to: target_proj = "2329"
+    # To keep it dynamic, leave as: target_proj = selected_project
     target_proj = selected_project 
-    st.header(f"📊 Client Portal Preview: Project {target_proj}")
-
+    
     if not target_proj:
         st.warning("Please select a project in the sidebar to view the portal.")
     else:
+        st.header(f"📊 Project Status: {target_proj}")
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
         # --- DATA PREPARATION ---
-        # Fetch 7 days of approved data for the specific project
+        # FIXED: Using 'approve IS TRUE' for BigQuery Boolean compatibility
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
-            WHERE Project = '{target_proj}' AND approve = TRUE
+            WHERE Project = '{target_proj}' 
+            AND approve IS TRUE
             AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
             ORDER BY timestamp ASC
         """
         try:
             p_df = client.query(portal_q).to_dataframe()
+            
             if p_df.empty:
                 st.info(f"No approved data found for Project {target_proj} in the last 7 days.")
             else:
                 # ---------------------------------------------------------
-                # TAB 1: TIME VS TEMPERATURE (Standard Timeline)
+                # TAB 1: TIME VS TEMPERATURE
                 # ---------------------------------------------------------
                 with tab_time:
                     st.subheader("Historical Timeline")
-                    # Group by Location (Pipe/Bank) to create individual graphs
                     locations = sorted(p_df['Location'].unique())
                     
-                    # Pagination for large projects (10 graphs per page)
                     t_batch_size = 10
                     t_total_pages = max((len(locations) // t_batch_size) + 1, 1)
-                    t_page = st.number_input("Timeline Page", 1, t_total_pages, 1, key="t_page")
+                    t_page = st.number_input("Timeline Page", 1, t_total_pages, 1, key=f"t_page_{target_proj}")
                     
                     t_start = (t_page - 1) * t_batch_size
                     t_locs_batch = locations[t_start : t_start + t_batch_size]
@@ -437,75 +438,77 @@ elif service == "📊 Client Portal":
                     for loc in t_locs_batch:
                         with st.expander(f"📈 Timeline: {loc}", expanded=True):
                             loc_data = p_df[p_df['Location'] == loc]
-                            fig = build_standard_sf_graph(loc_data, f"{loc} - Last 7 Days", 
-                                                         p_df['timestamp'].min(), p_df['timestamp'].max(), 
-                                                         active_refs)
-                            st.plotly_chart(fig, use_container_width=True, key=f"time_{loc}")
+                            # Uses your existing global graph engine
+                            fig = build_standard_sf_graph(
+                                loc_data, f"{loc} - 7 Day History", 
+                                p_df['timestamp'].min(), p_df['timestamp'].max(), 
+                                active_refs
+                            )
+                            st.plotly_chart(fig, use_container_width=True, key=f"time_{target_proj}_{loc}")
 
                 # ---------------------------------------------------------
-                # TAB 2: TEMPERATURE VS DEPTH (Profile View)
+                # TAB 2: TEMPERATURE VS DEPTH
                 # ---------------------------------------------------------
                 with tab_depth:
                     st.subheader("Vertical Temperature Profiles")
-                    # We only want Pipes (rows with Depth) for this view
                     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
                     depth_df = p_df.dropna(subset=['Depth_Num'])
                     
                     d_locations = sorted(depth_df['Location'].unique())
-                    d_batch_size = 10
-                    d_total_pages = max((len(d_locations) // d_batch_size) + 1, 1)
-                    d_page = st.number_input("Depth Profile Page", 1, d_total_pages, 1, key="d_page")
-                    
-                    d_start = (d_page - 1) * d_batch_size
-                    d_locs_batch = d_locations[d_start : d_start + d_batch_size]
+                    if not d_locations:
+                        st.info("No depth-based sensor data (Pipes) found.")
+                    else:
+                        d_batch_size = 10
+                        d_total_pages = max((len(d_locations) // d_batch_size) + 1, 1)
+                        d_page = st.number_input("Profile Page", 1, d_total_pages, 1, key=f"d_page_{target_proj}")
+                        
+                        d_start = (d_page - 1) * d_batch_size
+                        d_locs_batch = d_locations[d_start : d_start + d_batch_size]
 
-                    for loc in d_locs_batch:
-                        with st.expander(f"📏 Depth Profile: {loc}", expanded=True):
-                            # Create a vertical chart (Y = Depth, X = Temp)
-                            # We take the most recent reading for the profile
-                            latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(20)
-                            
-                            fig_depth = px.line(latest_profile, x="temperature", y="Depth_Num", 
-                                                markers=True, color="Location",
-                                                labels={"temperature": "Temp (°F)", "Depth_Num": "Depth (ft)"},
-                                                title=f"Current Profile: {loc}")
-                            
-                            fig_depth.update_yaxes(autorange="reversed") # Surface (0) at top
-                            fig_depth.update_layout(plot_bgcolor='white', height=400)
-                            fig_depth.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
-                            
-                            st.plotly_chart(fig_depth, use_container_width=True, key=f"depth_{loc}")
+                        for loc in d_locs_batch:
+                            with st.expander(f"📏 Depth Profile: {loc}", expanded=True):
+                                # Get latest reading per depth level
+                                latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(20)
+                                
+                                fig_depth = px.line(latest_profile, x="temperature", y="Depth_Num", 
+                                                    markers=True,
+                                                    labels={"temperature": "Temp (°F)", "Depth_Num": "Depth (ft)"},
+                                                    title=f"Current Vertical Profile: {loc}")
+                                
+                                fig_depth.update_yaxes(autorange="reversed") # 0ft at the top
+                                fig_depth.update_layout(plot_bgcolor='white', height=450)
+                                fig_depth.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+                                
+                                st.plotly_chart(fig_depth, use_container_width=True, key=f"depth_{target_proj}_{loc}")
 
                 # ---------------------------------------------------------
-                # TAB 3: PROJECT DATA (Table View)
+                # TAB 3: PROJECT DATA (100 rows per page)
                 # ---------------------------------------------------------
                 with tab_table:
                     st.subheader("Current Project Readings")
-                    # Get the absolute latest reading for every pipe/node in project
                     latest_q = f"""
                         SELECT Location, Depth, Bank, temperature, timestamp
                         FROM `{MASTER_TABLE}`
-                        WHERE Project = '{target_proj}' AND approve = TRUE
+                        WHERE Project = '{target_proj}' AND approve IS TRUE
                         QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1
                     """
                     l_df = client.query(latest_q).to_dataframe()
                     
                     if not l_df.empty:
-                        # Clean up formatting for display
+                        # Formatting: XX.X°F
                         l_df['Current Temp'] = l_df['temperature'].apply(lambda x: f"{round(x, 1)}°F")
                         l_df['Last Seen'] = pd.to_datetime(l_df['timestamp']).dt.strftime('%m/%d %H:%M')
                         
-                        # Pagination (100 pipes per page)
                         batch_size = 100
                         total_pages = max((len(l_df) // batch_size) + 1, 1)
-                        page = st.number_input("Data Page", 1, total_pages, 1, key="data_page")
+                        page = st.number_input("Data Page", 1, total_pages, 1, key=f"p_page_{target_proj}")
                         
                         start_idx = (page - 1) * batch_size
                         display_df = l_df.iloc[start_idx : start_idx + batch_size]
                         
                         st.table(display_df[["Location", "Depth", "Bank", "Current Temp", "Last Seen"]])
                     else:
-                        st.info("No current data available for this project.")
+                        st.info("No current approved data available.")
 
         except Exception as e:
             st.error(f"Portal Preview Error: {e}")
