@@ -395,8 +395,6 @@ if service == "🏠 Executive Summary":
 #########################
 elif service == "📊 Client Portal":
     # --- CONFIGURATION: HARD-WIRE HERE ---
-    # To hard-code for a client, change to: target_proj = "2329"
-    # To keep it dynamic, leave as: target_proj = selected_project
     target_proj = selected_project 
     
     if not target_proj:
@@ -406,26 +404,39 @@ elif service == "📊 Client Portal":
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
         # --- DATA PREPARATION ---
+        # Fetch up to 12 weeks of data to support the slider range
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
             WHERE Project = '{target_proj}' 
             AND approve = 'TRUE'
-            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 12 WEEK)
             ORDER BY timestamp ASC
         """
         try:
             p_df = client.query(portal_q).to_dataframe()
             
             if p_df.empty:
-                st.info(f"No approved data found for Project {target_proj} in the last 7 days.")
+                st.info(f"No approved data found for Project {target_proj}.")
             else:
                 # ---------------------------------------------------------
-                # TAB 1: TIME VS TEMPERATURE
+                # TAB 1: TIME VS TEMPERATURE (Adjustable Lookback)
                 # ---------------------------------------------------------
                 with tab_time:
                     st.subheader("Historical Timeline")
-                    locations = sorted(p_df['Location'].unique())
+                    
+                    # Lookback Slider
+                    weeks_view = st.slider("Weeks to View", 1, 12, 6, key=f"weeks_{target_proj}")
+                    
+                    # Calculate view window
+                    end_view = pd.Timestamp.now(tz=pytz.UTC)
+                    start_view = end_view - timedelta(weeks=weeks_view)
+                    
+                    # Filter dataframe for the selected window
+                    p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC) if p_df['timestamp'].dt.tzinfo is None else pd.to_datetime(p_df['timestamp'])
+                    time_filtered_df = p_df[p_df['timestamp'] >= start_view]
+
+                    locations = sorted(time_filtered_df['Location'].unique())
                     
                     t_batch_size = 10
                     t_total_pages = max((len(locations) // t_batch_size) + 1, 1)
@@ -436,18 +447,18 @@ elif service == "📊 Client Portal":
 
                     for loc in t_locs_batch:
                         with st.expander(f"📈 Timeline: {loc}", expanded=True):
-                            loc_data = p_df[p_df['Location'] == loc]
-                            # FIXED: Added unit_mode and unit_label to the function call
+                            loc_data = time_filtered_df[time_filtered_df['Location'] == loc]
+                            
                             fig = build_standard_sf_graph(
                                 loc_data, 
-                                f"{loc} - 7 Day History", 
-                                p_df['timestamp'].min(), 
-                                p_df['timestamp'].max(), 
+                                f"{loc} - {weeks_view} Week History", 
+                                start_view, 
+                                end_view, 
                                 active_refs,
                                 unit_mode,
                                 unit_label
                             )
-                            st.plotly_chart(fig, use_container_width=True, key=f"time_{target_proj}_{loc}")
+                            st.plotly_chart(fig, use_container_width=True, key=f"time_{target_proj}_{loc}_{weeks_view}")
 
                 # ---------------------------------------------------------
                 # TAB 2: TEMPERATURE VS DEPTH
@@ -470,7 +481,8 @@ elif service == "📊 Client Portal":
 
                         for loc in d_locs_batch:
                             with st.expander(f"📏 Depth Profile: {loc}", expanded=True):
-                                latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(20)
+                                # Always use the latest available profile regardless of slider
+                                latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(25)
                                 
                                 fig_depth = px.line(latest_profile, x="temperature", y="Depth_Num", 
                                                     markers=True,
