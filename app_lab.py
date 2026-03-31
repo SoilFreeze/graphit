@@ -268,33 +268,30 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # Query for the last 24 hours to calculate Min/Max/Delta and Status
+    # Updated Query: Removed the 24h/72h time constraint to show ALL sensors
+    # QUALIFY ensures we get exactly one (the most recent) row per NodeNum
     summary_q = f"""
         SELECT Project, Location, Depth, Bank, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
-        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
     """
     if selected_project: 
-        summary_q += f" AND Project = '{selected_project}'"
+        summary_q += f" WHERE Project = '{selected_project}'"
+    
+    summary_q += " QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
     
     try:
-        with st.spinner("Calculating engineering metrics..."):
+        with st.spinner("Loading all sensor states..."):
             raw_data = client.query(summary_q).to_dataframe()
         
         if raw_data.empty:
-            st.warning("📡 No data found in the last 24 hours.")
+            st.warning("📡 No sensors found in the master_data table.")
         else:
             summary_rows = []
             now = pd.Timestamp.now(tz=pytz.UTC)
             
-            # Group by Node for trend analysis
-            for node, group in raw_data.groupby('NodeNum'):
-                group = group.sort_values('timestamp', ascending=False)
-                latest = group.iloc[0]
-                earliest = group.iloc[-1]
-                
-                # Status/Latency Logic
-                ts = latest['timestamp'].tz_localize(pytz.UTC) if latest['timestamp'].tzinfo is None else latest['timestamp']
+            for _, row in raw_data.iterrows():
+                # Latency & Status Logic
+                ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
                 latency_hrs = (now - ts).total_seconds() / 3600
                 
                 if latency_hrs > 24: status_icon = "🔴"
@@ -303,21 +300,30 @@ if service == "🏠 Executive Summary":
                 else: status_icon = "🟢"
 
                 # Bank vs Depth Display Logic
-                bank_val = str(latest['Bank']).strip()
-                pos_display = f"Bank {bank_val}" if bank_val not in ["", "None", "nan", "null"] else f"{latest['Depth']} ft"
+                bank_val = str(row['Bank']).strip()
+                pos_display = f"Bank {bank_val}" if bank_val not in ["", "None", "nan", "null"] else f"{row['Depth']} ft"
 
-                # Temp Metrics (Formatted as XX.X°F)
-                curr_t = latest['temperature']
-                delta_val = curr_t - earliest['temperature']
+                # Fetching 24h Delta for this specific node
+                # Note: This sub-query calculates the trend specifically for this row
+                delta_q = f"""
+                    SELECT 
+                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{row['NodeNum']}' ORDER BY timestamp DESC LIMIT 1) - 
+                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{row['NodeNum']}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1)
+                    as delta_raw
+                """
+                delta_res = client.query(delta_q).to_dataframe()
+                raw_delta = delta_res['delta_raw'].iloc[0] if not delta_res.empty else 0.0
 
+                # Formatted Metrics
+                curr_t = row['temperature']
+                
                 summary_rows.append({
-                    "Node": node,
-                    "Pipe/Bank": latest['Location'],
+                    "Node": row['NodeNum'],
+                    "Pipe/Bank": row['Location'],
                     "Pos/Depth": pos_display,
                     "Current": f"{round(convert_val(curr_t), 1)}°F",
-                    "Min": f"{round(convert_val(group['temperature'].min()), 1)}°F",
-                    "Max": f"{round(convert_val(group['temperature'].max()), 1)}°F",
-                    "Delta": round(delta_val * (5/9) if unit_mode == "Celsius" else delta_val, 2),
+                    "Delta": raw_delta, # Keep as float for the color-styler logic
+                    "Delta_Display": f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F",
                     "Last Seen": f"{ts.strftime('%m/%d %H:%M')} {status_icon}"
                 })
 
@@ -337,7 +343,8 @@ if service == "🏠 Executive Summary":
                 return f'background-color: {bg}; color: {color}'
 
             st.subheader("📡 Engineering Command Center")
-            st.table(summary_df.style.applymap(style_delta, subset=['Delta']))
+            # We display Delta_Display for the text, but use Delta for the color logic
+            st.table(summary_df.style.applymap(style_delta, subset=['Delta']).format({"Delta": lambda x: f"{round(x, 1)}°F"}))
 
     except Exception as e: 
         st.error(f"Summary Error: {e}")
