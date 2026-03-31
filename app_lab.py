@@ -394,43 +394,121 @@ if service == "🏠 Executive Summary":
 # --- CLIENT PORTAL --- #
 #########################
 elif service == "📊 Client Portal":
-    st.header("📊 Project Status Report")
-    try:
-        # UPDATED: Using new field names 'Project', 'Location', and 'approve'
-        meta_q = f"SELECT DISTINCT Project, Location FROM `{MASTER_TABLE}` WHERE approve = 'TRUE'"
-        meta_df = client.query(meta_q).to_dataframe()
-        
-        if meta_df.empty:
-            st.warning("No approved data available in the Temperature.master_data table.")
-        else:
-            c1, c2, c3 = st.columns([1, 1, 1])
-            with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].dropna().unique()))
-            with c2: 
-                locs = sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].dropna().unique())
-                sel_loc = st.selectbox("Pipe / Bank", locs)
-            with c3: weeks_to_view = st.slider("Weeks to View", 1, 12, 6)
-            
-            # Pulling data using the new schema
-            data_q = f"""
-                SELECT timestamp, temperature, Depth, NodeNum as sensor_name 
-                FROM `{MASTER_TABLE}` 
-                WHERE Project = '{sel_proj}' AND Location = '{sel_loc}' AND approve = 'TRUE' 
-                ORDER BY timestamp ASC
-            """
-            df_c = client.query(data_q).to_dataframe()
-            df_c['timestamp'] = pd.to_datetime(df_c['timestamp'])
+    # 1. Input: Project ID (Passed as a string to match BigQuery schema)
+    # You can replace 'selected_project' with a hardcoded number like '2541' if needed
+    target_proj = selected_project 
+    st.header(f"📊 Client Portal Preview: Project {target_proj}")
 
-            max_approved_ts = df_c['timestamp'].max()
-            current_monday = (max_approved_ts - timedelta(days=max_approved_ts.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            start_view = current_monday - timedelta(weeks=weeks_to_view - 1)
-            end_view = current_monday + timedelta(days=7)
+    if not target_proj:
+        st.warning("Please select a project in the sidebar to view the portal.")
+    else:
+        tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
-            st.subheader("📈 Historical Trends")
-            fig_timeline = build_standard_sf_graph(df_c, f"{weeks_to_view}-Week Trend: {sel_loc}", start_view, end_view, active_refs)
-            st.plotly_chart(fig_timeline, use_container_width=True)
-            
-    except Exception as e: 
-        st.error(f"Portal Error: {e}")
+        # --- DATA PREPARATION ---
+        # Fetch 7 days of approved data for the specific project
+        portal_q = f"""
+            SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
+            FROM `{MASTER_TABLE}`
+            WHERE Project = '{target_proj}' AND approve = TRUE
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+            ORDER BY timestamp ASC
+        """
+        try:
+            p_df = client.query(portal_q).to_dataframe()
+            if p_df.empty:
+                st.info(f"No approved data found for Project {target_proj} in the last 7 days.")
+            else:
+                # ---------------------------------------------------------
+                # TAB 1: TIME VS TEMPERATURE (Standard Timeline)
+                # ---------------------------------------------------------
+                with tab_time:
+                    st.subheader("Historical Timeline")
+                    # Group by Location (Pipe/Bank) to create individual graphs
+                    locations = sorted(p_df['Location'].unique())
+                    
+                    # Pagination for large projects (10 graphs per page)
+                    t_batch_size = 10
+                    t_total_pages = max((len(locations) // t_batch_size) + 1, 1)
+                    t_page = st.number_input("Timeline Page", 1, t_total_pages, 1, key="t_page")
+                    
+                    t_start = (t_page - 1) * t_batch_size
+                    t_locs_batch = locations[t_start : t_start + t_batch_size]
+
+                    for loc in t_locs_batch:
+                        with st.expander(f"📈 Timeline: {loc}", expanded=True):
+                            loc_data = p_df[p_df['Location'] == loc]
+                            fig = build_standard_sf_graph(loc_data, f"{loc} - Last 7 Days", 
+                                                         p_df['timestamp'].min(), p_df['timestamp'].max(), 
+                                                         active_refs)
+                            st.plotly_chart(fig, use_container_width=True, key=f"time_{loc}")
+
+                # ---------------------------------------------------------
+                # TAB 2: TEMPERATURE VS DEPTH (Profile View)
+                # ---------------------------------------------------------
+                with tab_depth:
+                    st.subheader("Vertical Temperature Profiles")
+                    # We only want Pipes (rows with Depth) for this view
+                    p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+                    depth_df = p_df.dropna(subset=['Depth_Num'])
+                    
+                    d_locations = sorted(depth_df['Location'].unique())
+                    d_batch_size = 10
+                    d_total_pages = max((len(d_locations) // d_batch_size) + 1, 1)
+                    d_page = st.number_input("Depth Profile Page", 1, d_total_pages, 1, key="d_page")
+                    
+                    d_start = (d_page - 1) * d_batch_size
+                    d_locs_batch = d_locations[d_start : d_start + d_batch_size]
+
+                    for loc in d_locs_batch:
+                        with st.expander(f"📏 Depth Profile: {loc}", expanded=True):
+                            # Create a vertical chart (Y = Depth, X = Temp)
+                            # We take the most recent reading for the profile
+                            latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(20)
+                            
+                            fig_depth = px.line(latest_profile, x="temperature", y="Depth_Num", 
+                                                markers=True, color="Location",
+                                                labels={"temperature": "Temp (°F)", "Depth_Num": "Depth (ft)"},
+                                                title=f"Current Profile: {loc}")
+                            
+                            fig_depth.update_yaxes(autorange="reversed") # Surface (0) at top
+                            fig_depth.update_layout(plot_bgcolor='white', height=400)
+                            fig_depth.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+                            
+                            st.plotly_chart(fig_depth, use_container_width=True, key=f"depth_{loc}")
+
+                # ---------------------------------------------------------
+                # TAB 3: PROJECT DATA (Table View)
+                # ---------------------------------------------------------
+                with tab_table:
+                    st.subheader("Current Project Readings")
+                    # Get the absolute latest reading for every pipe/node in project
+                    latest_q = f"""
+                        SELECT Location, Depth, Bank, temperature, timestamp
+                        FROM `{MASTER_TABLE}`
+                        WHERE Project = '{target_proj}' AND approve = TRUE
+                        QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1
+                    """
+                    l_df = client.query(latest_q).to_dataframe()
+                    
+                    if not l_df.empty:
+                        # Clean up formatting for display
+                        l_df['Current Temp'] = l_df['temperature'].apply(lambda x: f"{round(x, 1)}°F")
+                        l_df['Last Seen'] = pd.to_datetime(l_df['timestamp']).dt.strftime('%m/%d %H:%M')
+                        
+                        # Pagination (100 pipes per page)
+                        batch_size = 100
+                        total_pages = max((len(l_df) // batch_size) + 1, 1)
+                        page = st.number_input("Data Page", 1, total_pages, 1, key="data_page")
+                        
+                        start_idx = (page - 1) * batch_size
+                        display_df = l_df.iloc[start_idx : start_idx + batch_size]
+                        
+                        st.table(display_df[["Location", "Depth", "Bank", "Current Temp", "Last Seen"]])
+                    else:
+                        st.info("No current data available for this project.")
+
+        except Exception as e:
+            st.error(f"Portal Preview Error: {e}")
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
