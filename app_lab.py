@@ -205,16 +205,13 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         else:
             y_range = [-20, 80]
             
-        # 2. SMART LABELING (Fixed 'NoneType' sorting error)
+        # 2. SMART LABELING
         def create_label(row):
             b_val = str(row.get('bank', '')).strip().lower()
             d_val = str(row.get('depth', '')).strip().lower()
             s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
-
-            if b_val not in ["", "none", "nan", "null"]:
-                return f"Bank {row['bank']} ({s_name})"
-            if d_val not in ["", "none", "nan", "null"]:
-                return f"{row['depth']}ft ({s_name})"
+            if b_val not in ["", "none", "nan", "null"]: return f"Bank {row['bank']} ({s_name})"
+            if d_val not in ["", "none", "nan", "null"]: return f"{row['depth']}ft ({s_name})"
             return f"Unmapped ({s_name})"
 
         display_df['label'] = display_df.apply(create_label, axis=1)
@@ -243,21 +240,29 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
                 name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
             ))
 
-        # 5. STANDARD STYLING (Matches your established Office project look)
+        # 5. STANDARD STYLING & GRIDLINES (6h Frequency)
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
-            plot_bgcolor='white', hovermode="x unified", height=550,
-            margin=dict(t=80, l=50, r=180, b=50), # Wide right margin for legend
+            plot_bgcolor='white', hovermode="x unified", height=600,
+            margin=dict(t=80, l=50, r=180, b=50),
             legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
-        fig.update_yaxes(
-            title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', 
-            gridwidth=0.5, mirror=True, showline=True, linecolor='black'
-        )
-        fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black', gridcolor='Gainsboro')
+        # Draw 6-hour vertical gridlines
+        grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
+        for ts in grid_times:
+            color, width = ("DimGray", 1.5) if ts.hour == 0 else ("GhostWhite", 0.5)
+            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 6. REFERENCE LINES
+        # 6. "NOW" MARKER
+        now_marker = pd.Timestamp.now(tz=pytz.UTC)
+        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
+        fig.add_annotation(x=now_marker, y=1.02, yref="paper", text="NOW", showarrow=False, font=dict(color="Red", size=10, weight="bold"))
+
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', mirror=True, showline=True, linecolor='black')
+        fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
+
+        # Reference Lines
         for val, label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
             fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", opacity=0.6)
@@ -410,14 +415,13 @@ if service == "🏠 Executive Summary":
             
             # Use st.dataframe with hide_index=True to remove the left column
             st.dataframe(
-                display_batch[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
-                    lambda x: [style_delta(rv) for rv in display_batch['Delta_Val']], axis=0, subset=['Delta']
-                ),
-                use_container_width=True,
-                hide_index=True, # Removes the sensor number/index column
-                height=600
-            )
-
+            display_batch[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
+                lambda x: [style_delta(rv) for rv in display_batch['Delta_Val']], axis=0, subset=['Delta']
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=600
+        )
     except Exception as e: 
         st.error(f"Summary Error: {traceback.format_exc()}")
 #################################
@@ -427,7 +431,6 @@ if service == "🏠 Executive Summary":
 # --- CLIENT PORTAL --- #
 #########################
 elif service == "📊 Client Portal":
-    # CONFIGURATION: Set the project context
     target_proj = selected_project 
     
     if not target_proj:
@@ -436,12 +439,11 @@ elif service == "📊 Client Portal":
         st.header(f"📊 Project Status: {target_proj}")
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
-        # Fetch 12 weeks of data for the timeline
+        # ROBUST QUERY: Search for project ID as string, no 'approve' restriction for preview
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
-            WHERE Project = '{target_proj}' 
-            AND approve = 'TRUE'
+            WHERE CAST(Project AS STRING) LIKE '%{target_proj}%' 
             AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
             ORDER BY Location ASC, timestamp ASC
         """
@@ -449,15 +451,12 @@ elif service == "📊 Client Portal":
             p_df = client.query(portal_q).to_dataframe()
             
             if p_df.empty:
-                st.info(f"No approved data found for Project {target_proj}.")
+                st.info(f"No data found for Project {target_proj} in the last 12 weeks.")
             else:
                 p_df['timestamp'] = pd.to_datetime(p_df['timestamp'])
-                if p_df['timestamp'].dt.tz is None:
-                    p_df['timestamp'] = p_df['timestamp'].dt.tz_localize(pytz.UTC)
-                else:
-                    p_df['timestamp'] = p_df['timestamp'].dt.tz_convert(pytz.UTC)
+                if p_df['timestamp'].dt.tz is None: p_df['timestamp'] = p_df['timestamp'].dt.tz_localize(pytz.UTC)
+                else: p_df['timestamp'] = p_df['timestamp'].dt.tz_convert(pytz.UTC)
 
-                # --- TAB 1: TIME VS TEMPERATURE ---
                 with tab_time:
                     weeks_view = st.slider("Weeks to View", 1, 12, 6, key=f"wk_{target_proj}")
                     end_view = pd.Timestamp.now(tz=pytz.UTC)
@@ -467,39 +466,30 @@ elif service == "📊 Client Portal":
                     locations = sorted(time_filtered_df['Location'].unique())
                     
                     t_page = st.number_input("Timeline Page", 1, max((len(locations)//10)+1, 1), 1, key=f"pg_{target_proj}")
-                    t_locs = locations[(t_page-1)*10 : t_page*10]
-
-                    for loc in t_locs:
+                    for loc in locations[(t_page-1)*10 : t_page*10]:
                         with st.expander(f"📈 {loc}", expanded=True):
                             loc_data = time_filtered_df[time_filtered_df['Location'] == loc]
                             fig = build_standard_sf_graph(loc_data, f"{loc} Timeline", start_view, end_view, active_refs, unit_mode, unit_label)
                             st.plotly_chart(fig, use_container_width=True)
 
-                # --- TAB 2: TEMPERATURE VS DEPTH ---
                 with tab_depth:
                     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
                     depth_df = p_df.dropna(subset=['Depth_Num'])
                     d_locs = sorted(depth_df['Location'].unique())
-                    
-                    if not d_locs:
-                        st.info("No depth-based data found.")
+                    if not d_locs: st.info("No depth-based data found.")
                     else:
                         d_page = st.number_input("Profile Page", 1, max((len(d_locs)//10)+1, 1), 1, key=f"dp_{target_proj}")
                         for loc in d_locs[(d_page-1)*10 : d_page*10]:
                             with st.expander(f"📏 {loc}", expanded=True):
-                                # Current profile uses last 25 readings for smoothness
                                 latest = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(25)
                                 fig_d = px.line(latest, x="temperature", y="Depth_Num", markers=True, title=f"Current Profile: {loc}")
-                                fig_d.update_yaxes(autorange="reversed", title="Depth (ft)", gridcolor='Gainsboro')
-                                fig_d.update_xaxes(title=f"Temp ({unit_label})", gridcolor='Gainsboro')
+                                fig_d.update_yaxes(autorange="reversed", title="Depth (ft)")
                                 fig_d.update_layout(plot_bgcolor='white')
                                 fig_d.add_vline(x=32 if unit_mode == "Fahrenheit" else 0, line_dash="dash", line_color="blue")
                                 st.plotly_chart(fig_d, use_container_width=True)
 
-                # --- TAB 3: PROJECT DATA ---
                 with tab_table:
-                    # Combined Location/Pos sorting
-                    latest_q = f"SELECT Location, Depth, Bank, temperature, NodeNum FROM `{MASTER_TABLE}` WHERE Project = '{target_proj}' AND approve = 'TRUE' QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1 ORDER BY Location ASC"
+                    latest_q = f"SELECT Location, Depth, Bank, temperature, NodeNum FROM `{MASTER_TABLE}` WHERE CAST(Project AS STRING) LIKE '%{target_proj}%' QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1 ORDER BY Location ASC"
                     l_df = client.query(latest_q).to_dataframe()
                     if not l_df.empty:
                         l_df['Pos'] = l_df.apply(lambda r: f"Bank {r['Bank']}" if str(r['Bank']).strip().lower() not in ["","none","nan","null"] else f"{r['Depth']} ft", axis=1)
