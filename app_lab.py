@@ -226,6 +226,12 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
 # --- GRAPH ENGINE --- #
 ########################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
+    """
+    Standard Graph: Temp (y) vs Time (x)
+    - X-Axis: Dark line Monday midnight, medium midnight, light 6-hour.
+    - Y-Axis: Major lines at 20, minor at 5. Range 80 to -20.
+    - Legend: 'Bank' with location and nodenum in parentheses.
+    """
     try:
         display_df = df.copy()
         if display_df.empty:
@@ -234,25 +240,26 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         display_df.columns = [c.lower() for c in display_df.columns]
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         
-        # Ensure timezone consistency
         if display_df['timestamp'].dt.tz is None:
             display_df['timestamp'] = display_df['timestamp'].dt.tz_localize(pytz.UTC)
         else:
             display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC)
 
-        # 1. UNIT CONVERSION
+        # 1. UNIT CONVERSION & RANGE
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
-            y_range = [-30, 30]
+            y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
+            dt_major, dt_minor = 10, 2 
         else:
             y_range = [-20, 80]
-            
-        # 2. SMART LABELING (Fixed 'NoneType' sorting error)
+            dt_major, dt_minor = 20, 5
+
+        # 2. SMART LABELING
         def create_label(row):
             b_val = str(row.get('bank', '')).strip().lower()
             d_val = str(row.get('depth', '')).strip().lower()
             s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
-
+            
             if b_val not in ["", "none", "nan", "null"]:
                 return f"Bank {row['bank']} ({s_name})"
             if d_val not in ["", "none", "nan", "null"]:
@@ -261,7 +268,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
 
         display_df['label'] = display_df.apply(create_label, axis=1)
         
-        # 3. GAP HANDLING (> 6 hrs)
+        # 3. GAP HANDLING
         processed_dfs = []
         for lbl in sorted(display_df['label'].unique()):
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
@@ -273,7 +280,6 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(seconds=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
             processed_dfs.append(s_df)
-            
         clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
         
         # 4. FIGURE SETUP
@@ -285,31 +291,51 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
                 name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
             ))
 
-        # 5. STANDARD STYLING & GRIDLINES
+        # 5. STYLING & GRIDLINES
         fig.update_layout(
-            title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
+            title={'text': f"{title} Time vs Temperature", 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
             plot_bgcolor='white', hovermode="x unified", height=600,
             margin=dict(t=80, l=50, r=180, b=50),
             legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
-        # 6-hour vertical gridlines
-        grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
-        for ts in grid_times:
-            color, width = ("DimGray", 1.5) if ts.hour == 0 else ("GhostWhite", 0.5)
+        # X-AXIS VERTICAL GRIDLINES (HIERARCHY)
+        grid_6h = pd.date_range(start=start_view, end=end_view, freq='6h')
+        for ts in grid_6h:
+            if ts.weekday() == 0 and ts.hour == 0:
+                # Monday Midnight - Darkest/Thickest
+                color, width = "Black", 2
+            elif ts.hour == 0:
+                # Other Midnights - Medium
+                color, width = "Gray", 1
+            else:
+                # 6-Hour Intervals - Lightest
+                color, width = "LightGray", 0.5
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # "NOW" MARKER
+        # "NOW" MARKER (Red Dashed)
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
-        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
-        fig.add_annotation(x=now_marker, y=1.02, yref="paper", text="NOW", showarrow=False, font=dict(color="Red", size=10, weight="bold"))
+        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', mirror=True, showline=True, linecolor='black')
+        # Y-AXIS GRID (20 Major, 5 Minor)
+        fig.update_yaxes(
+            title=f"Temp ({unit_label})", range=y_range,
+            gridcolor='Gainsboro', gridwidth=0.5, # Minor grid color
+            dtick=dt_minor,
+            mirror=True, showline=True, linecolor='black'
+        )
+        # Major Y-Gridlines (Every 20)
+        for y_val in range(int(y_range[0]), int(y_range[1]) + 1, dt_major):
+            fig.add_hline(y=y_val, line_width=1.2, line_color="DimGray", layer='below')
+
         fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
 
+        # REFERENCE LINES
         for val, label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", opacity=0.6)
+            # Type A: Burgundy (Maroon) dashed; Others: Blue dashed
+            l_color = "maroon" if "Type A" in label else "RoyalBlue"
+            fig.add_hline(y=c_val, line_dash="dash", line_color=l_color, opacity=0.8)
         
         return fig
     except Exception as e:
