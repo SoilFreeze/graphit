@@ -1073,65 +1073,106 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
-    RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
-    MAPPING_TABLE = f"{PROJECT_ID}.Temperature.master_data" 
+    if not selected_project:
+        st.warning("Please select an Active Project in the sidebar to use Admin Tools.")
+    else:
+        # Define table paths for easier reference
+        RAW_SP = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+        RAW_LORD = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+        MASTER = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
 
-    tab_scrub, tab_approve = st.tabs(["🧹 Deep Data Scrubber", "✅ Raw Bulk Approval"])
-    
-    with tab_scrub:
-        st.subheader("🧹 Deep Raw Source Cleaning & Diagnostics")
-        scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_source")
-        target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
-        id_col = "sensor_id" if scrub_target == "SensorPush" else "NodeNum"
-
-        # Fetch All Sensors for Admin View
-        admin_query = f"""
-            SELECT 
-                {id_col} as Node, 
-                COUNT(*) as Total_Points, 
-                MIN(temperature) as Min_Temp,
-                MAX(temperature) as Max_Temp,
-                MAX(timestamp) as Last_Seen_TS,
-                (SELECT temperature FROM `{target_table}` t2 WHERE t2.{id_col} = t1.{id_col} ORDER BY timestamp DESC LIMIT 1) - 
-                (SELECT temperature FROM `{target_table}` t3 WHERE t3.{id_col} = t1.{id_col} AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as Raw_Delta
-            FROM `{target_table}` t1
-            GROUP BY Node
-        """
+        tab_scrub, tab_approve, tab_cleaner = st.tabs([
+            "🧹 Deep Data Scrub", 
+            "✅ Raw Bulk Approval", 
+            "🧨 Surgical Data Cleaner"
+        ])
         
-        try:
-            admin_df = client.query(admin_query).to_dataframe()
-            if not admin_df.empty:
-                st.write("### 🔍 Filter All Sensors")
-                f_col1, f_col2 = st.columns(2)
-                with f_col1:
-                    delta_filter = st.slider("Min Delta Threshold (Abs Value)", 0.0, 20.0, 0.0)
-                with f_col2:
-                    hours_silent = st.number_input("Show sensors silent for more than (Hours):", min_value=0, value=0)
+        # --- TAB 1: DEEP DATA SCRUB ---
+        with tab_scrub:
+            st.subheader("🧹 Database Optimization")
+            st.info("This removes NULLs and ensures exactly one reading per hour (Deduplication).")
+            
+            target_source = st.radio("Target Source", ["SensorPush", "Lord"], horizontal=True)
+            target_table = RAW_SP if target_source == "SensorPush" else RAW_LORD
+            id_col = "sensor_id" if target_source == "SensorPush" else "NodeNum"
 
-                # Processing Filters
-                now = pd.Timestamp.now(tz=pytz.UTC)
-                admin_df['Last_Seen_TS'] = pd.to_datetime(admin_df['Last_Seen_TS']).dt.tz_localize(pytz.UTC) if admin_df['Last_Seen_TS'].dt.tzinfo is None else pd.to_datetime(admin_df['Last_Seen_TS'])
-                admin_df['Hours_Ago'] = (now - admin_df['Last_Seen_TS']).dt.total_seconds() / 3600
+            if st.button(f"🚀 Execute Deep Scrub on {target_source}"):
+                with st.spinner(f"Scrubbing {target_source}..."):
+                    scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS
+                    SELECT * EXCEPT(row_num)
+                    FROM (
+                        SELECT *, 
+                               ROW_NUMBER() OVER(
+                                   PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                                   ORDER BY timestamp DESC
+                               ) as row_num
+                        FROM `{target_table}`
+                        WHERE temperature IS NOT NULL
+                    )
+                    WHERE row_num = 1
+                    """
+                    try:
+                        client.query(scrub_sql).result()
+                        st.success(f"Successfully scrubbed {target_source}. Table is now optimized.")
+                    except Exception as e:
+                        st.error(f"Scrub Error: {e}")
+
+        # --- TAB 2: RAW BULK APPROVAL ---
+        with tab_approve:
+            st.subheader("✅ Bulk Data Approval")
+            st.warning(f"This will mark ALL data for '{selected_project}' as 'Approved'.")
+            
+            if st.button(f"Confirm Bulk Approval for {selected_project}"):
+                approve_sql = f"""
+                UPDATE `{MASTER}`
+                SET is_approved = TRUE
+                WHERE Project = '{selected_project}'
+                """
+                try:
+                    with st.spinner("Updating records..."):
+                        query_job = client.query(approve_sql)
+                        query_job.result()
+                        st.success(f"Done! {query_job.num_dml_affected_rows} rows marked as approved.")
+                except Exception as e:
+                    st.error(f"Approval Error: {e}")
+
+        # --- TAB 3: SURGICAL DATA CLEANER ---
+        with tab_cleaner:
+            st.subheader("🧨 Surgical Data Removal")
+            st.write("Carefully remove erroneous data points by time range.")
+            
+            clean_mode = st.selectbox("Cleaning Scope", ["Single Pipe/Bank", "Global (Entire Project)"])
+            
+            col1, col2 = st.columns(2)
+            start_del = col1.date_input("Start Date of Bad Data", datetime.now() - timedelta(days=1))
+            end_del = col2.date_input("End Date of Bad Data", datetime.now())
+            
+            # Additional filter for Single Pipe mode
+            target_loc = None
+            if clean_mode == "Single Pipe/Bank":
+                loc_q = f"SELECT DISTINCT Location FROM `{MASTER}` WHERE Project = '{selected_project}'"
+                loc_df = client.query(loc_q).to_dataframe()
+                target_loc = st.selectbox("Select Pipe to Clean", sorted(loc_df['Location'].dropna().unique()))
+
+            st.error(f"DANGER ZONE: This will permanently delete data from {start_del} to {end_del}.")
+            
+            if st.button("🔥 EXECUTE DATA DELETE"):
+                # Construct the WHERE clause based on mode
+                where_clause = f"Project = '{selected_project}' AND timestamp BETWEEN '{start_del}' AND '{end_del}'"
+                if clean_mode == "Single Pipe/Bank":
+                    where_clause += f" AND Location = '{target_loc}'"
                 
-                filtered_df = admin_df[(admin_df['Raw_Delta'].abs() >= delta_filter) & (admin_df['Hours_Ago'] >= hours_silent)].copy()
-
-                # Formatting to XX.X°F
-                filtered_df['Min'] = filtered_df['Min_Temp'].apply(lambda x: f"{round(float(x), 1)}°F")
-                filtered_df['Max'] = filtered_df['Max_Temp'].apply(lambda x: f"{round(float(x), 1)}°F")
-                filtered_df['Delta'] = filtered_df['Raw_Delta'].apply(lambda x: f"{round(x, 1)}°F" if pd.notnull(x) else "N/A")
-                filtered_df['Last Seen'] = filtered_df['Last_Seen_TS'].dt.strftime('%m/%d %H:%M')
-
-                st.write(f"Showing {len(filtered_df)} sensors:")
-                st.dataframe(filtered_df[["Node", "Min", "Max", "Delta", "Last Seen", "Total_Points"]], use_container_width=True, height=500)
-        except Exception as e:
-            st.error(f"Admin View Error: {e}")
-
-        st.divider()
-        if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
-            with st.spinner("Cleaning..."):
-                # Your existing Purge/Dedup SQL remains here
-                st.success("Scrub complete.")
+                delete_sql = f"DELETE FROM `{MASTER}` WHERE {where_clause}"
+                
+                try:
+                    with st.spinner("Deleting data..."):
+                        del_job = client.query(delete_sql)
+                        del_job.result()
+                        st.success(f"Purge complete. Removed {del_job.num_dml_affected_rows} data points.")
+                        st.info("Note: You may need to rebuild the master table if you deleted from raw sources.")
+                except Exception as e:
+                    st.error(f"Delete Error: {e}")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
