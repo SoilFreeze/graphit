@@ -500,9 +500,6 @@ if service == "🏠 Executive Summary":
 #########################
 # --- CLIENT PORTAL --- #
 #########################
-#########################
-# --- CLIENT PORTAL --- #
-#########################
 elif service == "📊 Client Portal":
     target_proj = selected_project 
     
@@ -828,174 +825,6 @@ elif service == "📤 Data Intake Lab":
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
-###########################
-# --- NODE DIAGNOSTIC --- #
-###########################  
-elif service == "📉 Node Diagnostics":
-    st.header(f"📉 Diagnostics: {selected_project}")
-    try:
-        # Get locations for the ALREADY selected project
-        loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project = '{selected_project}'"
-        loc_df = client.query(loc_q).to_dataframe()
-        
-        c1, c2 = st.columns([2, 1])
-        with c1: 
-            sel_loc = st.selectbox("Pipe / Bank", sorted(loc_df['Location'].dropna().unique()))
-        with c2: 
-            weeks = st.slider("Lookback (Weeks)", 1, 12, 6)
-
-        # Date Math
-        now = pd.Timestamp.now(tz=pytz.UTC)
-        monday_this_week = (now - pd.offsets.Day(now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        start_view = monday_this_week - pd.offsets.Week(int(weeks)-1)
-        end_view = monday_this_week + pd.offsets.Day(7)
-
-        data_q = f"""
-            SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
-            FROM `{PROJECT_ID}.Temperature.master_data` 
-            WHERE Project = '{selected_project}' AND Location = '{sel_loc}' 
-            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
-            ORDER BY timestamp ASC
-        """
-        df_g = client.query(data_q).to_dataframe()
-        
-        if not df_g.empty:
-            st.plotly_chart(build_standard_sf_graph(df_g, f"{selected_project} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
-        else:
-            st.warning("No data found.")
-    except Exception as e:
-        st.error(f"Diagnostics Error: {e}")
-###############################
-# --- END NODE DIAGNOSTIC --- #
-###############################
-###############################
-# --- DATA INTAKE LAB --- #
-###############################
-elif service == "📤 Data Intake Lab":
-    st.header("📤 Data Ingestion & Recovery")
-    
-    tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
-
-    with tab1:
-        st.subheader("📄 Manual File Ingestion")
-        st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
-        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
-        
-        if u_file is not None:
-            import io
-            filename = u_file.name.lower()
-            raw_content = u_file.getvalue().decode('utf-8').splitlines()
-            
-            # --- DETECT FILE TYPE ---
-            is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
-            is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
-            
-            # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
-            if is_lord_wide:
-                try:
-                    start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
-                    df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
-                    # Rename 'Time' to 'timestamp' and melt columns into 'NodeNum'
-                    df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
-                    df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
-                    df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
-                    df_long = df_long.dropna(subset=['temperature'])
-                    
-                    st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
-                    st.dataframe(df_long.head())
-                    if st.button("🚀 UPLOAD LORD WIDE DATA"):
-                        client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
-                                                         f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                        st.success("Uploaded successfully to raw_lord!")
-                except Exception as e: st.error(f"Lord Wide Error: {e}")
-
-            # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
-            elif is_lord_narrow:
-                try:
-                    df_ln = pd.read_csv(io.StringIO("\n".join(raw_content)))
-                    # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
-                    df_ln = df_ln.rename(columns={
-                        'Timestamp': 'timestamp', 
-                        'nodenumber': 'NodeNum', 
-                        'temperature': 'temperature'
-                    })
-                    df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
-                    df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
-                    
-                    st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
-                    st.dataframe(df_ln.head())
-                    if st.button("🚀 UPLOAD LORD NARROW DATA"):
-                        client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
-                                                         f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                        st.success("Uploaded successfully to raw_lord!")
-                except Exception as e: st.error(f"Lord Narrow Error: {e}")
-
-            # --- CASE 3: SENSORPUSH ---
-            else:
-                try:
-                    header_idx = -1
-                    for i, line in enumerate(raw_content[:50]):
-                        if "SensorId" in line or "Observed" in line:
-                            header_idx = i; break
-                    
-                    if header_idx != -1:
-                        df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
-                        ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
-                        
-                        df_up = pd.DataFrame()
-                        # Mapping to the raw_sensorpush schema
-                        df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
-                        df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
-                        t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
-                        df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
-                        df_up = df_up.dropna(subset=['timestamp', 'temperature'])
-
-                        st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
-                        if st.button("🚀 UPLOAD SENSORPUSH"):
-                            client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                            st.success("Uploaded successfully to raw_sensorpush!")
-                    else:
-                        st.error("Format not recognized. Check CSV headers.")
-                except Exception as e: st.error(f"SensorPush Error: {e}")
-
-    with tab2:
-        st.subheader("📡 Cloud-to-Cloud API Sync")
-        c1, c2 = st.columns(2)
-        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
-        end_date = c2.date_input("End Date", datetime.now())
-        
-        if st.button("🛰️ FETCH & SYNC"):
-            # Level 3: Date Conversion
-            start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
-            end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
-            
-            with st.spinner("Fetching data..."):
-                # Level 4: Call the Function
-                df_api = fetch_sensorpush_data(start_dt, end_dt)
-                
-                if not df_api.empty:
-                    # Level 5: Upload to BigQuery
-                    table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                    client.load_table_from_dataframe(df_api, table_path).result()
-                    st.success(f"✅ Integrated {len(df_api)} points successfully!")
-                else:
-                    # Level 5: Fallback
-                    st.warning("No data found for this range.")
-                    
-    with tab3:
-        st.subheader("🛠️ Metadata Management")
-        u_meta = st.file_uploader("Upload Master_Log / Metadata CSV", type=['csv'])
-        if u_meta:
-            df_new_meta = pd.read_csv(u_meta)
-            st.dataframe(df_new_meta.head())
-            if st.button("Overwrite Master Metadata"):
-                # This replaces the mapping table in BigQuery
-                client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
-                                                 job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-                st.success("Master Metadata Updated!")
-###############################
-# --- END DATA INTAKE LAB --- #
-###############################
 #######################
 # --- ADMIN TOOLS --- #
 #######################             
@@ -1009,7 +838,9 @@ elif service == "🛠️ Admin Tools":
     # Set variables strictly based on the radio selection
     if scrub_target == "SensorPush":
         target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-        id_col = "sensor_id"
+        # If 'sensor_id' failed, it is likely 'NodeNum' or 'sensor_name'
+        # Adjust this string to match your BigQuery Column name exactly
+        id_col = "sensor_id" 
     else:
         target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
         id_col = "NodeNum"
@@ -1017,11 +848,9 @@ elif service == "🛠️ Admin Tools":
     st.divider()
 
     # 2. THE SCRUB BUTTON
-    # No SQL runs until this button is physically pressed
     if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
         with st.spinner(f"Cleaning {scrub_target}..."):
             # This is a 'flat' query. It does not reference other tables or subqueries.
-            # It strictly deduplicates the selected table.
             dedup_sql = f"""
             CREATE OR REPLACE TABLE `{target_table}` AS 
             SELECT * EXCEPT(rn) FROM (
@@ -1040,6 +869,7 @@ elif service == "🛠️ Admin Tools":
                 st.balloons()
             except Exception as e:
                 st.error(f"Scrub Error: {e}")
+                st.info("Check if the column name for SensorPush is actually 'sensor_id' in BigQuery.")
 
     st.divider()
 
