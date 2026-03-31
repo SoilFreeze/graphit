@@ -834,19 +834,21 @@ elif service == "🛠️ Admin Tools":
     # 1. TAB NAVIGATION
     tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
 
+    # Physical table name for DML operations (UPDATE/DELETE)
+    # Based on your rebuild_master_table logic:
+    PHYSICAL_MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
         scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
         
-        # Table Path
         target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
         
-        # UPDATED: Both tables appear to use 'NodeNum' based on your screenshot/previous success
+        # Using NodeNum as confirmed by your schema screenshot
         id_col = "NodeNum" 
 
         if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
             with st.spinner(f"Cleaning {scrub_target}..."):
-                # Flat deduplication query
                 dedup_sql = f"""
                 CREATE OR REPLACE TABLE `{target_table}` AS 
                 SELECT * EXCEPT(rn) FROM (
@@ -868,10 +870,11 @@ elif service == "🛠️ Admin Tools":
 
     with tab_approve:
         st.subheader("✅ Bulk Approval")
+        st.info(f"Targeting physical table: {PHYSICAL_MASTER_TABLE}")
         if st.button("Mark All Data as Approved"):
             try:
-                # Direct update to master_data
-                approve_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.master_data` SET is_approved = TRUE WHERE Project = '{selected_project}'"
+                # Target the PHYSICAL table, not the VIEW
+                approve_sql = f"UPDATE `{PHYSICAL_MASTER_TABLE}` SET is_approved = TRUE WHERE Project = '{selected_project}'"
                 job = client.query(approve_sql)
                 job.result()
                 st.success(f"Updated {job.num_dml_affected_rows} rows to Approved.")
@@ -889,6 +892,7 @@ elif service == "🛠️ Admin Tools":
         target_loc = None
         if clean_mode == "Single Pipe/Bank":
             try:
+                # We can still query the VIEW to get the dropdown list
                 loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.{DATASET_ID}.master_data` WHERE Project = '{selected_project}'"
                 loc_df = client.query(loc_q).to_dataframe()
                 target_loc = st.selectbox("Select Pipe", sorted(loc_df['Location'].dropna().unique()))
@@ -896,14 +900,14 @@ elif service == "🛠️ Admin Tools":
                 st.warning("Could not load locations.")
 
         if st.button("🔥 DELETE SELECTED DATA"):
-            # Constructing the deletion clause
+            # Constructing the deletion clause for the physical table
             del_clause = f"Project = '{selected_project}' AND CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
             if clean_mode == "Single Pipe/Bank" and target_loc:
                 del_clause += f" AND Location = '{target_loc}'"
             
-            delete_sql = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.master_data` WHERE {del_clause}"
+            delete_sql = f"DELETE FROM `{PHYSICAL_MASTER_TABLE}` WHERE {del_clause}"
             try:
-                with st.spinner("Deleting data..."):
+                with st.spinner("Deleting data from physical storage..."):
                     del_job = client.query(delete_sql)
                     del_job.result()
                     st.success(f"Purge complete. Removed {del_job.num_dml_affected_rows} records.")
