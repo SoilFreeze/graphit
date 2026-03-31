@@ -1082,120 +1082,86 @@ elif service == "🛠️ Admin Tools":
         MASTER = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
 
         tab_scrub, tab_approve, tab_cleaner = st.tabs([
-            "🧹 Deep Data Scrub & Diagnostics", 
+            "🧹 Deep Data Scrub", 
             "✅ Raw Bulk Approval", 
             "🧨 Surgical Data Cleaner"
         ])
         
-        # --- TAB 1: DEEP DATA SCRUB & DIAGNOSTICS ---
+        # --- TAB 1: DEEP DATA SCRUB ---
         with tab_scrub:
-            st.subheader("🧹 Database Optimization & Diagnostics")
-            scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
+            st.subheader("🧹 Database Optimization")
+            st.info("This action removes NULL temperatures and ensures exactly one reading exists per sensor, per hour.")
+            
+            scrub_target = st.radio("Select Source Table to Clean", ["SensorPush", "Lord"], horizontal=True)
             target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
             id_col = "sensor_id" if scrub_target == "SensorPush" else "NodeNum"
 
-            # FIXED QUERY: Uses CTEs and Joins instead of correlated subqueries
-            admin_query = f"""
-                WITH LatestPoints AS (
-                    SELECT {id_col}, temperature, timestamp,
-                           ROW_NUMBER() OVER(PARTITION BY {id_col} ORDER BY timestamp DESC) as rank
-                    FROM `{target_table}`
-                ),
-                DayAgoPoints AS (
-                    SELECT {id_col}, temperature,
-                           ROW_NUMBER() OVER(PARTITION BY {id_col} ORDER BY timestamp ASC) as rank
-                    FROM `{target_table}`
-                    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-                ),
-                BaseStats AS (
-                    SELECT 
-                        {id_col} as Node, 
-                        COUNT(*) as Total_Points, 
-                        MIN(temperature) as Min_Temp,
-                        MAX(temperature) as Max_Temp,
-                        MAX(timestamp) as Last_Seen_TS
-                    FROM `{target_table}`
-                    GROUP BY Node
-                )
-                SELECT 
-                    s.*, 
-                    lp.temperature as Current_Temp,
-                    (lp.temperature - dp.temperature) as Raw_Delta
-                FROM BaseStats s
-                LEFT JOIN LatestPoints lp ON s.Node = lp.{id_col} AND lp.rank = 1
-                LEFT JOIN DayAgoPoints dp ON s.Node = dp.{id_col} AND dp.rank = 1
-            """
-            
-            try:
-                with st.spinner("Analyzing Raw Source..."):
-                    admin_df = client.query(admin_query).to_dataframe()
-                
-                if not admin_df.empty:
-                    # Formatting
-                    admin_df['Delta'] = admin_df['Raw_Delta'].apply(lambda x: f"{round(x, 1)}°F" if pd.notnull(x) else "N/A")
-                    admin_df['Last Seen'] = pd.to_datetime(admin_df['Last_Seen_TS']).dt.strftime('%m/%d %H:%M')
-                    
-                    st.write("### 🔍 Raw Source Overview")
-                    st.dataframe(admin_df[["Node", "Min_Temp", "Max_Temp", "Delta", "Last Seen", "Total_Points"]], use_container_width=True)
-
-                st.divider()
-                st.write("### 🛠️ Scrub Actions")
-                if st.button(f"🚀 Execute Hourly Deduplication on {scrub_target}"):
-                    with st.spinner("Cleaning and Deduplicating..."):
-                        # Removes NULLs and keeps only 1 reading per hour per node
-                        dedup_sql = f"""
-                        CREATE OR REPLACE TABLE `{target_table}` AS 
-                        SELECT * EXCEPT(rn) FROM (
-                            SELECT *, ROW_NUMBER() OVER(PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) ORDER BY timestamp DESC) as rn
-                            FROM `{target_table}` WHERE temperature IS NOT NULL
-                        ) WHERE rn = 1
-                        """
+            if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
+                with st.spinner(f"Optimizing {scrub_target} table..."):
+                    # This SQL avoids all correlated subqueries by using a simple Window Function
+                    # 1. Filters out NULLs
+                    # 2. Groups by Node and Hour
+                    # 3. Picks the most recent reading in that hour
+                    dedup_sql = f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS 
+                    SELECT * EXCEPT(rn) FROM (
+                        SELECT *, 
+                               ROW_NUMBER() OVER(
+                                   PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                                   ORDER BY timestamp DESC
+                               ) as rn
+                        FROM `{target_table}` 
+                        WHERE temperature IS NOT NULL
+                    ) WHERE rn = 1
+                    """
+                    try:
                         client.query(dedup_sql).result()
-                        st.success(f"Success! {scrub_target} is now cleaned and optimized.")
-            
-            except Exception as e:
-                st.error(f"Admin View Error: {e}")
+                        st.success(f"Success! {scrub_target} has been cleaned and downsampled to 1 reading/hour.")
+                        st.balloons()
+                    except Exception as e:
+                        st.error(f"Scrub Error: {e}")
 
         # --- TAB 2: RAW BULK APPROVAL ---
         with tab_approve:
             st.subheader("✅ Bulk Data Approval")
-            st.info(f"Marking all data for **{selected_project}** as approved.")
-            if st.button(f"Confirm Bulk Approval for {selected_project}"):
+            st.write(f"Mark all current data points for **{selected_project}** as approved.")
+            if st.button(f"Confirm Bulk Approval"):
                 approve_sql = f"UPDATE `{MASTER}` SET is_approved = TRUE WHERE Project = '{selected_project}'"
-                with st.spinner("Updating Master Table..."):
+                try:
                     job = client.query(approve_sql)
                     job.result()
                     st.success(f"Approval Complete: {job.num_dml_affected_rows} rows updated.")
+                except Exception as e:
+                    st.error(f"Approval Error: {e}")
 
         # --- TAB 3: SURGICAL DATA CLEANER ---
         with tab_cleaner:
             st.subheader("🧨 Surgical Data Cleaner")
-            st.write("Remove bad data points by selecting a specific timeframe and pipe.")
-            
-            clean_scope = st.radio("Scope", ["Single Pipe/Bank", "Entire Project"], horizontal=True)
+            clean_scope = st.radio("Cleaning Scope", ["Single Pipe/Bank", "Entire Project"], horizontal=True)
             
             col1, col2 = st.columns(2)
-            start_date = col1.date_input("Start Date", datetime.now() - timedelta(days=1))
-            end_date = col2.date_input("End Date", datetime.now())
+            start_date = col1.date_input("Start of Bad Data", datetime.now() - timedelta(days=1))
+            end_date = col2.date_input("End of Bad Data", datetime.now())
             
             target_loc = None
             if clean_scope == "Single Pipe/Bank":
+                # Basic query to get locations for the dropdown
                 loc_list = client.query(f"SELECT DISTINCT Location FROM `{MASTER}` WHERE Project = '{selected_project}'").to_dataframe()
-                target_loc = st.selectbox("Select Pipe to Clean", sorted(loc_list['Location'].dropna().unique()))
+                target_loc = st.selectbox("Select Pipe", sorted(loc_list['Location'].dropna().unique()))
 
-            st.warning(f"This will permanently delete records from {start_date} to {end_date}.")
             if st.button("🔥 DELETE DATA"):
-                # Build Clause
+                # Construct the logic
                 del_clause = f"Project = '{selected_project}' AND timestamp BETWEEN '{start_date}' AND '{end_date}'"
                 if clean_scope == "Single Pipe/Bank":
                     del_clause += f" AND Location = '{target_loc}'"
                 
                 delete_sql = f"DELETE FROM `{MASTER}` WHERE {del_clause}"
-                
-                with st.spinner("Executing deletion..."):
+                try:
                     del_job = client.query(delete_sql)
                     del_job.result()
                     st.success(f"Purge successful. Deleted {del_job.num_dml_affected_rows} records.")
+                except Exception as e:
+                    st.error(f"Delete Error: {e}")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
