@@ -828,77 +828,6 @@ elif service == "📤 Data Intake Lab":
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
-#######################
-# --- ADMIN TOOLS --- #
-#######################             
-elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
-    
-    RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
-    RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
-    MAPPING_TABLE = f"{PROJECT_ID}.Temperature.master_data" 
-
-    tab_scrub, tab_approve = st.tabs(["🧹 Deep Data Scrubber", "✅ Raw Bulk Approval"])
-    
-    with tab_scrub:
-        st.subheader("🧹 Deep Raw Source Cleaning & Diagnostics")
-        scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_source")
-        target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
-        id_col = "sensor_id" if scrub_target == "SensorPush" else "NodeNum"
-
-        # Fetch All Sensors for Admin View
-        admin_query = f"""
-            SELECT 
-                {id_col} as Node, 
-                COUNT(*) as Total_Points, 
-                MIN(temperature) as Min_Temp,
-                MAX(temperature) as Max_Temp,
-                MAX(timestamp) as Last_Seen_TS,
-                (SELECT temperature FROM `{target_table}` t2 WHERE t2.{id_col} = t1.{id_col} ORDER BY timestamp DESC LIMIT 1) - 
-                (SELECT temperature FROM `{target_table}` t3 WHERE t3.{id_col} = t1.{id_col} AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as Raw_Delta
-            FROM `{target_table}` t1
-            GROUP BY Node
-        """
-        
-        try:
-            admin_df = client.query(admin_query).to_dataframe()
-            if not admin_df.empty:
-                st.write("### 🔍 Filter All Sensors")
-                f_col1, f_col2 = st.columns(2)
-                with f_col1:
-                    delta_filter = st.slider("Min Delta Threshold (Abs Value)", 0.0, 20.0, 0.0)
-                with f_col2:
-                    hours_silent = st.number_input("Show sensors silent for more than (Hours):", min_value=0, value=0)
-
-                # Processing Filters
-                now = pd.Timestamp.now(tz=pytz.UTC)
-                admin_df['Last_Seen_TS'] = pd.to_datetime(admin_df['Last_Seen_TS']).dt.tz_localize(pytz.UTC) if admin_df['Last_Seen_TS'].dt.tzinfo is None else pd.to_datetime(admin_df['Last_Seen_TS'])
-                admin_df['Hours_Ago'] = (now - admin_df['Last_Seen_TS']).dt.total_seconds() / 3600
-                
-                filtered_df = admin_df[(admin_df['Raw_Delta'].abs() >= delta_filter) & (admin_df['Hours_Ago'] >= hours_silent)].copy()
-
-                # Formatting to XX.X°F
-                filtered_df['Min'] = filtered_df['Min_Temp'].apply(lambda x: f"{round(float(x), 1)}°F")
-                filtered_df['Max'] = filtered_df['Max_Temp'].apply(lambda x: f"{round(float(x), 1)}°F")
-                filtered_df['Delta'] = filtered_df['Raw_Delta'].apply(lambda x: f"{round(x, 1)}°F" if pd.notnull(x) else "N/A")
-                filtered_df['Last Seen'] = filtered_df['Last_Seen_TS'].dt.strftime('%m/%d %H:%M')
-
-                st.write(f"Showing {len(filtered_df)} sensors:")
-                st.dataframe(filtered_df[["Node", "Min", "Max", "Delta", "Last Seen", "Total_Points"]], use_container_width=True, height=500)
-        except Exception as e:
-            st.error(f"Admin View Error: {e}")
-
-        st.divider()
-        if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
-            with st.spinner("Cleaning..."):
-                # Your existing Purge/Dedup SQL remains here
-                st.success("Scrub complete.")
-###########################
-# --- END ADMIN TOOLS --- #
-########################### 
-#############################
-# --- END CLIENT PORTAL --- #
-#############################  
 ###########################
 # --- NODE DIAGNOSTIC --- #
 ###########################  
@@ -1073,10 +1002,11 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    # Simple selection for the source
+    # 1. SIMPLE UI FOR SELECTION
+    st.subheader("🧹 Deep Data Scrub")
     scrub_target = st.radio("Select Source Table to Clean", ["SensorPush", "Lord"], horizontal=True)
     
-    # Set the table ID and column name based on selection
+    # Set variables strictly based on the radio selection
     if scrub_target == "SensorPush":
         target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
         id_col = "sensor_id"
@@ -1086,10 +1016,12 @@ elif service == "🛠️ Admin Tools":
 
     st.divider()
 
-    # The Scrub Button - This is the ONLY SQL that will run in this section
+    # 2. THE SCRUB BUTTON
+    # No SQL runs until this button is physically pressed
     if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
         with st.spinner(f"Cleaning {scrub_target}..."):
-            # This SQL is a "flat" query (no subqueries) to avoid Error 400
+            # This is a 'flat' query. It does not reference other tables or subqueries.
+            # It strictly deduplicates the selected table.
             dedup_sql = f"""
             CREATE OR REPLACE TABLE `{target_table}` AS 
             SELECT * EXCEPT(rn) FROM (
@@ -1104,10 +1036,24 @@ elif service == "🛠️ Admin Tools":
             """
             try:
                 client.query(dedup_sql).result()
-                st.success(f"Successfully cleaned {scrub_target}: NULLs removed and data limited to 1 reading/hour.")
+                st.success(f"Success! {scrub_target} has been cleaned (1 reading per hour).")
                 st.balloons()
             except Exception as e:
                 st.error(f"Scrub Error: {e}")
+
+    st.divider()
+
+    # 3. BULK APPROVAL BUTTON
+    st.subheader("✅ Bulk Approval")
+    if st.button("Mark All Project Data as Approved"):
+        try:
+            approve_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` SET is_approved = TRUE WHERE Project = '{selected_project}'"
+            job = client.query(approve_sql)
+            job.result()
+            st.success(f"Updated {job.num_dml_affected_rows} rows to Approved.")
+        except Exception as e:
+            st.error(f"Approval Error: {e}")
+
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
