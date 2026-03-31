@@ -1,266 +1,169 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
 
-# --- 1. PAGE SETUP ---
-st.set_page_config(layout="wide", page_title="SF Project Dashboard", page_icon="❄️")
+#########################
+# --- CONFIGURATION --- #
+#########################
+st.set_page_config(page_title="Project 2329 Dashboard", layout="wide")
 
-# --- 2. GRIDLINE ENGINE ---
-def get_time_gridlines(start_date, end_date):
-    """Generates vertical lines for Monday (Dark), Midnight (Grey), and 6-hour intervals (Light)."""
-    shapes = []
-    current = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    while current <= end_date:
-        for hour_offset in [0, 6, 12, 18]:
-            line_time = current + timedelta(hours=hour_offset)
-            if line_time < start_date or line_time > end_date: 
-                continue
-            
-            # Formatting: Monday is Darkest, Midnight is Grey, 6hr is Light/Dotted
-            if line_time.weekday() == 0 and hour_offset == 0:
-                color, width, dash = "#424242", 2, "solid" 
-            elif hour_offset == 0:
-                color, width, dash = "#9E9E9E", 1, "solid" 
-            else:
-                color, width, dash = "#E0E0E0", 0.5, "dot" 
-            
-            shapes.append(dict(
-                type="line", xref="x", yref="paper",
-                x0=line_time, y0=0, x1=line_time, y1=1,
-                line=dict(color=color, width=width, dash=dash),
-                layer="below"
-            ))
-        current += timedelta(days=1)
-    return shapes
+DATASET_ID = "Temperature" 
+PROJECT_ID = "sensorpush-export"
+MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+ACTIVE_PROJECT = "2329"
 
-# --- 3. DATA FETCHING ---
-PROJECT_ID = "2329" 
-
-@st.cache_data(ttl=600)
-def fetch_project_data(pid, weeks):
-    info = st.secrets["gcp_service_account"]
-    scopes = [
-        "https://www.googleapis.com/auth/bigquery",
-        "https://www.googleapis.com/auth/drive",
-        "https://www.googleapis.com/auth/cloud-platform"
-    ]
-    credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-    client = bigquery.Client(credentials=credentials, project=info["project_id"])
-    
-    # Fetch slightly more than requested to ensure Monday boundaries are covered
-    cutoff = (datetime.now(tz=pytz.UTC) - timedelta(weeks=weeks+1)).strftime('%Y-%m-%d %H:%M:%S')
-    
-    query = f"""
-    SELECT 
-        d.timestamp, d.value, d.nodenumber, d.is_approved, d.engineer_note,
-        m.Project, m.Location, m.Depth
-    FROM `sensorpush-export.sensor_data.final_databoard_master` as d
-    INNER JOIN `sensorpush-export.sensor_data.master_metadata` as m 
-      ON d.nodenumber = m.NodeNum
-    WHERE m.Project = '{pid}' 
-    AND d.is_approved = TRUE
-    AND d.timestamp >= '{cutoff}'
-    ORDER BY d.timestamp ASC
-    """
+@st.cache_resource
+def get_bq_client():
     try:
-        df = client.query(query).to_dataframe()
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-        return df
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/bigquery"])
+            return bigquery.Client(credentials=credentials, project=info["project_id"])
+        return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
-        st.error(f"Access Error: {e}")
-        return pd.DataFrame()
+        st.error(f"Authentication Failed: {e}")
+        return None
 
-# --- 4. MAIN INTERFACE ---
-st.title(f"❄️ Project {PROJECT_ID} Thermal Dashboard")
+client = get_bq_client()
 
-# Sidebar Filters
-st.sidebar.header("View Settings")
-weeks_to_show = st.sidebar.slider("Weeks of History", 1, 12, 2)
+############################
+# --- GRAPHING ENGINES --- #
+############################
 
-# Calculate Monday-to-Monday Boundaries
-now_utc = datetime.now(tz=pytz.UTC)
-days_until_next_monday = (7 - now_utc.weekday()) % 7
-if days_until_next_monday == 0: days_until_next_monday = 7
+def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
+    try:
+        display_df = df.copy()
+        if display_df.empty: return go.Figure()
 
-end_view = (now_utc + timedelta(days=days_until_next_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
-start_view = end_view - timedelta(weeks=weeks_to_show)
+        display_df.columns = [c.lower() for c in display_df.columns]
+        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+        display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC) if display_df['timestamp'].dt.tz else display_df['timestamp'].dt.tz_localize(pytz.UTC)
 
-# Fetch and check data
-df = fetch_project_data(PROJECT_ID, weeks_to_show)
-
-if df.empty:
-    st.warning("⏳ **Review in Progress:** Verified data will appear here once approved.")
-else:
-    all_locs = sorted(df['Location'].dropna().unique())
-    sel_loc = st.sidebar.selectbox("Select Pipe / Bank", all_locs)
-    
-    loc_df = df[df['Location'] == sel_loc].copy()
-    loc_df['Sensor_ID'] = "Depth: " + loc_df['Depth'].astype(str) + "'"
-
-    # Create Tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Site Health", "📈 Temp vs Time", "📉 Depth Profile (Snapshot)"])
-
-    with tab1:
-        st.subheader(f"📋 24-Hour Summary: {sel_loc}")
-        recent_df = loc_df[loc_df['timestamp'] >= (now_utc - timedelta(hours=24))]
-        if not recent_df.empty:
-            summary = []
-            for node in recent_df['nodenumber'].unique():
-                n_df = recent_df[recent_df['nodenumber'] == node].sort_values('timestamp')
-                summary.append({
-                    "Depth": n_df['Depth'].iloc[0],
-                    "Min": n_df['value'].min(),
-                    "Max": n_df['value'].max(),
-                    "24h Change": n_df['value'].iloc[-1] - n_df['value'].iloc[0]
-                })
-            st.table(pd.DataFrame(summary).sort_values('Depth').style.format("{:.2f}°F"))
+        # 1. UNIT CONVERSION
+        if unit_mode == "Celsius":
+            display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
+            y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
+            dt_major, dt_minor = 10, 2 
         else:
-            st.info("No approved data in the last 24 hours.")
+            y_range = [-20, 80]
+            dt_major, dt_minor = 20, 5
 
-    with tab2:
-        st.subheader("Temperature vs Time (History)")
+        # 2. LABELING (Standard: Name + NodeNum)
+        display_df['label'] = display_df.apply(lambda r: f"{r.get('depth', r.get('bank', 'Unmapped'))}ft ({r.get('nodenum', 'Unknown')})", axis=1)
         
-        # 1. Determine Tick Frequency
-        if weeks_to_show > 3:
-            tick_spacing = 604800000.0  # 1 week in ms
-            tick_format = "%b %d"
-        else:
-            tick_spacing = 86400000.0   # 1 day in ms
-            tick_format = "%a\n%b %d"
+        # 3. GAP HANDLING
+        processed_dfs = []
+        for lbl in sorted(display_df['label'].unique()):
+            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
+            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            if (s_df['gap'] > 6.0).any():
+                gaps = s_df[s_df['gap'] > 6.0].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] -= pd.Timedelta(seconds=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            processed_dfs.append(s_df)
+        clean_df = pd.concat(processed_dfs)
+        
+        fig = go.Figure()
+        for lbl in sorted(clean_df['label'].unique()):
+            sdf = clean_df[clean_df['label'] == lbl]
+            fig.add_trace(go.Scatter(x=sdf['timestamp'], y=sdf['temperature'], name=lbl, mode='lines', connectgaps=False))
 
-        fig = px.line(loc_df, x='timestamp', y='value', color='Sensor_ID', range_y=[-20, 80], height=650)
-        
-        # 2. Apply Custom Gridlines (The vertical Monday/Midnight lines)
-        grid_shapes = get_time_gridlines(start_view, end_view)
-        
-        # 3. Layout, Frame, and Axis Standardization
+        # 4. STYLING & GRID (Standard: Monday Black, Daily Gray, 6h Light)
         fig.update_layout(
-            shapes=grid_shapes, 
-            plot_bgcolor='white', 
-            hovermode="x unified",
-            margin=dict(l=60, r=40, t=50, b=60), # Balanced margins for the frame
-            legend=dict(title="Sensor Depth", x=1.02, font=dict(size=12))
-        )
-
-        # X-Axis: Time
-        fig.update_xaxes(
-            range=[start_view, end_view], 
-            showgrid=False, # We use our custom grid_shapes instead
-            tickformat=tick_format,
-            dtick=tick_spacing,
-            tickangle=0,
-            # --- THE FRAME ---
-            mirror=True, 
-            showline=True, 
-            linecolor='black', 
-            linewidth=2
+            title={'text': f"{title} Time vs Temperature", 'x': 0, 'font': dict(size=18)},
+            plot_bgcolor='white', hovermode="x unified", height=600, margin=dict(r=150)
         )
         
-        # Y-Axis: Temperature
-        fig.update_yaxes(
-            # --- THE 20 DEGREE BLACK LINES ---
-            tickmode='array',
-            tickvals=[-20, 0, 20, 40, 60, 80],
-            gridcolor='black', 
-            gridwidth=1.5,
-            # --- THE FRAME ---
-            mirror=True, 
-            showline=True, 
-            linecolor='black', 
-            linewidth=2,
-            # Minor lines for 5-degree increments
-            minor=dict(dtick=5, gridcolor='#D3D3D3', showgrid=True)
-        )
+        for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
+            color, width = ("Black", 2) if ts.weekday() == 0 and ts.hour == 0 else (("Gray", 1) if ts.hour == 0 else ("LightGray", 0.5))
+            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # Reference Freezing Line
-        fig.add_hline(y=32, line_dash="dash", line_color="blue", annotation_text="32°F", annotation_position="top right")
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', dtick=dt_minor)
+        for yv in range(int(y_range[0]), int(y_range[1])+1, dt_major):
+            fig.add_hline(y=yv, line_width=1.2, line_color="DimGray", layer='below')
+
+        # Reference Lines
+        for val, label in active_refs:
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue")
         
-        st.plotly_chart(fig, use_container_width=True, key="history_chart_framed")
+        return fig
+    except: return go.Figure()
 
-    with tab3:
-        st.subheader(f"Historical Thermal Profiles for {sel_loc}")
+#######################
+# --- SIDEBAR UI --- #
+#######################
+st.sidebar.title("📏 Dashboard Controls")
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+st.sidebar.divider()
+st.sidebar.write("### Reference Lines")
+active_refs = []
+if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F)", value=True): active_refs.append((10.2, "Type A"))
+
+def convert_val(f):
+    if f is None: return None
+    return (f - 32) * 5/9 if unit_mode == "Celsius" else f
+
+########################
+# --- MAIN CONTENT --- #
+########################
+st.header(f"📊 Project {ACTIVE_PROJECT} Dashboard")
+tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
+
+# Fetch Data
+q = f"SELECT * FROM `{MASTER_TABLE}` WHERE CAST(Project AS STRING) = '{ACTIVE_PROJECT}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)"
+p_df = client.query(q).to_dataframe()
+
+if p_df.empty:
+    st.warning("No data found for Project 2329.")
+else:
+    p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_convert(pytz.UTC) if p_df['timestamp'].dt.tz else pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC)
+    
+    # 1. TIMELINE TAB
+    with tab_time:
+        weeks = st.slider("Weeks to View", 1, 12, 6)
+        now = pd.Timestamp.now(tz=pytz.UTC)
+        end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_view = end_view - timedelta(weeks=weeks)
         
-        # 1. FAILSAFE LOGIC: Find readings closest to Monday 06:00 UTC
-        # We define a "Target" for every Monday in our range
-        mondays = []
-        curr_mon = end_view - timedelta(days=end_view.weekday()) # Most recent Monday
-        for i in range(weeks_to_show):
-            mondays.append(curr_mon - timedelta(weeks=i))
+        locs = sorted(p_df['Location'].dropna().unique())
+        for loc in locs:
+            with st.expander(f"📈 {loc}", expanded=True):
+                loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
+                st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True)
 
-        all_snapshots = []
-
-        for target_mon in mondays:
-            # Set target time to 6:00 AM
-            target_time = target_mon.replace(hour=6, minute=0, second=0, microsecond=0)
-            
-            # Filter data for this specific day (+/- 3 hours failsafe)
-            day_df = loc_df[
-                (loc_df['timestamp'] >= target_time - timedelta(hours=3)) & 
-                (loc_df['timestamp'] <= target_time + timedelta(hours=3))
-            ].copy()
-
-            if not day_df.empty:
-                # Find the record closest to exactly 06:00:00
-                day_df['time_diff'] = (day_df['timestamp'] - target_time).abs()
-                best_time = day_df.sort_values('time_diff')['timestamp'].iloc[0]
+    # 2. DEPTH PROFILE TAB
+    with tab_depth:
+        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+        depth_df = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
+        for loc in sorted(depth_df['Location'].unique()):
+            with st.expander(f"📏 {loc} Depth Profile", expanded=True):
+                fig_d = go.Figure()
+                mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
+                for target_ts in [m.replace(hour=6) for m in mondays]:
+                    window = depth_df[(depth_df['Location'] == loc) & (depth_df['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (depth_df['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                    if not window.empty:
+                        snaps = window.loc[window.groupby('NodeNum')['timestamp'].apply(lambda x: (x - target_ts).abs().idxmin())].sort_values('Depth_Num')
+                        fig_d.add_trace(go.Scatter(x=snaps['temperature'], y=snaps['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
                 
-                # Extract only that specific moment's data
-                snap = day_df[day_df['timestamp'] == best_time].copy()
-                snap['Snapshot_Date'] = target_time.strftime('%b %d')
-                all_snapshots.append(snap)
+                y_lim = int(((depth_df[depth_df['Location']==loc]['Depth_Num'].max() // 5) + 1) * 5)
+                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80] if unit_mode=="Fahrenheit" else [-30, 30], dtick=5, gridcolor='LightGray')
+                fig_d.update_yaxes(title="Depth (ft)", range=[y_lim, 0], dtick=10, gridcolor='Gray')
+                fig_d.update_layout(plot_bgcolor='white', height=600)
+                st.plotly_chart(fig_d, use_container_width=True)
 
-        if not all_snapshots:
-            st.info(f"No Monday morning data found for {sel_loc} in the selected range.")
-        else:
-            final_snap_df = pd.concat(all_snapshots)
-            # Ensure Depth is numeric for math
-            final_snap_df['Depth'] = pd.to_numeric(final_snap_df['Depth'], errors='coerce')
-            final_snap_df = final_snap_df.dropna(subset=['Depth'])
-            
-            # 2. Collapse duplicates and sort
-            final_snap_df = final_snap_df.groupby(['Snapshot_Date', 'Depth'])['value'].mean().reset_index()
-            final_snap_df = final_snap_df.sort_values(['Snapshot_Date', 'Depth'], ascending=[False, True])
-
-            # 3. Build Multi-Line Figure
-            fig_profile = px.line(
-                final_snap_df, x='value', y='Depth', color='Snapshot_Date', 
-                markers=True,
-                labels={'value': 'Temperature (°F)', 'Depth': 'Depth (ft)', 'Snapshot_Date': 'Monday Date'}
-            )
-
-            # 4. Dynamic Depth Rounding
-            import math
-            max_depth_val = final_snap_df['Depth'].max()
-            rounded_max = int(math.ceil(max_depth_val / 10.0) * 10)
-            if rounded_max == max_depth_val: rounded_max += 10
-
-            depth_ticks = list(range(0, rounded_max + 1, 10))
-            depth_labels = [str(t) for t in depth_ticks]
-            depth_labels[0] = "Ground Surface"
-
-            # 5. Styling & Frame
-            fig_profile.update_yaxes(
-                range=[rounded_max, 0], tickmode='array', tickvals=depth_ticks, ticktext=depth_labels,
-                gridcolor='black', gridwidth=1.5, minor=dict(dtick=1, gridcolor='#F0F0F0', showgrid=True),
-                mirror=True, showline=True, linecolor='black', linewidth=2
-            )
-
-            fig_profile.update_xaxes(
-                range=[-20, 80], tickmode='array', tickvals=[-20, 0, 20, 40, 60, 80],
-                gridcolor='black', gridwidth=1.5, minor=dict(dtick=5, gridcolor='#D3D3D3', showgrid=True),
-                mirror=True, showline=True, linecolor='black', linewidth=2
-            )
-
-            fig_profile.update_layout(
-                plot_bgcolor='white', height=900, margin=dict(l=120, r=60, t=60, b=60),
-                hovermode="y unified", legend=dict(bgcolor="rgba(255,255,255,0.5)")
-            )
-            fig_profile.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
-
-            st.plotly_chart(fig_profile, width='stretch', key="historical_profile_v5")
+    # 3. PROJECT DATA TAB
+    with tab_table:
+        latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+        latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
+        latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) else f"{r['Depth']} ft", axis=1)
+        st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']], use_container_width=True, hide_index=True)
