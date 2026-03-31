@@ -1073,52 +1073,41 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    if not selected_project:
-        st.warning("Please select an Active Project in the sidebar to use Admin Tools.")
+    # Simple selection for the source
+    scrub_target = st.radio("Select Source Table to Clean", ["SensorPush", "Lord"], horizontal=True)
+    
+    # Set the table ID and column name based on selection
+    if scrub_target == "SensorPush":
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+        id_col = "sensor_id"
     else:
-        # Define table paths
-        RAW_SP = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-        RAW_LORD = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+        id_col = "NodeNum"
 
-        st.subheader("🧹 Deep Data Scrub")
-        st.info("""
-            **Action:** This removes NULL temperatures and ensures exactly one reading exists 
-            per sensor, per hour (keeping the most recent).
-        """)
+    st.divider()
 
-        # 1. Choose the source
-        scrub_target = st.radio("Select Source Table to Clean", ["SensorPush", "Lord"], horizontal=True)
-        
-        # Set variables based on choice
-        target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
-        id_col = "sensor_id" if scrub_target == "SensorPush" else "NodeNum"
-
-        # 2. Execute the scrub
-        if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
-            with st.spinner(f"Optimizing {scrub_target} table..."):
-                # Clean SQL: Removes nulls and deduplicates to 1/hr
-                dedup_sql = f"""
-                CREATE OR REPLACE TABLE `{target_table}` AS 
-                SELECT * EXCEPT(rn) FROM (
-                    SELECT *, 
-                           ROW_NUMBER() OVER(
-                               PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                               ORDER BY timestamp DESC
-                           ) as rn
-                    FROM `{target_table}` 
-                    WHERE temperature IS NOT NULL
-                ) WHERE rn = 1
-                """
-                try:
-                    client.query(dedup_sql).result()
-                    st.success(f"Success! {scrub_target} has been cleaned and deduplicated.")
-                    st.balloons()
-                except Exception as e:
-                    st.error(f"Scrub Error: {e}")
-                    
-        st.divider()
-        st.write("### ℹ️ Other Admin Functions")
-        st.caption("Approval and Surgical Cleaning are currently hidden to ensure Scrub stability.")
+    # The Scrub Button - This is the ONLY SQL that will run in this section
+    if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
+        with st.spinner(f"Cleaning {scrub_target}..."):
+            # This SQL is a "flat" query (no subqueries) to avoid Error 400
+            dedup_sql = f"""
+            CREATE OR REPLACE TABLE `{target_table}` AS 
+            SELECT * EXCEPT(rn) FROM (
+                SELECT *, 
+                       ROW_NUMBER() OVER(
+                           PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                           ORDER BY timestamp DESC
+                       ) as rn
+                FROM `{target_table}` 
+                WHERE temperature IS NOT NULL
+            ) WHERE rn = 1
+            """
+            try:
+                client.query(dedup_sql).result()
+                st.success(f"Successfully cleaned {scrub_target}: NULLs removed and data limited to 1 reading/hour.")
+                st.balloons()
+            except Exception as e:
+                st.error(f"Scrub Error: {e}")
 ###########################
 # --- END ADMIN TOOLS --- #
-########################### 
+###########################
