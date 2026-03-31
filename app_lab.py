@@ -277,6 +277,7 @@ if service == "🏠 Executive Summary":
         sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
     
     # 2. DATA QUERY
+    # Pull latest record for every sensor to establish the "current" list
     summary_q = f"SELECT * FROM `{MASTER_TABLE}`"
     if selected_project: 
         summary_q += f" WHERE Project = '{selected_project}'"
@@ -293,41 +294,54 @@ if service == "🏠 Executive Summary":
             now = pd.Timestamp.now(tz=pytz.UTC)
             
             for _, row in raw_data.iterrows():
+                node_id = row['NodeNum']
                 # Latency Logic
                 ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-                diff = now - ts
-                hrs_ago = int(diff.total_seconds() / 3600)
+                hrs_ago = int((now - ts).total_seconds() / 3600)
                 
-                # Delta Logic
+                # FETCH 24H METRICS (Min, Max, Delta)
+                # We look at the 24-hour window relative to 'NOW' for all sensors
+                metrics_q = f"""
+                    SELECT 
+                        MIN(temperature) as min_24, 
+                        MAX(temperature) as max_24,
+                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' ORDER BY timestamp DESC LIMIT 1) - 
+                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as delta_24
+                    FROM `{MASTER_TABLE}` 
+                    WHERE NodeNum = '{node_id}' 
+                    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+                """
+                m_res = client.query(metrics_q).to_dataframe()
+                
+                # Default values if no data in last 24h
+                min_val = m_res['min_24'].iloc[0] if not m_res.empty else None
+                max_val = m_res['max_24'].iloc[0] if not m_res.empty else None
+                raw_delta = m_res['delta_24'].iloc[0] if not m_res.empty else None
+
+                # Status and Delta Display Logic
                 if hrs_ago > 24:
                     status_icon = "🔴"
                     delta_text = "-"
-                    raw_delta = 0.0
+                    delta_for_styling = None # This will trigger 'no color'
                 else:
                     if hrs_ago > 12: status_icon = "🟠"
                     elif hrs_ago > 6: status_icon = "🟡"
                     else: status_icon = "🟢"
-                    
-                    delta_q = f"""
-                        SELECT (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{row['NodeNum']}' ORDER BY timestamp DESC LIMIT 1) - 
-                               (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{row['NodeNum']}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as d
-                    """
-                    d_res = client.query(delta_q).to_dataframe()
-                    raw_delta = d_res['d'].iloc[0] if not d_res.empty and pd.notnull(d_res['d'].iloc[0]) else 0.0
-                    delta_text = f"{round(raw_delta, 1)}°F"
+                    delta_text = f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F"
+                    delta_for_styling = raw_delta
 
-                # Bank vs Depth Display
+                # Position Display
                 bank_val = str(row['Bank']).strip()
                 pos_display = f"Bank {bank_val}" if bank_val not in ["", "None", "nan", "null"] else f"{row['Depth']} ft"
 
                 summary_rows.append({
-                    "Node": row['NodeNum'],
+                    "Node": node_id,
                     "Pipe/Bank": row['Location'],
                     "Pos/Depth": pos_display,
-                    "Min": f"{round(convert_val(row['temperature']), 1)}°F", 
-                    "Max": f"{round(convert_val(row['temperature']), 1)}°F",
-                    "Delta": raw_delta, 
-                    "Delta_Text": delta_text,
+                    "Min": f"{round(convert_val(min_val), 1)}°F" if pd.notnull(min_val) else "N/A",
+                    "Max": f"{round(convert_val(max_val), 1)}°F" if pd.notnull(max_val) else "N/A",
+                    "Delta_Val": delta_for_styling, 
+                    "Delta": delta_text,
                     "Hours_Ago": hrs_ago,
                     "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}hr) {status_icon}"
                 })
@@ -339,11 +353,13 @@ if service == "🏠 Executive Summary":
             if sort_choice == "Hours Since Last Seen":
                 summary_df = summary_df.sort_values(by="Hours_Ago", ascending=ascending)
             elif sort_choice == "Delta Magnitude":
-                summary_df = summary_df.sort_values(by="Delta", ascending=ascending, key=abs)
+                # Use absolute value but handle None/NaN safely
+                summary_df['abs_delta'] = summary_df['Delta_Val'].abs().fillna(-1)
+                summary_df = summary_df.sort_values(by="abs_delta", ascending=ascending).drop(columns=['abs_delta'])
 
             # 4. PAGINATION (100 per page)
             batch_size = 100
-            total_pages = (len(summary_df) // batch_size) + 1
+            total_pages = max((len(summary_df) // batch_size) + 1, 1)
             page = st.number_input("Page", min_value=1, max_value=total_pages, step=1)
             
             start_idx = (page - 1) * batch_size
@@ -351,6 +367,7 @@ if service == "🏠 Executive Summary":
 
             # 5. STYLING & DISPLAY
             def style_delta(val):
+                if val is None: return "" # No color for inactive/None
                 bg, color = "", "black"
                 if val >= 5: bg = "#FF0000"; color = "white"
                 elif val >= 2: bg = "#FFA500"
@@ -363,9 +380,9 @@ if service == "🏠 Executive Summary":
 
             st.subheader(f"📡 Engineering Command Center ({len(summary_df)} sensors)")
             
-            # Map Delta_Text into the display table but style it using the hidden numeric Delta column
-            st.table(display_batch[["Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta_Text", "Last Seen"]].rename(columns={"Delta_Text": "Delta"}).style.apply(
-                lambda x: [style_delta(row_val) for row_val in display_batch['Delta']], axis=0, subset=['Delta']
+            # Use Delta_Val for hidden styling logic while showing formatted Delta text
+            st.table(display_batch[["Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
+                lambda x: [style_delta(row_val) for row_val in display_batch['Delta_Val']], axis=0, subset=['Delta']
             ))
 
     except Exception as e: 
