@@ -500,6 +500,9 @@ if service == "🏠 Executive Summary":
 #########################
 # --- CLIENT PORTAL --- #
 #########################
+#########################
+# --- CLIENT PORTAL --- #
+#########################
 elif service == "📊 Client Portal":
     target_proj = selected_project 
     
@@ -540,7 +543,7 @@ elif service == "📊 Client Portal":
                     start_view = end_view - timedelta(weeks=weeks_view)
                     
                     time_filtered_df = p_df[p_df['timestamp'] >= start_view]
-                    locations = sorted(time_filtered_df['Location'].unique())
+                    locations = sorted(time_filtered_df['Location'].dropna().unique())
                     
                     t_page = st.number_input("Timeline Page", 1, max((len(locations)//10)+1, 1), 1, key=f"pg_{target_proj}")
                     for loc in locations[(t_page-1)*10 : t_page*10]:
@@ -550,8 +553,9 @@ elif service == "📊 Client Portal":
                             st.plotly_chart(fig, use_container_width=True)
 
                 with tab_depth:
+                    # Fix: Ensure Depth is numeric and drop rows where essential ID data is missing to avoid the '<' error
                     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-                    depth_only_df = p_df.dropna(subset=['Depth_Num']).copy()
+                    depth_only_df = p_df.dropna(subset=['Depth_Num', 'NodeNum', 'Location']).copy()
                     d_locs = sorted(depth_only_df['Location'].unique())
                     
                     if not d_locs: 
@@ -570,7 +574,7 @@ elif service == "📊 Client Portal":
                                 
                                 fig_d = go.Figure()
                                 
-                                # 2. SNAPSHOT LOGIC (Monday 6AM with 24h search window)
+                                # 2. SNAPSHOT LOGIC
                                 for target_ts in target_times:
                                     window_start = target_ts - pd.Timedelta(days=1)
                                     window_end = target_ts + pd.Timedelta(days=1)
@@ -580,13 +584,13 @@ elif service == "📊 Client Portal":
                                         continue
                                     
                                     snapshot_points = []
-                                    # Find the reading closest to Monday 6am for each sensor
+                                    # Safe grouping by NodeNum
                                     for node in window_df['NodeNum'].unique():
                                         node_df = window_df[window_df['NodeNum'] == node].copy()
                                         node_df['time_diff'] = (node_df['timestamp'] - target_ts).abs()
+                                        # Sort by time difference to target
                                         closest_row = node_df.sort_values('time_diff').iloc[0]
                                         
-                                        # Only include if within 24 hours (1 day)
                                         if closest_row['time_diff'] <= pd.Timedelta(days=1):
                                             snapshot_points.append(closest_row)
                                     
@@ -596,7 +600,7 @@ elif service == "📊 Client Portal":
                                             x=snap_df['temperature'], 
                                             y=snap_df['Depth_Num'],
                                             mode='lines+markers',
-                                            name=target_ts.strftime('%m/%d/%Y'), # Only date in legend
+                                            name=target_ts.strftime('%m/%d/%Y'),
                                             hovertemplate="Depth: %{y}ft<br>Temp: %{x}°"
                                         ))
 
@@ -606,13 +610,14 @@ elif service == "📊 Client Portal":
                                 y_dtick = 20 if y_limit > 60 else 10
                                 y_minor = 10 if y_limit > 60 else 5
 
-                                # X-axis: -20 on left, 80 on right
+                                # X-axis: -20 to 80
                                 x_range = [-20, 80] if unit_mode == "Fahrenheit" else [-30, 30]
                                 fig_d.update_xaxes(
                                     title=f"Temp ({unit_label})", range=x_range,
                                     dtick=5, gridcolor='LightGray', showgrid=True,
                                     mirror=True, showline=True, linecolor='black'
                                 )
+                                # Major grid every 20
                                 for x_val in range(-20, 81, 20):
                                     fig_d.add_vline(x=x_val, line_width=1, line_color="Gray")
 
