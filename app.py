@@ -1,231 +1,172 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-from google.cloud import bigquery, secretmanager
+import plotly.graph_objects as go
+from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta, time, date
+from datetime import datetime, timedelta
 import pytz
-import json
-import requests
 
+#########################
+# --- CONFIGURATION --- #
+#########################
+st.set_page_config(page_title="Office Dashboard", layout="wide")
 
-# --- 0. PAGE CONFIG & SOILFREEZE PALETTE ---
-st.set_page_config(layout="wide", page_title="SoilFreeze Engineering Hub")
+DATASET_ID = "Temperature" 
+PROJECT_ID = "sensorpush-export"
+MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+ACTIVE_PROJECT = "Office"
 
-def apply_sf_style():
-    st.markdown("""
-        <style>
-            .stApp { background-color: #FFFFFF; }
-            .stSidebar { background-color: #F8F9FA; border-right: 1px solid #E0E0E0; }
-            h1, h2, h3 { color: #003366 !important; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
-            .stButton>button { background-color: #003366; color: white; border-radius: 4px; border: none; width: 100%; }
-            .stMetric { background-color: #F8F9FA; padding: 10px; border-radius: 5px; border: 1px solid #E0E0E0; }
-        </style>
-    """, unsafe_allow_html=True)
-
-apply_sf_style()
-
-# --- 1. AUTHENTICATION (SECRET MANAGER) ---
 @st.cache_resource
 def get_bq_client():
-    # 1. TRY SECRET MANAGER (The "One Source" Plan)
     try:
-        from google.cloud import secretmanager
-        sm_client = secretmanager.SecretManagerServiceClient()
-        # Ensure 'sensorpush-export' is your EXACT project ID
-        name = "projects/sensorpush-export/secrets/BIGQUERY_SERVICE_ACCOUNT_JSON/versions/latest"
-        
-        # We add a 5-second timeout so it doesn't get "stuck"
-        response = sm_client.access_secret_version(request={"name": name}, timeout=5)
-        info = json.loads(response.payload.data.decode("UTF-8"))
-        credentials = service_account.Credentials.from_service_account_info(info)
-        scoped_creds = credentials.with_scopes([
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/bigquery"
-        ])
-        return bigquery.Client(credentials=scoped_creds, project=info["project_id"])
-
-    except Exception as e:
-        # 2. FALLBACK TO LOCAL SECRETS (So you aren't stuck!)
-        st.sidebar.warning("⚠️ Secret Manager failed. Using local secrets.")
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(info)
-            # Make sure we still add the Drive scope here for the Metadata join
-            scoped_creds = credentials.with_scopes([
-                "https://www.googleapis.com/auth/drive",
-                "https://www.googleapis.com/auth/bigquery"
-            ])
-            return bigquery.Client(credentials=scoped_creds, project=info["project_id"])
-        else:
-            raise Exception("No credentials found in Secret Manager or st.secrets")
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/bigquery"])
+            return bigquery.Client(credentials=credentials, project=info["project_id"])
+        return bigquery.Client(project=PROJECT_ID)
+    except Exception as e:
+        st.error(f"Authentication Failed: {e}")
+        return None
 
 client = get_bq_client()
 
-# --- 2. DATA FETCHING (Using the Cleaned Master Table) ---
-@st.cache_data(ttl=600)
-def fetch_engineering_data():
-    # We now pull from the 'final_databoard_master' which is already scrubbed and joined
-    query = """
-    SELECT timestamp, value, nodenumber, Project, Location, Depth, is_approved, engineer_note
-    FROM `sensorpush-export.sensor_data.final_databoard_master`
-    """
-    df = client.query(query).to_dataframe()
-    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-    return df
+############################
+# --- GRAPHING ENGINES --- #
+############################
 
-full_df = pd.DataFrame()
-try:
-    full_df = fetch_engineering_data()
-except Exception as e:
-    st.error(f"⚠️ Master Table Missing or Error: {e}. Run 'Database Maintenance' to build it.")
+def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
+    try:
+        display_df = df.copy()
+        if display_df.empty: return go.Figure()
 
-# --- 3. SIDEBAR NAVIGATION ---
-st.sidebar.title("🛠 Engineering Hub")
+        display_df.columns = [c.lower() for c in display_df.columns]
+        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+        display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC) if display_df['timestamp'].dt.tz else display_df['timestamp'].dt.tz_localize(pytz.UTC)
 
-# Update this list to include all your new tools
-service = st.sidebar.selectbox(
-    "Select Service", 
-    [
-        "🏠 Executive Summary", 
-        "🔍 Node Diagnostics"
-    ]
-)
+        # 1. UNIT CONVERSION
+        if unit_mode == "Celsius":
+            display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
+            y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
+            dt_major, dt_minor = 10, 2 
+        else:
+            y_range = [-20, 80]
+            dt_major, dt_minor = 20, 5
 
-# --- SERVICE ROUTING ---
-
-if service == "🏠 Executive Summary":
-    # (Insert your Executive Summary code here)
-    pass
-
-elif service == "🔍 Node Diagnostics":
-    # (Insert the Node Diagnostic code with the .sort_values fix here)
-    pass
-
-# --- SERVICE: EXECUTIVE SUMMARY ---
-if service == "🏠 Executive Summary" and not full_df.empty:
-    st.header("🏠 Site Health & Warming Alerts")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        all_projs = sorted([p for p in full_df['Project'].unique() if p is not None])
-        sel_summary_proj = st.selectbox("1. Select Project", all_projs)
-    
-    proj_df = full_df[full_df['Project'] == sel_summary_proj].copy()
-    
-    with c2:
-        all_locs = sorted([l for l in proj_df['Location'].unique() if l is not None])
-        sel_summary_loc = st.selectbox("2. Select Pipe / Bank", all_locs)
-
-    # 24-Hour Performance Table logic...
-    now_ts = datetime.now(tz=pytz.UTC)
-    loc_recent = proj_df[(proj_df['Location'] == sel_summary_loc) & (proj_df['timestamp'] >= (now_ts - timedelta(hours=24)))].copy()
-
-    if not loc_recent.empty:
-        node_analysis = []
-        for node in loc_recent['nodenumber'].unique():
-            n_df = loc_recent[loc_recent['nodenumber'] == node].sort_values('timestamp')
-            if len(n_df) > 1:
-                node_analysis.append({
-                    "Depth": n_df['Depth'].iloc[0], "Node ID": node,
-                    "Min": n_df['value'].min(), "Max": n_df['value'].max(),
-                    "Current": n_df['value'].iloc[-1], "24h Change": n_df['value'].iloc[-1] - n_df['value'].iloc[0]
-                })
-        st.table(pd.DataFrame(node_analysis).sort_values('Depth'))
-
-# --- SERVICE 1: NODE DIAGNOSTIC HUB (6-WEEK DEFAULT) ---
-elif service == "🔍 Node Diagnostics" and not full_df.empty:
-    st.header("🔍 Node Diagnostic Hub")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        sel_proj = st.selectbox("Project", sorted(full_df['Project'].unique()))
-    with col2:
-        locs = sorted(full_df[full_df['Project'] == sel_proj]['Location'].unique())
-        sel_loc = st.selectbox("Location", locs)
-    with col3:
-        # UPDATED: Default value is now 6
-        weeks_to_show = st.number_input("Weeks to Display", min_value=1, value=6)
-
-    # SIDEBAR REFERENCE LINES
-    st.sidebar.subheader("Thermal Reference Lines")
-    ref_options = {"32°F (Frost)": 32.0, "26.6°F (Brine)": 26.6, "10.2°F (Deep)": 10.2}
-    selected_refs = [label for label, val in ref_options.items() if st.sidebar.checkbox(label)]
-
-    # 1. TIME LOGIC: Strict Monday-to-Monday 6-Week Window
-    today_dt = datetime.now(pytz.UTC).date()
-    this_monday = today_dt - timedelta(days=today_dt.weekday())
-    # Start time is anchored to Monday 00:00, looking back 6 weeks
-    start_time = datetime.combine(this_monday, time.min).replace(tzinfo=pytz.UTC) - timedelta(weeks=weeks_to_show-1)
-    end_time = start_time + timedelta(weeks=weeks_to_show)
-    
-    plot_df = full_df[
-        (full_df['Project'] == sel_proj) & 
-        (full_df['Location'] == sel_loc) & 
-        (full_df['timestamp'] >= start_time) &
-        (full_df['timestamp'] <= end_time)
-    ].copy().sort_values(['nodenumber', 'timestamp'])
-
-    if not plot_df.empty:
-        # GAP LOGIC: Insert None for breaks > 6 hours
+        # 2. LABELING
+        display_df['label'] = display_df.apply(lambda r: f"{r.get('depth', r.get('bank', 'Unmapped'))}ft ({r.get('nodenum', 'Unknown')})", axis=1)
+        
+        # 3. GAP HANDLING
         processed_dfs = []
-        for node in plot_df['nodenumber'].unique():
-            node_df = plot_df[plot_df['nodenumber'] == node].copy()
-            node_df['diff'] = node_df['timestamp'].diff().dt.total_seconds() / 3600
-            gaps = node_df[node_df['diff'] > 6.0].copy()
-            if not gaps.empty:
-                gaps['value'] = None
-                gaps['timestamp'] = gaps['timestamp'] - timedelta(minutes=1)
-                node_df = pd.concat([node_df, gaps]).sort_values('timestamp')
-            processed_dfs.append(node_df)
+        for lbl in sorted(display_df['label'].unique()):
+            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
+            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            if (s_df['gap'] > 6.0).any():
+                gaps = s_df[s_df['gap'] > 6.0].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] -= pd.Timedelta(seconds=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            processed_dfs.append(s_df)
+        clean_df = pd.concat(processed_dfs)
         
-        plot_df = pd.concat(processed_dfs)
-        plot_df['Sensor'] = plot_df['Depth'].astype(str) + "ft (" + plot_df['nodenumber'] + ")"
-        
-        fig = px.line(plot_df, x='timestamp', y='value', color='Sensor', 
-                     range_y=[-20, 80], height=850)
-        fig.update_traces(connectgaps=False) 
+        fig = go.Figure()
+        for lbl in sorted(clean_df['label'].unique()):
+            sdf = clean_df[clean_df['label'] == lbl]
+            fig.add_trace(go.Scatter(x=sdf['timestamp'], y=sdf['temperature'], name=lbl, mode='lines', connectgaps=False))
 
-        # 2. GRID & AXES (Zero-Cushion & Frame)
-        fig.update_yaxes(
-            showline=True, linewidth=2, linecolor='Black', mirror=True,
-            tick0=-20, dtick=20, gridcolor='DimGrey', gridwidth=1.5,
-            minor=dict(dtick=5, gridcolor='#E5E5E5', showgrid=True), 
-            zeroline=False, range=[-20, 80]
-        )
-        fig.update_xaxes(
-            showline=True, linewidth=2, linecolor='Black', mirror=True,
-            showgrid=False, zeroline=False, tickformat="%b %d", title="",
-            range=[start_time, end_time]
-        )
-        
-        # 3. DYNAMIC REFERENCE LINES
-        for label in selected_refs:
-            val = ref_options[label]
-            fig.add_hline(y=val, line_width=2, line_color="#003366", annotation_text=f"{val}°F")
-
-        # 4. MANUAL VERTICAL GRID (Darker Mondays)
-        num_days = (end_time - start_time).days
-        for i in range(num_days + 1):
-            midnight = start_time + timedelta(days=i)
-            is_monday = (midnight.weekday() == 0)
-            fig.add_vline(x=midnight.timestamp()*1000, 
-                         line_width=1.5 if is_monday else 1, 
-                         line_color="DimGrey" if is_monday else "#CCCCCC")
-            # 6-Hour Intervals
-            if i < num_days:
-                for h in [6, 12, 18]:
-                    fig.add_vline(x=(midnight+timedelta(hours=h)).timestamp()*1000, 
-                                 line_width=0.5, line_color="#F0F0F0")
-
-        # 5. LAYOUT: External Legend & Wide Margin
+        # 4. STYLING & GRID
         fig.update_layout(
-            plot_bgcolor='white', hovermode="x unified",
-            margin=dict(l=10, r=200, t=10, b=10),
-            legend=dict(x=1.02, y=1, bordercolor="Black", borderwidth=1)
+            title={'text': f"{title} Time vs Temperature", 'x': 0, 'font': dict(size=18)},
+            plot_bgcolor='white', hovermode="x unified", height=600, margin=dict(r=150)
         )
         
-        st.plotly_chart(fig, use_container_width=True, config={'responsive': True})
-    else:
-        st.info(f"No data for {sel_loc}. Viewing 6-week grid starting {start_time.strftime('%m/%d')}.")
+        for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
+            color, width = ("Black", 2) if ts.weekday() == 0 and ts.hour == 0 else (("Gray", 1) if ts.hour == 0 else ("LightGray", 0.5))
+            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', dtick=dt_minor)
+        for yv in range(int(y_range[0]), int(y_range[1])+1, dt_major):
+            fig.add_hline(y=yv, line_width=1.2, line_color="DimGray", layer='below')
+
+        # Reference Lines
+        for val, label in active_refs:
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue")
+        
+        return fig
+    except: return go.Figure()
+
+#######################
+# --- SIDEBAR UI --- #
+#######################
+st.sidebar.title("📏 Dashboard Controls")
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+st.sidebar.divider()
+st.sidebar.write("### Reference Lines")
+active_refs = []
+if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F)", value=True): active_refs.append((10.2, "Type A"))
+
+def convert_val(f):
+    if f is None: return None
+    return (f - 32) * 5/9 if unit_mode == "Celsius" else f
+
+########################
+# --- MAIN CONTENT --- #
+########################
+st.header(f"📊 {ACTIVE_PROJECT} Dashboard")
+tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
+
+# Fetch Data
+q = f"SELECT * FROM `{MASTER_TABLE}` WHERE Project = '{ACTIVE_PROJECT}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)"
+p_df = client.query(q).to_dataframe()
+
+if p_df.empty:
+    st.warning(f"No data found for Project: {ACTIVE_PROJECT}")
+else:
+    p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_convert(pytz.UTC) if p_df['timestamp'].dt.tz else pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC)
+    
+    # 1. TIMELINE TAB
+    with tab_time:
+        weeks = st.slider("Weeks to View", 1, 12, 6)
+        now = pd.Timestamp.now(tz=pytz.UTC)
+        end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_view = end_view - timedelta(weeks=weeks)
+        
+        locs = sorted(p_df['Location'].dropna().unique())
+        for loc in locs:
+            with st.expander(f"📈 {loc}", expanded=True):
+                loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
+                st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True)
+
+    # 2. DEPTH PROFILE TAB
+    with tab_depth:
+        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+        depth_df = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
+        if depth_df.empty:
+            st.info("No depth-based data available for this project.")
+        else:
+            for loc in sorted(depth_df['Location'].unique()):
+                with st.expander(f"📏 {loc} Depth Profile", expanded=True):
+                    fig_d = go.Figure()
+                    mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
+                    for target_ts in [m.replace(hour=6) for m in mondays]:
+                        window = depth_df[(depth_df['Location'] == loc) & (depth_df['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (depth_df['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                        if not window.empty:
+                            snaps = window.loc[window.groupby('NodeNum')['timestamp'].apply(lambda x: (x - target_ts).abs().idxmin())].sort_values('Depth_Num')
+                            fig_d.add_trace(go.Scatter(x=snaps['temperature'], y=snaps['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
+                    
+                    y_lim = int(((depth_df[depth_df['Location']==loc]['Depth_Num'].max() // 5) + 1) * 5)
+                    fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80] if unit_mode=="Fahrenheit" else [-30, 30], dtick=5, gridcolor='LightGray')
+                    fig_d.update_yaxes(title="Depth (ft)", range=[y_lim, 0], dtick=10, gridcolor='Gray')
+                    fig_d.update_layout(plot_bgcolor='white', height=600)
+                    st.plotly_chart(fig_d, use_container_width=True)
+
+    # 3. PROJECT DATA TAB
+    with tab_table:
+        latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+        latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
+        latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) else f"{r['Depth']} ft", axis=1)
+        st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']], use_container_width=True, hide_index=True)
