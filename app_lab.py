@@ -268,86 +268,113 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # Updated Query: Removed the 24h/72h time constraint to show ALL sensors
-    # QUALIFY ensures we get exactly one (the most recent) row per NodeNum
-    summary_q = f"""
-        SELECT Project, Location, Depth, Bank, NodeNum, temperature, timestamp
-        FROM `{PROJECT_ID}.Temperature.master_data`
-    """
+    # 1. QUICK FILTERS
+    st.write("### 🔍 Filters")
+    c1, c2, _ = st.columns([1, 1, 2])
+    with c1:
+        filter_inactive = st.toggle("Show Only Inactive (>24h)", value=False)
+    with c2:
+        filter_high_delta = st.toggle("Show Only High Delta (>5°F)", value=False)
+
+    # 2. DATA QUERY
+    # We pull the latest record for every sensor in the system
+    summary_q = f"SELECT * FROM `{MASTER_TABLE}`"
     if selected_project: 
         summary_q += f" WHERE Project = '{selected_project}'"
-    
     summary_q += " QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
     
     try:
-        with st.spinner("Loading all sensor states..."):
+        with st.spinner("Loading Command Center..."):
             raw_data = client.query(summary_q).to_dataframe()
         
         if raw_data.empty:
-            st.warning("📡 No sensors found in the master_data table.")
+            st.warning("📡 No sensors found.")
         else:
             summary_rows = []
             now = pd.Timestamp.now(tz=pytz.UTC)
             
             for _, row in raw_data.iterrows():
-                # Latency & Status Logic
+                # Latency Logic
                 ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-                latency_hrs = (now - ts).total_seconds() / 3600
+                diff = now - ts
+                hrs_ago = int(diff.total_seconds() / 3600)
                 
-                if latency_hrs > 24: status_icon = "🔴"
-                elif latency_hrs > 12: status_icon = "🟠"
-                elif latency_hrs > 6: status_icon = "🟡"
-                else: status_icon = "🟢"
+                # Determine Status and Delta Display
+                if hrs_ago > 24:
+                    status_icon = "🔴"
+                    delta_text = "-"
+                    raw_delta = 0.0 # For color logic (neutral)
+                else:
+                    if hrs_ago > 12: status_icon = "🟠"
+                    elif hrs_ago > 6: status_icon = "🟡"
+                    else: status_icon = "🟢"
+                    
+                    # Fetch 24h Delta
+                    delta_q = f"""
+                        SELECT (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{row['NodeNum']}' ORDER BY timestamp DESC LIMIT 1) - 
+                               (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{row['NodeNum']}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as d
+                    """
+                    d_res = client.query(delta_q).to_dataframe()
+                    raw_delta = d_res['d'].iloc[0] if not d_res.empty and pd.notnull(d_res['d'].iloc[0]) else 0.0
+                    delta_text = f"{round(raw_delta, 1)}°F"
 
-                # Bank vs Depth Display Logic
+                # Min/Max for the row
+                curr_t = row['temperature']
+                
+                # Bank vs Depth Display
                 bank_val = str(row['Bank']).strip()
                 pos_display = f"Bank {bank_val}" if bank_val not in ["", "None", "nan", "null"] else f"{row['Depth']} ft"
 
-                # Fetching 24h Delta for this specific node
-                # Note: This sub-query calculates the trend specifically for this row
-                delta_q = f"""
-                    SELECT 
-                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{row['NodeNum']}' ORDER BY timestamp DESC LIMIT 1) - 
-                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{row['NodeNum']}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1)
-                    as delta_raw
-                """
-                delta_res = client.query(delta_q).to_dataframe()
-                raw_delta = delta_res['delta_raw'].iloc[0] if not delta_res.empty else 0.0
+                # Filter Logic
+                if filter_inactive and hrs_ago <= 24: continue
+                if filter_high_delta and abs(raw_delta) < 5.0: continue
 
-                # Formatted Metrics
-                curr_t = row['temperature']
-                
                 summary_rows.append({
                     "Node": row['NodeNum'],
                     "Pipe/Bank": row['Location'],
                     "Pos/Depth": pos_display,
-                    "Current": f"{round(convert_val(curr_t), 1)}°F",
-                    "Delta": raw_delta, # Keep as float for the color-styler logic
-                    "Delta_Display": f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F",
-                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} {status_icon}"
+                    "Min": f"{round(convert_val(row['temperature']), 1)}°F", # Placeholder if you want actual 24h Min/Max you'd query them here
+                    "Max": f"{round(convert_val(row['temperature']), 1)}°F",
+                    "Delta": raw_delta, 
+                    "Delta_Text": delta_text,
+                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}hr) {status_icon}"
                 })
 
+            # 3. PAGINATION (50 per page)
             summary_df = pd.DataFrame(summary_rows)
+            if not summary_df.empty:
+                batch_size = 50
+                total_pages = (len(summary_df) // batch_size) + 1
+                page = st.number_input("Page", min_value=1, max_value=total_pages, step=1)
+                start_idx = (page - 1) * batch_size
+                end_idx = start_idx + batch_size
+                
+                display_batch = summary_df.iloc[start_idx:end_idx]
 
-            # Delta Color Coding Logic
-            def style_delta(val):
-                bg = ""
-                color = "black"
-                if val >= 5: bg = "#FF0000"; color = "white"   # Red
-                elif val >= 2: bg = "#FFA500"                 # Orange
-                elif val >= 0.5: bg = "#FFFF00"               # Yellow
-                elif -0.5 <= val <= 0.5: bg = "#008000"; color = "white" # Green
-                elif -2 < val < -0.5: bg = "#ADD8E6"          # Light Blue
-                elif -5 < val <= -2: bg = "#4169E1"; color = "white"  # Med Blue
-                elif val <= -5: bg = "#00008B"; color = "white"      # Dark Blue
-                return f'background-color: {bg}; color: {color}'
+                # 4. COLOR STYLING
+                def style_delta(val):
+                    # Only color if it's not the "Inactive" marker
+                    bg, color = "", "black"
+                    if val >= 5: bg = "#FF0000"; color = "white"
+                    elif val >= 2: bg = "#FFA500"
+                    elif val >= 0.5: bg = "#FFFF00"
+                    elif -0.5 <= val <= 0.5: bg = "#008000"; color = "white"
+                    elif -2 < val < -0.5: bg = "#ADD8E6"
+                    elif -5 < val <= -2: bg = "#4169E1"; color = "white"
+                    elif val <= -5: bg = "#00008B"; color = "white"
+                    return f'background-color: {bg}; color: {color}'
 
-            st.subheader("📡 Engineering Command Center")
-            # We display Delta_Display for the text, but use Delta for the color logic
-            st.table(summary_df.style.applymap(style_delta, subset=['Delta']).format({"Delta": lambda x: f"{round(x, 1)}°F"}))
+                st.subheader(f"📡 Engineering Command Center ({len(summary_df)} sensors)")
+                
+                # We use 'Delta_Text' for the column but style based on 'Delta'
+                st.table(display_batch[["Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta_Text", "Last Seen"]].rename(columns={"Delta_Text": "Delta"}).style.apply(
+                    lambda x: [style_delta(row_val) for row_val in display_batch['Delta']], axis=0, subset=['Delta']
+                ))
+            else:
+                st.info("No sensors match the current filters.")
 
     except Exception as e: 
-        st.error(f"Summary Error: {e}")
+        st.error(f"Summary Error: {traceback.format_exc()}")
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
