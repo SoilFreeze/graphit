@@ -406,7 +406,6 @@ elif service == "📊 Client Portal":
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
         # --- DATA PREPARATION ---
-        # FIXED: Using 'approve = "TRUE"' (String comparison) to match your BQ schema
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
@@ -438,11 +437,15 @@ elif service == "📊 Client Portal":
                     for loc in t_locs_batch:
                         with st.expander(f"📈 Timeline: {loc}", expanded=True):
                             loc_data = p_df[p_df['Location'] == loc]
-                            # Uses your existing global graph engine
+                            # FIXED: Added unit_mode and unit_label to the function call
                             fig = build_standard_sf_graph(
-                                loc_data, f"{loc} - 7 Day History", 
-                                p_df['timestamp'].min(), p_df['timestamp'].max(), 
-                                active_refs
+                                loc_data, 
+                                f"{loc} - 7 Day History", 
+                                p_df['timestamp'].min(), 
+                                p_df['timestamp'].max(), 
+                                active_refs,
+                                unit_mode,
+                                unit_label
                             )
                             st.plotly_chart(fig, use_container_width=True, key=f"time_{target_proj}_{loc}")
 
@@ -451,7 +454,6 @@ elif service == "📊 Client Portal":
                 # ---------------------------------------------------------
                 with tab_depth:
                     st.subheader("Vertical Temperature Profiles")
-                    # Ensure Depth is treated as a number for the Y-axis
                     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
                     depth_df = p_df.dropna(subset=['Depth_Num'])
                     
@@ -468,17 +470,17 @@ elif service == "📊 Client Portal":
 
                         for loc in d_locs_batch:
                             with st.expander(f"📏 Depth Profile: {loc}", expanded=True):
-                                # Get latest reading per depth level for this pipe
                                 latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(20)
                                 
                                 fig_depth = px.line(latest_profile, x="temperature", y="Depth_Num", 
                                                     markers=True,
-                                                    labels={"temperature": "Temp (°F)", "Depth_Num": "Depth (ft)"},
+                                                    labels={"temperature": f"Temp ({unit_label})", "Depth_Num": "Depth (ft)"},
                                                     title=f"Current Vertical Profile: {loc}")
                                 
-                                fig_depth.update_yaxes(autorange="reversed") # Surface (0) at top
+                                fig_depth.update_yaxes(autorange="reversed")
                                 fig_depth.update_layout(plot_bgcolor='white', height=450)
-                                fig_depth.add_vline(x=32, line_dash="dash", line_color="blue", annotation_text="32°F")
+                                fig_depth.add_vline(x=32 if unit_mode == "Fahrenheit" else 0, 
+                                                    line_dash="dash", line_color="blue", annotation_text="Freezing")
                                 
                                 st.plotly_chart(fig_depth, use_container_width=True, key=f"depth_{target_proj}_{loc}")
 
@@ -487,7 +489,6 @@ elif service == "📊 Client Portal":
                 # ---------------------------------------------------------
                 with tab_table:
                     st.subheader("Current Project Readings")
-                    # FIXED: Match the STRING 'TRUE' schema
                     latest_q = f"""
                         SELECT Location, Depth, Bank, temperature, timestamp
                         FROM `{MASTER_TABLE}`
@@ -497,8 +498,7 @@ elif service == "📊 Client Portal":
                     l_df = client.query(latest_q).to_dataframe()
                     
                     if not l_df.empty:
-                        # Formatting: XX.X°F
-                        l_df['Current Temp'] = l_df['temperature'].apply(lambda x: f"{round(x, 1)}°F")
+                        l_df['Current Temp'] = l_df['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
                         l_df['Last Seen'] = pd.to_datetime(l_df['timestamp']).dt.strftime('%m/%d %H:%M')
                         
                         batch_size = 100
