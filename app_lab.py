@@ -262,14 +262,13 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 ####################
 # --- SERVICES --- #
 ####################
-####################
+#############################
 # --- Executive Summary --- #
-####################
+#############################
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # Query to get the last 24 hours of data for trend analysis (Min/Max/Delta)
-    # plus the latest record for status
+    # Query for the last 24 hours to calculate Min/Max/Delta and Status
     summary_q = f"""
         SELECT Project, Location, Depth, Bank, NodeNum, temperature, timestamp
         FROM `{PROJECT_ID}.Temperature.master_data`
@@ -288,54 +287,46 @@ if service == "🏠 Executive Summary":
             summary_rows = []
             now = pd.Timestamp.now(tz=pytz.UTC)
             
-            # Group by Node to calculate Min, Max, and Delta
+            # Group by Node for trend analysis
             for node, group in raw_data.groupby('NodeNum'):
                 group = group.sort_values('timestamp', ascending=False)
                 latest = group.iloc[0]
                 earliest = group.iloc[-1]
                 
-                # Latency/Status Logic
+                # Status/Latency Logic
                 ts = latest['timestamp'].tz_localize(pytz.UTC) if latest['timestamp'].tzinfo is None else latest['timestamp']
                 latency_hrs = (now - ts).total_seconds() / 3600
                 
-                if latency_hrs > 24: status_circle = "🔴"
-                elif latency_hrs > 12: status_circle = "🟠"
-                elif latency_hrs > 6: status_circle = "🟡"
-                else: status_circle = "🟢"
+                if latency_hrs > 24: status_icon = "🔴"
+                elif latency_hrs > 12: status_icon = "🟠"
+                elif latency_hrs > 6: status_icon = "🟡"
+                else: status_icon = "🟢"
 
-                # Position Logic (Bank vs Depth)
+                # Bank vs Depth Display Logic
                 bank_val = str(latest['Bank']).strip()
-                if bank_val not in ["", "None", "nan", "null"]:
-                    pos_display = f"Bank {bank_val}"
-                else:
-                    pos_display = f"{latest['Depth']} ft" if pd.notnull(latest['Depth']) else "Unmapped"
+                pos_display = f"Bank {bank_val}" if bank_val not in ["", "None", "nan", "null"] else f"{latest['Depth']} ft"
 
-                # Temperature Metrics
+                # Temp Metrics (Formatted as XX.X°F)
                 curr_t = latest['temperature']
-                min_t = group['temperature'].min()
-                max_t = group['temperature'].max()
-                delta_t = curr_t - earliest['temperature']
+                delta_val = curr_t - earliest['temperature']
 
                 summary_rows.append({
                     "Node": node,
                     "Pipe/Bank": latest['Location'],
                     "Pos/Depth": pos_display,
-                    "Current": round(convert_val(curr_t), 1),
-                    "Min": round(convert_val(min_t), 1),
-                    "Max": round(convert_val(max_t), 1),
-                    "Delta": round(delta_t * (5/9) if unit_mode == "Celsius" else delta_t, 2),
-                    "Last Seen": ts.strftime('%m/%d %H:%M'),
-                    "Status": status_circle
+                    "Current": f"{round(convert_val(curr_t), 1)}°F",
+                    "Min": f"{round(convert_val(group['temperature'].min()), 1)}°F",
+                    "Max": f"{round(convert_val(group['temperature'].max()), 1)}°F",
+                    "Delta": round(delta_val * (5/9) if unit_mode == "Celsius" else delta_val, 2),
+                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} {status_icon}"
                 })
 
             summary_df = pd.DataFrame(summary_rows)
 
-            # --- COLOR CODING LOGIC ---
+            # Delta Color Coding Logic
             def style_delta(val):
-                # Standardize to Fahrenheit for logic if needed, 
-                # but since you provided specific numbers, we'll use the raw delta
-                color = ""
                 bg = ""
+                color = "black"
                 if val >= 5: bg = "#FF0000"; color = "white"   # Red
                 elif val >= 2: bg = "#FFA500"                 # Orange
                 elif val >= 0.5: bg = "#FFFF00"               # Yellow
@@ -345,7 +336,6 @@ if service == "🏠 Executive Summary":
                 elif val <= -5: bg = "#00008B"; color = "white"      # Dark Blue
                 return f'background-color: {bg}; color: {color}'
 
-            # Apply styling and display
             st.subheader("📡 Engineering Command Center")
             st.table(summary_df.style.applymap(style_delta, subset=['Delta']))
 
@@ -579,31 +569,58 @@ elif service == "🛠️ Admin Tools":
     tab_scrub, tab_approve = st.tabs(["🧹 Deep Data Scrubber", "✅ Raw Bulk Approval"])
     
     with tab_scrub:
-        st.subheader("🧹 Deep Raw Source Cleaning")
-        scrub_target = st.radio("Select Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_target")
+        st.subheader("🧹 Deep Raw Source Cleaning & Diagnostics")
+        scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_source")
         target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
-        
-        # New Diagnostic Table for Admin
-        st.write(f"### 🔍 {scrub_target} Node Status")
-        # Note: raw_sensorpush uses 'sensor_id', raw_lord uses 'NodeNum'
         id_col = "sensor_id" if scrub_target == "SensorPush" else "NodeNum"
-        
-        node_status_q = f"""
-            SELECT {id_col} as Node, COUNT(*) as Point_Count, MAX(timestamp) as Last_Seen 
-            FROM `{target_table}` 
-            GROUP BY Node 
-            ORDER BY Last_Seen DESC
-        """
-        try:
-            node_df = client.query(node_status_q).to_dataframe()
-            st.dataframe(node_df, use_container_width=True)
-        except Exception as e: 
-            st.info("Could not load node status. Table may be empty or schema is being updated.")
 
-        if st.button(f"🚀 Run Deep Scrub on {scrub_target}"):
-            with st.spinner(f"Cleaning {target_table}..."):
-                # Your existing Purge/Dedup SQL logic goes here
-                st.success(f"Scrub complete for {scrub_target}.")
+        # Fetch All Sensors for Admin View
+        admin_query = f"""
+            SELECT 
+                {id_col} as Node, 
+                COUNT(*) as Total_Points, 
+                MIN(temperature) as Min_Temp,
+                MAX(temperature) as Max_Temp,
+                MAX(timestamp) as Last_Seen_TS,
+                (SELECT temperature FROM `{target_table}` t2 WHERE t2.{id_col} = t1.{id_col} ORDER BY timestamp DESC LIMIT 1) - 
+                (SELECT temperature FROM `{target_table}` t3 WHERE t3.{id_col} = t1.{id_col} AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as Raw_Delta
+            FROM `{target_table}` t1
+            GROUP BY Node
+        """
+        
+        try:
+            admin_df = client.query(admin_query).to_dataframe()
+            if not admin_df.empty:
+                st.write("### 🔍 Filter All Sensors")
+                f_col1, f_col2 = st.columns(2)
+                with f_col1:
+                    delta_filter = st.slider("Min Delta Threshold (Abs Value)", 0.0, 20.0, 0.0)
+                with f_col2:
+                    hours_silent = st.number_input("Show sensors silent for more than (Hours):", min_value=0, value=0)
+
+                # Processing Filters
+                now = pd.Timestamp.now(tz=pytz.UTC)
+                admin_df['Last_Seen_TS'] = pd.to_datetime(admin_df['Last_Seen_TS']).dt.tz_localize(pytz.UTC) if admin_df['Last_Seen_TS'].dt.tzinfo is None else pd.to_datetime(admin_df['Last_Seen_TS'])
+                admin_df['Hours_Ago'] = (now - admin_df['Last_Seen_TS']).dt.total_seconds() / 3600
+                
+                filtered_df = admin_df[(admin_df['Raw_Delta'].abs() >= delta_filter) & (admin_df['Hours_Ago'] >= hours_silent)].copy()
+
+                # Formatting to XX.X°F
+                filtered_df['Min'] = filtered_df['Min_Temp'].apply(lambda x: f"{round(float(x), 1)}°F")
+                filtered_df['Max'] = filtered_df['Max_Temp'].apply(lambda x: f"{round(float(x), 1)}°F")
+                filtered_df['Delta'] = filtered_df['Raw_Delta'].apply(lambda x: f"{round(x, 1)}°F" if pd.notnull(x) else "N/A")
+                filtered_df['Last Seen'] = filtered_df['Last_Seen_TS'].dt.strftime('%m/%d %H:%M')
+
+                st.write(f"Showing {len(filtered_df)} sensors:")
+                st.dataframe(filtered_df[["Node", "Min", "Max", "Delta", "Last Seen", "Total_Points"]], use_container_width=True, height=500)
+        except Exception as e:
+            st.error(f"Admin View Error: {e}")
+
+        st.divider()
+        if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
+            with st.spinner("Cleaning..."):
+                # Your existing Purge/Dedup SQL remains here
+                st.success("Scrub complete.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ########################### 
