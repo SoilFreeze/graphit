@@ -107,78 +107,96 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-def fetch_sensorpush_data(start_dt, end_dt, target_location=None):
-    ACCOUNTS = [
-        {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
-        {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
-    ]
-    BASE_URL = "https://api.sensorpush.com/api/v1"
-    all_records = [] 
-
-    # --- 1. LOAD MAPPINGS FROM 'metadata' (Integer-Only Map) ---
-    name_map = {}
+def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     try:
-        query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata`"
-        meta_df = client.query(query).to_dataframe()
-        for _, row in meta_df.iterrows():
-            p_id = str(row['PhysicalID']).split('.')[0].strip()
-            name_map[p_id] = str(row['NodeNum']).strip()
-        st.sidebar.success(f"✅ Loaded {len(name_map)} mappings from metadata.")
+        display_df = df.copy()
+        if display_df.empty:
+            return go.Figure()
+
+        display_df.columns = [c.lower() for c in display_df.columns]
+        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+        
+        # Ensure timezone consistency
+        if display_df['timestamp'].dt.tz is None:
+            display_df['timestamp'] = display_df['timestamp'].dt.tz_localize(pytz.UTC)
+        else:
+            display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC)
+
+        # 1. UNIT CONVERSION
+        if unit_mode == "Celsius":
+            display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
+            y_range = [-30, 30]
+        else:
+            y_range = [-20, 80]
+            
+        # 2. SMART LABELING (Fixed 'NoneType' sorting error)
+        def create_label(row):
+            b_val = str(row.get('bank', '')).strip().lower()
+            d_val = str(row.get('depth', '')).strip().lower()
+            s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
+
+            if b_val not in ["", "none", "nan", "null"]:
+                return f"Bank {row['bank']} ({s_name})"
+            if d_val not in ["", "none", "nan", "null"]:
+                return f"{row['depth']}ft ({s_name})"
+            return f"Unmapped ({s_name})"
+
+        display_df['label'] = display_df.apply(create_label, axis=1)
+        
+        # 3. GAP HANDLING (> 6 hrs)
+        processed_dfs = []
+        for lbl in sorted(display_df['label'].unique()):
+            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            gap_mask = s_df['gap_hrs'] > 6.0
+            if gap_mask.any():
+                gaps = s_df[gap_mask].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(seconds=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            processed_dfs.append(s_df)
+            
+        clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
+        
+        # 4. FIGURE SETUP
+        fig = go.Figure()
+        for lbl in sorted(clean_df['label'].unique()):
+            sensor_df = clean_df[clean_df['label'] == lbl]
+            fig.add_trace(go.Scatter(
+                x=sensor_df['timestamp'], y=sensor_df['temperature'], 
+                name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
+            ))
+
+        # 5. STANDARD STYLING & GRIDLINES
+        fig.update_layout(
+            title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
+            plot_bgcolor='white', hovermode="x unified", height=600,
+            margin=dict(t=80, l=50, r=180, b=50),
+            legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
+        )
+        
+        # 6-hour vertical gridlines
+        grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
+        for ts in grid_times:
+            color, width = ("DimGray", 1.5) if ts.hour == 0 else ("GhostWhite", 0.5)
+            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+
+        # "NOW" MARKER
+        now_marker = pd.Timestamp.now(tz=pytz.UTC)
+        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
+        fig.add_annotation(x=now_marker, y=1.02, yref="paper", text="NOW", showarrow=False, font=dict(color="Red", size=10, weight="bold"))
+
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', mirror=True, showline=True, linecolor='black')
+        fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
+
+        for val, label in active_refs:
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", opacity=0.6)
+        
+        return fig
     except Exception as e:
-        st.error(f"Metadata load failed: {e}")
-
-    for acc in ACCOUNTS:
-        try:
-            # --- 2. AUTHENTICATION ---
-            auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
-            token = requests.post(f"{BASE_URL}/oauth/accesstoken", 
-                                   json={"authorization": auth_r.get('authorization')}, 
-                                   timeout=15).json().get('accesstoken')
-            headers = {"Authorization": token}
-
-            # --- 3. SENSOR DISCOVERY ---
-            s_resp = requests.post(f"{BASE_URL}/devices/sensors", headers=headers, json={}, timeout=20).json()
-            sensor_list = s_resp.values() if isinstance(s_resp, dict) else s_resp
-            api_sensor_ids = [str(s.get('id')) for s in sensor_list]
-            
-            # --- 4. FETCH SAMPLES ---
-            current_start = start_dt
-            while current_start < end_dt:
-                current_end = min(current_start + timedelta(hours=24), end_dt)
-                
-                for i in range(0, len(api_sensor_ids), 10):
-                    chunk = api_sensor_ids[i:i+10]
-                    payload = {
-                        "limit": 10000, 
-                        "startTime": current_start.strftime('%Y-%m-%dT%H:%M:%S+0000'), 
-                        "endTime": current_end.strftime('%Y-%m-%dT%H:%M:%S+0000'),
-                        "sensors": chunk
-                    }
-                    r = requests.post(f"{BASE_URL}/samples", headers=headers, json=payload, timeout=60).json()
-                    
-                    samples_data = r.get('sensors', {})
-                    for s_id, samples in samples_data.items():
-                        for s in samples:
-                            temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
-                            if temp is None and s.get('temp_c') is not None:
-                                temp = (float(s['temp_c']) * 1.8) + 32
-                            
-                            if temp is not None:
-                                all_records.append({
-                                    "timestamp": pd.to_datetime(s['observed']),   
-                                    "PhysicalID": s_id, 
-                                    "temperature": round(float(temp), 2),
-                                    "approve": False  # FIXED: Boolean for BQ
-                                })
-                current_start = current_end
-                time.sleep(0.1)
-        except Exception as e:
-            st.error(f"Account {acc['email']} failed: {e}")
-            
-    df = pd.DataFrame(all_records)
-    if not df.empty:
-        df['PhysicalID'] = pd.to_numeric(df['PhysicalID'], errors='coerce')
-    return df
+        st.error(f"Critical Graph Error: {e}")
+        return go.Figure()
 
 ########################
 # --- GRAPH ENGINE --- #
@@ -439,7 +457,7 @@ elif service == "📊 Client Portal":
         st.header(f"📊 Project Status: {target_proj}")
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
-        # ROBUST QUERY: Search for project ID as string, no 'approve' restriction for preview
+        # Fetch up to 12 weeks of data regardless of approval status
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
