@@ -834,17 +834,18 @@ elif service == "🛠️ Admin Tools":
     # 1. TAB NAVIGATION
     tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
 
-    # Physical table name for DML operations (UPDATE/DELETE)
-    # Based on your rebuild_master_table logic:
-    PHYSICAL_MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+    # Physical Source Tables
+    RAW_TABLES = [
+        f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush",
+        f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+    ]
 
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
         scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
-        
         target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
         
-        # Using NodeNum as confirmed by your schema screenshot
+        # Using NodeNum as confirmed by your schema
         id_col = "NodeNum" 
 
         if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
@@ -864,55 +865,57 @@ elif service == "🛠️ Admin Tools":
                 try:
                     client.query(dedup_sql).result()
                     st.success(f"Success! {scrub_target} cleaned (1 reading per hour).")
-                    st.balloons()
                 except Exception as e:
                     st.error(f"Scrub Error: {e}")
 
     with tab_approve:
         st.subheader("✅ Bulk Approval")
-        st.info(f"Targeting physical table: {PHYSICAL_MASTER_TABLE}")
+        st.info("Marking data as approved in both raw_sensorpush and raw_lord.")
         if st.button("Mark All Data as Approved"):
-            try:
-                # Target the PHYSICAL table, not the VIEW
-                approve_sql = f"UPDATE `{PHYSICAL_MASTER_TABLE}` SET is_approved = TRUE WHERE Project = '{selected_project}'"
-                job = client.query(approve_sql)
-                job.result()
-                st.success(f"Updated {job.num_dml_affected_rows} rows to Approved.")
-            except Exception as e:
-                st.error(f"Approval Error: {e}")
+            success_count = 0
+            for table in RAW_TABLES:
+                try:
+                    # Note: This assumes 'approve' or 'is_approved' column exists in raw tables
+                    # Based on your SP schema, the column is named 'approve'
+                    approve_sql = f"UPDATE `{table}` SET approve = 'TRUE' WHERE 1=1" 
+                    job = client.query(approve_sql)
+                    job.result()
+                    success_count += 1
+                except Exception as e:
+                    st.warning(f"Could not update {table}: {e}")
+            
+            if success_count > 0:
+                st.success("Approval command sent to available raw tables.")
 
     with tab_cleaner:
         st.subheader("🧨 Surgical Data Cleaner")
-        clean_mode = st.radio("Scope", ["Single Pipe/Bank", "Global (Entire Project)"], horizontal=True)
+        st.write("Deletes bad data from both Raw Source tables.")
         
+        # Timeframe selection
         col1, col2 = st.columns(2)
         start_del = col1.date_input("Start Date", datetime.now() - timedelta(days=1))
         end_del = col2.date_input("End Date", datetime.now())
         
-        target_loc = None
-        if clean_mode == "Single Pipe/Bank":
-            try:
-                # We can still query the VIEW to get the dropdown list
-                loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.{DATASET_ID}.master_data` WHERE Project = '{selected_project}'"
-                loc_df = client.query(loc_q).to_dataframe()
-                target_loc = st.selectbox("Select Pipe", sorted(loc_df['Location'].dropna().unique()))
-            except:
-                st.warning("Could not load locations.")
+        # Node selection
+        node_to_clean = st.text_input("Enter NodeNum to clean (Optional - leave blank for all nodes)")
 
-        if st.button("🔥 DELETE SELECTED DATA"):
-            # Constructing the deletion clause for the physical table
-            del_clause = f"Project = '{selected_project}' AND CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
-            if clean_mode == "Single Pipe/Bank" and target_loc:
-                del_clause += f" AND Location = '{target_loc}'"
-            
-            delete_sql = f"DELETE FROM `{PHYSICAL_MASTER_TABLE}` WHERE {del_clause}"
-            try:
-                with st.spinner("Deleting data from physical storage..."):
-                    del_job = client.query(delete_sql)
-                    del_job.result()
-                    st.success(f"Purge complete. Removed {del_job.num_dml_affected_rows} records.")
-            except Exception as e:
-                st.error(f"Delete Error: {e}")
+        if st.button("🔥 DELETE DATA FROM RAW SOURCES"):
+            for table in RAW_TABLES:
+                try:
+                    # Constructing deletion for raw tables
+                    del_clause = f"CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
+                    if node_to_clean:
+                        del_clause += f" AND NodeNum = '{node_to_clean}'"
+                    
+                    delete_sql = f"DELETE FROM `{table}` WHERE {del_clause}"
+                    
+                    with st.spinner(f"Deleting from {table}..."):
+                        del_job = client.query(delete_sql)
+                        del_job.result()
+                        st.write(f"✔️ {table}: Removed {del_job.num_dml_affected_rows} records.")
+                except Exception as e:
+                    st.error(f"Error on {table}: {e}")
+            st.success("Surgical cleaning complete.")
 
 ###########################
 # --- END ADMIN TOOLS --- #
