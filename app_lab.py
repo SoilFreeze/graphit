@@ -404,14 +404,14 @@ elif service == "📊 Client Portal":
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
         # --- DATA PREPARATION ---
-        # Fetch up to 12 weeks of data to support the slider range
+        # FIXED: Using 84 DAY interval instead of WEEK for BigQuery compatibility
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
             WHERE Project = '{target_proj}' 
             AND approve = 'TRUE'
-            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 12 WEEK)
-            ORDER BY timestamp ASC
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+            ORDER BY Location ASC, timestamp ASC
         """
         try:
             p_df = client.query(portal_q).to_dataframe()
@@ -420,24 +420,19 @@ elif service == "📊 Client Portal":
                 st.info(f"No approved data found for Project {target_proj}.")
             else:
                 # ---------------------------------------------------------
-                # TAB 1: TIME VS TEMPERATURE (Adjustable Lookback)
+                # TAB 1: TIME VS TEMPERATURE
                 # ---------------------------------------------------------
                 with tab_time:
                     st.subheader("Historical Timeline")
-                    
-                    # Lookback Slider
                     weeks_view = st.slider("Weeks to View", 1, 12, 6, key=f"weeks_{target_proj}")
                     
-                    # Calculate view window
                     end_view = pd.Timestamp.now(tz=pytz.UTC)
                     start_view = end_view - timedelta(weeks=weeks_view)
                     
-                    # Filter dataframe for the selected window
                     p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC) if p_df['timestamp'].dt.tzinfo is None else pd.to_datetime(p_df['timestamp'])
                     time_filtered_df = p_df[p_df['timestamp'] >= start_view]
 
                     locations = sorted(time_filtered_df['Location'].unique())
-                    
                     t_batch_size = 10
                     t_total_pages = max((len(locations) // t_batch_size) + 1, 1)
                     t_page = st.number_input("Timeline Page", 1, t_total_pages, 1, key=f"t_page_{target_proj}")
@@ -448,15 +443,9 @@ elif service == "📊 Client Portal":
                     for loc in t_locs_batch:
                         with st.expander(f"📈 Timeline: {loc}", expanded=True):
                             loc_data = time_filtered_df[time_filtered_df['Location'] == loc]
-                            
                             fig = build_standard_sf_graph(
-                                loc_data, 
-                                f"{loc} - {weeks_view} Week History", 
-                                start_view, 
-                                end_view, 
-                                active_refs,
-                                unit_mode,
-                                unit_label
+                                loc_data, f"{loc} - {weeks_view} Week History", 
+                                start_view, end_view, active_refs, unit_mode, unit_label
                             )
                             st.plotly_chart(fig, use_container_width=True, key=f"time_{target_proj}_{loc}_{weeks_view}")
 
@@ -481,37 +470,40 @@ elif service == "📊 Client Portal":
 
                         for loc in d_locs_batch:
                             with st.expander(f"📏 Depth Profile: {loc}", expanded=True):
-                                # Always use the latest available profile regardless of slider
                                 latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(25)
-                                
                                 fig_depth = px.line(latest_profile, x="temperature", y="Depth_Num", 
-                                                    markers=True,
-                                                    labels={"temperature": f"Temp ({unit_label})", "Depth_Num": "Depth (ft)"},
+                                                    markers=True, labels={"temperature": f"Temp ({unit_label})", "Depth_Num": "Depth (ft)"},
                                                     title=f"Current Vertical Profile: {loc}")
-                                
                                 fig_depth.update_yaxes(autorange="reversed")
                                 fig_depth.update_layout(plot_bgcolor='white', height=450)
-                                fig_depth.add_vline(x=32 if unit_mode == "Fahrenheit" else 0, 
-                                                    line_dash="dash", line_color="blue", annotation_text="Freezing")
-                                
+                                fig_depth.add_vline(x=32 if unit_mode == "Fahrenheit" else 0, line_dash="dash", line_color="blue", annotation_text="Freezing")
                                 st.plotly_chart(fig_depth, use_container_width=True, key=f"depth_{target_proj}_{loc}")
 
                 # ---------------------------------------------------------
-                # TAB 3: PROJECT DATA (100 rows per page)
+                # TAB 3: PROJECT DATA (Sorted & Combined Columns)
                 # ---------------------------------------------------------
                 with tab_table:
                     st.subheader("Current Project Readings")
+                    # Sorting by Location in the query for grouping
                     latest_q = f"""
-                        SELECT Location, Depth, Bank, temperature, timestamp
+                        SELECT Location, Depth, Bank, temperature
                         FROM `{MASTER_TABLE}`
                         WHERE Project = '{target_proj}' AND approve = 'TRUE'
                         QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1
+                        ORDER BY Location ASC
                     """
                     l_df = client.query(latest_q).to_dataframe()
                     
                     if not l_df.empty:
-                        l_df['Current Temp'] = l_df['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
-                        l_df['Last Seen'] = pd.to_datetime(l_df['timestamp']).dt.strftime('%m/%d %H:%M')
+                        # Combine Depth/Bank into a single 'Pos' column
+                        def format_pos(row):
+                            b = str(row['Bank']).strip()
+                            d = str(row['Depth']).strip()
+                            if b not in ["", "None", "nan", "null"]: return f"Bank {b}"
+                            return f"{d} ft" if d not in ["", "None", "nan", "null"] else "Unmapped"
+
+                        l_df['Pos'] = l_df.apply(format_pos, axis=1)
+                        l_df['Temp'] = l_df['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
                         
                         batch_size = 100
                         total_pages = max((len(l_df) // batch_size) + 1, 1)
@@ -520,7 +512,8 @@ elif service == "📊 Client Portal":
                         start_idx = (page - 1) * batch_size
                         display_df = l_df.iloc[start_idx : start_idx + batch_size]
                         
-                        st.table(display_df[["Location", "Depth", "Bank", "Current Temp", "Last Seen"]])
+                        # Displaying only Location, Pos (Combined), and Temp
+                        st.table(display_df[["Location", "Pos", "Temp"]].rename(columns={"Temp": "Current Temp"}))
                     else:
                         st.info("No current approved data available.")
 
