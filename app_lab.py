@@ -191,39 +191,55 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
 
         display_df.columns = [c.lower() for c in display_df.columns]
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        display_df['sensor_id'] = display_df.get('nodenum', display_df.get('sensor_name', 'Unknown')).fillna("Unknown").astype(str)
-
+        
+        # Unit Conversion logic moved inside
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
             y_range = [-30, 30]
         else:
             y_range = [-20, 80]
             
-        start_ts = pd.to_datetime(start_view)
-        end_ts = pd.to_datetime(end_view)
-        
+        # Labeling Logic
         def create_label(row):
             b_val = str(row.get('bank', '')).strip().lower()
             d_val = str(row.get('depth', '')).strip().lower()
-            s_name = str(row.get('sensor_id', 'Unknown'))
-            if b_val not in ["", "none", "nan", "null", "unknown"]: return f"Bank {row['bank']} ({s_name})"
-            if d_val not in ["", "none", "nan", "null", "unknown"]: return f"{row['depth']}ft ({s_name})"
+            s_name = str(row.get('nodenum', row.get('sensor_id', 'Unknown')))
+            if b_val not in ["", "none", "nan", "null"]: return f"Bank {row['bank']} ({s_name})"
+            if d_val not in ["", "none", "nan", "null"]: return f"{row['depth']}ft ({s_name})"
             return f"Unmapped ({s_name})"
 
         display_df['label'] = display_df.apply(create_label, axis=1)
         
-        # Figure setup
+        # Figure Setup
         fig = go.Figure()
-        labels = sorted(display_df['label'].unique())
-        
-        for lbl in labels:
-            sensor_df = display_df[display_df['label'] == lbl].sort_values('timestamp')
-            fig.add_trace(go.Scatter(x=sensor_df['timestamp'], y=sensor_df['temperature'], name=lbl, mode='lines', connectgaps=False))
+        for lbl in sorted(display_df['label'].unique()):
+            s_df = display_df[display_df['label'] == lbl].sort_values('timestamp')
+            # Gap handling (6hr)
+            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            if (s_df['gap'] > 6).any():
+                # Split traces at gaps to prevent long connecting lines
+                fig.add_trace(go.Scatter(x=s_df['timestamp'], y=s_df['temperature'], name=lbl, mode='lines', connectgaps=False))
+            else:
+                fig.add_trace(go.Scatter(x=s_df['timestamp'], y=s_df['temperature'], name=lbl, mode='lines'))
 
-        fig.update_layout(title=title, plot_bgcolor='white', hovermode="x unified", height=750)
+        # Global Formatting
+        fig.update_layout(
+            title={'text': title, 'font': dict(size=18)},
+            plot_bgcolor='white', hovermode="x unified", height=500,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', showline=True, linecolor='black')
+        fig.update_xaxes(range=[start_view, end_view], showline=True, linecolor='black', gridcolor='Gainsboro')
+
+        # Add Reference Lines
+        for val, label in active_refs:
+            converted_ref = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            fig.add_hline(y=converted_ref, line_dash="dash", line_color="RoyalBlue", 
+                          annotation_text=f"{label} ({round(converted_ref,1)}{unit_label})")
+        
         return fig
     except Exception as e:
-        st.error(f"Graph Error: {e}")
+        st.error(f"Global Graph Engine Error: {e}")
         return go.Figure()
 
 #######################
@@ -404,7 +420,7 @@ elif service == "📊 Client Portal":
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
         # --- DATA PREPARATION ---
-        # FIXED: Using 84 DAY interval instead of WEEK for BigQuery compatibility
+        # Fixed: Interval 84 DAY for 12 weeks compatibility
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
@@ -429,7 +445,13 @@ elif service == "📊 Client Portal":
                     end_view = pd.Timestamp.now(tz=pytz.UTC)
                     start_view = end_view - timedelta(weeks=weeks_view)
                     
-                    p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC) if p_df['timestamp'].dt.tzinfo is None else pd.to_datetime(p_df['timestamp'])
+                    # FIXED: Safe timezone conversion for the entire column
+                    p_df['timestamp'] = pd.to_datetime(p_df['timestamp'])
+                    if p_df['timestamp'].dt.tz is None:
+                        p_df['timestamp'] = p_df['timestamp'].dt.tz_localize(pytz.UTC)
+                    else:
+                        p_df['timestamp'] = p_df['timestamp'].dt.tz_convert(pytz.UTC)
+                        
                     time_filtered_df = p_df[p_df['timestamp'] >= start_view]
 
                     locations = sorted(time_filtered_df['Location'].unique())
@@ -443,6 +465,7 @@ elif service == "📊 Client Portal":
                     for loc in t_locs_batch:
                         with st.expander(f"📈 Timeline: {loc}", expanded=True):
                             loc_data = time_filtered_df[time_filtered_df['Location'] == loc]
+                            # All logic is now inside the build function below
                             fig = build_standard_sf_graph(
                                 loc_data, f"{loc} - {weeks_view} Week History", 
                                 start_view, end_view, active_refs, unit_mode, unit_label
@@ -480,13 +503,12 @@ elif service == "📊 Client Portal":
                                 st.plotly_chart(fig_depth, use_container_width=True, key=f"depth_{target_proj}_{loc}")
 
                 # ---------------------------------------------------------
-                # TAB 3: PROJECT DATA (Sorted & Combined Columns)
+                # TAB 3: PROJECT DATA (Sorted & Combined)
                 # ---------------------------------------------------------
                 with tab_table:
                     st.subheader("Current Project Readings")
-                    # Sorting by Location in the query for grouping
                     latest_q = f"""
-                        SELECT Location, Depth, Bank, temperature
+                        SELECT Location, Depth, Bank, temperature, NodeNum
                         FROM `{MASTER_TABLE}`
                         WHERE Project = '{target_proj}' AND approve = 'TRUE'
                         QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1
@@ -495,7 +517,6 @@ elif service == "📊 Client Portal":
                     l_df = client.query(latest_q).to_dataframe()
                     
                     if not l_df.empty:
-                        # Combine Depth/Bank into a single 'Pos' column
                         def format_pos(row):
                             b = str(row['Bank']).strip()
                             d = str(row['Depth']).strip()
@@ -511,8 +532,6 @@ elif service == "📊 Client Portal":
                         
                         start_idx = (page - 1) * batch_size
                         display_df = l_df.iloc[start_idx : start_idx + batch_size]
-                        
-                        # Displaying only Location, Pos (Combined), and Temp
                         st.table(display_df[["Location", "Pos", "Temp"]].rename(columns={"Temp": "Current Temp"}))
                     else:
                         st.info("No current approved data available.")
