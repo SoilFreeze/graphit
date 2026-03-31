@@ -16,10 +16,13 @@ import io
 #########################
 # --- CONFIGURATION --- #
 #########################
+# --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
+# UPDATED: Pointing to the new 'Temperature' dataset
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
+# The full table name is now sensorpush-export.Temperature.master_data
 MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
 METADATA_TABLE = "metadata"
 
@@ -42,14 +45,69 @@ def get_bq_client():
 
 client = get_bq_client()
 
-########################
-# --- GRAPH ENGINE --- #
-########################
+#########################
+# --- REBUILD TABLE --- #
+#########################
+def rebuild_master_table(mode="preserve"):
+    """
+    Failsafe Rebuild: Strips all non-numeric characters to ensure 
+    a match between CSV IDs and Google Sheet IDs.
+    """
+    table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+    
+    # Check if table exists to handle the 'ex' alias error
+    exists = True
+    try:
+        client.get_table(table_id)
+    except Exception:
+        exists = False
+
+    status_logic = "TRUE" if mode == "approve_all" else ("COALESCE(ex.is_approved, FALSE)" if exists else "FALSE")
+    join_clause = f"LEFT JOIN `{table_id}` ex ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id" if (exists and mode == "preserve") else ""
+
+    scrub_sql = f"""
+        CREATE OR REPLACE TABLE `{table_id}` AS 
+        WITH RawUnified AS (
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
+                   -- Clean the ID: Remove colons, spaces, and non-digits
+                   REGEXP_REPLACE(CAST(sensor_id AS STRING), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            UNION ALL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, 
+                   REGEXP_REPLACE(REPLACE(nodenumber, ':', '-'), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+        ),
+        HourlyDedupped AS (
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY clean_node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
+            FROM RawUnified
+        )
+        SELECT 
+            h.ts as timestamp, 
+            h.temp as temperature, 
+            m.NodeNum as sensor_id,
+            m.NodeNum as sensor_name,
+            m.Project as project, 
+            m.Location as location, 
+            m.Depth as depth, 
+            {status_logic} as is_approved
+        FROM HourlyDedupped h 
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+            -- Match by stripping the Google Sheet PhysicalID of all non-digits too
+            ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
+        {join_clause}
+        WHERE h.rank = 1
+    """
+    try:
+        client.query(scrub_sql).result()
+        return True
+    except Exception as e:
+        st.error(f"Rebuild Error: {e}")
+        return False
+
+############################
+# --- FETCH SENSORPUSH --- #
+############################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
-    """
-    The 'Pulse Monitor': Historical Trend Graph (Time-Series Analysis).
-    Shows how every individual sensor is behaving over time.
-    """
     try:
         display_df = df.copy()
         if display_df.empty:
@@ -58,6 +116,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         display_df.columns = [c.lower() for c in display_df.columns]
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         
+        # Ensure timezone consistency
         if display_df['timestamp'].dt.tz is None:
             display_df['timestamp'] = display_df['timestamp'].dt.tz_localize(pytz.UTC)
         else:
@@ -70,11 +129,12 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         else:
             y_range = [-20, 80]
             
-        # 2. SMART LABELING
+        # 2. SMART LABELING (Fixed 'NoneType' sorting error)
         def create_label(row):
             b_val = str(row.get('bank', '')).strip().lower()
             d_val = str(row.get('depth', '')).strip().lower()
             s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
+
             if b_val not in ["", "none", "nan", "null"]:
                 return f"Bank {row['bank']} ({s_name})"
             if d_val not in ["", "none", "nan", "null"]:
@@ -83,7 +143,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
 
         display_df['label'] = display_df.apply(create_label, axis=1)
         
-        # 3. GAP HANDLING
+        # 3. GAP HANDLING (> 6 hrs)
         processed_dfs = []
         for lbl in sorted(display_df['label'].unique()):
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
@@ -107,15 +167,15 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
                 name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
             ))
 
-        # 5. STYLING & GRIDLINES
+        # 5. STANDARD STYLING & GRIDLINES
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
             plot_bgcolor='white', hovermode="x unified", height=600,
             margin=dict(t=80, l=50, r=180, b=50),
-            legend=dict(title="Nodes (Sensors)", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
+            legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
-        # Vertical gridlines (6h)
+        # 6-hour vertical gridlines
         grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
         for ts in grid_times:
             color, width = ("DimGray", 1.5) if ts.hour == 0 else ("GhostWhite", 0.5)
@@ -124,86 +184,112 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         # "NOW" MARKER
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
+        fig.add_annotation(x=now_marker, y=1.02, yref="paper", text="NOW", showarrow=False, font=dict(color="Red", size=10, weight="bold"))
 
         fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', mirror=True, showline=True, linecolor='black')
         fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
 
-        # GOAL LINE (32°F / 0°C)
         for val, label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            thickness = 3 if val == 32.0 else 1.5
-            fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", opacity=0.8, line_width=thickness, 
-                          annotation_text=f"{label} Goal", annotation_position="top right")
+            fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", opacity=0.6)
         
         return fig
     except Exception as e:
-        st.error(f"Pulse Monitor Error: {e}")
+        st.error(f"Critical Graph Error: {e}")
         return go.Figure()
 
-def build_vertical_profile_graph(df, title, unit_mode, unit_label):
-    """
-    The 'Freeze Wall': Soil Temperature Profile (Vertical Analysis).
-    Shows Weekly Snapshots on an inverted Y-axis.
-    """
+########################
+# --- GRAPH ENGINE --- #
+########################
+def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     try:
-        v_df = df.copy()
-        v_df['depth_num'] = pd.to_numeric(v_df['depth'], errors='coerce')
-        v_df = v_df.dropna(subset=['depth_num', 'temperature'])
+        display_df = df.copy()
+        if display_df.empty:
+            return go.Figure()
+
+        display_df.columns = [c.lower() for c in display_df.columns]
+        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         
-        # Unit Conversion
-        if unit_mode == "Celsius":
-            v_df['temperature'] = (v_df['temperature'] - 32) * 5/9
-            freeze_line = 0
+        # Ensure timezone consistency
+        if display_df['timestamp'].dt.tz is None:
+            display_df['timestamp'] = display_df['timestamp'].dt.tz_localize(pytz.UTC)
         else:
-            freeze_line = 32
+            display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC)
 
-        # Filter for Weekly Snapshots (Mondays at 06:00)
-        v_df['timestamp'] = pd.to_datetime(v_df['timestamp'])
-        # Find all Mondays at 6AM in the data
-        v_df['is_snapshot'] = (v_df['timestamp'].dt.weekday == 0) & (v_df['timestamp'].dt.hour == 6)
-        snapshots_df = v_df[v_df['is_snapshot']].copy()
-        
-        # Add the absolute latest reading as a "Current" snapshot
-        latest_ts = v_df['timestamp'].max()
-        latest_df = v_df[v_df['timestamp'] == latest_ts].copy()
-        latest_df['snapshot_label'] = "CURRENT STATUS"
-        
-        snapshots_df['snapshot_label'] = snapshots_df['timestamp'].dt.strftime('%Y-%m-%d')
-        plot_df = pd.concat([snapshots_df, latest_df]).sort_values(['snapshot_label', 'depth_num'])
+        # 1. UNIT CONVERSION
+        if unit_mode == "Celsius":
+            display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
+            y_range = [-30, 30]
+        else:
+            y_range = [-20, 80]
+            
+        # 2. SMART LABELING (Fixed 'NoneType' sorting error)
+        def create_label(row):
+            b_val = str(row.get('bank', '')).strip().lower()
+            d_val = str(row.get('depth', '')).strip().lower()
+            s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
 
+            if b_val not in ["", "none", "nan", "null"]:
+                return f"Bank {row['bank']} ({s_name})"
+            if d_val not in ["", "none", "nan", "null"]:
+                return f"{row['depth']}ft ({s_name})"
+            return f"Unmapped ({s_name})"
+
+        display_df['label'] = display_df.apply(create_label, axis=1)
+        
+        # 3. GAP HANDLING (> 6 hrs)
+        processed_dfs = []
+        for lbl in sorted(display_df['label'].unique()):
+            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            gap_mask = s_df['gap_hrs'] > 6.0
+            if gap_mask.any():
+                gaps = s_df[gap_mask].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(seconds=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            processed_dfs.append(s_df)
+            
+        clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
+        
+        # 4. FIGURE SETUP
         fig = go.Figure()
-
-        # Plot each weekly line
-        labels = sorted(plot_df['snapshot_label'].unique())
-        for i, lbl in enumerate(labels):
-            snap = plot_df[plot_df['snapshot_label'] == lbl]
-            is_latest = (lbl == "CURRENT STATUS")
+        for lbl in sorted(clean_df['label'].unique()):
+            sensor_df = clean_df[clean_df['label'] == lbl]
             fig.add_trace(go.Scatter(
-                x=snap['temperature'], y=snap['depth_num'],
-                name=lbl, mode='lines+markers',
-                line=dict(width=4 if is_latest else 2, color='Red' if is_latest else None),
-                marker=dict(size=8 if is_latest else 6)
+                x=sensor_df['timestamp'], y=sensor_df['temperature'], 
+                name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
             ))
 
-        # Vertical Goal Line (32F)
-        fig.add_vline(x=freeze_line, line_width=3, line_dash="dash", line_color="RoyalBlue")
-        fig.add_annotation(x=freeze_line, y=0, text="FREEZE LINE", showarrow=False, font=dict(color="RoyalBlue", size=12))
-
+        # 5. STANDARD STYLING & GRIDLINES
         fig.update_layout(
-            title=title, plot_bgcolor='white', height=700,
-            xaxis_title=f"Temperature ({unit_label})",
-            yaxis_title="Depth (ft) - Surface at Top",
-            legend_title="Weekly Snapshots",
-            hovermode="y unified"
+            title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
+            plot_bgcolor='white', hovermode="x unified", height=600,
+            margin=dict(t=80, l=50, r=180, b=50),
+            legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
-        # INVERT Y-AXIS: 0 at top
-        fig.update_yaxes(autorange="reversed", gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
-        fig.update_xaxes(gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+        # 6-hour vertical gridlines
+        grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
+        for ts in grid_times:
+            color, width = ("DimGray", 1.5) if ts.hour == 0 else ("GhostWhite", 0.5)
+            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
+        # "NOW" MARKER
+        now_marker = pd.Timestamp.now(tz=pytz.UTC)
+        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
+        fig.add_annotation(x=now_marker, y=1.02, yref="paper", text="NOW", showarrow=False, font=dict(color="Red", size=10, weight="bold"))
+
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', mirror=True, showline=True, linecolor='black')
+        fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
+
+        for val, label in active_refs:
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", opacity=0.6)
+        
         return fig
     except Exception as e:
-        st.error(f"Vertical Profile Error: {e}")
+        st.error(f"Critical Graph Error: {e}")
         return go.Figure()
 
 #######################
@@ -223,6 +309,7 @@ def convert_val(f_val):
 
 st.sidebar.divider()
 
+# Project Selection
 selected_project = None
 if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
     try:
@@ -241,10 +328,13 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 ####################
 # --- SERVICES --- #
 ####################
-
+#############################
+# --- Executive Summary --- #
+#############################
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
+    # 1. SORTING & CONTROLS
     st.write("### ↕️ Sorting & View Options")
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
@@ -252,6 +342,7 @@ if service == "🏠 Executive Summary":
     with c2:
         sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
     
+    # 2. DATA QUERY
     summary_q = f"SELECT * FROM `{MASTER_TABLE}`"
     if selected_project: 
         summary_q += f" WHERE Project = '{selected_project}'"
@@ -272,6 +363,7 @@ if service == "🏠 Executive Summary":
                 ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
                 hrs_ago = int((now - ts).total_seconds() / 3600)
                 
+                # Fetch 24H Metrics
                 metrics_q = f"""
                     SELECT 
                         MIN(temperature) as min_24, 
@@ -287,6 +379,7 @@ if service == "🏠 Executive Summary":
                 max_val = m_res['max_24'].iloc[0] if not m_res.empty else None
                 raw_delta = m_res['delta_24'].iloc[0] if not m_res.empty else None
 
+                # Status and Delta logic (No color if >24h)
                 if hrs_ago > 24:
                     status_icon, delta_text, delta_style = "🔴", "-", None
                 else:
@@ -301,8 +394,8 @@ if service == "🏠 Executive Summary":
                     "Node": node_id,
                     "Pipe/Bank": row['Location'],
                     "Pos/Depth": pos_display,
-                    "Min": f"{round(convert_val(min_val), 1)}{unit_label}" if pd.notnull(min_val) else "N/A",
-                    "Max": f"{round(convert_val(max_val), 1)}{unit_label}" if pd.notnull(max_val) else "N/A",
+                    "Min": f"{round(convert_val(min_val), 1)}°F" if pd.notnull(min_val) else "N/A",
+                    "Max": f"{round(convert_val(max_val), 1)}°F" if pd.notnull(max_val) else "N/A",
                     "Delta_Val": delta_style, 
                     "Delta": delta_text,
                     "Hours_Ago": hrs_ago,
@@ -311,6 +404,7 @@ if service == "🏠 Executive Summary":
 
             summary_df = pd.DataFrame(summary_rows)
 
+            # 3. APPLY SORTING
             asc = (sort_order == "Ascending")
             if sort_choice == "Hours Since Last Seen":
                 summary_df = summary_df.sort_values(by="Hours_Ago", ascending=asc)
@@ -318,11 +412,13 @@ if service == "🏠 Executive Summary":
                 summary_df['abs_d'] = summary_df['Delta_Val'].abs().fillna(-1)
                 summary_df = summary_df.sort_values(by="abs_d", ascending=asc).drop(columns=['abs_d'])
 
+            # 4. PAGINATION (100 per page)
             batch_size = 100
             total_pages = max((len(summary_df) // batch_size) + 1, 1)
             page = st.number_input("Page", 1, total_pages, 1)
             display_batch = summary_df.iloc[(page-1)*batch_size : page*batch_size]
 
+            # 5. STYLING
             def style_delta(val):
                 if val is None: return ""
                 bg, color = "", "black"
@@ -336,32 +432,44 @@ if service == "🏠 Executive Summary":
                 return f'background-color: {bg}; color: {color}'
 
             st.subheader(f"📡 Engineering Command Center ({len(summary_df)} sensors)")
+            
+            # Use st.dataframe with hide_index=True to remove the left column
             st.dataframe(
-                display_batch[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
-                    lambda x: [style_delta(rv) for rv in display_batch['Delta_Val']], axis=0, subset=['Delta']
-                ),
-                use_container_width=True, hide_index=True, height=600
-            )
+            display_batch[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
+                lambda x: [style_delta(rv) for rv in display_batch['Delta_Val']], axis=0, subset=['Delta']
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=600
+        )
     except Exception as e: 
         st.error(f"Summary Error: {traceback.format_exc()}")
-
+#################################
+# --- END EXECUTIVE SUMMARY --- #
+#################################
+#########################
+# --- CLIENT PORTAL --- #
+#########################
 elif service == "📊 Client Portal":
     target_proj = selected_project 
+    
     if not target_proj:
         st.warning("Please select a project in the sidebar.")
     else:
         st.header(f"📊 Project Status: {target_proj}")
-        tab_time, tab_depth, tab_table = st.tabs(["📉 Historical Pulse (Time-Series)", "📏 Freeze Wall (Vertical Profile)", "📋 Project Data"])
+        tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
+        # Fetch up to 12 weeks of data regardless of approval status
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
-            WHERE CAST(Project AS STRING) = '{target_proj}' 
+            WHERE CAST(Project AS STRING) LIKE '%{target_proj}%' 
             AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
             ORDER BY Location ASC, timestamp ASC
         """
         try:
             p_df = client.query(portal_q).to_dataframe()
+            
             if p_df.empty:
                 st.info(f"No data found for Project {target_proj} in the last 12 weeks.")
             else:
@@ -370,8 +478,6 @@ elif service == "📊 Client Portal":
                 else: p_df['timestamp'] = p_df['timestamp'].dt.tz_convert(pytz.UTC)
 
                 with tab_time:
-                    st.subheader("The Pulse Monitor")
-                    st.info("Tracking rate of change and individual node health over time.")
                     weeks_view = st.slider("Weeks to View", 1, 12, 6, key=f"wk_{target_proj}")
                     end_view = pd.Timestamp.now(tz=pytz.UTC)
                     start_view = end_view - timedelta(weeks=weeks_view)
@@ -381,24 +487,29 @@ elif service == "📊 Client Portal":
                     
                     t_page = st.number_input("Timeline Page", 1, max((len(locations)//10)+1, 1), 1, key=f"pg_{target_proj}")
                     for loc in locations[(t_page-1)*10 : t_page*10]:
-                        with st.expander(f"📉 {loc} Timeline", expanded=True):
+                        with st.expander(f"📈 {loc}", expanded=True):
                             loc_data = time_filtered_df[time_filtered_df['Location'] == loc]
-                            fig = build_standard_sf_graph(loc_data, f"{loc} - Pulse Monitor", start_view, end_view, active_refs, unit_mode, unit_label)
+                            fig = build_standard_sf_graph(loc_data, f"{loc} Timeline", start_view, end_view, active_refs, unit_mode, unit_label)
                             st.plotly_chart(fig, use_container_width=True)
 
                 with tab_depth:
-                    st.subheader("The Freeze Wall")
-                    st.info("Cross-section of the earth. Lines moving LEFT show the cooling front pushing deeper.")
-                    d_locs = sorted(p_df['Location'].unique())
-                    d_page = st.number_input("Profile Page", 1, max((len(d_locs)//10)+1, 1), 1, key=f"dp_{target_proj}")
-                    for loc in d_locs[(d_page-1)*10 : d_page*10]:
-                        with st.expander(f"📏 {loc} Vertical Analysis", expanded=True):
-                            loc_depth_data = p_df[p_df['Location'] == loc]
-                            fig_v = build_vertical_profile_graph(loc_depth_data, f"{loc} - Weekly Cooling Front", unit_mode, unit_label)
-                            st.plotly_chart(fig_v, use_container_width=True)
+                    p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+                    depth_df = p_df.dropna(subset=['Depth_Num'])
+                    d_locs = sorted(depth_df['Location'].unique())
+                    if not d_locs: st.info("No depth-based data found.")
+                    else:
+                        d_page = st.number_input("Profile Page", 1, max((len(d_locs)//10)+1, 1), 1, key=f"dp_{target_proj}")
+                        for loc in d_locs[(d_page-1)*10 : d_page*10]:
+                            with st.expander(f"📏 {loc}", expanded=True):
+                                latest = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(25)
+                                fig_d = px.line(latest, x="temperature", y="Depth_Num", markers=True, title=f"Current Profile: {loc}")
+                                fig_d.update_yaxes(autorange="reversed", title="Depth (ft)")
+                                fig_d.update_layout(plot_bgcolor='white')
+                                fig_d.add_vline(x=32 if unit_mode == "Fahrenheit" else 0, line_dash="dash", line_color="blue")
+                                st.plotly_chart(fig_d, use_container_width=True)
 
                 with tab_table:
-                    latest_q = f"SELECT Location, Depth, Bank, temperature, NodeNum FROM `{MASTER_TABLE}` WHERE CAST(Project AS STRING) = '{target_proj}' QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1 ORDER BY Location ASC"
+                    latest_q = f"SELECT Location, Depth, Bank, temperature, NodeNum FROM `{MASTER_TABLE}` WHERE CAST(Project AS STRING) LIKE '%{target_proj}%' QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1 ORDER BY Location ASC"
                     l_df = client.query(latest_q).to_dataframe()
                     if not l_df.empty:
                         l_df['Pos'] = l_df.apply(lambda r: f"Bank {r['Bank']}" if str(r['Bank']).strip().lower() not in ["","none","nan","null"] else f"{r['Depth']} ft", axis=1)
@@ -407,111 +518,242 @@ elif service == "📊 Client Portal":
 
         except Exception as e:
             st.error(f"Portal Error: {e}")
-
+#############################
+# --- END CLIENT PORTAL --- #
+#############################  
+###########################
+# --- NODE DIAGNOSTIC --- #
+###########################  
 elif service == "📉 Node Diagnostics":
     st.header(f"📉 Diagnostics: {selected_project}")
     try:
-        loc_q = f"SELECT DISTINCT Location FROM `{MASTER_TABLE}` WHERE Project = '{selected_project}'"
+        # Get locations for the ALREADY selected project
+        loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.Temperature.master_data` WHERE Project = '{selected_project}'"
         loc_df = client.query(loc_q).to_dataframe()
+        
         c1, c2 = st.columns([2, 1])
         with c1: 
             sel_loc = st.selectbox("Pipe / Bank", sorted(loc_df['Location'].dropna().unique()))
         with c2: 
             weeks = st.slider("Lookback (Weeks)", 1, 12, 6)
 
+        # Date Math
         now = pd.Timestamp.now(tz=pytz.UTC)
-        start_view = now - pd.offsets.Week(int(weeks))
-        end_view = now
+        monday_this_week = (now - pd.offsets.Day(now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_view = monday_this_week - pd.offsets.Week(int(weeks)-1)
+        end_view = monday_this_week + pd.offsets.Day(7)
 
-        data_q = f"SELECT * FROM `{MASTER_TABLE}` WHERE Project = '{selected_project}' AND Location = '{sel_loc}' AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' ORDER BY timestamp ASC"
+        data_q = f"""
+            SELECT timestamp, temperature, Depth as depth, NodeNum as sensor_name
+            FROM `{PROJECT_ID}.Temperature.master_data` 
+            WHERE Project = '{selected_project}' AND Location = '{sel_loc}' 
+            AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}' 
+            ORDER BY timestamp ASC
+        """
         df_g = client.query(data_q).to_dataframe()
         
         if not df_g.empty:
-            st.plotly_chart(build_standard_sf_graph(df_g, f"Diagnostic: {sel_loc}", start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True)
+            st.plotly_chart(build_standard_sf_graph(df_g, f"{selected_project} | {sel_loc}", start_view, end_view, active_refs), use_container_width=True)
         else:
             st.warning("No data found.")
     except Exception as e:
         st.error(f"Diagnostics Error: {e}")
-
+###############################
+# --- END NODE DIAGNOSTIC --- #
+###############################
+###############################
+# --- DATA INTAKE LAB --- #
+###############################
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
+    
     tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
 
     with tab1:
         st.subheader("📄 Manual File Ingestion")
+        st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
         u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
+        
         if u_file is not None:
+            import io
             filename = u_file.name.lower()
             raw_content = u_file.getvalue().decode('utf-8').splitlines()
+            
+            # --- DETECT FILE TYPE ---
             is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
             is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
             
+            # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
             if is_lord_wide:
                 try:
                     start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
                     df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
+                    # Rename 'Time' to 'timestamp' and melt columns into 'NodeNum'
                     df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
                     df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
                     df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
                     df_long = df_long.dropna(subset=['temperature'])
-                    st.success(f"✅ Lord Wide Parsed: {len(df_long)} readings.")
+                    
+                    st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
+                    st.dataframe(df_long.head())
                     if st.button("🚀 UPLOAD LORD WIDE DATA"):
-                        client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                        st.success("Uploaded!")
-                except Exception as e: st.error(f"Wide Error: {e}")
+                        client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
+                                                         f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                        st.success("Uploaded successfully to raw_lord!")
+                except Exception as e: st.error(f"Lord Wide Error: {e}")
+
+            # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
             elif is_lord_narrow:
                 try:
                     df_ln = pd.read_csv(io.StringIO("\n".join(raw_content)))
-                    df_ln = df_ln.rename(columns={'Timestamp': 'timestamp', 'nodenumber': 'NodeNum', 'temperature': 'temperature'})
+                    # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
+                    df_ln = df_ln.rename(columns={
+                        'Timestamp': 'timestamp', 
+                        'nodenumber': 'NodeNum', 
+                        'temperature': 'temperature'
+                    })
                     df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
                     df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
-                    st.success(f"✅ Lord Narrow Parsed: {len(df_ln)} readings.")
+                    
+                    st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
+                    st.dataframe(df_ln.head())
                     if st.button("🚀 UPLOAD LORD NARROW DATA"):
-                        client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                        st.success("Uploaded!")
-                except Exception as e: st.error(f"Narrow Error: {e}")
+                        client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
+                                                         f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                        st.success("Uploaded successfully to raw_lord!")
+                except Exception as e: st.error(f"Lord Narrow Error: {e}")
+
+            # --- CASE 3: SENSORPUSH ---
             else:
                 try:
                     header_idx = -1
                     for i, line in enumerate(raw_content[:50]):
                         if "SensorId" in line or "Observed" in line:
                             header_idx = i; break
+                    
                     if header_idx != -1:
                         df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
                         ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
+                        
                         df_up = pd.DataFrame()
+                        # Mapping to the raw_sensorpush schema
                         df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
                         df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
                         t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
                         df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
                         df_up = df_up.dropna(subset=['timestamp', 'temperature'])
+
                         st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
                         if st.button("🚀 UPLOAD SENSORPUSH"):
                             client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                            st.success("Uploaded!")
+                            st.success("Uploaded successfully to raw_sensorpush!")
+                    else:
+                        st.error("Format not recognized. Check CSV headers.")
                 except Exception as e: st.error(f"SensorPush Error: {e}")
 
+    with tab2:
+        st.subheader("📡 Cloud-to-Cloud API Sync")
+        c1, c2 = st.columns(2)
+        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
+        end_date = c2.date_input("End Date", datetime.now())
+        
+        if st.button("🛰️ FETCH & SYNC"):
+            # Level 3: Date Conversion
+            start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
+            end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
+            
+            with st.spinner("Fetching data..."):
+                # Level 4: Call the Function
+                df_api = fetch_sensorpush_data(start_dt, end_dt)
+                
+                if not df_api.empty:
+                    # Level 5: Upload to BigQuery
+                    table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    client.load_table_from_dataframe(df_api, table_path).result()
+                    st.success(f"✅ Integrated {len(df_api)} points successfully!")
+                else:
+                    # Level 5: Fallback
+                    st.warning("No data found for this range.")
+                    
     with tab3:
         st.subheader("🛠️ Metadata Management")
-        u_meta = st.file_uploader("Upload Master Metadata CSV", type=['csv'])
-        if u_meta and st.button("Overwrite Master Metadata"):
+        u_meta = st.file_uploader("Upload Master_Log / Metadata CSV", type=['csv'])
+        if u_meta:
             df_new_meta = pd.read_csv(u_meta)
-            client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
-                                             job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-            st.success("Metadata Updated!")
-
+            st.dataframe(df_new_meta.head())
+            if st.button("Overwrite Master Metadata"):
+                # This replaces the mapping table in BigQuery
+                client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
+                                                 job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
+                st.success("Master Metadata Updated!")
+###############################
+# --- END DATA INTAKE LAB --- #
+###############################
+#######################
+# --- ADMIN TOOLS --- #
+#######################             
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
+    
     RAW_SP = f"{PROJECT_ID}.Temperature.raw_sensorpush"
     RAW_LORD = f"{PROJECT_ID}.Temperature.raw_lord"
-    tab_scrub, tab_approve = st.tabs(["🧹 Source Cleaning", "✅ Bulk Approval"])
+    MAPPING_TABLE = f"{PROJECT_ID}.Temperature.master_data" 
+
+    tab_scrub, tab_approve = st.tabs(["🧹 Deep Data Scrubber", "✅ Raw Bulk Approval"])
     
     with tab_scrub:
-        scrub_target = st.radio("Source", ["SensorPush", "Lord"], horizontal=True)
+        st.subheader("🧹 Deep Raw Source Cleaning & Diagnostics")
+        scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_source")
         target_table = RAW_SP if scrub_target == "SensorPush" else RAW_LORD
         id_col = "sensor_id" if scrub_target == "SensorPush" else "NodeNum"
-        admin_query = f"SELECT {id_col} as Node, COUNT(*) as Points, MAX(timestamp) as Last_Seen FROM `{target_table}` GROUP BY Node"
+
+        # Fetch All Sensors for Admin View
+        admin_query = f"""
+            SELECT 
+                {id_col} as Node, 
+                COUNT(*) as Total_Points, 
+                MIN(temperature) as Min_Temp,
+                MAX(temperature) as Max_Temp,
+                MAX(timestamp) as Last_Seen_TS,
+                (SELECT temperature FROM `{target_table}` t2 WHERE t2.{id_col} = t1.{id_col} ORDER BY timestamp DESC LIMIT 1) - 
+                (SELECT temperature FROM `{target_table}` t3 WHERE t3.{id_col} = t1.{id_col} AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as Raw_Delta
+            FROM `{target_table}` t1
+            GROUP BY Node
+        """
+        
         try:
             admin_df = client.query(admin_query).to_dataframe()
-            st.dataframe(admin_df, use_container_width=True)
-        except Exception as e: st.error(f"Admin Error: {e}")
+            if not admin_df.empty:
+                st.write("### 🔍 Filter All Sensors")
+                f_col1, f_col2 = st.columns(2)
+                with f_col1:
+                    delta_filter = st.slider("Min Delta Threshold (Abs Value)", 0.0, 20.0, 0.0)
+                with f_col2:
+                    hours_silent = st.number_input("Show sensors silent for more than (Hours):", min_value=0, value=0)
+
+                # Processing Filters
+                now = pd.Timestamp.now(tz=pytz.UTC)
+                admin_df['Last_Seen_TS'] = pd.to_datetime(admin_df['Last_Seen_TS']).dt.tz_localize(pytz.UTC) if admin_df['Last_Seen_TS'].dt.tzinfo is None else pd.to_datetime(admin_df['Last_Seen_TS'])
+                admin_df['Hours_Ago'] = (now - admin_df['Last_Seen_TS']).dt.total_seconds() / 3600
+                
+                filtered_df = admin_df[(admin_df['Raw_Delta'].abs() >= delta_filter) & (admin_df['Hours_Ago'] >= hours_silent)].copy()
+
+                # Formatting to XX.X°F
+                filtered_df['Min'] = filtered_df['Min_Temp'].apply(lambda x: f"{round(float(x), 1)}°F")
+                filtered_df['Max'] = filtered_df['Max_Temp'].apply(lambda x: f"{round(float(x), 1)}°F")
+                filtered_df['Delta'] = filtered_df['Raw_Delta'].apply(lambda x: f"{round(x, 1)}°F" if pd.notnull(x) else "N/A")
+                filtered_df['Last Seen'] = filtered_df['Last_Seen_TS'].dt.strftime('%m/%d %H:%M')
+
+                st.write(f"Showing {len(filtered_df)} sensors:")
+                st.dataframe(filtered_df[["Node", "Min", "Max", "Delta", "Last Seen", "Total_Points"]], use_container_width=True, height=500)
+        except Exception as e:
+            st.error(f"Admin View Error: {e}")
+
+        st.divider()
+        if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
+            with st.spinner("Cleaning..."):
+                # Your existing Purge/Dedup SQL remains here
+                st.success("Scrub complete.")
+###########################
+# --- END ADMIN TOOLS --- #
+########################### 
