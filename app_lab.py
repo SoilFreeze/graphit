@@ -838,17 +838,15 @@ elif service == "🛠️ Admin Tools":
         st.subheader("🧹 Deep Data Scrub")
         scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
         
-        # Mapping table and ID column based on your script's internal logic
-        if scrub_target == "SensorPush":
-            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-            id_col = "sensor_id" # Matches rebuild_master_table logic
-        else:
-            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-            id_col = "NodeNum" # Matches rebuild_master_table logic
+        # Table Path
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+        
+        # UPDATED: Both tables appear to use 'NodeNum' based on your screenshot/previous success
+        id_col = "NodeNum" 
 
         if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
             with st.spinner(f"Cleaning {scrub_target}..."):
-                # Flat query to remove NULLs and keep 1 reading per hour
+                # Flat deduplication query
                 dedup_sql = f"""
                 CREATE OR REPLACE TABLE `{target_table}` AS 
                 SELECT * EXCEPT(rn) FROM (
@@ -872,8 +870,8 @@ elif service == "🛠️ Admin Tools":
         st.subheader("✅ Bulk Approval")
         if st.button("Mark All Data as Approved"):
             try:
-                # Direct update to the master table
-                approve_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` SET is_approved = TRUE WHERE Project = '{selected_project}'"
+                # Direct update to master_data
+                approve_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.master_data` SET is_approved = TRUE WHERE Project = '{selected_project}'"
                 job = client.query(approve_sql)
                 job.result()
                 st.success(f"Updated {job.num_dml_affected_rows} rows to Approved.")
@@ -891,11 +889,11 @@ elif service == "🛠️ Admin Tools":
         target_loc = None
         if clean_mode == "Single Pipe/Bank":
             try:
-                loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE Project = '{selected_project}'"
+                loc_q = f"SELECT DISTINCT Location FROM `{PROJECT_ID}.{DATASET_ID}.master_data` WHERE Project = '{selected_project}'"
                 loc_df = client.query(loc_q).to_dataframe()
                 target_loc = st.selectbox("Select Pipe", sorted(loc_df['Location'].dropna().unique()))
             except:
-                st.warning("Could not load locations. Ensure project is selected.")
+                st.warning("Could not load locations.")
 
         if st.button("🔥 DELETE SELECTED DATA"):
             # Constructing the deletion clause
@@ -903,7 +901,7 @@ elif service == "🛠️ Admin Tools":
             if clean_mode == "Single Pipe/Bank" and target_loc:
                 del_clause += f" AND Location = '{target_loc}'"
             
-            delete_sql = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.final_databoard_master` WHERE {del_clause}"
+            delete_sql = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.master_data` WHERE {del_clause}"
             try:
                 with st.spinner("Deleting data..."):
                     del_job = client.query(delete_sql)
