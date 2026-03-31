@@ -189,57 +189,82 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         if display_df.empty:
             return go.Figure()
 
+        # Standardize columns and handle timestamps
         display_df.columns = [c.lower() for c in display_df.columns]
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         
-        # Unit Conversion logic moved inside
+        # Ensure timestamp is timezone aware for comparison
+        if display_df['timestamp'].dt.tz is None:
+            display_df['timestamp'] = display_df['timestamp'].dt.tz_localize(pytz.UTC)
+        else:
+            display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC)
+
+        # Unit Conversion
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
             y_range = [-30, 30]
         else:
             y_range = [-20, 80]
             
-        # Labeling Logic
+        # FIXED: Robust labeling to prevent '<' str vs None errors
         def create_label(row):
             b_val = str(row.get('bank', '')).strip().lower()
             d_val = str(row.get('depth', '')).strip().lower()
-            s_name = str(row.get('nodenum', row.get('sensor_id', 'Unknown')))
-            if b_val not in ["", "none", "nan", "null"]: return f"Bank {row['bank']} ({s_name})"
-            if d_val not in ["", "none", "nan", "null"]: return f"{row['depth']}ft ({s_name})"
+            s_name = str(row.get('nodenum', row.get('sensor_name', row.get('sensor_id', 'Unknown'))))
+            
+            if b_val not in ["", "none", "nan", "null"]: 
+                return f"Bank {row.get('bank')} ({s_name})"
+            if d_val not in ["", "none", "nan", "null"]: 
+                return f"{row.get('depth')}ft ({s_name})"
             return f"Unmapped ({s_name})"
 
         display_df['label'] = display_df.apply(create_label, axis=1)
         
-        # Figure Setup
         fig = go.Figure()
+        # Sort labels to ensure consistent legend order
         for lbl in sorted(display_df['label'].unique()):
             s_df = display_df[display_df['label'] == lbl].sort_values('timestamp')
-            # Gap handling (6hr)
-            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            if (s_df['gap'] > 6).any():
-                # Split traces at gaps to prevent long connecting lines
-                fig.add_trace(go.Scatter(x=s_df['timestamp'], y=s_df['temperature'], name=lbl, mode='lines', connectgaps=False))
-            else:
-                fig.add_trace(go.Scatter(x=s_df['timestamp'], y=s_df['temperature'], name=lbl, mode='lines'))
+            
+            # Gap handling (> 6 hrs) - inserts a None to break the line
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            mask = s_df['gap_hrs'] > 6.0
+            if mask.any():
+                # Add gap rows
+                gaps = s_df[mask].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(seconds=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            
+            fig.add_trace(go.Scatter(
+                x=s_df['timestamp'], 
+                y=s_df['temperature'], 
+                name=lbl, 
+                mode='lines', 
+                connectgaps=False,
+                line=dict(width=2)
+            ))
 
-        # Global Formatting
+        # Layout settings aligned with your Office project preferences
         fig.update_layout(
-            title={'text': title, 'font': dict(size=18)},
-            plot_bgcolor='white', hovermode="x unified", height=500,
+            title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
+            plot_bgcolor='white', 
+            hovermode="x unified", 
+            height=500,
+            margin=dict(t=80, l=50, r=50, b=50),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
+        
         fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', showline=True, linecolor='black')
         fig.update_xaxes(range=[start_view, end_view], showline=True, linecolor='black', gridcolor='Gainsboro')
 
-        # Add Reference Lines
+        # Reference Lines
         for val, label in active_refs:
-            converted_ref = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            fig.add_hline(y=converted_ref, line_dash="dash", line_color="RoyalBlue", 
-                          annotation_text=f"{label} ({round(converted_ref,1)}{unit_label})")
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", opacity=0.7)
         
         return fig
     except Exception as e:
-        st.error(f"Global Graph Engine Error: {e}")
+        st.error(f"Graph Engine Error: {e}")
         return go.Figure()
 
 #######################
@@ -410,17 +435,17 @@ if service == "🏠 Executive Summary":
 # --- CLIENT PORTAL --- #
 #########################
 elif service == "📊 Client Portal":
-    # --- CONFIGURATION: HARD-WIRE HERE ---
+    # --- CONFIGURATION ---
+    # target_proj = "2538" # Uncomment to hard-wire for project 2538
     target_proj = selected_project 
     
     if not target_proj:
-        st.warning("Please select a project in the sidebar to view the portal.")
+        st.warning("Please select a project in the sidebar.")
     else:
         st.header(f"📊 Project Status: {target_proj}")
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
-        # --- DATA PREPARATION ---
-        # Fixed: Interval 84 DAY for 12 weeks compatibility
+        # Fetch 84 days (12 weeks) of data
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
@@ -435,109 +460,60 @@ elif service == "📊 Client Portal":
             if p_df.empty:
                 st.info(f"No approved data found for Project {target_proj}.")
             else:
-                # ---------------------------------------------------------
-                # TAB 1: TIME VS TEMPERATURE
-                # ---------------------------------------------------------
+                p_df['timestamp'] = pd.to_datetime(p_df['timestamp'])
+                if p_df['timestamp'].dt.tz is None:
+                    p_df['timestamp'] = p_df['timestamp'].dt.tz_localize(pytz.UTC)
+                else:
+                    p_df['timestamp'] = p_df['timestamp'].dt.tz_convert(pytz.UTC)
+
+                # --- TAB 1: TIME VS TEMPERATURE ---
                 with tab_time:
-                    st.subheader("Historical Timeline")
-                    weeks_view = st.slider("Weeks to View", 1, 12, 6, key=f"weeks_{target_proj}")
-                    
+                    weeks_view = st.slider("Weeks to View", 1, 12, 6, key=f"wk_{target_proj}")
                     end_view = pd.Timestamp.now(tz=pytz.UTC)
                     start_view = end_view - timedelta(weeks=weeks_view)
                     
-                    # FIXED: Safe timezone conversion for the entire column
-                    p_df['timestamp'] = pd.to_datetime(p_df['timestamp'])
-                    if p_df['timestamp'].dt.tz is None:
-                        p_df['timestamp'] = p_df['timestamp'].dt.tz_localize(pytz.UTC)
-                    else:
-                        p_df['timestamp'] = p_df['timestamp'].dt.tz_convert(pytz.UTC)
-                        
                     time_filtered_df = p_df[p_df['timestamp'] >= start_view]
-
                     locations = sorted(time_filtered_df['Location'].unique())
-                    t_batch_size = 10
-                    t_total_pages = max((len(locations) // t_batch_size) + 1, 1)
-                    t_page = st.number_input("Timeline Page", 1, t_total_pages, 1, key=f"t_page_{target_proj}")
                     
-                    t_start = (t_page - 1) * t_batch_size
-                    t_locs_batch = locations[t_start : t_start + t_batch_size]
+                    t_page = st.number_input("Page", 1, max((len(locations)//10)+1, 1), 1, key=f"pg_{target_proj}")
+                    t_locs = locations[(t_page-1)*10 : t_page*10]
 
-                    for loc in t_locs_batch:
-                        with st.expander(f"📈 Timeline: {loc}", expanded=True):
+                    for loc in t_locs:
+                        with st.expander(f"📈 {loc}", expanded=True):
                             loc_data = time_filtered_df[time_filtered_df['Location'] == loc]
-                            # All logic is now inside the build function below
-                            fig = build_standard_sf_graph(
-                                loc_data, f"{loc} - {weeks_view} Week History", 
-                                start_view, end_view, active_refs, unit_mode, unit_label
-                            )
-                            st.plotly_chart(fig, use_container_width=True, key=f"time_{target_proj}_{loc}_{weeks_view}")
+                            fig = build_standard_sf_graph(loc_data, f"{loc} Timeline", start_view, end_view, active_refs, unit_mode, unit_label)
+                            st.plotly_chart(fig, use_container_width=True)
 
-                # ---------------------------------------------------------
-                # TAB 2: TEMPERATURE VS DEPTH
-                # ---------------------------------------------------------
+                # --- TAB 2: TEMPERATURE VS DEPTH ---
                 with tab_depth:
-                    st.subheader("Vertical Temperature Profiles")
                     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
                     depth_df = p_df.dropna(subset=['Depth_Num'])
+                    d_locs = sorted(depth_df['Location'].unique())
                     
-                    d_locations = sorted(depth_df['Location'].unique())
-                    if not d_locations:
-                        st.info("No depth-based sensor data (Pipes) found.")
+                    if not d_locs:
+                        st.info("No depth-based data available.")
                     else:
-                        d_batch_size = 10
-                        d_total_pages = max((len(d_locations) // d_batch_size) + 1, 1)
-                        d_page = st.number_input("Profile Page", 1, d_total_pages, 1, key=f"d_page_{target_proj}")
-                        
-                        d_start = (d_page - 1) * d_batch_size
-                        d_locs_batch = d_locations[d_start : d_start + d_batch_size]
+                        d_page = st.number_input("Profile Page", 1, max((len(d_locs)//10)+1, 1), 1, key=f"dp_{target_proj}")
+                        for loc in d_locs[(d_page-1)*10 : d_page*10]:
+                            with st.expander(f"📏 {loc}", expanded=True):
+                                latest = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(25)
+                                fig_d = px.line(latest, x="temperature", y="Depth_Num", markers=True, title=f"Current Profile: {loc}")
+                                fig_d.update_yaxes(autorange="reversed", title="Depth (ft)")
+                                fig_d.update_xaxes(title=f"Temp ({unit_label})")
+                                fig_d.add_vline(x=32 if unit_mode == "Fahrenheit" else 0, line_dash="dash", line_color="blue")
+                                st.plotly_chart(fig_d, use_container_width=True)
 
-                        for loc in d_locs_batch:
-                            with st.expander(f"📏 Depth Profile: {loc}", expanded=True):
-                                latest_profile = depth_df[depth_df['Location'] == loc].sort_values('timestamp').tail(25)
-                                fig_depth = px.line(latest_profile, x="temperature", y="Depth_Num", 
-                                                    markers=True, labels={"temperature": f"Temp ({unit_label})", "Depth_Num": "Depth (ft)"},
-                                                    title=f"Current Vertical Profile: {loc}")
-                                fig_depth.update_yaxes(autorange="reversed")
-                                fig_depth.update_layout(plot_bgcolor='white', height=450)
-                                fig_depth.add_vline(x=32 if unit_mode == "Fahrenheit" else 0, line_dash="dash", line_color="blue", annotation_text="Freezing")
-                                st.plotly_chart(fig_depth, use_container_width=True, key=f"depth_{target_proj}_{loc}")
-
-                # ---------------------------------------------------------
-                # TAB 3: PROJECT DATA (Sorted & Combined)
-                # ---------------------------------------------------------
+                # --- TAB 3: PROJECT DATA ---
                 with tab_table:
-                    st.subheader("Current Project Readings")
-                    latest_q = f"""
-                        SELECT Location, Depth, Bank, temperature, NodeNum
-                        FROM `{MASTER_TABLE}`
-                        WHERE Project = '{target_proj}' AND approve = 'TRUE'
-                        QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1
-                        ORDER BY Location ASC
-                    """
+                    latest_q = f"SELECT Location, Depth, Bank, temperature, NodeNum FROM `{MASTER_TABLE}` WHERE Project = '{target_proj}' AND approve = 'TRUE' QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1 ORDER BY Location ASC"
                     l_df = client.query(latest_q).to_dataframe()
-                    
                     if not l_df.empty:
-                        def format_pos(row):
-                            b = str(row['Bank']).strip()
-                            d = str(row['Depth']).strip()
-                            if b not in ["", "None", "nan", "null"]: return f"Bank {b}"
-                            return f"{d} ft" if d not in ["", "None", "nan", "null"] else "Unmapped"
-
-                        l_df['Pos'] = l_df.apply(format_pos, axis=1)
-                        l_df['Temp'] = l_df['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
-                        
-                        batch_size = 100
-                        total_pages = max((len(l_df) // batch_size) + 1, 1)
-                        page = st.number_input("Data Page", 1, total_pages, 1, key=f"p_page_{target_proj}")
-                        
-                        start_idx = (page - 1) * batch_size
-                        display_df = l_df.iloc[start_idx : start_idx + batch_size]
-                        st.table(display_df[["Location", "Pos", "Temp"]].rename(columns={"Temp": "Current Temp"}))
-                    else:
-                        st.info("No current approved data available.")
+                        l_df['Pos'] = l_df.apply(lambda r: f"Bank {r['Bank']}" if str(r['Bank']).strip().lower() not in ["","none","nan","null"] else f"{r['Depth']} ft", axis=1)
+                        l_df['Current Temp'] = l_df['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
+                        st.table(l_df[["Location", "Pos", "Current Temp"]])
 
         except Exception as e:
-            st.error(f"Portal Preview Error: {e}")
+            st.error(f"Portal Error: {e}")
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
