@@ -318,7 +318,6 @@ if service == "🏠 Executive Summary":
         sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
     
     # 2. DATA QUERY
-    # Pull latest record for every sensor to establish the "current" list
     summary_q = f"SELECT * FROM `{MASTER_TABLE}`"
     if selected_project: 
         summary_q += f" WHERE Project = '{selected_project}'"
@@ -336,12 +335,10 @@ if service == "🏠 Executive Summary":
             
             for _, row in raw_data.iterrows():
                 node_id = row['NodeNum']
-                # Latency Logic
                 ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
                 hrs_ago = int((now - ts).total_seconds() / 3600)
                 
-                # FETCH 24H METRICS (Min, Max, Delta)
-                # We look at the 24-hour window relative to 'NOW' for all sensors
+                # Fetch 24H Metrics
                 metrics_q = f"""
                     SELECT 
                         MIN(temperature) as min_24, 
@@ -353,35 +350,28 @@ if service == "🏠 Executive Summary":
                     AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
                 """
                 m_res = client.query(metrics_q).to_dataframe()
-                
-                # Default values if no data in last 24h
                 min_val = m_res['min_24'].iloc[0] if not m_res.empty else None
                 max_val = m_res['max_24'].iloc[0] if not m_res.empty else None
                 raw_delta = m_res['delta_24'].iloc[0] if not m_res.empty else None
 
-                # Status and Delta Display Logic
+                # Status and Delta logic (No color if >24h)
                 if hrs_ago > 24:
-                    status_icon = "🔴"
-                    delta_text = "-"
-                    delta_for_styling = None # This will trigger 'no color'
+                    status_icon, delta_text, delta_style = "🔴", "-", None
                 else:
-                    if hrs_ago > 12: status_icon = "🟠"
-                    elif hrs_ago > 6: status_icon = "🟡"
-                    else: status_icon = "🟢"
+                    status_icon = "🟠" if hrs_ago > 12 else ("🟡" if hrs_ago > 6 else "🟢")
                     delta_text = f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F"
-                    delta_for_styling = raw_delta
+                    delta_style = raw_delta
 
-                # Position Display
-                bank_val = str(row['Bank']).strip()
-                pos_display = f"Bank {bank_val}" if bank_val not in ["", "None", "nan", "null"] else f"{row['Depth']} ft"
+                pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
 
                 summary_rows.append({
+                    "Project": row['Project'],
                     "Node": node_id,
                     "Pipe/Bank": row['Location'],
                     "Pos/Depth": pos_display,
                     "Min": f"{round(convert_val(min_val), 1)}°F" if pd.notnull(min_val) else "N/A",
                     "Max": f"{round(convert_val(max_val), 1)}°F" if pd.notnull(max_val) else "N/A",
-                    "Delta_Val": delta_for_styling, 
+                    "Delta_Val": delta_style, 
                     "Delta": delta_text,
                     "Hours_Ago": hrs_ago,
                     "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}hr) {status_icon}"
@@ -390,41 +380,43 @@ if service == "🏠 Executive Summary":
             summary_df = pd.DataFrame(summary_rows)
 
             # 3. APPLY SORTING
-            ascending = (sort_order == "Ascending")
+            asc = (sort_order == "Ascending")
             if sort_choice == "Hours Since Last Seen":
-                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=ascending)
+                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=asc)
             elif sort_choice == "Delta Magnitude":
-                # Use absolute value but handle None/NaN safely
-                summary_df['abs_delta'] = summary_df['Delta_Val'].abs().fillna(-1)
-                summary_df = summary_df.sort_values(by="abs_delta", ascending=ascending).drop(columns=['abs_delta'])
+                summary_df['abs_d'] = summary_df['Delta_Val'].abs().fillna(-1)
+                summary_df = summary_df.sort_values(by="abs_d", ascending=asc).drop(columns=['abs_d'])
 
             # 4. PAGINATION (100 per page)
             batch_size = 100
             total_pages = max((len(summary_df) // batch_size) + 1, 1)
-            page = st.number_input("Page", min_value=1, max_value=total_pages, step=1)
-            
-            start_idx = (page - 1) * batch_size
-            display_batch = summary_df.iloc[start_idx : start_idx + batch_size]
+            page = st.number_input("Page", 1, total_pages, 1)
+            display_batch = summary_df.iloc[(page-1)*batch_size : page*batch_size]
 
-            # 5. STYLING & DISPLAY
+            # 5. STYLING
             def style_delta(val):
-                if val is None: return "" # No color for inactive/None
+                if val is None: return ""
                 bg, color = "", "black"
-                if val >= 5: bg = "#FF0000"; color = "white"
+                if val >= 5: bg, color = "#FF0000", "white"
                 elif val >= 2: bg = "#FFA500"
                 elif val >= 0.5: bg = "#FFFF00"
-                elif -0.5 <= val <= 0.5: bg = "#008000"; color = "white"
+                elif -0.5 <= val <= 0.5: bg, color = "#008000", "white"
                 elif -2 < val < -0.5: bg = "#ADD8E6"
-                elif -5 < val <= -2: bg = "#4169E1"; color = "white"
-                elif val <= -5: bg = "#00008B"; color = "white"
+                elif -5 < val <= -2: bg, color = "#4169E1", "white"
+                elif val <= -5: bg, color = "#00008B", "white"
                 return f'background-color: {bg}; color: {color}'
 
             st.subheader(f"📡 Engineering Command Center ({len(summary_df)} sensors)")
             
-            # Use Delta_Val for hidden styling logic while showing formatted Delta text
-            st.table(display_batch[["Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
-                lambda x: [style_delta(row_val) for row_val in display_batch['Delta_Val']], axis=0, subset=['Delta']
-            ))
+            # Use st.dataframe with hide_index=True to remove the left column
+            st.dataframe(
+                display_batch[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
+                    lambda x: [style_delta(rv) for rv in display_batch['Delta_Val']], axis=0, subset=['Delta']
+                ),
+                use_container_width=True,
+                hide_index=True, # Removes the sensor number/index column
+                height=600
+            )
 
     except Exception as e: 
         st.error(f"Summary Error: {traceback.format_exc()}")
