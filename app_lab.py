@@ -223,13 +223,16 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         else:
             y_range = [-20, 80]
             
-        # 2. SMART LABELING
+        # 2. SMART LABELING (Fixed 'NoneType' sorting error)
         def create_label(row):
             b_val = str(row.get('bank', '')).strip().lower()
             d_val = str(row.get('depth', '')).strip().lower()
             s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
-            if b_val not in ["", "none", "nan", "null"]: return f"Bank {row['bank']} ({s_name})"
-            if d_val not in ["", "none", "nan", "null"]: return f"{row['depth']}ft ({s_name})"
+
+            if b_val not in ["", "none", "nan", "null"]:
+                return f"Bank {row['bank']} ({s_name})"
+            if d_val not in ["", "none", "nan", "null"]:
+                return f"{row['depth']}ft ({s_name})"
             return f"Unmapped ({s_name})"
 
         display_df['label'] = display_df.apply(create_label, axis=1)
@@ -258,7 +261,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
                 name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
             ))
 
-        # 5. STANDARD STYLING & GRIDLINES (6h Frequency)
+        # 5. STANDARD STYLING & GRIDLINES
         fig.update_layout(
             title={'text': title, 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
             plot_bgcolor='white', hovermode="x unified", height=600,
@@ -266,13 +269,13 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
             legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
-        # Draw 6-hour vertical gridlines
+        # 6-hour vertical gridlines
         grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
         for ts in grid_times:
             color, width = ("DimGray", 1.5) if ts.hour == 0 else ("GhostWhite", 0.5)
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # 6. "NOW" MARKER
+        # "NOW" MARKER
         now_marker = pd.Timestamp.now(tz=pytz.UTC)
         fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dot")
         fig.add_annotation(x=now_marker, y=1.02, yref="paper", text="NOW", showarrow=False, font=dict(color="Red", size=10, weight="bold"))
@@ -280,7 +283,6 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', mirror=True, showline=True, linecolor='black')
         fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
 
-        # Reference Lines
         for val, label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
             fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", opacity=0.6)
