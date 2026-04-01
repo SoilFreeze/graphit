@@ -45,23 +45,54 @@ client = get_bq_client()
 ###########################
 # --- GLOBAL MEMORY --- #
 ###########################
-# 1. Initialize all Session State keys (Crucial to prevent KeyErrors)
+
+# 1. Initialize all Session State keys (Prevents AttributeErrors)
 if "master_df" not in st.session_state:
     st.session_state.master_df = pd.DataFrame()
     st.session_state.summary_df = pd.DataFrame()
     st.session_state.current_project = None
     st.session_state.last_refresh = None
 
-###########################
-# --- GLOBAL MEMORY --- #
-###########################
+# 2. Sync Global Summary (For Executive Summary Page)
+# This block runs once per session unless the dataframe is empty
+if st.session_state.summary_df.empty:
+    with st.spinner("📡 Syncing Global Command Center..."):
+        try:
+            # Fetches ONLY the latest reading for every node in the entire system
+            summary_q = f"SELECT * FROM `{MASTER_TABLE}` QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
+            st.session_state.summary_df = client.query(summary_q).to_dataframe()
+        except Exception as e:
+            st.error(f"Global Summary Fetch Failed: {e}")
 
-# 1. Initialize all Session State keys (Crucial to prevent KeyErrors)
-if "master_df" not in st.session_state:
-    st.session_state.master_df = pd.DataFrame()
-    st.session_state.summary_df = pd.DataFrame()
-    st.session_state.current_project = None
-    st.session_state.last_refresh = None
+# 3. Project Detail Cache (Loads once per project selection)
+if selected_project and st.session_state.current_project != selected_project:
+    with st.spinner(f"⚡ Syncing {selected_project} History..."):
+        detail_q = f"""
+            SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve, Project
+            FROM `{MASTER_TABLE}`
+            WHERE Project = '{selected_project}'
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+            ORDER BY timestamp ASC
+        """
+        try:
+            df = client.query(detail_q).to_dataframe()
+            if not df.empty:
+                # Pre-processing (Timezone & Types)
+                df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
+                df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
+                df['is_approved'] = df['approve'].astype(str).str.upper().str.strip() == 'TRUE'
+                
+                st.session_state.master_df = df
+                st.session_state.current_project = selected_project
+                st.session_state.last_refresh = datetime.now().strftime("%m/%d %H:%M")
+        except Exception as e:
+            st.error(f"Project Detail Sync Failed: {e}")
+
+# Map Global References for use in the pages below
+summary_df = st.session_state.summary_df
+master_df = st.session_state.master_df
+
+
 
 # 2. Sidebar Setup & Refresh Button
 st.sidebar.title("❄️ SoilFreeze Lab")
@@ -195,118 +226,69 @@ if st.session_state.get("last_refresh"):
 # --- Executive Summary --- #
 #############################
 if service == "🏠 Executive Summary":
-    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+    st.header("🏠 Executive Summary")
     
-    # 1. SORTING & CONTROLS
-    st.write("### ↕️ Sorting & View Options")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        sort_choice = st.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"])
-    with c2:
-        sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
-    
-    # 2. DATA QUERY
-    summary_q = f"SELECT * FROM `{MASTER_TABLE}`"
-    if selected_project: 
-        summary_q += f" WHERE Project = '{selected_project}'"
-    summary_q += " QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
-    
-    try:
-        with st.spinner("Syncing Command Center..."):
-            raw_data = client.query(summary_q).to_dataframe()
+    # 1. Safety Check: Verify memory is populated
+    if summary_df.empty:
+        st.warning("📡 Global summary is empty. Please check your BigQuery connection or hit the Sync button in the sidebar.")
+        if st.button("🔄 Force Global Sync"):
+            st.session_state.summary_df = pd.DataFrame()
+            st.rerun()
+    else:
+        # 2. Local Filter: If a project is selected in the sidebar, filter the summary
+        display_summary = summary_df.copy()
+        if selected_project:
+            display_summary = display_summary[display_summary['Project'] == selected_project]
+
+        # 3. UI Controls
+        st.write("### ↕️ Sorting & View Options")
+        c1, c2 = st.columns(2)
+        sort_choice = c1.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"])
+        sort_order = c2.radio("Order", ["Descending", "Ascending"], horizontal=True)
+
+        # 4. In-Memory Processing
+        now = pd.Timestamp.now(tz=pytz.UTC)
+        summary_rows = []
         
-        if raw_data.empty:
-            st.warning("📡 No sensors found.")
-        else:
-            summary_rows = []
-            now = pd.Timestamp.now(tz=pytz.UTC)
+        for _, row in display_summary.iterrows():
+            ts = row['timestamp']
+            # Ensure timezone awareness
+            if ts.tzinfo is None: ts = ts.tz_localize(pytz.UTC)
+            else: ts = ts.tz_convert(pytz.UTC)
             
-            for _, row in raw_data.iterrows():
-                node_id = row['NodeNum']
-                ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-                hrs_ago = int((now - ts).total_seconds() / 3600)
-                
-                # Fetch 24H Metrics
-                metrics_q = f"""
-                    SELECT 
-                        MIN(temperature) as min_24, 
-                        MAX(temperature) as max_24,
-                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' ORDER BY timestamp DESC LIMIT 1) - 
-                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as delta_24
-                    FROM `{MASTER_TABLE}` 
-                    WHERE NodeNum = '{node_id}' 
-                    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-                """
-                m_res = client.query(metrics_q).to_dataframe()
-                min_val = m_res['min_24'].iloc[0] if not m_res.empty else None
-                max_val = m_res['max_24'].iloc[0] if not m_res.empty else None
-                raw_delta = m_res['delta_24'].iloc[0] if not m_res.empty else None
-
-                # Status and Delta logic (No color if >24h)
-                if hrs_ago > 24:
-                    status_icon, delta_text, delta_style = "🔴", "-", None
-                else:
-                    status_icon = "🟠" if hrs_ago > 12 else ("🟡" if hrs_ago > 6 else "🟢")
-                    delta_text = f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F"
-                    delta_style = raw_delta
-
-                pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
-
-                summary_rows.append({
-                    "Project": row['Project'],
-                    "Node": node_id,
-                    "Pipe/Bank": row['Location'],
-                    "Pos/Depth": pos_display,
-                    "Min": f"{round(convert_val(min_val), 1)}°F" if pd.notnull(min_val) else "N/A",
-                    "Max": f"{round(convert_val(max_val), 1)}°F" if pd.notnull(max_val) else "N/A",
-                    "Delta_Val": delta_style, 
-                    "Delta": delta_text,
-                    "Hours_Ago": hrs_ago,
-                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}hr) {status_icon}"
-                })
-
-            summary_df = pd.DataFrame(summary_rows)
-
-            # 3. APPLY SORTING
-            asc = (sort_order == "Ascending")
-            if sort_choice == "Hours Since Last Seen":
-                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=asc)
-            elif sort_choice == "Delta Magnitude":
-                summary_df['abs_d'] = summary_df['Delta_Val'].abs().fillna(-1)
-                summary_df = summary_df.sort_values(by="abs_d", ascending=asc).drop(columns=['abs_d'])
-
-            # 4. PAGINATION (100 per page)
-            batch_size = 100
-            total_pages = max((len(summary_df) // batch_size) + 1, 1)
-            page = st.number_input("Page", 1, total_pages, 1)
-            display_batch = summary_df.iloc[(page-1)*batch_size : page*batch_size]
-
-            # 5. STYLING
-            def style_delta(val):
-                if val is None: return ""
-                bg, color = "", "black"
-                if val >= 5: bg, color = "#FF0000", "white"
-                elif val >= 2: bg = "#FFA500"
-                elif val >= 0.5: bg = "#FFFF00"
-                elif -0.5 <= val <= 0.5: bg, color = "#008000", "white"
-                elif -2 < val < -0.5: bg = "#ADD8E6"
-                elif -5 < val <= -2: bg, color = "#4169E1", "white"
-                elif val <= -5: bg, color = "#00008B", "white"
-                return f'background-color: {bg}; color: {color}'
-
-            st.subheader(f"📡 Engineering Command Center ({len(summary_df)} sensors)")
+            hrs_ago = int((now - ts).total_seconds() / 3600)
             
-            # Use st.dataframe with hide_index=True to remove the left column
-            st.dataframe(
-            display_batch[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
-                lambda x: [style_delta(rv) for rv in display_batch['Delta_Val']], axis=0, subset=['Delta']
-            ),
+            # Status Logic
+            if hrs_ago > 24:
+                status_icon = "🔴"
+            elif hrs_ago > 6:
+                status_icon = "🟡"
+            else:
+                status_icon = "🟢"
+
+            summary_rows.append({
+                "Project": row['Project'],
+                "Node": row['NodeNum'],
+                "Location": row['Location'],
+                "Position": f"Bank {row['Bank']}" if pd.notnull(row['Bank']) and str(row['Bank']).strip() != "" else f"{row['Depth']} ft",
+                "Temp": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
+                "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}",
+                "hrs": hrs_ago
+            })
+        
+        final_summary_df = pd.DataFrame(summary_rows)
+
+        # Apply Sorting locally
+        if sort_choice == "Hours Since Last Seen":
+            final_summary_df = final_summary_df.sort_values("hrs", ascending=(sort_order == "Ascending"))
+
+        # 5. Display Table
+        st.dataframe(
+            final_summary_df[["Project", "Node", "Location", "Position", "Temp", "Last Seen"]],
             use_container_width=True,
             hide_index=True,
             height=600
         )
-    except Exception as e: 
-        st.error(f"Summary Error: {traceback.format_exc()}")
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
