@@ -554,7 +554,7 @@ elif service == "📊 Client Portal":
                 for loc in sorted(p_df['Location'].dropna().unique()):
                     with st.expander(f"📈 {loc}", expanded=True):
                         loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
-                        # Uses the High-Speed Engine with 3-tier grid
+                        # Uses the High-Speed Engine (ensure build_high_speed_graph is updated)
                         fig = build_high_speed_graph(loc_data, loc, start_view, end_view, tuple(active_refs), unit_mode, unit_label)
                         st.plotly_chart(fig, use_container_width=True, key=f"cht_{loc}", config={'displayModeBar': False})
 
@@ -567,7 +567,7 @@ elif service == "📊 Client Portal":
                         loc_data = depth_only[depth_only['Location'] == loc].copy()
                         fig_d = go.Figure()
                         
-                        # Generate Monday Snapshots
+                        # Monday Snapshots logic
                         mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
                         
                         for m_date in mondays:
@@ -584,7 +584,7 @@ elif service == "📊 Client Portal":
                                 snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
                                 fig_d.add_trace(go.Scattergl(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
 
-                        # --- RESTORED TEMPERATURE GRID LINES ---
+                        # --- DYNAMIC GRID LOGIC ---
                         if unit_mode == "Celsius":
                             x_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
                             x_major, x_minor = 10, 2
@@ -596,27 +596,42 @@ elif service == "📊 Client Portal":
                         
                         fig_d.update_layout(
                             plot_bgcolor='white', height=700,
-                            # X-AXIS: Minor 5 degree grid
+                            # X-AXIS: Configured for Minor 5° grid
                             xaxis=dict(
-                                title=f"Temp ({unit_label})", range=x_range, dtick=x_minor,
-                                gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True
+                                title=f"Temp ({unit_label})", 
+                                range=x_range, 
+                                dtick=x_minor,           # Set minor interval (5°)
+                                showgrid=True,           # Explicitly show minor grid
+                                gridcolor='Gainsboro',   # Light gray for minor lines
+                                gridwidth=0.5,
+                                showline=True, 
+                                linecolor='black', 
+                                mirror=True
                             ),
-                            # Y-AXIS: 10ft major grid
+                            # Y-AXIS: 10ft grid
                             yaxis=dict(
-                                title="Depth (ft)", range=[y_limit, 0], dtick=10, 
-                                gridcolor='Gray', showline=True, linecolor='black', mirror=True
+                                title="Depth (ft)", 
+                                range=[y_limit, 0], 
+                                dtick=10, 
+                                showgrid=True,
+                                gridcolor='Silver',      # Slightly darker for depth lines
+                                showline=True, 
+                                linecolor='black', 
+                                mirror=True
                             ),
                             legend=dict(title="Weekly Snapshots (6AM)", orientation="h", y=-0.2)
                         )
 
-                        # ADD MAJOR VERTICAL LINES (Every 20 degrees)
-                        for x_v in range(int(x_range[0]), int(x_range[1]) + 1, x_major):
-                            fig_d.add_vline(x=x_v, line_width=1.5, line_color="DimGray", layer='below')
+                        # ADD MAJOR TEMPERATURE LINES (Every 20°)
+                        # We iterate through the range to add bold vertical markers
+                        for x_v in range(-40, 101, x_major):
+                            if x_range[0] <= x_v <= x_range[1]:
+                                fig_d.add_vline(x=x_v, line_width=1.5, line_color="DimGray", layer='below')
 
-                        # ADD REFERENCE THRESHOLDS (Freezing, Type A, etc)
+                        # ADD REFERENCE THRESHOLDS (Freezing, Type A, Type B)
                         for val, label in active_refs:
                             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                            fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2)
+                            fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5, opacity=0.8)
                             
                         st.plotly_chart(fig_d, use_container_width=True, key=f"dep_{loc}", config={'displayModeBar': False})
 
@@ -625,7 +640,6 @@ elif service == "📊 Client Portal":
                 latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
                 latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r.get('Depth', '??')} ft", axis=1)
                 st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
-                
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
