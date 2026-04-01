@@ -207,20 +207,22 @@ def rebuild_master_table(mode="preserve"):
 ############################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
-    OPTIMIZED: Uses WebGL (Scattergl) to render lines using the computer's GPU.
-    Identical look to your original graph, but significantly faster.
+    High-Performance Graph Engine:
+    - 3-tier Grid Hierarchy
+    - 6-Hour Gap Detection (Breaks the line)
+    - Red 'Now' Line
     """
     if df.empty: return go.Figure()
 
-    # Unit Conversion Logic
     plot_df = df.copy()
+    # Unit Conversion
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
         y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-        dt_minor = 2 
+        dt_major, dt_minor = 10, 2 
     else:
         y_range = [-20, 80]
-        dt_minor = 5
+        dt_major, dt_minor = 20, 5
 
     # Labeling
     plot_df['label'] = plot_df.apply(
@@ -229,13 +231,42 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     )
     
     fig = go.Figure()
+    
+    # 1. CORE DATA PLOTTING WITH GAP HANDLING
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
-        fig.add_trace(go.Scattergl( # Hardware Accelerated
+        
+        # --- GAP DETECTOR ---
+        # If time between points > 6 hours, insert a None row to break the line
+        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gap_mask = s_df['gap_hrs'] > 6.0
+        if gap_mask.any():
+            gaps = s_df[gap_mask].copy()
+            gaps['temperature'] = None
+            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
+        fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
             name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
         ))
 
+    # 2. GRID HIERARCHY
+    grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
+    for ts in grid_times:
+        if ts.weekday() == 0 and ts.hour == 0:
+            color, width = "Black", 1.5
+        elif ts.hour == 0:
+            color, width = "Gray", 1.0
+        else:
+            color, width = "LightGray", 0.5
+        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+
+    # 3. RED "NOW" LINE
+    now_marker = pd.Timestamp.now(tz=pytz.UTC)
+    fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dash")
+
+    # 4. STYLING
     fig.update_layout(
         title={'text': title, 'x': 0, 'font': dict(size=18)},
         plot_bgcolor='white', hovermode="x unified", height=600,
@@ -245,16 +276,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
     )
 
-    # Reference Lines
+    for y_val in range(int(y_range[0]), int(y_range[1]) + 1, dt_major):
+        fig.add_hline(y=y_val, line_width=1.2, line_color="DimGray", layer='below')
+
     for val, label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
     
-    # Monday/Midnight Gridlines
-    for ts in pd.date_range(start=start_view, end=end_view, freq='24h'):
-        color, width = ("Black", 1.5) if ts.weekday() == 0 else ("LightGray", 0.5)
-        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
     return fig
 ########################
 # --- GRAPH ENGINE --- #
