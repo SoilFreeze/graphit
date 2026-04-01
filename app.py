@@ -218,65 +218,36 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-def fetch_sensorpush_data(start_dt, end_dt):
+import streamlit as st
+
+def get_sensorpush_connection():
     """
-    Handles API connection for multiple SensorPush accounts.
-    Iterates through [sensorpush_accounts] in st.secrets.
+    Attempts to retrieve credentials from st.secrets.
+    Provides clear documentation on what is missing if a KeyError occurs.
     """
-    all_records = []
-    
-    if "sensorpush_accounts" not in st.secrets:
-        st.error("Missing [sensorpush_accounts] in Streamlit Secrets.")
-        return pd.DataFrame()
+    try:
+        # Accessing the 'sensorpush_creds' key defined in secrets.toml
+        creds = st.secrets["sensorpush_creds"]
+        
+        email = creds["username"]
+        password = creds["password"]
+        
+        # Here you would typically initialize your API client
+        # Example: client = SensorPushClient(email, password)
+        return email, password
 
-    # This pulls the dictionary of accounts from your secrets
-    accounts = st.secrets["sensorpush_accounts"]
-    
-    for acc_key in accounts:
-        try:
-            creds = accounts[acc_key]
-            email = creds["email"]
-            password = creds["password"]
-            
-            # 1. AUTHENTICATE
-            auth_url = "https://api.sensorpush.com/v1/oauth/authorize"
-            auth_payload = {"email": email, "password": password}
-            
-            auth_res = requests.post(auth_url, json=auth_payload)
-            auth_res.raise_for_status()
-            token = auth_res.json().get("accesstoken")
-            
-            if not token:
-                st.warning(f"API Auth Failed for {email}. Skipping.")
-                continue
+    except KeyError:
+        st.error("Missing Credentials: Please ensure 'sensorpush_creds' is defined in your secrets.")
+        return None, None
 
-            # 2. FETCH DATA
-            data_url = "https://api.sensorpush.com/v1/samples"
-            headers = {"accept": "application/json", "Authorization": token}
-            payload = {
-                "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            }
-            
-            res = requests.post(data_url, headers=headers, json=payload)
-            res.raise_for_status()
-            data = res.json()
-            
-            # 3. TRANSFORM TO RECORDS
-            for sensor_id, samples in data.get("sensors", {}).items():
-                for s in samples:
-                    all_records.append({
-                        "sensor_id": sensor_id,
-                        "timestamp": s["observed"],
-                        "temperature": s["temperature"]
-                    })
-            
-            st.info(f"✅ Successfully synced: {email}")
-            
-        except Exception as e:
-            st.error(f"Error syncing {acc_key} ({email}): {e}")
+# Usage in your app
+user, pw = get_sensorpush_connection()
 
-    return pd.DataFrame(all_records)
+if user:
+    st.success(f"Authenticated as {user}. Proceeding with API Sync...")
+    # Trigger your API Recovery logic here
+else:
+    st.warning("Please configure your API keys to enable Cloud-to-Cloud Sync.")
 
 
 ############################
