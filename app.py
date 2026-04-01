@@ -311,6 +311,32 @@ def get_api_data():
 
 # Run the check
 get_api_data()
+
+import streamlit as st
+
+def troubleshoot_secrets():
+    st.subheader("Secret Diagnostic")
+    
+    if "sensorpush_creds" not in st.secrets:
+        st.error("❌ Root key 'sensorpush_creds' not found.")
+        return
+
+    raw_creds = st.secrets["sensorpush_creds"]
+    st.write(f"Data type detected: `{type(raw_creds)}`")
+
+    if isinstance(raw_creds, dict):
+        st.success("✅ Success! Found dictionary structure.")
+        # Access account 1
+        acc1 = raw_creds.get("account1")
+        if acc1:
+            st.write(f"Account 1 Email: {acc1.get('email')}")
+    else:
+        st.error("❌ Data is being read as a LIST. Check for extra brackets in secrets.")
+        st.code(raw_creds) # This will show us exactly what it is holding
+
+troubleshoot_secrets()
+
+
 ############################
 # --- Graph --- #
 ############################
