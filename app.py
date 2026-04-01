@@ -537,7 +537,7 @@ elif service == "📊 Client Portal":
     else:
         st.header(f"📊 Project Status: {selected_project}")
         
-        # 1. FETCH DATA (Uses the function we added to the top)
+        # 1. FETCH DATA (Uses the cached function from the top)
         p_df = get_universal_portal_data(selected_project)
         
         if p_df.empty:
@@ -548,44 +548,75 @@ elif service == "📊 Client Portal":
             with tab_time:
                 weeks_view = st.slider("Weeks to View", 1, 12, 6, key="cp_weeks")
                 now = pd.Timestamp.now(tz=pytz.UTC)
-                end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0)
+                # Align end_view to the coming Monday midnight
+                end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
                 start_view = end_view - timedelta(weeks=weeks_view)
                 
                 for loc in sorted(p_df['Location'].dropna().unique()):
                     with st.expander(f"📈 {loc}", expanded=True):
+                        # Filter local dataframe (Fast)
                         loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
                         fig = build_high_speed_graph(loc_data, loc, start_view, end_view, tuple(active_refs), unit_mode, unit_label)
                         st.plotly_chart(fig, use_container_width=True, key=f"cht_{loc}", config={'displayModeBar': False})
 
             with tab_depth:
+                # Ensure Depth is numeric for plotting
                 p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-                depth_only = p_df.dropna(subset=['Depth_Num']).copy()
+                depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
                 
                 for loc in sorted(depth_only['Location'].unique()):
                     with st.expander(f"📏 {loc} Depth Profile", expanded=True):
                         loc_data = depth_only[depth_only['Location'] == loc].copy()
                         fig_d = go.Figure()
                         
+                        # Generate Monday Snapshots
                         mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
-                        for target_ts in [m.replace(hour=6, tzinfo=pytz.UTC) for m in mondays]:
-                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                        
+                        for m_date in mondays:
+                            target_ts = m_date.replace(hour=6, minute=0, second=0, microsecond=0).tz_localize(pytz.UTC) if m_date.tzinfo is None else m_date.replace(hour=6)
+                            
+                            # Grab data within +/- 12 hours of the target Monday 6AM
+                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                              (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                            
                             if not window.empty:
-                                snap = window.loc[window.groupby('NodeNum')['timestamp'].transform(lambda x: (x - target_ts).abs()).idxmin()].sort_values('Depth_Num')
-                                fig_d.add_trace(go.Scattergl(x=snap['temperature'], y=snap['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
+                                # Fix: More robust way to find the closest reading per node
+                                snap_list = []
+                                for node in window['NodeNum'].unique():
+                                    node_data = window[window['NodeNum'] == node].copy()
+                                    node_data['time_diff'] = (node_data['timestamp'] - target_ts).abs()
+                                    closest_row = node_data.sort_values('time_diff').iloc[0]
+                                    snap_list.append(closest_row)
+                                
+                                snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
+                                
+                                fig_d.add_trace(go.Scattergl(
+                                    x=snap_df['temperature'], 
+                                    y=snap_df['Depth_Num'], 
+                                    mode='lines+markers', 
+                                    name=target_ts.strftime('%m/%d/%y')
+                                ))
 
-                        y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
+                        y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5) if not loc_data.empty else 50
                         fig_d.update_layout(
                             plot_bgcolor='white', height=700,
                             xaxis=dict(title=f"Temp ({unit_label})", range=[-20, 80], gridcolor='Gainsboro'),
-                            yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Gray')
+                            yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Gray'),
+                            legend=dict(title="Weekly Snapshots (6AM)", orientation="h", y=-0.2)
                         )
+                        # Add Reference Lines to Depth Chart
+                        for val, label in active_refs:
+                            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                            fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.7)
+                            
                         st.plotly_chart(fig_d, use_container_width=True, key=f"dep_{loc}", config={'displayModeBar': False})
 
             with tab_table:
+                # Show most recent reading for each sensor in the project
                 latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
                 latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
-                latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) else f"{r['Depth']} ft", axis=1)
-                st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']], use_container_width=True, hide_index=True)
+                latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r['Depth']} ft", axis=1)
+                st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
