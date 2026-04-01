@@ -887,97 +887,132 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
+    # 1. DEFINE TABS FIRST (Fixes the NameError)
     tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
 
-    ###########################
-# --- ADMIN TOOLS REVISED --- #
-###########################
-with tab_approve:
-    st.subheader("✅ Bulk Approval")
-    if st.button("🚀 Approve All Pending Data"):
-        # REMOVED MASTER_TABLE because it is a VIEW
-        raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                      f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+    # 2. BULK APPROVAL (Only targets physical RAW tables)
+    with tab_approve:
+        st.subheader("✅ Bulk Approval")
+        st.info("Sets records to 'TRUE' unless they were specifically marked 'FALSE' with the Lasso tool.")
         
-        with st.spinner("Processing approvals..."):
-            for table in raw_tables:
+        if st.button("🚀 Approve All Pending Data"):
+            # We ONLY update raw tables; the MASTER_TABLE View will reflect changes automatically
+            raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                          f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+            
+            with st.spinner("Processing approvals..."):
+                for table in raw_tables:
+                    try:
+                        approve_sql = f"""
+                            UPDATE `{table}` 
+                            SET approve = 'TRUE' 
+                            WHERE approve IS NULL 
+                            OR UPPER(CAST(approve AS STRING)) != 'FALSE'
+                        """
+                        client.query(approve_sql).result()
+                    except Exception as e:
+                        st.warning(f"Could not update {table}: {e}")
+            st.success("Bulk approval complete.")
+            st.cache_data.clear()
+
+    # 3. DEEP DATA SCRUB (Physical Purge of RAW tables)
+    with tab_scrub:
+        st.subheader("🧹 Deep Data Scrub & Final Purge")
+        st.info("Permanently deletes 'FALSE' points and reduces data to 1-hour intervals.")
+        
+        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+
+        if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
+            with st.spinner("Executing hard delete and dedup..."):
+                scrub_sql = f"""
+                CREATE OR REPLACE TABLE `{target_table}` AS 
+                SELECT * EXCEPT(rn) FROM (
+                    SELECT *, 
+                           ROW_NUMBER() OVER(
+                               PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                               ORDER BY timestamp DESC
+                           ) as rn
+                    FROM `{target_table}` 
+                    WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
+                    AND temperature IS NOT NULL
+                ) WHERE rn = 1
+                """
+                # Note: Purge for Master Table removed as it is a VIEW
                 try:
-                    approve_sql = f"""
-                        UPDATE `{table}` 
-                        SET approve = 'TRUE' 
-                        WHERE approve IS NULL 
-                        OR UPPER(CAST(approve AS STRING)) != 'FALSE'
-                    """
-                    client.query(approve_sql).result()
+                    client.query(scrub_sql).result()
+                    st.success(f"{scrub_target} purged of rejected points and deduped.")
+                    st.cache_data.clear()
                 except Exception as e:
-                    st.warning(f"Could not update {table}: {e}")
-        st.success("Bulk approval complete. View will update automatically.")
-        st.cache_data.clear()
+                    st.error(f"Scrub Error: {e}")
 
-with tab_cleaner:
-    st.subheader("🧨 Surgical Data Cleaner: Lasso Selection")
-    p_df = pd.DataFrame() 
+    # 4. SURGICAL CLEANER (Lasso Selection)
+    with tab_cleaner:
+        st.subheader("🧨 Surgical Data Cleaner: Lasso Selection")
+        p_df = pd.DataFrame() # Initialize to avoid NameError
 
-    # UI Setup
-    meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
-    c1, c2, c3 = st.columns(3)
-    with c1: sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
-    with c2: 
-        pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
-        sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
-    with c3:
-        nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique()) if sel_pipe != "ALL" else ["ALL"]
-        sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
+        # Fetch Metadata
+        meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
 
-    lookback_hrs = st.slider("Lookback Window (Hours)", 6, 168, 24, format="%d hours ago")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
+        with c2:
+            pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
+            sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
+        with c3:
+            if sel_pipe == "ALL":
+                nodes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['NodeNum'].unique())
+            else:
+                nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique())
+            sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
 
-    # Preview Query (Selecting from the View is fine)
-    preview_q = f"""
-        SELECT timestamp, temperature, NodeNum, Location 
-        FROM `{MASTER_TABLE}` 
-        WHERE Project = '{sel_proj}' 
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_hrs} HOUR)
-        ORDER BY timestamp ASC
-    """
-    p_df = client.query(preview_q).to_dataframe()
+        st.divider()
+        lookback_hrs = st.slider("Lookback Window (Hours)", 6, 168, 24, format="%d hours ago")
 
-    if not p_df.empty:
-        if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
-        if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
+        preview_q = f"""
+            SELECT timestamp, temperature, NodeNum, Location 
+            FROM `{MASTER_TABLE}` 
+            WHERE Project = '{sel_proj}' 
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_hrs} HOUR)
+            ORDER BY timestamp ASC
+        """
+        p_df = client.query(preview_q).to_dataframe()
 
         if not p_df.empty:
-            fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
-                             title=f"Lasso selection (Last {lookback_hrs}h)",
-                             template="plotly_white", height=600)
-            fig.update_layout(dragmode='lasso', hovermode='closest')
-            fig.update_traces(marker=dict(size=10, opacity=0.7))
+            if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
+            if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
 
-            selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+            if not p_df.empty:
+                fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
+                                 title="Lasso selection tool active", template="plotly_white", height=600)
+                fig.update_layout(dragmode='lasso', hovermode='closest')
+                fig.update_traces(marker=dict(size=10, opacity=0.7))
 
-            if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
-                points = selected_points["selection"]["points"]
-                st.warning(f"⚠️ {len(points)} points highlighted.")
-                
-                if st.button("🚫 HIDE SELECTED DATA"):
-                    with st.spinner("Updating raw tables..."):
-                        try:
-                            # Build conditions for the RAW tables
-                            conditions = [f"(NodeNum = '{p_df.iloc[pt['point_index']]['NodeNum']}' AND timestamp = CAST('{pt['x']}' AS TIMESTAMP))" for pt in points]
-                            where_clause = " OR ".join(conditions)
-                            
-                            # ONLY update physical tables
-                            raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                                          f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
-                                          
-                            for table in raw_tables:
-                                update_sql = f"UPDATE `{table}` SET approve = 'FALSE' WHERE {where_clause}"
-                                client.query(update_sql).result()
-                            
-                            st.success("Points hidden in raw tables. Refreshing view...")
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Hide failed: {e}")
+                # Use width='stretch' to avoid deprecation warnings
+                selected_points = st.plotly_chart(fig, width='stretch', on_select="rerun")
+
+                if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
+                    points = selected_points["selection"]["points"]
+                    st.warning(f"⚠️ {len(points)} points highlighted.")
+                    
+                    if st.button("🚫 HIDE SELECTED DATA"):
+                        with st.spinner("Updating raw tables..."):
+                            try:
+                                conditions = [f"(NodeNum = '{p_df.iloc[pt['point_index']]['NodeNum']}' AND timestamp = CAST('{pt['x']}' AS TIMESTAMP))" for pt in points]
+                                where_clause = " OR ".join(conditions)
+                                
+                                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                                              f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+                                              
+                                for table in raw_tables:
+                                    client.query(f"UPDATE `{table}` SET approve = 'FALSE' WHERE {where_clause}").result()
+                                
+                                st.success("Points hidden. Refreshing cache...")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Hide failed: {e}")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
