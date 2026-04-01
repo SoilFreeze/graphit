@@ -944,40 +944,40 @@ elif service == "🛠️ Admin Tools":
 ###########################
 with tab_cleaner:
     st.subheader("🧨 Surgical Data Cleaner: 7-Day Lasso")
-    st.info("1. Zoom in using the sliders. 2. **Lasso** the points you want to delete. 3. Confirm below.")
+    st.info("Limit: Only data from the last 168 hours can be cleaned here.")
     
     # 1. FETCH METADATA FOR DROPDOWNS
-    # Ensuring we handle nulls to prevent 'sorted' errors
+    # We use the MASTER_TABLE to get our project/pipe/node mapping
     meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
+        projs = sorted(meta_df['Project'].unique())
+        sel_proj = st.selectbox("Project", projs, key="lasso_proj")
     with c2:
         pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
         sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
     with c3:
-        nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique()) if sel_pipe != "ALL" else ["ALL"]
+        if sel_pipe == "ALL":
+            nodes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['NodeNum'].unique())
+        else:
+            nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique())
         sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
 
     st.divider()
 
-    # 2. HARD-LIMITED 7-DAY SLIDERS
-    # This restricts the 'view' and 'cleaning' strictly to the last 168 hours
-    st.write("### 📅 Set View Window (Strict 7-Day Limit)")
-    
-    # Range slider for the last 7 days (168 hours)
-    # Using hours gives you more granular control for the 'drill-down' view
+    # 2. HARD-LIMITED 7-DAY HOURLY SLIDERS
+    st.write("### 📅 Set View Window (Max 168 Hours)")
     start_hr, end_hr = st.slider(
         "Select Window (Hours Ago)",
         value=(168, 0), 
         min_value=0,
         max_value=168,
+        step=1,
         format="%d hours ago"
     )
 
-    # 3. PREVIEW DATA
-    # Based on your BigQuery schema: NodeNum, timestamp, and temperature
+    # 3. PREVIEW DATA (Ignoring 'approve' status so you can clean unapproved data)
     preview_q = f"""
         SELECT timestamp, temperature, NodeNum, Location 
         FROM `{MASTER_TABLE}` 
@@ -988,57 +988,54 @@ with tab_cleaner:
     p_df = client.query(preview_q).to_dataframe()
 
     if not p_df.empty:
-        # Apply local filters
+        # Apply local filters for Pipe and Node
         if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
         if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
 
         if not p_df.empty:
-            # 4. INTERACTIVE LASSO SELECTION GRAPH
-            # We set dragmode to 'lasso' so you can circle points immediately
+            # 4. LASSO SELECTION GRAPH
             fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
                              title="Lasso the points you wish to purge",
                              template="plotly_white", height=600)
             
+            # Default to Lasso mode
             fig.update_layout(dragmode='lasso', hovermode='closest')
             fig.update_traces(marker=dict(size=10, opacity=0.7))
 
-            # Capture the lasso selection using Streamlit's native on_select
+            # Capture the selection
             selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
 
-            # 5. PURGE LOGIC
+            # 5. PURGE EXECUTION
             if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
                 selection_list = selected_points["selection"]["points"]
                 st.error(f"⚠️ {len(selection_list)} points lassoed for permanent deletion.")
                 
                 if st.button("🔥 PURGE SELECTED DATA"):
-                    with st.spinner("Executing deletion..."):
+                    with st.spinner("Deleting points from all source tables..."):
                         for pt in selection_list:
-                            # Pull specific coordinates for the 'surgical' strike
                             ts_val = pt['x']
+                            # Get the NodeNum from the dataframe based on the selected point index
                             node_val = p_df.iloc[pt['point_index']]['NodeNum']
                             
-                            # Clean from all tables (Confirmed all use NodeNum via your screenshot)
-                            tables_to_clean = [
+                            # Clean across all known tables
+                            target_tables = [
                                 f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
                                 f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
                                 MASTER_TABLE
                             ]
                             
-                            for table in tables_to_clean:
-                                del_sql = f"""
-                                    DELETE FROM `{table}` 
-                                    WHERE NodeNum = '{node_val}' 
-                                    AND timestamp = '{ts_val}'
-                                """
+                            for table in target_tables:
+                                # Using exact match for timestamp and NodeNum
+                                del_sql = f"DELETE FROM `{table}` WHERE NodeNum = '{node_val}' AND timestamp = '{ts_val}'"
                                 client.query(del_sql).result()
                     
-                    st.success("Lassoed points removed. Refreshing UI...")
+                    st.success("Selected points purged. Refreshing view...")
                     st.cache_data.clear()
                     st.rerun()
             else:
-                st.warning("No points selected. Use the Lasso tool to circle data on the chart.")
+                st.warning("Use the Lasso tool (top right of graph) to circle the data you want to delete.")
         else:
-            st.info("No data found for this selection within the specific hour window.")
+            st.info("No data found for this specific Pipe/Node selection in the window.")
     else:
         st.info("No data exists in the Master table for the last 7 days for this project.")
 ###########################
