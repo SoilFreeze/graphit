@@ -75,7 +75,18 @@ if st.sidebar.button("🔄 Sync New Data Now", key="manual_refresh_sync"):
     st.session_state.current_project = None 
     st.rerun()
 
+###########################
+# --- GLOBAL MEMORY --- #
+###########################
 
+# Initialize all keys so they exist before the app tries to read them
+if "master_df" not in st.session_state:
+    st.session_state.master_df = pd.DataFrame()
+    st.session_state.current_project = None
+    st.session_state.last_refresh = None  # <--- THIS FIXES THE KEYERROR
+
+if "summary_df" not in st.session_state:
+    st.session_state.summary_df = pd.DataFrame()
         
 #########################
 # --- REBUILD TABLE --- #
