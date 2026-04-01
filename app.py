@@ -889,176 +889,136 @@ elif service == "🛠️ Admin Tools":
     
     tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
 
-###########################
-# --- DEEP DATA SCRUB --- #
-###########################
-with tab_scrub:
-    st.subheader("🧹 Deep Data Scrub & Purge")
-    st.info("This will dedup data to hourly intervals AND permanently delete any points you marked 'FALSE' with the Lasso tool.")
-    
-    scrub_target = st.radio("Select Source Table to Purge", ["SensorPush", "Lord"], horizontal=True)
-    
-    # Mapping based on your schema
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-    id_col = "NodeNum" 
-
-    if st.button(f"🚀 Execute Physical Purge on {scrub_target}"):
-        with st.spinner(f"Purging and deduping {scrub_target}..."):
-            # This SQL:
-            # 1. Filters out any rows where approve is 'FALSE' (case-insensitive)
-            # 2. Dedups the remaining rows to 1-hour intervals
-            scrub_sql = f"""
-            CREATE OR REPLACE TABLE `{target_table}` AS 
-            SELECT * EXCEPT(rn) FROM (
-                SELECT *, 
-                       ROW_NUMBER() OVER(
-                           PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                           ORDER BY timestamp DESC
-                       ) as rn
-                FROM `{target_table}` 
-                WHERE (approve IS NULL OR (UPPER(approve) != 'FALSE'))
-                AND temperature IS NOT NULL
-            ) WHERE rn = 1
-            """
-            
-            # Also clean the MASTER_TABLE of false points
-            clean_master_sql = f"DELETE FROM `{MASTER_TABLE}` WHERE UPPER(approve) = 'FALSE'"
-            
-            try:
-                # 1. Scrub the Raw Table
-                client.query(scrub_sql).result()
-                # 2. Purge the Master Table
-                client.query(clean_master_sql).result()
-                
-                st.success(f"Success! {target_table} and Master Table have been purged of 'FALSE' points and deduped.")
-                st.cache_data.clear()
-            except Exception as e:
-                st.error(f"Scrub Error: {e}")
-
-###########################
-# --- ADMIN TOOLS REVISED --- #
-###########################
-with tab_approve:
-    st.subheader("✅ Bulk Approval")
-    st.info("This will set all records to 'TRUE' EXCEPT those you have explicitly marked as 'FALSE' with the Lasso tool.")
-    
-    if st.button("🚀 Approve All Pending Data"):
-        success_count = 0
-        # List of all tables that need approval updates
-        tables = [
-            f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-            f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
-            MASTER_TABLE
-        ]
+    # 1. BULK APPROVAL (Updated: Approve anything not explicitly 'FALSE')
+    with tab_approve:
+        st.subheader("✅ Bulk Approval")
+        st.info("This will set all records to 'TRUE' unless they were specifically marked 'FALSE' with the Lasso tool.")
         
-        with st.spinner("Updating approval statuses..."):
-            for table in tables:
-                try:
-                    # SQL Logic: Update to TRUE if the current value isn't already 'FALSE'
-                    # We use UPPER() to handle 'false', 'False', or 'FALSE'
-                    approve_sql = f"""
-                        UPDATE `{table}` 
-                        SET approve = 'TRUE' 
-                        WHERE approve IS NULL 
-                        OR UPPER(approve) != 'FALSE'
-                    """
-                    client.query(approve_sql).result()
-                    success_count += 1
-                except Exception as e:
-                    st.warning(f"Note: Could not update {table} (it may be empty or schema differs): {e}")
-        
-        if success_count > 0:
-            st.success(f"Approval complete across {success_count} tables.")
+        if st.button("🚀 Approve All Pending Data"):
+            tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                      f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
+                      MASTER_TABLE]
+            
+            with st.spinner("Processing approvals..."):
+                for table in tables:
+                    try:
+                        # Logic: Set to TRUE if it's NULL or NOT 'FALSE'
+                        approve_sql = f"""
+                            UPDATE `{table}` 
+                            SET approve = 'TRUE' 
+                            WHERE approve IS NULL 
+                            OR UPPER(CAST(approve AS STRING)) != 'FALSE'
+                        """
+                        client.query(approve_sql).result()
+                    except Exception as e:
+                        st.warning(f"Could not update {table}: {e}")
+            st.success("Bulk approval complete.")
             st.cache_data.clear()
 
-with tab_scrub:
-    st.subheader("🧹 Deep Data Scrub & Final Purge")
-    st.info("This permanently deletes any points marked 'FALSE' and reduces data to 1-hour intervals.")
-    
-    scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+    # 2. DEEP DATA SCRUB (Updated: Physical purge of 'FALSE' points)
+    with tab_scrub:
+        st.subheader("🧹 Deep Data Scrub & Final Purge")
+        st.info("This permanently deletes 'FALSE' points and dedups the rest to hourly intervals.")
+        
+        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
 
-    if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
-        with st.spinner("Performing hard delete of rejected points..."):
-            # The Scrub SQL now strictly removes 'FALSE' points during the dedup process
-            scrub_sql = f"""
-            CREATE OR REPLACE TABLE `{target_table}` AS 
-            SELECT * EXCEPT(rn) FROM (
-                SELECT *, 
-                       ROW_NUMBER() OVER(
-                           PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                           ORDER BY timestamp DESC
-                       ) as rn
-                FROM `{target_table}` 
-                WHERE (approve IS NULL OR UPPER(approve) != 'FALSE')
-                AND temperature IS NOT NULL
-            ) WHERE rn = 1
-            """
-            
-            # Also physically remove the 'FALSE' points from the Master Table
-            purge_master_sql = f"DELETE FROM `{MASTER_TABLE}` WHERE UPPER(approve) = 'FALSE'"
-            
-            try:
-                client.query(scrub_sql).result()
-                client.query(purge_master_sql).result()
-                st.success("Database purged of all rejected data points.")
-                st.cache_data.clear()
-            except Exception as e:
-                st.error(f"Purge Error: {e}")
+        if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
+            with st.spinner("Executing hard delete and dedup..."):
+                # Scrub SQL: Removes 'FALSE' and keeps 1 per hour
+                scrub_sql = f"""
+                CREATE OR REPLACE TABLE `{target_table}` AS 
+                SELECT * EXCEPT(rn) FROM (
+                    SELECT *, 
+                           ROW_NUMBER() OVER(
+                               PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                               ORDER BY timestamp DESC
+                           ) as rn
+                    FROM `{target_table}` 
+                    WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
+                    AND temperature IS NOT NULL
+                ) WHERE rn = 1
+                """
+                # Purge Master Table
+                purge_master_sql = f"DELETE FROM `{MASTER_TABLE}` WHERE UPPER(CAST(approve AS STRING)) = 'FALSE'"
+                
+                try:
+                    client.query(scrub_sql).result()
+                    client.query(purge_master_sql).result()
+                    st.success("Rejected points purged and data deduped.")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Scrub Error: {e}")
 
-###########################
-# --- SURGICAL CLEANER --- #
-###########################
-with tab_cleaner:
-    st.subheader("🧨 Surgical Data Cleaner: Lasso & Drill-Down")
-    st.info("Note: Points lassoed here will be marked as 'FALSE' for approval to hide them instantly.")
-    
-    # ... (Keep your existing Metadata and Slider code here) ...
+    # 3. SURGICAL CLEANER (Updated: Lasso + NameError Fix)
+    with tab_cleaner:
+        st.subheader("🧨 Surgical Data Cleaner: Lasso Selection")
+        st.info("Lasso points to mark them as 'FALSE'. The window starts from your chosen hours and ends at 'Now'.")
+        
+        # Initialize p_df to avoid NameError if query isn't run
+        p_df = pd.DataFrame()
 
-    if not p_df.empty:
-        # 1. INTERACTIVE LASSO GRAPH
-        fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
-                         title=f"Lasso points to hide (Last {lookback_hrs}h)",
-                         template="plotly_white", height=600)
-        fig.update_layout(dragmode='lasso', hovermode='closest')
-        fig.update_traces(marker=dict(size=10, opacity=0.7))
+        # Fetch Metadata
+        meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
 
-        selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
+        with c2:
+            pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
+            sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
+        with c3:
+            nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique()) if sel_pipe != "ALL" else ["ALL"]
+            sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
 
-        # 2. SOFT DELETE EXECUTION
-        if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
-            points = selected_points["selection"]["points"]
-            st.warning(f"⚠️ {len(points)} points highlighted for removal.")
-            
-            if st.button("🚫 HIDE SELECTED DATA"):
-                with st.spinner("Updating approval status..."):
-                    try:
-                        # Build the batch update conditions
-                        conditions = []
-                        for pt in points:
-                            node = p_df.iloc[pt['point_index']]['NodeNum']
-                            ts = pt['x']
-                            conditions.append(f"(NodeNum = '{node}' AND timestamp = '{ts}')")
-                        
-                        where_clause = " OR ".join(conditions)
-                        
-                        # We update the 'approve' column instead of deleting
-                        # This works even if the data is in the streaming buffer for many table types,
-                        # but more importantly, it avoids the physical DELETE restriction.
-                        tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                                  f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
-                                  MASTER_TABLE]
-                        
-                        for table in tables:
-                            update_sql = f"UPDATE `{table}` SET approve = 'FALSE' WHERE {where_clause}"
-                            client.query(update_sql).result()
-                        
-                        st.success("Points hidden successfully.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Update Failed: {e}")
-                        st.info("If streaming buffer errors persist, wait 30 mins for data to finalize.")
+        st.divider()
+        lookback_hrs = st.slider("Lookback Window (Hours)", 6, 168, 24, format="%d hours ago")
+
+        # Preview Query
+        preview_q = f"""
+            SELECT timestamp, temperature, NodeNum, Location 
+            FROM `{MASTER_TABLE}` 
+            WHERE Project = '{sel_proj}' 
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_hrs} HOUR)
+            ORDER BY timestamp ASC
+        """
+        p_df = client.query(preview_q).to_dataframe()
+
+        if not p_df.empty:
+            if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
+            if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
+
+            if not p_df.empty:
+                fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
+                                 title=f"Lasso selection (Last {lookback_hrs}h)",
+                                 template="plotly_white", height=600)
+                fig.update_layout(dragmode='lasso', hovermode='closest')
+                fig.update_traces(marker=dict(size=10, opacity=0.7))
+
+                # Capture selection
+                selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+
+                if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
+                    points = selected_points["selection"]["points"]
+                    st.warning(f"⚠️ {len(points)} points highlighted for removal.")
+                    
+                    if st.button("🚫 HIDE SELECTED DATA"):
+                        with st.spinner("Updating approval status..."):
+                            conditions = [f"(NodeNum = '{p_df.iloc[pt['point_index']]['NodeNum']}' AND timestamp = '{pt['x']}')" for pt in points]
+                            where_clause = " OR ".join(conditions)
+                            
+                            for table in [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", f"{PROJECT_ID}.{DATASET_ID}.raw_lord", MASTER_TABLE]:
+                                client.query(f"UPDATE `{table}` SET approve = 'FALSE' WHERE {where_clause}").result()
+                            
+                            st.success("Points hidden.")
+                            st.cache_data.clear()
+                            st.rerun()
+                else:
+                    st.info("💡 Use the Lasso tool to circle data.")
+            else:
+                st.warning("No data found for this selection in the window.")
+        else:
+            st.error(f"No data exists for project '{sel_proj}' in the last 7 days.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
