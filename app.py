@@ -1020,36 +1020,47 @@ elif service == "🛠️ Admin Tools":
             if success_count > 0:
                 st.success("Approval command sent to available raw tables.")
 
-    with tab_cleaner:
+   with tab_cleaner:
         st.subheader("🧨 Surgical Data Cleaner")
-        st.write("Deletes bad data from both Raw Source tables.")
+        st.warning("Caution: This permanently removes data from the RAW source tables.")
         
-        # Timeframe selection
         col1, col2 = st.columns(2)
-        start_del = col1.date_input("Start Date", datetime.now() - timedelta(days=1))
-        end_del = col2.date_input("End Date", datetime.now())
+        start_del = col1.date_input("Start Date", datetime.now() - timedelta(days=1), key="clean_start")
+        end_del = col2.date_input("End Date", datetime.now(), key="clean_end")
         
-        # Node selection
-        node_to_clean = st.text_input("Enter NodeNum to clean (Optional - leave blank for all nodes)")
+        # Allow user to target a specific sensor
+        target_node = st.text_input("Enter Sensor ID to delete (Leave blank for ALL sensors in range)")
 
-        if st.button("🔥 DELETE DATA FROM RAW SOURCES"):
-            for table in RAW_TABLES:
+        if st.button("🔥 EXECUTE PURGE"):
+            # We target the two main raw tables
+            targets = [
+                {"table": f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", "id_col": "sensor_id"},
+                {"table": f"{PROJECT_ID}.{DATASET_ID}.raw_lord", "id_col": "NodeNum"}
+            ]
+            
+            for t in targets:
                 try:
-                    # Constructing deletion for raw tables
-                    del_clause = f"CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
-                    if node_to_clean:
-                        del_clause += f" AND NodeNum = '{node_to_clean}'"
+                    # 1. Build the query
+                    query = f"DELETE FROM `{t['table']}` WHERE CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
                     
-                    delete_sql = f"DELETE FROM `{table}` WHERE {del_clause}"
+                    if target_node:
+                        # Ensure we match the numeric-only cleaning logic if it's SensorPush
+                        clean_target = re.sub(r'[^0-9]', '', target_node) if "sensorpush" in t['table'] else target_node
+                        query += f" AND {t['id_col']} LIKE '%{clean_target}%'"
                     
-                    with st.spinner(f"Deleting from {table}..."):
-                        del_job = client.query(delete_sql)
-                        del_job.result()
-                        st.write(f"✔️ {table}: Removed {del_job.num_dml_affected_rows} records.")
+                    # 2. Run it
+                    with st.spinner(f"Purging {t['table']}..."):
+                        job = client.query(query)
+                        job.result()
+                        st.write(f"✔️ {t['table']}: Deleted {job.num_dml_affected_rows} rows.")
+                
                 except Exception as e:
-                    st.error(f"Error on {table}: {e}")
-            st.success("Surgical cleaning complete.")
-
+                    st.error(f"Error purging {t['table']}: {e}")
+            
+            # 3. Refresh the App
+            st.success("Purge complete.")
+            st.cache_data.clear() 
+            st.info("Tip: Run 'Deep Data Scrub' in Admin Tools to update the master dashboard views.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
