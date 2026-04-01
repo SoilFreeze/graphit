@@ -55,13 +55,7 @@ st.sidebar.divider()
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-def convert_val(f_val):
-    if f_val is None: return None
-    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
-
-st.sidebar.divider()
-
-# 1. Project Selection (Defined BEFORE Global Memory)
+# 1. Project Selection
 selected_project = None
 if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools", "🏠 Executive Summary"]:
     try:
@@ -72,22 +66,27 @@ if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Too
         st.sidebar.warning("No projects found.")
 
 st.sidebar.divider()
-st.sidebar.write("### 📏 Reference Lines")
-active_refs = []
-if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True): active_refs.append((26.6, "Type B"))
-if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.append((10.2, "Type A"))
 
-# 2. Add a Manual Refresh Button
-if st.sidebar.button("🔄 Sync New Data Now"):
-    st.session_state.current_project = None
+# 2. Sidebar Refresh Button (WITH UNIQUE KEY)
+if st.sidebar.button("🔄 Sync New Data Now", key="manual_refresh_sync"):
+    # Clear the cache to force a fresh BigQuery pull
+    if "master_df" in st.session_state: del st.session_state.master_df
     if "summary_df" in st.session_state: del st.session_state.summary_df
+    st.session_state.current_project = None 
     st.rerun()
 
 ###########################
 # --- GLOBAL MEMORY --- #
 ###########################
-# This engine powers the high-speed switching between pages
+if "master_df" not in st.session_state:
+    st.session_state.master_df = pd.DataFrame()
+    st.session_state.current_project = None
+
+# Detail Load Logic
+if selected_project and st.session_state.current_project != selected_project:
+    with st.spinner(f"⚡ Syncing {selected_project}..."):
+        # ... (rest of your BigQuery query code)
+        pass
 
 # A. Executive Summary Cache
 if "summary_df" not in st.session_state:
@@ -421,9 +420,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
     except Exception as e:
         st.error(f"Critical Graph Error: {e}")
         return go.Figure()
-
-
-
+        
 ###########################
 # --- GLOBAL DATA LOAD --- #
 ###########################
@@ -435,8 +432,11 @@ if "master_df" not in st.session_state:
     st.session_state.last_refresh = None
 
 # 2. Sidebar Refresh Button
-if st.sidebar.button("🔄 Sync New Data Now"):
+if st.sidebar.button("🔄 Sync New Data Now", key="global_sync_button"):
     st.session_state.current_project = None  # Resetting this forces a re-query
+    if "summary_df" in st.session_state: 
+        del st.session_state.summary_df
+    st.rerun()
 
 # 3. The Logic: Only query BigQuery if project changes OR manual refresh clicked
 if selected_project and st.session_state.current_project != selected_project:
