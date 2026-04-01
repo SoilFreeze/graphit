@@ -49,7 +49,6 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
 
         display_df['label'] = display_df.apply(lambda r: f"{r.get('depth', r.get('bank', 'Unmapped'))}ft ({r.get('nodenum', 'Unknown')})", axis=1)
         
-        # Insert None for gaps > 6h
         processed_dfs = []
         for lbl in sorted(display_df['label'].unique()):
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
@@ -70,15 +69,15 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         # TIMELINE X-AXIS GRID
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
             if ts.weekday() == 0 and ts.hour == 0: color, width = "Black", 2.5
-            elif ts.hour == 0: color, width = "#333333", 1.5
-            else: color, width = "#555555", 1.2 # Much darker minor lines
+            elif ts.hour == 0: color, width = "#222222", 1.8
+            else: color, width = "#444444", 1.2 # Darker 6h lines
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        fig.update_yaxes(range=y_range, gridcolor='#444444', gridwidth=1, dtick=dt_minor)
+        fig.update_yaxes(range=y_range, gridcolor='#333333', gridwidth=1, dtick=dt_minor)
         fig.update_layout(plot_bgcolor='white', height=600, margin=dict(r=150))
         
         for val, label in active_refs:
-            fig.add_hline(y=val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2)
+            fig.add_hline(y=val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5)
         
         return fig
     except: return go.Figure()
@@ -101,11 +100,11 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=True): active_refs.append((10.2
 st.header(f"📊 Project {ACTIVE_PROJECT} Dashboard")
 tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
-# CLEANER QUERY: Handles boolean or string 'approve' column
+# FIXED QUERY: Direct string comparison for 'approve'
 q = f"""
     SELECT * FROM `{MASTER_TABLE}` 
     WHERE Project = '{ACTIVE_PROJECT}' 
-    AND (approve IS TRUE OR approve = TRUE OR approve = 'TRUE' OR approve = 'true')
+    AND (approve = 'TRUE' OR approve = 'true')
     AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
 """
 
@@ -151,9 +150,9 @@ else:
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
                 
-                # DEPTH X-AXIS GRID (5-degree increments) - DARKENED
+                # DEPTH X-AXIS GRID (5-degree increments) - DARKEST GRAY
                 fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, 
-                                   gridcolor='#333333', gridwidth=1.2, mirror=True, showline=True, linecolor='black')
+                                   gridcolor='#222222', gridwidth=1.3, mirror=True, showline=True, linecolor='black')
                 # 20-degree Major lines
                 for x_v in range(-20, 81, 20):
                     fig_d.add_vline(x=x_v, line_width=2.5, line_color="Black")
