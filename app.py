@@ -955,90 +955,113 @@ elif service == "🛠️ Admin Tools":
 ###########################
 with tab_cleaner:
     st.subheader("🧨 Surgical Data Cleaner")
-    st.info("Select specific data to remove. Select 'ALL' to wipe an entire category.")
+    st.info("Select data to remove. The graph below shows exactly what will be deleted.")
 
-    # 1. DATABASE FETCH FOR FILTERS
-    # We pull from MASTER_TABLE to get the human-readable project/location mapping
-    filter_q = f"SELECT Project, Location, NodeNum FROM `{MASTER_TABLE}`"
-    f_df = client.query(filter_q).to_dataframe()
+    # 1. FETCH FILTER DATA & HANDLE NULLS
+    # We pull unique combinations to build our dropdown logic
+    filter_q = f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`"
+    try:
+        f_df = client.query(filter_q).to_dataframe()
+        # Clean up nulls immediately to prevent sorting errors
+        f_df['Project'] = f_df['Project'].fillna("Unknown Project")
+        f_df['Location'] = f_df['Location'].fillna("Unknown Location")
+        f_df['NodeNum'] = f_df['NodeNum'].fillna("Unknown Node")
+    except Exception as e:
+        st.error(f"Error fetching metadata: {e}")
+        f_df = pd.DataFrame(columns=['Project', 'Location', 'NodeNum'])
 
+    # 2. CASCADING DROPDOWNS
     c1, c2, c3 = st.columns(3)
     
     with c1:
-        # Project is required to narrow down the scope
-        proj_list = sorted(f_df['Project'].unique())
-        sel_proj = st.selectbox("1. Select Project", proj_list, key="del_proj")
+        proj_list = sorted(f_df['Project'].unique().tolist())
+        sel_proj = st.selectbox("1. Project", proj_list, key="del_proj")
         
     with c2:
         # Filter pipes based on project
-        pipe_list = ["ALL"] + sorted(f_df[f_df['Project'] == sel_proj]['Location'].unique())
-        sel_pipe = st.selectbox("2. Select Pipe (Location)", pipe_list, key="del_pipe")
+        relevant_pipes = f_df[f_df['Project'] == sel_proj]['Location'].unique().tolist()
+        pipe_list = ["ALL"] + sorted([str(p) for p in relevant_pipes])
+        sel_pipe = st.selectbox("2. Pipe / Location", pipe_list, key="del_pipe")
         
     with c3:
-        # Filter nodes based on pipe (if not ALL)
+        # Filter nodes based on pipe
         if sel_pipe == "ALL":
-            node_list = ["ALL"]
+            relevant_nodes = f_df[f_df['Project'] == sel_proj]['NodeNum'].unique().tolist()
         else:
-            node_list = ["ALL"] + sorted(f_df[f_df['Location'] == sel_pipe]['NodeNum'].unique())
-        sel_node = st.selectbox("3. Select Node", node_list, key="del_node")
+            relevant_nodes = f_df[(f_df['Project'] == sel_proj) & (f_df['Location'] == sel_pipe)]['NodeNum'].unique().tolist()
+        
+        node_list = ["ALL"] + sorted([str(n) for n in relevant_nodes])
+        sel_node = st.selectbox("3. Node ID", node_list, key="del_node")
 
-    # 2. DATE & PREVIEW CONTROLS
-    col_d1, col_d2 = st.columns(2)
-    lookback_days = col_d1.slider("Deletion Window (Days Ago)", 1, 30, 7)
-    start_del = datetime.now() - timedelta(days=lookback_days)
+    # 3. DATE SELECTION & PREVIEW GRAPH
+    st.divider()
+    lookback = st.slider("Time Window to Delete (Days Ago)", 1, 30, 7)
+    cutoff_dt = datetime.now(pytz.UTC) - timedelta(days=lookback)
+
+    # Fetch preview data from the Master Table
+    preview_q = f"""
+        SELECT timestamp, temperature, NodeNum, Location 
+        FROM `{MASTER_TABLE}` 
+        WHERE Project = '{sel_proj}' 
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback} DAY)
+    """
     
-    # 3. GRAPH PREVIEW (To ensure you don't delete the wrong thing!)
-    preview_df = get_universal_portal_data(sel_proj)
-    if not preview_df.empty:
-        plot_df = preview_df[preview_df['timestamp'] >= pd.Timestamp(start_del).tz_localize('UTC')]
+    preview_data = client.query(preview_q).to_dataframe()
+    
+    if not preview_data.empty:
+        # Apply local filters for the graph
         if sel_pipe != "ALL":
-            plot_df = plot_df[plot_df['Location'] == sel_pipe]
+            preview_data = preview_data[preview_data['Location'] == sel_pipe]
         if sel_node != "ALL":
-            plot_df = plot_df[plot_df['NodeNum'] == sel_node]
+            preview_data = preview_data[preview_data['NodeNum'] == sel_node]
+
+        if not preview_data.empty:
+            # Create the point-based scatter plot
+            fig_del = px.scatter(
+                preview_data, 
+                x='timestamp', 
+                y='temperature', 
+                color='NodeNum',
+                title=f"Target Data Points (Last {lookback} Days)",
+                labels={'temperature': f'Temp ({unit_label})'}
+            )
+            fig_del.update_traces(marker=dict(size=8, opacity=0.6))
+            st.plotly_chart(fig_del, use_container_width=True)
             
-        if not plot_df.empty:
-            fig = px.scatter(plot_df, x='timestamp', y='temperature', color='NodeNum', 
-                             title="Preview of Data to be Deleted")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("No data found for this selection in the last 7 days.")
+            # 4. EXECUTION BUTTON
+            st.warning(f"Confirm: You are about to delete {len(preview_data)} points.")
+            if st.button("🔥 PERMANENTLY DELETE SHOWN DATA"):
+                # Identify exactly which nodes to hit in the raw tables
+                target_nodes = preview_data['NodeNum'].unique().tolist()
+                nodes_sql_list = ", ".join([f"'{n}'" for n in target_nodes])
 
-    # 4. EXECUTION
-    if st.button("🔥 PERMANENTLY DELETE SELECTED DATA"):
-        # Mapping tables to their specific ID columns
-        target_map = {
-            f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush": "sensor_id",
-            f"{PROJECT_ID}.{DATASET_ID}.raw_lord": "NodeNum",
-            MASTER_TABLE: "NodeNum"
-        }
-        
-        # Build the WHERE clause
-        # Note: Since Raw tables don't have 'Location', we use the Node IDs found in our filter
-        nodes_to_delete = []
-        if sel_node != "ALL":
-            nodes_to_delete = [sel_node]
-        elif sel_pipe != "ALL":
-            nodes_to_delete = f_df[f_df['Location'] == sel_pipe]['NodeNum'].unique().tolist()
-        else:
-            nodes_to_delete = f_df[f_df['Project'] == sel_proj]['NodeNum'].unique().tolist()
+                # Tables to clean
+                table_map = {
+                    f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush": "sensor_id",
+                    f"{PROJECT_ID}.{DATASET_ID}.raw_lord": "NodeNum",
+                    MASTER_TABLE: "NodeNum"
+                }
 
-        nodes_str = ", ".join([f"'{n}'" for n in nodes_to_delete])
-        
-        for table, id_col in target_map.items():
-            try:
-                del_sql = f"""
-                    DELETE FROM `{table}` 
-                    WHERE {id_col} IN ({nodes_str})
-                    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY)
-                """
-                del_job = client.query(del_sql)
-                del_job.result()
-                st.write(f"✔️ Purged `{table}` ({del_job.num_dml_affected_rows} rows)")
-            except Exception as e:
-                st.error(f"Error cleaning {table}: {e}")
-        
-        st.success("Surgical strike complete.")
-        st.cache_data.clear()
+                for table, id_col in table_map.items():
+                    try:
+                        del_sql = f"""
+                            DELETE FROM `{table}` 
+                            WHERE {id_col} IN ({nodes_sql_list})
+                            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback} DAY)
+                        """
+                        job = client.query(del_sql)
+                        job.result()
+                        st.write(f"✔️ {table}: Deleted {job.num_dml_affected_rows} rows.")
+                    except Exception as e:
+                        st.error(f"Error on {table}: {e}")
+                
+                st.success("Deletion complete. Refreshing app...")
+                st.cache_data.clear()
+                st.rerun()
+        else:
+            st.info("No data found for this specific Pipe/Node selection in the window.")
+    else:
+        st.info("No data found for this project in the selected time window.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
