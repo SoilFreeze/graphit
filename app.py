@@ -950,45 +950,61 @@ elif service == "🛠️ Admin Tools":
             if success_count > 0:
                 st.success("Approval command sent to available raw tables.")
 
-    with tab_cleaner:
-        st.subheader("🧨 Surgical Data Cleaner")
-        st.write("Deletes specific data ranges from Raw Source tables.")
-        
-        c1, c2 = st.columns(2)
-        start_del = c1.date_input("Start Date", datetime.now() - timedelta(days=1), key="del_start")
-        end_del = c2.date_input("End Date", datetime.now(), key="del_end")
-        
-        node_to_clean = st.text_input("Enter ID (sensor_id or NodeNum) to clean (Optional)")
+###########################
+# --- SURGICAL CLEANER --- #
+###########################
+with tab_cleaner:
+    st.subheader("🧨 Surgical Data Cleaner")
+    st.warning("Warning: This permanently deletes data from both Raw and Master tables.")
+    
+    c1, c2 = st.columns(2)
+    start_del = c1.date_input("Start Date", datetime.now() - timedelta(days=7), key="del_start")
+    end_del = c2.date_input("End Date", datetime.now(), key="del_end")
+    
+    # Let user pick a specific sensor or leave blank for a full date-range wipe
+    node_to_clean = st.text_input("Enter ID (e.g. 12-34-56 or SensorPush ID) to clean (Optional)")
 
-        if st.button("🔥 PERMANENTLY DELETE DATA"):
-            # Map of tables and their primary ID columns
-            raw_map = {
-                f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush": "sensor_id",
-                f"{PROJECT_ID}.{DATASET_ID}.raw_lord": "NodeNum"
-            }
-            
-            for table, id_col in raw_map.items():
-                try:
-                    # Construct deletion clause
-                    del_clause = f"CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
-                    if node_to_clean:
-                        # Clean the input to match scrubbed ID format
-                        clean_id = re.sub(r'[^0-9]', '', node_to_clean) if "sensorpush" in table else node_to_clean
-                        del_clause += f" AND {id_col} LIKE '%{clean_id}%'"
+    if st.button("🔥 PERMANENTLY DELETE DATA"):
+        # Map of all tables and their specific ID column names
+        # We include MASTER_TABLE so the UI updates immediately without a full rebuild
+        target_map = {
+            f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush": "sensor_id",
+            f"{PROJECT_ID}.{DATASET_ID}.raw_lord": "NodeNum",
+            MASTER_TABLE: "NodeNum" # The master table uses NodeNum as the ID
+        }
+        
+        total_affected = 0
+        
+        for table, id_col in target_map.items():
+            try:
+                # 1. Base deletion clause (Date range)
+                # Using TIMESTAMP_TRUNC or CAST to DATE for BigQuery efficiency
+                del_clause = f"CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
+                
+                # 2. Specific Node Filter
+                if node_to_clean:
+                    # We use LIKE with wildcards to handle dashes/colons vs raw digits
+                    # Example: if user enters '1234', it matches '12-34' or '1234'
+                    clean_id = re.sub(r'[^a-zA-Z0-9]', '', node_to_clean)
+                    del_clause += f" AND REGEXP_REPLACE(CAST({id_col} AS STRING), r'[^a-zA-Z0-9]', '') LIKE '%{clean_id}%'"
+                
+                delete_sql = f"DELETE FROM `{table}` WHERE {del_clause}"
+                
+                with st.spinner(f"Purging {table}..."):
+                    del_job = client.query(delete_sql)
+                    result = del_job.result() # Wait for job to finish
+                    rows_deleted = del_job.num_dml_affected_rows
+                    total_affected += rows_deleted
+                    st.write(f"✔️ `{table}`: Removed {rows_deleted} records.")
                     
-                    delete_sql = f"DELETE FROM `{table}` WHERE {del_clause}"
-                    
-                    with st.spinner(f"Purging {table}..."):
-                        del_job = client.query(delete_sql)
-                        del_job.result()
-                        st.write(f"✔️ {table}: Removed {del_job.num_dml_affected_rows} records.")
-                        
-                except Exception as e:
-                    st.error(f"Error cleaning {table}: {e}")
-            
-            st.success("Surgical cleaning complete. Remember to run 'Deep Scrub' to update the master tables.")
-            st.cache_data.clear() # Force app to see the changes
-
+            except Exception as e:
+                st.error(f"Error cleaning {table}: {e}")
+        
+        if total_affected > 0:
+            st.success(f"Surgical cleaning complete! {total_affected} total records purged.")
+            st.cache_data.clear() # Wipe Streamlit cache so graphs refresh
+        else:
+            st.info("No records matched those criteria.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
