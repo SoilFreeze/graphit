@@ -9,7 +9,7 @@ import pytz
 #########################
 # --- CONFIGURATION --- #
 #########################
-# CHANGE THIS TO "2329" or "Office" depending on the dashboard
+# CHANGE THIS TO "2329" or "Office"
 ACTIVE_PROJECT = "2329" 
 
 st.set_page_config(page_title=f"Project {ACTIVE_PROJECT} Dashboard", layout="wide")
@@ -58,7 +58,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         processed_dfs = []
         for lbl in sorted(display_df['label'].unique()):
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-            s_df['gap'] = s_df['timestamp'].diff().total_seconds() / 3600
+            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             if (s_df['gap'] > 6.0).any():
                 gaps = s_df[s_df['gap'] > 6.0].copy()
                 gaps['temperature'] = None
@@ -80,20 +80,21 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         # X-AXIS GRID (TIME)
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
             if ts.weekday() == 0 and ts.hour == 0:
-                color, width = "Black", 2.5
+                color, width = "Black", 2.5 # Monday
             elif ts.hour == 0:
-                color, width = "Gray", 1.5
+                color, width = "#444444", 1.5 # Daily
             else:
-                color, width = "DimGray", 0.8 # Darkened minor 6h lines
+                color, width = "#888888", 1.0 # 6-Hour (Darker)
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='DimGray', gridwidth=0.5, dtick=dt_minor)
+        # Y-AXIS GRID (TEMP)
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='#666666', gridwidth=0.8, dtick=dt_minor)
         for yv in range(int(y_range[0]), int(y_range[1])+1, dt_major):
-            fig.add_hline(y=yv, line_width=1.5, line_color="Black", layer='below')
+            fig.add_hline(y=yv, line_width=2.0, line_color="Black", layer='below')
 
         for val, label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", layer="above", line_width=2)
+            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", layer="above", line_width=2.5)
         
         return fig
     except: return go.Figure()
@@ -122,11 +123,17 @@ def convert_val(f):
 st.header(f"📊 Project {ACTIVE_PROJECT} Dashboard")
 tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
-q = f"SELECT * FROM `{MASTER_TABLE}` WHERE CAST(Project AS STRING) = '{ACTIVE_PROJECT}' AND approve = 'TRUE' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)"
+# Flexible Query for Approved status (Handles TRUE or 'TRUE')
+q = f"""
+    SELECT * FROM `{MASTER_TABLE}` 
+    WHERE CAST(Project AS STRING) = '{ACTIVE_PROJECT}' 
+    AND (UPPER(CAST(approve AS STRING)) = 'TRUE' OR approve IS TRUE)
+    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+"""
 p_df = client.query(q).to_dataframe()
 
 if p_df.empty:
-    st.warning(f"No approved data found for Project {ACTIVE_PROJECT}.")
+    st.warning(f"No approved data found for Project {ACTIVE_PROJECT}. Verify that 'approve' column is set to TRUE in BigQuery.")
 else:
     p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_convert(pytz.UTC) if p_df['timestamp'].dt.tz else pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC)
     
@@ -139,15 +146,9 @@ else:
         
         locs = sorted(p_df['Location'].dropna().unique())
         for loc in locs:
-            # Added a unique key to the expander
             with st.expander(f"📈 {loc}", expanded=True):
                 loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
-                # Added a unique key to the plotly_chart
-                st.plotly_chart(
-                    build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), 
-                    use_container_width=True,
-                    key=f"time_chart_{loc}" 
-                )
+                st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"time_{loc}")
 
     # 2. DEPTH PROFILE TAB
     with tab_depth:
@@ -155,7 +156,6 @@ else:
         depth_df = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
         
         for loc in sorted(depth_df['Location'].unique()):
-            # Added a unique key to the expander
             with st.expander(f"📏 {loc} Depth Profile", expanded=True):
                 loc_data = depth_df[depth_df['Location'] == loc].copy()
                 fig_d = go.Figure()
@@ -177,22 +177,25 @@ else:
                 y_dtick = 20 if y_limit > 60 else 10
                 y_minor = 10 if y_limit > 60 else 5
 
+                # X-AXIS STYLING (TEMP)
                 x_range = [-20, 80] if unit_mode == "Fahrenheit" else [-30, 30]
-                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=x_range, dtick=5, gridcolor='DimGray', gridwidth=0.7, mirror=True, showline=True, linecolor='black')
+                # Using #666666 for much darker minor grid lines (5-degree increments)
+                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=x_range, dtick=5, gridcolor='#666666', gridwidth=1.0, mirror=True, showline=True, linecolor='black')
                 for x_v in range(-20, 81, 20):
-                    fig_d.add_vline(x=x_v, line_width=1.5, line_color="Gray")
+                    fig_d.add_vline(x=x_v, line_width=2.0, line_color="Black")
 
-                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=y_dtick, gridcolor='Gray', gridwidth=1.0, mirror=True, showline=True, linecolor='black')
+                # Y-AXIS STYLING (DEPTH)
+                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=y_dtick, gridcolor='Black', gridwidth=1.2, mirror=True, showline=True, linecolor='black')
                 for d_v in range(0, y_limit + 1, y_minor):
-                    fig_d.add_hline(y=d_v, line_width=0.8, line_color="DimGray")
+                    fig_d.add_hline(y=d_v, line_width=1.0, line_color="#444444")
 
+                # Reference Lines
                 for val, label in active_refs:
                     c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                    fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=1.0, line_width=2)
+                    fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=1.0, line_width=2.5)
 
                 fig_d.update_layout(plot_bgcolor='white', height=700, legend=dict(title="Monday 6AM Snapshots"))
-                # Added a unique key to the plotly_chart
-                st.plotly_chart(fig_d, use_container_width=True, key=f"depth_chart_{loc}")
+                st.plotly_chart(fig_d, use_container_width=True, key=f"depth_{loc}")
 
     # 3. PROJECT DATA TAB
     with tab_table:
