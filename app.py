@@ -278,6 +278,12 @@ def sync_all_accounts():
 # Call the function
 if st.button("Start Cloud-to-Cloud Sync"):
     sync_all_accounts()
+
+# This will print the keys available under sensorpush_creds to your app
+if "sensorpush_creds" in st.secrets:
+    st.write("Available accounts:", list(st.secrets["sensorpush_creds"].keys()))
+else:
+    st.error("The main key 'sensorpush_creds' is totally missing.")
 ############################
 # --- Graph --- #
 ############################
