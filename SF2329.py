@@ -58,7 +58,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         processed_dfs = []
         for lbl in sorted(display_df['label'].unique()):
             s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            s_df['gap'] = s_df['timestamp'].diff().total_seconds() / 3600
             if (s_df['gap'] > 6.0).any():
                 gaps = s_df[s_df['gap'] > 6.0].copy()
                 gaps['temperature'] = None
@@ -77,22 +77,23 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
             plot_bgcolor='white', hovermode="x unified", height=600, margin=dict(r=150)
         )
         
+        # X-AXIS GRID (TIME)
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
             if ts.weekday() == 0 and ts.hour == 0:
-                color, width = "Black", 2
+                color, width = "Black", 2.5
             elif ts.hour == 0:
-                color, width = "Gray", 1
+                color, width = "Gray", 1.5
             else:
-                color, width = "Silver", 0.7 # Darker minor lines
+                color, width = "DimGray", 0.8 # Darkened minor 6h lines
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Silver', gridwidth=0.5, dtick=dt_minor)
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='DimGray', gridwidth=0.5, dtick=dt_minor)
         for yv in range(int(y_range[0]), int(y_range[1])+1, dt_major):
-            fig.add_hline(y=yv, line_width=1.2, line_color="DimGray", layer='below')
+            fig.add_hline(y=yv, line_width=1.5, line_color="Black", layer='below')
 
         for val, label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", layer="above")
+            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", layer="above", line_width=2)
         
         return fig
     except: return go.Figure()
@@ -167,21 +168,21 @@ else:
                 y_dtick = 20 if y_limit > 60 else 10
                 y_minor = 10 if y_limit > 60 else 5
 
-                # X-Axis Styling
+                # X-Axis Styling (TEMP)
                 x_range = [-20, 80] if unit_mode == "Fahrenheit" else [-30, 30]
-                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=x_range, dtick=5, gridcolor='Silver', mirror=True, showline=True, linecolor='black')
+                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=x_range, dtick=5, gridcolor='DimGray', gridwidth=0.7, mirror=True, showline=True, linecolor='black')
                 for x_v in range(-20, 81, 20):
-                    fig_d.add_vline(x=x_v, line_width=1, line_color="Gray")
+                    fig_d.add_vline(x=x_v, line_width=1.5, line_color="Gray")
 
-                # Y-Axis Styling
-                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=y_dtick, gridcolor='Gray', mirror=True, showline=True, linecolor='black')
+                # Y-Axis Styling (DEPTH)
+                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=y_dtick, gridcolor='Gray', gridwidth=1.0, mirror=True, showline=True, linecolor='black')
                 for d_v in range(0, y_limit + 1, y_minor):
-                    fig_d.add_hline(y=d_v, line_width=0.6, line_color="Silver")
+                    fig_d.add_hline(y=d_v, line_width=0.8, line_color="DimGray")
 
-                # Add Reference Lines to Depth Plot
+                # Reference Lines
                 for val, label in active_refs:
                     c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                    fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
+                    fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=1.0, line_width=2)
 
                 fig_d.update_layout(plot_bgcolor='white', height=700, legend=dict(title="Monday 6AM Snapshots"))
                 st.plotly_chart(fig_d, use_container_width=True)
