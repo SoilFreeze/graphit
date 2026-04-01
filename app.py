@@ -445,29 +445,31 @@ approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty
 if service == "🏠 Executive Summary":
     st.header("🏠 Executive Summary")
     
-    # Instant local filter from memory
-    display_summary = summary_df.copy()
-    if selected_project:
-        display_summary = display_summary[display_summary['Project'] == selected_project]
+    # Use the cached summary from memory
+    display_summary = st.session_state.summary_df
+    
+    if display_summary.empty:
+        st.info("Global summary is still loading or empty. Try refreshing.")
+    else:
+        if selected_project:
+            # Instant memory filter
+            display_summary = display_summary[display_summary['Project'] == selected_project]
 
-    now = pd.Timestamp.now(tz=pytz.UTC)
-    
-    # Process rows instantly in memory
-    summary_rows = []
-    for _, row in display_summary.iterrows():
-        ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-        hrs_ago = int((now - ts).total_seconds() / 3600)
-        status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
+        now = pd.Timestamp.now(tz=pytz.UTC)
+        summary_rows = []
+        for _, row in display_summary.iterrows():
+            ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
+            hrs_ago = int((now - ts).total_seconds() / 3600)
+            status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
+            
+            summary_rows.append({
+                "Project": row['Project'],
+                "Node": row['NodeNum'],
+                "Temp": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
+                "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
+            })
         
-        summary_rows.append({
-            "Project": row['Project'],
-            "Node": row['NodeNum'],
-            "Location": row['Location'],
-            "Temp": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
-            "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
-        })
-    
-    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
@@ -526,26 +528,26 @@ elif service == "📊 Client Portal":
 ###########################
 elif service == "📉 Node Diagnostics":
     if not selected_project:
-        st.warning("Please select a project.")
-    elif master_df.empty:
-        st.info("Loading project details...")
+        st.warning("Please select a project in the sidebar.")
+    elif st.session_state.master_df.empty:
+        st.info("No data cached for this project. Please wait for sync or try refreshing.")
     else:
         st.header(f"📉 Diagnostics: {selected_project}")
         
-        loc_options = sorted(master_df['Location'].dropna().unique())
-        sel_loc = st.selectbox("Select Pipe", loc_options)
-        weeks_diag = st.slider("Lookback", 1, 12, 6, key="diag_slider")
-
-        # Instant local memory filter
-        diag_data = master_df[(master_df['Location'] == sel_loc)]
+        # Pulling from the global master_df
+        m_df = st.session_state.master_df
+        loc_options = sorted(m_df['Location'].dropna().unique())
+        sel_loc = st.selectbox("Select Pipe / Bank", loc_options)
+        
+        # Instant local filter
+        diag_data = m_df[m_df['Location'] == sel_loc]
         
         st.subheader(f"📈 Raw Timeline: {sel_loc}")
-        st.plotly_chart(build_standard_sf_graph(diag_data, sel_loc, datetime.now()-timedelta(weeks=weeks_diag), datetime.now(), active_refs, unit_mode, unit_label), use_container_width=True, key=f"diag_t_{sel_loc}")
+        st.plotly_chart(build_standard_sf_graph(diag_data, sel_loc, datetime.now()-timedelta(days=42), datetime.now(), active_refs, unit_mode, unit_label), use_container_width=True)
 
-        st.divider()
-        st.subheader("📋 Engineering Summary")
-        # Show latest 100 raw samples instantly
-        st.dataframe(diag_data.sort_values('timestamp', ascending=False).head(100), use_container_width=True, hide_index=True)
+        # Safety check for display (Your old line 422)
+        if st.session_state.get("last_refresh"):
+            st.sidebar.caption(f"Last Data Sync: {st.session_state.last_refresh}")
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
