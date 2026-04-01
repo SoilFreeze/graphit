@@ -695,9 +695,7 @@ elif service == "📉 Node Diagnostics":
     else:
         try:
             # 1. DATA ACCESS & CONTROLS
-            # Pull project data from the centralized cache
             all_data = get_universal_portal_data(selected_project)
-            
             loc_options = sorted(all_data['Location'].dropna().unique())
             
             c1, c2 = st.columns([2, 1])
@@ -713,21 +711,19 @@ elif service == "📉 Node Diagnostics":
             end_view = (now + pd.Timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
             start_view = end_view - timedelta(weeks=weeks_view)
 
-            # Filter data for the specific location selected
             df_diag = all_data[all_data['Location'] == sel_loc].copy()
             
             if df_diag.empty:
                 st.warning(f"No data found for {sel_loc} in the selected timeframe.")
             else:
-                # --- 3. TIME VS TEMPERATURE GRAPH (TOP) ---
+                # --- 3. TIME VS TEMPERATURE GRAPH ---
                 st.subheader("📈 Timeline Analysis")
-                # build_high_speed_graph handles the Gaps, Now Line, and 3-tier Grid
                 fig_time = build_high_speed_graph(df_diag, sel_loc, start_view, end_view, tuple(active_refs), unit_mode, unit_label)
                 st.plotly_chart(fig_time, use_container_width=True, config={'displayModeBar': False})
 
                 st.divider()
 
-                # --- 4. DEPTH VS TEMPERATURE GRAPH (MIDDLE) ---
+                # --- 4. DEPTH VS TEMPERATURE GRAPH ---
                 st.subheader("📏 Depth Profile Analysis")
                 df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
                 depth_only_df = df_diag.dropna(subset=['Depth_Num', 'NodeNum']).copy()
@@ -739,7 +735,14 @@ elif service == "📉 Node Diagnostics":
                     mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
                     
                     for m_date in mondays:
-                        target_ts = m_date.replace(hour=6, minute=0, second=0).tz_localize(pytz.UTC)
+                        # --- FIXED TIMEZONE LOGIC ---
+                        # If m_date has no timezone, localize it. If it has one, just set the hour.
+                        target_ts = m_date.replace(hour=6, minute=0, second=0)
+                        if target_ts.tzinfo is None:
+                            target_ts = target_ts.tz_localize(pytz.UTC)
+                        else:
+                            target_ts = target_ts.tz_convert(pytz.UTC)
+                        
                         window = depth_only_df[(depth_only_df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                                (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                         
@@ -756,7 +759,7 @@ elif service == "📉 Node Diagnostics":
                                 mode='lines+markers', name=target_ts.strftime('%m/%d/%y')
                             ))
 
-                    # Apply Engineering Grid to Depth Graph
+                    # Grid Styling
                     x_range = [-20, 80] if unit_mode == "Fahrenheit" else [(-20-32)*5/9, (80-32)*5/9]
                     y_limit = int(((depth_only_df['Depth_Num'].max() // 5) + 1) * 5)
 
@@ -768,33 +771,27 @@ elif service == "📉 Node Diagnostics":
                                    showgrid=True, gridcolor='Gray', gridwidth=0.7),
                         legend=dict(title="Weekly Snapshots (6AM)", orientation="v", x=1.02, y=1)
                     )
-                    # Bold 20-degree lines
                     for x_v in range(int(x_range[0]), int(x_range[1]) + 1, 20 if unit_mode=="Fahrenheit" else 10):
                         fig_depth.add_vline(x=x_v, line_width=1.5, line_color="DimGray")
-                    # Thresholds
                     for val, label in active_refs:
                         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
                         fig_depth.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5)
                     
-                    st.plotly_chart(fig_depth, use_container_width=True, key=f"diag_d_{sel_loc}", config={'displayModeBar': False})
+                    st.plotly_chart(fig_depth, use_container_width=True, config={'displayModeBar': False})
 
                 st.divider()
 
-                # --- 5. ENGINEERING SUMMARY TABLE (BOTTOM) ---
+                # --- 5. ENGINEERING SUMMARY TABLE ---
                 st.subheader(f"📋 Engineering Summary: {sel_loc}")
-                
                 latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
                 summary_rows = []
                 
                 for _, row in latest_nodes.iterrows():
                     node_id = row['NodeNum']
-                    # Get last 24H of data for this node from our local df_diag
                     day_data = df_diag[(df_diag['NodeNum'] == node_id) & (df_diag['timestamp'] >= now - pd.Timedelta(hours=24))]
                     
                     if not day_data.empty:
-                        min_v = day_data['temperature'].min()
-                        max_v = day_data['temperature'].max()
-                        # Delta = Current Temp - Temp 24h ago
+                        min_v, max_v = day_data['temperature'].min(), day_data['temperature'].max()
                         raw_delta = day_data['temperature'].iloc[-1] - day_data['temperature'].iloc[0]
                     else:
                         min_v, max_v, raw_delta = None, None, None
@@ -818,8 +815,7 @@ elif service == "📉 Node Diagnostics":
                     summary_df[["Node", "Pos/Depth", "Min (24h)", "Max (24h)", "Delta (24h)", "Last Seen"]].style.apply(
                         lambda x: [style_delta(rv) for rv in summary_df['Delta_Val']], axis=0, subset=['Delta (24h)']
                     ),
-                    use_container_width=True,
-                    hide_index=True
+                    use_container_width=True, hide_index=True
                 )
 
         except Exception as e:
