@@ -662,40 +662,28 @@ elif service == "📉 Node Diagnostics":
             with c1: 
                 sel_loc = st.selectbox("Select Pipe / Bank to Analyze", sorted(loc_df['Location'].dropna().unique()))
             with c2: 
-                weeks_view = st.slider("Lookback (Weeks)", 1, 12, 6)
+                weeks_view = st.slider("Lookback (Weeks)", 1, 12, 6, key="diag_weeks")
 
             # 2. DATE CALCULATIONS
-            # Ensures we show full weeks ending at the next Monday midnight
             now = pd.Timestamp.now(tz=pytz.UTC)
             days_until_monday = (7 - now.weekday()) % 7
             if days_until_monday == 0: days_until_monday = 7
             end_view = (now + pd.Timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
             start_view = end_view - timedelta(weeks=weeks_view)
 
-            # 3. DATA FETCHING
-            diag_q = f"""
-                SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
-                FROM `{MASTER_TABLE}`
-                WHERE Project = '{selected_project}' AND Location = '{sel_loc}'
-                AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'
-                ORDER BY timestamp ASC
-            """
-            with st.spinner("Fetching diagnostic data..."):
-                df_diag = client.query(diag_q).to_dataframe()
+            # 3. DATA FETCHING (Using the same caching logic for speed)
+            # Filter from universal cache if available, else fetch
+            all_data = get_universal_portal_data(selected_project)
+            df_diag = all_data[all_data['Location'] == sel_loc].copy()
             
             if df_diag.empty:
                 st.warning(f"No data found for {sel_loc} in the selected timeframe.")
             else:
-                df_diag['timestamp'] = pd.to_datetime(df_diag['timestamp'])
-                if df_diag['timestamp'].dt.tz is None:
-                    df_diag['timestamp'] = df_diag['timestamp'].dt.tz_localize(pytz.UTC)
-                else:
-                    df_diag['timestamp'] = df_diag['timestamp'].dt.tz_convert(pytz.UTC)
-
                 # --- 4. TIME VS TEMPERATURE GRAPH (TOP) ---
                 st.subheader("📈 Timeline Analysis")
-                fig_time = build_standard_sf_graph(df_diag, sel_loc, start_view, end_view, active_refs, unit_mode, unit_label)
-                st.plotly_chart(fig_time, use_container_width=True)
+                # Uses the High-Speed Engine with 3-tier grid
+                fig_time = build_high_speed_graph(df_diag, sel_loc, start_view, end_view, tuple(active_refs), unit_mode, unit_label)
+                st.plotly_chart(fig_time, use_container_width=True, config={'displayModeBar': False})
 
                 st.divider()
 
@@ -707,120 +695,114 @@ elif service == "📉 Node Diagnostics":
                 if depth_only_df.empty:
                     st.info("No depth-based sensors found for this location.")
                 else:
-                    # Generate Monday 6AM Snapshots
-                    all_mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
-                    target_times = [m.replace(hour=6, minute=0, second=0, microsecond=0) for m in all_mondays]
-                    
                     fig_depth = go.Figure()
-                    for target_ts in target_times:
-                        # 24-hour search window
-                        window_df = depth_only_df[(depth_only_df['timestamp'] >= target_ts - pd.Timedelta(days=1)) & 
-                                                  (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(days=1))]
-                        if window_df.empty: continue
+                    
+                    # Generate Monday Snapshots
+                    all_mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
+                    
+                    for m_date in all_mondays:
+                        target_ts = m_date.replace(hour=6, minute=0, second=0).tz_localize(pytz.UTC) if m_date.tzinfo is None else m_date.replace(hour=6)
                         
-                        snapshot_points = []
-                        for node in window_df['NodeNum'].unique():
-                            node_df = window_df[window_df['NodeNum'] == node].copy()
-                            node_df['diff'] = (node_df['timestamp'] - target_ts).abs()
-                            closest = node_df.sort_values('diff').iloc[0]
-                            if closest['diff'] <= pd.Timedelta(days=1):
-                                snapshot_points.append(closest)
+                        # Grab data within +/- 12 hours of the target Monday 6AM
+                        window = depth_only_df[(depth_only_df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                               (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                         
-                        if snapshot_points:
-                            snap_df = pd.DataFrame(snapshot_points).sort_values('Depth_Num')
-                            fig_depth.add_trace(go.Scatter(
-                                x=snap_df['temperature'], y=snap_df['Depth_Num'],
+                        if not window.empty:
+                            snap_list = []
+                            for node in window['NodeNum'].unique():
+                                node_data = window[window['NodeNum'] == node].copy()
+                                node_data['time_diff'] = (node_data['timestamp'] - target_ts).abs()
+                                snap_list.append(node_data.sort_values('time_diff').iloc[0])
+                            
+                            snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
+                            fig_depth.add_trace(go.Scattergl(
+                                x=snap_df['temperature'], 
+                                y=snap_df['Depth_Num'], 
                                 mode='lines+markers', 
-                                name=target_ts.strftime('%m/%d/%Y'), # Legend shows date only
+                                name=target_ts.strftime('%m/%d/%y'),
                                 hovertemplate="Depth: %{y}ft<br>Temp: %{x}°"
                             ))
 
-                    # Depth Axis Logic: Rounded to nearest 5 or 10
+                    # --- DYNAMIC GRID LOGIC ---
+                    if unit_mode == "Celsius":
+                        x_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
+                        x_major, x_minor = 10, 2
+                    else:
+                        x_range = [-20, 80]
+                        x_major, x_minor = 20, 5
+
                     max_d = depth_only_df['Depth_Num'].max()
                     y_limit = int(((max_d // 5) + 1) * 5)
-                    y_major = 20 if y_limit > 60 else 10
-                    y_minor = 10 if y_limit > 60 else 5
-
-                    fig_depth.update_xaxes(
-                        title=f"Temp ({unit_label})", range=[-20, 80] if unit_mode == "Fahrenheit" else [-30, 30],
-                        dtick=5, gridcolor='LightGray', mirror=True, showline=True, linecolor='black'
-                    )
-                    # Add major vertical lines at 20 degree intervals
-                    for x_v in range(-20, 81, 20):
-                        fig_depth.add_vline(x=x_v, line_width=1, line_color="Gray")
-
-                    fig_depth.update_yaxes(
-                        title="Depth (ft) - Surface at 0", range=[y_limit, 0], 
-                        dtick=y_major, gridcolor='Gray', mirror=True, showline=True, linecolor='black'
-                    )
-                    # Add minor horizontal lines
-                    for d_v in range(0, y_limit + 1, y_minor):
-                        fig_depth.add_hline(y=d_v, line_width=0.5, line_color="LightGray")
-
+                    
                     fig_depth.update_layout(
-                        title=f"{sel_loc}: Depth vs Temperature", 
+                        title=f"{sel_loc}: Depth vs Temperature",
                         plot_bgcolor='white', height=700,
+                        # X-AXIS: Minor 5° grid
+                        xaxis=dict(
+                            title=f"Temp ({unit_label})", range=x_range, dtick=x_minor,
+                            showgrid=True, gridcolor='Gainsboro', gridwidth=0.5,
+                            showline=True, linecolor='black', mirror=True
+                        ),
+                        # Y-AXIS: 10ft major grid
+                        yaxis=dict(
+                            title="Depth (ft) - Surface at 0", range=[y_limit, 0], dtick=10, 
+                            showgrid=True, gridcolor='Gray', gridwidth=0.7,
+                            showline=True, linecolor='black', mirror=True
+                        ),
                         legend=dict(title="Weekly Snapshots (6AM)", orientation="v", x=1.02, y=1)
                     )
+
+                    # ADD MAJOR VERTICAL LINES (Every 20°)
+                    for x_v in range(int(x_range[0]), int(x_range[1]) + 1, x_major):
+                        fig_depth.add_vline(x=x_v, line_width=1.5, line_color="DimGray", layer='below')
+
+                    # ADD REFERENCE THRESHOLDS (Freezing, Type A, Type B)
+                    for val, label in active_refs:
+                        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                        fig_depth.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5, opacity=0.8)
                     
-                    # Add Freezing Reference Line
-                    freeze_val = 32 if unit_mode == "Fahrenheit" else 0
-                    fig_depth.add_vline(x=freeze_val, line_dash="dash", line_color="RoyalBlue", opacity=0.5)
-                    
-                    st.plotly_chart(fig_depth, use_container_width=True)
+                    st.plotly_chart(fig_depth, use_container_width=True, key=f"diag_depth_{sel_loc}", config={'displayModeBar': False})
 
                 st.divider()
 
                 # --- 6. SENSOR SUMMARY TABLE (BOTTOM) ---
                 st.subheader(f"📋 Engineering Summary: {sel_loc}")
                 
-                # Query latest data for all nodes in this pipe
-                summary_q = f"""
-                    SELECT * FROM `{MASTER_TABLE}` 
-                    WHERE Project = '{selected_project}' AND Location = '{sel_loc}'
-                    QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1
-                """
-                raw_summary = client.query(summary_q).to_dataframe()
+                # Filter latest from the existing dataframe
+                latest_summary = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
                 
-                if not raw_summary.empty:
+                if not latest_summary.empty:
                     summary_rows = []
-                    for _, row in raw_summary.iterrows():
+                    for _, row in latest_summary.iterrows():
                         node_id = row['NodeNum']
-                        ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
+                        ts = row['timestamp']
                         hrs_ago = int((now - ts).total_seconds() / 3600)
                         
-                        # 24H Metrics for Min, Max, and Delta
-                        metrics_q = f"""
-                            SELECT 
-                                MIN(temperature) as min_24, 
-                                MAX(temperature) as max_24,
-                                (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' ORDER BY timestamp DESC LIMIT 1) - 
-                                (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as delta_24
-                            FROM `{MASTER_TABLE}` 
-                            WHERE NodeNum = '{node_id}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-                        """
-                        m_res = client.query(metrics_q).to_dataframe()
-                        min_v = m_res['min_24'].iloc[0] if not m_res.empty else None
-                        max_v = m_res['max_24'].iloc[0] if not m_res.empty else None
-                        raw_delta = m_res['delta_24'].iloc[0] if not m_res.empty else None
+                        # Using 24H window for Min/Max
+                        day_data = df_diag[(df_diag['NodeNum'] == node_id) & (df_diag['timestamp'] >= now - pd.Timedelta(hours=24))]
+                        min_v = day_data['temperature'].min() if not day_data.empty else None
+                        max_v = day_data['temperature'].max() if not day_data.empty else None
+                        
+                        # Delta Calculation
+                        first_val = day_data.sort_values('timestamp')['temperature'].iloc[0] if not day_data.empty else None
+                        last_val = day_data.sort_values('timestamp')['temperature'].iloc[-1] if not day_data.empty else None
+                        raw_delta = last_val - first_val if first_val is not None and last_val is not None else None
 
-                        # Status indicators
                         status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
                         pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
 
                         summary_rows.append({
                             "Node": node_id,
                             "Pos/Depth": pos_display,
-                            "Min (24h)": f"{round(convert_val(min_v), 1)}{unit_label}" if pd.notnull(min_v) else "N/A",
-                            "Max (24h)": f"{round(convert_val(max_v), 1)}{unit_label}" if pd.notnull(max_v) else "N/A",
-                            "Delta (24h)": f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F",
+                            "Min (24h)": f"{round(convert_val(min_v), 1)}{unit_label}" if min_v is not None else "N/A",
+                            "Max (24h)": f"{round(convert_val(max_v), 1)}{unit_label}" if max_v is not None else "N/A",
+                            "Delta (24h)": f"{round(raw_delta, 1)}°F" if raw_delta is not None else "0.0°F",
                             "Delta_Val": raw_delta,
                             "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
                         })
                     
                     summary_df = pd.DataFrame(summary_rows)
                     
-                    # Styling logic for Delta column
                     def style_delta(val):
                         if val is None: return ""
                         bg, color = "", "black"
@@ -842,7 +824,7 @@ elif service == "📉 Node Diagnostics":
                     )
 
         except Exception as e:
-            st.error(f"Diagnostics Error: {e}")
+            st.error(f"Diagnostics Error: {traceback.format_exc()}")
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
