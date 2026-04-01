@@ -887,30 +887,20 @@ elif service == "📤 Data Intake Lab":
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    # 1. TAB NAVIGATION
     tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
 
-    # Physical Source Tables
-    RAW_TABLES = [
-        f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush",
-        f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-    ]
-
+    # 1. DEEP DATA SCRUB (Updated for NodeNum)
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
         scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
         
-        # Mapping to your confirmed schema
-        if scrub_target == "SensorPush":
-            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-            id_col = "sensor_id"
-        else:
-            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-            id_col = "NodeNum" 
+        # Mapping based on your BigQuery screenshot
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+        # Both tables now use NodeNum based on your schema
+        id_col = "NodeNum" 
 
-        if st.button(f"🚀 Execute Physical 1-Hour Scrub on {scrub_target}"):
-            with st.spinner(f"Hard-cleaning {scrub_target} to hourly intervals..."):
-                # This SQL physically reduces the table size by overwriting it
+        if st.button(f"🚀 Execute 1-Hour Scrub on {scrub_target}"):
+            with st.spinner(f"Cleaning {scrub_target}..."):
                 dedup_sql = f"""
                 CREATE OR REPLACE TABLE `{target_table}` AS 
                 SELECT * EXCEPT(rn) FROM (
@@ -925,8 +915,7 @@ elif service == "🛠️ Admin Tools":
                 """
                 try:
                     client.query(dedup_sql).result()
-                    st.success(f"Success! {target_table} now contains exactly 1 record per hour per node.")
-                    # Clear cache so the app pulls the new, smaller dataset
+                    st.success(f"Success! {target_table} now has one record per hour.")
                     st.cache_data.clear()
                 except Exception as e:
                     st.error(f"Scrub Error: {e}")
