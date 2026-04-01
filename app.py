@@ -858,27 +858,24 @@ elif service == "📤 Data Intake Lab":
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
+        st.write("Fetching data from all configured SensorPush accounts.")
         c1, c2 = st.columns(2)
-        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
-        end_date = c2.date_input("End Date", datetime.now())
+        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1), key="api_start_input")
+        end_date = c2.date_input("End Date", datetime.now(), key="api_end_input")
         
-        if st.button("🛰️ FETCH & SYNC"):
-            # Level 3: Date Conversion
+        if st.button("🛰️ FETCH & SYNC FROM CLOUD"):
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            with st.spinner("Fetching data..."):
-                # Level 4: Call the Function
+            with st.spinner("Backfilling from all accounts..."):
                 df_api = fetch_sensorpush_data(start_dt, end_dt)
-                
                 if not df_api.empty:
-                    # Level 5: Upload to BigQuery
-                    table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                    client.load_table_from_dataframe(df_api, table_path).result()
-                    st.success(f"✅ Integrated {len(df_api)} points successfully!")
+                    # Upload the combined data to BigQuery
+                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                    st.success(f"✅ Successfully integrated {len(df_api)} samples from all accounts!")
+                    st.cache_data.clear()
                 else:
-                    # Level 5: Fallback
-                    st.warning("No data found for this range.")
+                    st.warning("No data returned. Check account credentials in secrets.")
                     
     with tab3:
         st.subheader("🛠️ Metadata Management")
