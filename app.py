@@ -13,13 +13,19 @@ import traceback
 import re
 import io
 
-@st.cache_data(ttl=600) # Cache for 10 minutes
-def get_project_data(project_name):
-    """Fetches all recent data for a project in a single batch."""
+@st.cache_data(ttl=600) # Cache data for 10 minutes
+def get_cached_project_data(project_id, days=84):
+    """
+    Centralized data fetcher. 
+    Returns all approved data for a project in one batch.
+    """
     query = f"""
-        SELECT * FROM `{MASTER_TABLE}` 
-        WHERE Project = '{project_name}' 
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+        SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
+        FROM `{MASTER_TABLE}`
+        WHERE Project = '{project_id}' 
+        AND (approve = 'TRUE' OR approve = 'true')
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        ORDER BY timestamp ASC
     """
     return client.query(query).to_dataframe()
 
@@ -125,16 +131,13 @@ def rebuild_master_table(mode="preserve"):
 ############################
 def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
-    Updated Time vs Temp Graph: 
-    - Y-axis: Medium gray at 20, light gray at 5. Range 80 to -20.
-    - X-axis: Gray at Monday midnight, medium gray at midnight, light gray at 6h.
-    - Reference: Burgundy dash for Type A, RoyalBlue for others.
+    High-Performance Graph Engine using WebGL for instant rendering.
     """
     try:
-        display_df = df.copy()
-        if display_df.empty:
+        if df.empty:
             return go.Figure()
 
+        display_df = df.copy()
         display_df.columns = [c.lower() for c in display_df.columns]
         display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
         
@@ -143,101 +146,58 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         else:
             display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC)
 
-        # 1. UNIT CONVERSION & RANGE
+        # Unit Conversion
         if unit_mode == "Celsius":
             display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
             y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-            dt_major, dt_minor = 10, 2 # Rough equivalents for C
+            dt_major, dt_minor = 10, 2 
         else:
             y_range = [-20, 80]
             dt_major, dt_minor = 20, 5
 
-        # 2. SMART LABELING
-        def create_label(row):
-            b_val = str(row.get('bank', '')).strip().lower()
-            d_val = str(row.get('depth', '')).strip().lower()
-            s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
-            # If in Client Portal (simplified title logic can be added here)
-            if b_val not in ["", "none", "nan", "null"]:
-                return f"Bank {row['bank']} ({s_name})"
-            if d_val not in ["", "none", "nan", "null"]:
-                return f"{row['depth']}ft ({s_name})"
-            return f"Unmapped ({s_name})"
-
-        display_df['label'] = display_df.apply(create_label, axis=1)
+        # Create Labels
+        display_df['label'] = display_df.apply(
+            lambda r: f"Bank {r['bank']} ({r['nodenum']})" if str(r.get('bank')).strip().lower() not in ["", "none", "nan", "null"]
+            else f"{r.get('depth')}ft ({r.get('nodenum')})", axis=1
+        )
         
-        # 3. GAP HANDLING
-        processed_dfs = []
-        for lbl in sorted(display_df['label'].unique()):
-            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 6.0
-            if gap_mask.any():
-                gaps = s_df[gap_mask].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(seconds=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-            processed_dfs.append(s_df)
-        clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
-        
-        # 4. FIGURE SETUP
         fig = go.Figure()
-        for lbl in sorted(clean_df['label'].unique()):
-            sensor_df = clean_df[clean_df['label'] == lbl]
-            fig.add_trace(go.Scatter(
+        
+        # Use Scattergl for hardware-accelerated rendering
+        for lbl in sorted(display_df['label'].unique()):
+            sensor_df = display_df[display_df['label'] == lbl].sort_values('timestamp')
+            fig.add_trace(go.Scattergl(
                 x=sensor_df['timestamp'], y=sensor_df['temperature'], 
                 name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
             ))
 
-        # 5. STYLING & GRIDLINES
+        # Styling
         fig.update_layout(
-            title={'text': f"{title}: Time vs Temperature", 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
+            title={'text': f"{title}", 'x': 0, 'font': dict(size=18)},
             plot_bgcolor='white', hovermode="x unified", height=600,
             margin=dict(t=80, l=50, r=180, b=50),
             legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
         )
         
-        # X-AXIS CUSTOM GRIDLINES
-        # Generate range covering full weeks (Monday to Monday)
-        grid_6h = pd.date_range(start=start_view, end=end_view, freq='6h')
-        for ts in grid_6h:
-            if ts.weekday() == 0 and ts.hour == 0: # Monday Midnight
-                color, width = "Gray", 2
-            elif ts.hour == 0: # Daily Midnight
-                color, width = "DimGray", 1
-            else: # 6-hour blocks
-                color, width = "LightGray", 0.5
+        # X-Axis Grid Logic
+        grid_range = pd.date_range(start=start_view, end=end_view, freq='24h')
+        for ts in grid_range:
+            color, width = ("Black", 1.5) if ts.weekday() == 0 else ("LightGray", 0.5)
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # "NOW" MARKER (Red Dashed)
-        now_marker = pd.Timestamp.now(tz=pytz.UTC)
-        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dash")
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro')
+        fig.update_xaxes(range=[start_view, end_view], showline=True, linecolor='black', mirror=True)
 
-        # Y-AXIS GRID (20 Major, 5 Minor)
-        fig.update_yaxes(
-            title=f"Temp ({unit_label})", range=y_range,
-            gridcolor='LightGray', gridwidth=0.5, # Minor
-            dtick=dt_minor,
-            mirror=True, showline=True, linecolor='black'
-        )
-        # Overlay Major Gridlines (Every 20)
-        for y_val in range(y_range[0], y_range[1] + 1, dt_major):
-            fig.add_hline(y=y_val, line_width=1, line_color="Gray", layer='below')
-
-        fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
-
-        # REFERENCE LINES
+        # Reference Lines
         for val, label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            line_color = "maroon" if label == "Type A" else "RoyalBlue"
-            fig.add_hline(y=c_val, line_dash="dash", line_color=line_color, opacity=0.8, 
-                         annotation_text=label, annotation_position="top right")
+            l_color = "maroon" if "Type A" in label else "RoyalBlue"
+            fig.add_hline(y=c_val, line_dash="dash", line_color=l_color, opacity=0.8)
         
         return fig
     except Exception as e:
-        st.error(f"Critical Graph Error: {e}")
+        st.error(f"Graph Error: {e}")
         return go.Figure()
-
 ########################
 # --- GRAPH ENGINE --- #
 ########################
@@ -394,9 +354,6 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 ####################
 # --- SERVICES --- #
 ####################
-#############################
-# --- Executive Summary --- #
-#############################
 #############################
 # --- Executive Summary --- #
 #############################
@@ -960,13 +917,18 @@ elif service == "🛠️ Admin Tools":
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
         scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
-        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
         
-        # Using NodeNum as confirmed by your schema
-        id_col = "NodeNum" 
+        # Mapping to your confirmed schema
+        if scrub_target == "SensorPush":
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+            id_col = "sensor_id"
+        else:
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+            id_col = "NodeNum" 
 
-        if st.button(f"🚀 Execute Deep Scrub on {scrub_target}"):
-            with st.spinner(f"Cleaning {scrub_target}..."):
+        if st.button(f"🚀 Execute Physical 1-Hour Scrub on {scrub_target}"):
+            with st.spinner(f"Hard-cleaning {scrub_target} to hourly intervals..."):
+                # This SQL physically reduces the table size by overwriting it
                 dedup_sql = f"""
                 CREATE OR REPLACE TABLE `{target_table}` AS 
                 SELECT * EXCEPT(rn) FROM (
@@ -981,7 +943,9 @@ elif service == "🛠️ Admin Tools":
                 """
                 try:
                     client.query(dedup_sql).result()
-                    st.success(f"Success! {scrub_target} cleaned (1 reading per hour).")
+                    st.success(f"Success! {target_table} now contains exactly 1 record per hour per node.")
+                    # Clear cache so the app pulls the new, smaller dataset
+                    st.cache_data.clear()
                 except Exception as e:
                     st.error(f"Scrub Error: {e}")
 
