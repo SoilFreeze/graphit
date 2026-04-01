@@ -119,12 +119,17 @@ def convert_val(f):
 st.header(f"📊 {ACTIVE_PROJECT} Dashboard")
 tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
-# Fetch Data
-q = f"SELECT * FROM `{MASTER_TABLE}` WHERE Project = '{ACTIVE_PROJECT}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)"
+# UPDATED QUERY: Added 'AND approve = "TRUE"' filter
+q = f"""
+    SELECT * FROM `{MASTER_TABLE}` 
+    WHERE Project = '{ACTIVE_PROJECT}' 
+    AND approve = 'TRUE'
+    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+"""
 p_df = client.query(q).to_dataframe()
 
 if p_df.empty:
-    st.warning(f"No data found for Project: {ACTIVE_PROJECT}")
+    st.warning(f"No approved data found for Project: {ACTIVE_PROJECT}. Use Admin Tools to approve data.")
 else:
     p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_convert(pytz.UTC) if p_df['timestamp'].dt.tz else pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC)
     
@@ -146,7 +151,7 @@ else:
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_df = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
         if depth_df.empty:
-            st.info("No depth-based data available for this project.")
+            st.info("No approved depth-based data available for this project.")
         else:
             for loc in sorted(depth_df['Location'].unique()):
                 with st.expander(f"📏 {loc} Depth Profile", expanded=True):
