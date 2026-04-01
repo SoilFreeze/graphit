@@ -962,9 +962,16 @@ if st.button('Update App Data from Google Sheets'):
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner", "Metadata Update"])
+    # 1. Added "Metadata Update" to the list 
+    # 2. Added tab_update to the variables on the left
+    tab_scrub, tab_approve, tab_cleaner, tab_update = st.tabs([
+        "🧹 Deep Data Scrub", 
+        "✅ Bulk Approval", 
+        "🧨 Surgical Cleaner", 
+        "Metadata Update"
+    ])
 
-    ###########################
+###########################
 # --- ADMIN TOOLS REVISED --- #
 ###########################
 with tab_approve:
