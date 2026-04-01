@@ -955,56 +955,90 @@ elif service == "🛠️ Admin Tools":
 ###########################
 with tab_cleaner:
     st.subheader("🧨 Surgical Data Cleaner")
-    st.warning("Warning: This permanently deletes data from both Raw and Master tables.")
-    
-    c1, c2 = st.columns(2)
-    start_del = c1.date_input("Start Date", datetime.now() - timedelta(days=7), key="del_start")
-    end_del = c2.date_input("End Date", datetime.now(), key="del_end")
-    
-    # Let user pick a specific sensor or leave blank for a full date-range wipe
-    node_to_clean = st.text_input("Enter ID (e.g. 12-34-56 or SensorPush ID) to clean (Optional)")
+    st.info("Select specific data to remove. Select 'ALL' to wipe an entire category.")
 
-    if st.button("🔥 PERMANENTLY DELETE DATA"):
-        # Map of all tables and their specific ID column names
-        # We include MASTER_TABLE so the UI updates immediately without a full rebuild
+    # 1. DATABASE FETCH FOR FILTERS
+    # We pull from MASTER_TABLE to get the human-readable project/location mapping
+    filter_q = f"SELECT Project, Location, NodeNum FROM `{MASTER_TABLE}`"
+    f_df = client.query(filter_q).to_dataframe()
+
+    c1, c2, c3 = st.columns(3)
+    
+    with c1:
+        # Project is required to narrow down the scope
+        proj_list = sorted(f_df['Project'].unique())
+        sel_proj = st.selectbox("1. Select Project", proj_list, key="del_proj")
+        
+    with c2:
+        # Filter pipes based on project
+        pipe_list = ["ALL"] + sorted(f_df[f_df['Project'] == sel_proj]['Location'].unique())
+        sel_pipe = st.selectbox("2. Select Pipe (Location)", pipe_list, key="del_pipe")
+        
+    with c3:
+        # Filter nodes based on pipe (if not ALL)
+        if sel_pipe == "ALL":
+            node_list = ["ALL"]
+        else:
+            node_list = ["ALL"] + sorted(f_df[f_df['Location'] == sel_pipe]['NodeNum'].unique())
+        sel_node = st.selectbox("3. Select Node", node_list, key="del_node")
+
+    # 2. DATE & PREVIEW CONTROLS
+    col_d1, col_d2 = st.columns(2)
+    lookback_days = col_d1.slider("Deletion Window (Days Ago)", 1, 30, 7)
+    start_del = datetime.now() - timedelta(days=lookback_days)
+    
+    # 3. GRAPH PREVIEW (To ensure you don't delete the wrong thing!)
+    preview_df = get_universal_portal_data(sel_proj)
+    if not preview_df.empty:
+        plot_df = preview_df[preview_df['timestamp'] >= pd.Timestamp(start_del).tz_localize('UTC')]
+        if sel_pipe != "ALL":
+            plot_df = plot_df[plot_df['Location'] == sel_pipe]
+        if sel_node != "ALL":
+            plot_df = plot_df[plot_df['NodeNum'] == sel_node]
+            
+        if not plot_df.empty:
+            fig = px.scatter(plot_df, x='timestamp', y='temperature', color='NodeNum', 
+                             title="Preview of Data to be Deleted")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("No data found for this selection in the last 7 days.")
+
+    # 4. EXECUTION
+    if st.button("🔥 PERMANENTLY DELETE SELECTED DATA"):
+        # Mapping tables to their specific ID columns
         target_map = {
             f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush": "sensor_id",
             f"{PROJECT_ID}.{DATASET_ID}.raw_lord": "NodeNum",
-            MASTER_TABLE: "NodeNum" # The master table uses NodeNum as the ID
+            MASTER_TABLE: "NodeNum"
         }
         
-        total_affected = 0
+        # Build the WHERE clause
+        # Note: Since Raw tables don't have 'Location', we use the Node IDs found in our filter
+        nodes_to_delete = []
+        if sel_node != "ALL":
+            nodes_to_delete = [sel_node]
+        elif sel_pipe != "ALL":
+            nodes_to_delete = f_df[f_df['Location'] == sel_pipe]['NodeNum'].unique().tolist()
+        else:
+            nodes_to_delete = f_df[f_df['Project'] == sel_proj]['NodeNum'].unique().tolist()
+
+        nodes_str = ", ".join([f"'{n}'" for n in nodes_to_delete])
         
         for table, id_col in target_map.items():
             try:
-                # 1. Base deletion clause (Date range)
-                # Using TIMESTAMP_TRUNC or CAST to DATE for BigQuery efficiency
-                del_clause = f"CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
-                
-                # 2. Specific Node Filter
-                if node_to_clean:
-                    # We use LIKE with wildcards to handle dashes/colons vs raw digits
-                    # Example: if user enters '1234', it matches '12-34' or '1234'
-                    clean_id = re.sub(r'[^a-zA-Z0-9]', '', node_to_clean)
-                    del_clause += f" AND REGEXP_REPLACE(CAST({id_col} AS STRING), r'[^a-zA-Z0-9]', '') LIKE '%{clean_id}%'"
-                
-                delete_sql = f"DELETE FROM `{table}` WHERE {del_clause}"
-                
-                with st.spinner(f"Purging {table}..."):
-                    del_job = client.query(delete_sql)
-                    result = del_job.result() # Wait for job to finish
-                    rows_deleted = del_job.num_dml_affected_rows
-                    total_affected += rows_deleted
-                    st.write(f"✔️ `{table}`: Removed {rows_deleted} records.")
-                    
+                del_sql = f"""
+                    DELETE FROM `{table}` 
+                    WHERE {id_col} IN ({nodes_str})
+                    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY)
+                """
+                del_job = client.query(del_sql)
+                del_job.result()
+                st.write(f"✔️ Purged `{table}` ({del_job.num_dml_affected_rows} rows)")
             except Exception as e:
                 st.error(f"Error cleaning {table}: {e}")
         
-        if total_affected > 0:
-            st.success(f"Surgical cleaning complete! {total_affected} total records purged.")
-            st.cache_data.clear() # Wipe Streamlit cache so graphs refresh
-        else:
-            st.info("No records matched those criteria.")
+        st.success("Surgical strike complete.")
+        st.cache_data.clear()
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
