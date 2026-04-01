@@ -943,114 +943,80 @@ elif service == "🛠️ Admin Tools":
 # --- SURGICAL CLEANER --- #
 ###########################
 with tab_cleaner:
-    st.subheader("🧨 Surgical Data Cleaner")
-    st.info("Select data to remove. The graph below shows exactly what will be deleted.")
-
-    # 1. FETCH FILTER DATA & HANDLE NULLS
-    # We pull unique combinations to build our dropdown logic
-    filter_q = f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`"
-    try:
-        f_df = client.query(filter_q).to_dataframe()
-        # Clean up nulls immediately to prevent sorting errors
-        f_df['Project'] = f_df['Project'].fillna("Unknown Project")
-        f_df['Location'] = f_df['Location'].fillna("Unknown Location")
-        f_df['NodeNum'] = f_df['NodeNum'].fillna("Unknown Node")
-    except Exception as e:
-        st.error(f"Error fetching metadata: {e}")
-        f_df = pd.DataFrame(columns=['Project', 'Location', 'NodeNum'])
-
-    # 2. CASCADING DROPDOWNS
-    c1, c2, c3 = st.columns(3)
+    st.subheader("🧨 Surgical Data Cleaner: Box Selection")
+    st.info("Use the **Box Select** or **Lasso Select** tool on the top right of the graph to highlight specific points for deletion.")
     
+    # 1. FETCH METADATA
+    meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
+
+    c1, c2, c3 = st.columns(3)
     with c1:
-        proj_list = sorted(f_df['Project'].unique().tolist())
-        sel_proj = st.selectbox("1. Project", proj_list, key="del_proj")
-        
+        sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="box_proj")
     with c2:
-        # Filter pipes based on project
-        relevant_pipes = f_df[f_df['Project'] == sel_proj]['Location'].unique().tolist()
-        pipe_list = ["ALL"] + sorted([str(p) for p in relevant_pipes])
-        sel_pipe = st.selectbox("2. Pipe / Location", pipe_list, key="del_pipe")
-        
+        pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
+        sel_pipe = st.selectbox("Pipe / Location", pipes, key="box_pipe")
     with c3:
-        # Filter nodes based on pipe
-        if sel_pipe == "ALL":
-            relevant_nodes = f_df[f_df['Project'] == sel_proj]['NodeNum'].unique().tolist()
-        else:
-            relevant_nodes = f_df[(f_df['Project'] == sel_proj) & (f_df['Location'] == sel_pipe)]['NodeNum'].unique().tolist()
-        
-        node_list = ["ALL"] + sorted([str(n) for n in relevant_nodes])
-        sel_node = st.selectbox("3. Node ID", node_list, key="del_node")
+        nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique()) if sel_pipe != "ALL" else ["ALL"]
+        sel_node = st.selectbox("Node ID", nodes, key="box_node")
 
-    # 3. DATE SELECTION & PREVIEW GRAPH
-    st.divider()
-    lookback = st.slider("Time Window to Delete (Days Ago)", 1, 30, 7)
-    cutoff_dt = datetime.now(pytz.UTC) - timedelta(days=lookback)
-
-    # Fetch preview data from the Master Table
+    # 2. PREVIEW DATA
     preview_q = f"""
         SELECT timestamp, temperature, NodeNum, Location 
         FROM `{MASTER_TABLE}` 
         WHERE Project = '{sel_proj}' 
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback} DAY)
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
     """
-    
-    preview_data = client.query(preview_q).to_dataframe()
-    
-    if not preview_data.empty:
-        # Apply local filters for the graph
-        if sel_pipe != "ALL":
-            preview_data = preview_data[preview_data['Location'] == sel_pipe]
-        if sel_node != "ALL":
-            preview_data = preview_data[preview_data['NodeNum'] == sel_node]
+    p_df = client.query(preview_q).to_dataframe()
 
-        if not preview_data.empty:
-            # Create the point-based scatter plot
-            fig_del = px.scatter(
-                preview_data, 
-                x='timestamp', 
-                y='temperature', 
-                color='NodeNum',
-                title=f"Target Data Points (Last {lookback} Days)",
-                labels={'temperature': f'Temp ({unit_label})'}
-            )
-            fig_del.update_traces(marker=dict(size=8, opacity=0.6))
-            st.plotly_chart(fig_del, use_container_width=True)
+    if not p_df.empty:
+        if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
+        if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
+
+        # 3. INTERACTIVE GRAPH
+        fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
+                         title="Drag a box over points to select them",
+                         template="plotly_white", height=500)
+        
+        # Force the box select tool to be active by default
+        fig.update_layout(dragmode='select') 
+
+        # Capture selection events
+        selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+
+        # 4. PROCESSING THE SELECTION
+        if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
+            # Extract data from the selected points
+            points_data = selected_points["selection"]["points"]
+            st.write(f"✅ {len(points_data)} points selected.")
             
-            # 4. EXECUTION BUTTON
-            st.warning(f"Confirm: You are about to delete {len(preview_data)} points.")
-            if st.button("🔥 PERMANENTLY DELETE SHOWN DATA"):
-                # Identify exactly which nodes to hit in the raw tables
-                target_nodes = preview_data['NodeNum'].unique().tolist()
-                nodes_sql_list = ", ".join([f"'{n}'" for n in target_nodes])
-
-                # Tables to clean
-                table_map = {
-                    f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush": "sensor_id",
-                    f"{PROJECT_ID}.{DATASET_ID}.raw_lord": "NodeNum",
-                    MASTER_TABLE: "NodeNum"
-                }
-
-                for table, id_col in table_map.items():
-                    try:
-                        del_sql = f"""
-                            DELETE FROM `{table}` 
-                            WHERE {id_col} IN ({nodes_sql_list})
-                            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback} DAY)
-                        """
-                        job = client.query(del_sql)
-                        job.result()
-                        st.write(f"✔️ {table}: Deleted {job.num_dml_affected_rows} rows.")
-                    except Exception as e:
-                        st.error(f"Error on {table}: {e}")
+            # Create a summary of what is about to be deleted
+            del_summary = pd.DataFrame(points_data)
+            
+            if st.button("🔥 DELETE SELECTED POINTS"):
+                with st.spinner("Executing surgical strike..."):
+                    for pt in points_data:
+                        # BigQuery timestamp strings need careful formatting
+                        ts_val = pt['x']
+                        node_val = pt['customdata'] if 'customdata' in pt else p_df.iloc[pt['point_index']]['NodeNum']
+                        
+                        # Delete from all relevant tables
+                        for table in [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                                      f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
+                                      MASTER_TABLE]:
+                            del_sql = f"""
+                                DELETE FROM `{table}` 
+                                WHERE NodeNum = '{node_val}' 
+                                AND timestamp = '{ts_val}'
+                            """
+                            client.query(del_sql).result()
                 
-                st.success("Deletion complete. Refreshing app...")
+                st.success("Selected points removed from database.")
                 st.cache_data.clear()
                 st.rerun()
         else:
-            st.info("No data found for this specific Pipe/Node selection in the window.")
+            st.warning("No points selected. Use the box tool on the graph above.")
     else:
-        st.info("No data found for this project in the selected time window.")
+        st.info("No data found for this selection in the last 7 days.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
