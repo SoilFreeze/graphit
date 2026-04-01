@@ -379,15 +379,19 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 # --- GLOBAL DATA LOAD --- #
 ###########################
 
-# Initialize session state keys if they don't exist
+# 1. Initialize the Cache
 if "master_df" not in st.session_state:
     st.session_state.master_df = pd.DataFrame()
     st.session_state.current_project = None
+    st.session_state.last_refresh = None
 
-# Only fetch from BigQuery if the project selection actually changes
+# 2. Sidebar Refresh Button
+if st.sidebar.button("🔄 Sync New Data Now"):
+    st.session_state.current_project = None  # Resetting this forces a re-query
+
+# 3. The Logic: Only query BigQuery if project changes OR manual refresh clicked
 if selected_project and st.session_state.current_project != selected_project:
-    with st.spinner(f"⚡ Syncing {selected_project} Data..."):
-        # PRUNED QUERY: We only select the columns needed for the UI
+    with st.spinner(f"⚡ High-Speed Syncing {selected_project}..."):
         query = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
             FROM `{MASTER_TABLE}`
@@ -397,23 +401,27 @@ if selected_project and st.session_state.current_project != selected_project:
         """
         try:
             df = client.query(query).to_dataframe()
-            
             if not df.empty:
-                # PRE-PROCESSING: Do the heavy lifting once here
-                df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
+                # Pre-calculate expensive operations once
+                df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC)
                 df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
                 df['is_approved'] = df['approve'].astype(str).str.upper().str.strip() == 'TRUE'
                 
+                # Store in memory
                 st.session_state.master_df = df
                 st.session_state.current_project = selected_project
+                st.session_state.last_refresh = datetime.now().strftime("%H:%M:%S")
             else:
                 st.session_state.master_df = pd.DataFrame()
         except Exception as e:
-            st.error(f"Failed to sync project data: {e}")
+            st.error(f"Sync Error: {e}")
 
-# Create instant-access references for the pages below
+# 4. Display Last Sync Time in Sidebar
+if st.session_state.last_refresh:
+    st.sidebar.caption(f"Last Data Sync: {st.session_state.last_refresh}")
+
+# References for the rest of the app
 master_df = st.session_state.master_df
-# Instant filter for approved data (Client Portal) vs all data (Diagnostics)
 approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty else pd.DataFrame()
 ####################
 # --- SERVICES --- #
