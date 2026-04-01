@@ -78,16 +78,21 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         )
         
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
-            color, width = ("Black", 2) if ts.weekday() == 0 and ts.hour == 0 else (("Gray", 1) if ts.hour == 0 else ("LightGray", 0.5))
+            if ts.weekday() == 0 and ts.hour == 0:
+                color, width = "Black", 2
+            elif ts.hour == 0:
+                color, width = "Gray", 1
+            else:
+                color, width = "Silver", 0.7 # Darker minor lines
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', dtick=dt_minor)
+        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Silver', gridwidth=0.5, dtick=dt_minor)
         for yv in range(int(y_range[0]), int(y_range[1])+1, dt_major):
             fig.add_hline(y=yv, line_width=1.2, line_color="DimGray", layer='below')
 
         for val, label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue")
+            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", layer="above")
         
         return fig
     except: return go.Figure()
@@ -149,7 +154,6 @@ else:
                 for target_ts in [m.replace(hour=6) for m in mondays]:
                     window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
                     if not window.empty:
-                        # Correct nearest time snapshot logic
                         snaps = []
                         for node in window['NodeNum'].unique():
                             ndf = window[window['NodeNum'] == node].copy()
@@ -158,22 +162,26 @@ else:
                         snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
                         fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
                 
-                # --- FORMATTING UPDATES ---
                 max_d = loc_data['Depth_Num'].max()
                 y_limit = int(((max_d // 5) + 1) * 5)
                 y_dtick = 20 if y_limit > 60 else 10
                 y_minor = 10 if y_limit > 60 else 5
 
-                # X-Axis: -20 to 80, Major 20 (Gray), Minor 5 (LightGray)
+                # X-Axis Styling
                 x_range = [-20, 80] if unit_mode == "Fahrenheit" else [-30, 30]
-                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=x_range, dtick=5, gridcolor='LightGray', mirror=True, showline=True, linecolor='black')
+                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=x_range, dtick=5, gridcolor='Silver', mirror=True, showline=True, linecolor='black')
                 for x_v in range(-20, 81, 20):
                     fig_d.add_vline(x=x_v, line_width=1, line_color="Gray")
 
-                # Y-Axis: 0 at top, Major Grid (Gray), Minor (LightGray)
+                # Y-Axis Styling
                 fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=y_dtick, gridcolor='Gray', mirror=True, showline=True, linecolor='black')
                 for d_v in range(0, y_limit + 1, y_minor):
-                    fig_d.add_hline(y=d_v, line_width=0.5, line_color="LightGray")
+                    fig_d.add_hline(y=d_v, line_width=0.6, line_color="Silver")
+
+                # Add Reference Lines to Depth Plot
+                for val, label in active_refs:
+                    c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                    fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
 
                 fig_d.update_layout(plot_bgcolor='white', height=700, legend=dict(title="Monday 6AM Snapshots"))
                 st.plotly_chart(fig_d, use_container_width=True)
