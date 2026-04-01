@@ -943,11 +943,11 @@ elif service == "🛠️ Admin Tools":
 # --- SURGICAL CLEANER --- #
 ###########################
 with tab_cleaner:
-    st.subheader("🧨 Surgical Data Cleaner: 7-Day Lasso")
-    st.info("Limit: Only data from the last 168 hours can be cleaned here.")
+    st.subheader("🧨 Surgical Data Cleaner: Lasso & Drill-Down")
+    st.info("The window always ends at the current time. Adjust the slider to set how far back you want to see.")
     
     # 1. FETCH METADATA FOR DROPDOWNS
-    # We use the MASTER_TABLE to get our project/pipe/node mapping
+    # We handle nulls to prevent sorting/UI errors
     meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
 
     c1, c2, c3 = st.columns(3)
@@ -966,78 +966,86 @@ with tab_cleaner:
 
     st.divider()
 
-    # 2. HARD-LIMITED 7-DAY HOURLY SLIDERS
-    st.write("### 📅 Set View Window (Max 168 Hours)")
-    start_hr, end_hr = st.slider(
-        "Select Window (Hours Ago)",
-        value=(168, 0), 
-        min_value=0,
-        max_value=168,
+    # 2. FIXED-END SLIDER (6 Hours to 7 Days)
+    st.write("### 📅 Set Start Time (End is always 'Now')")
+    lookback_hrs = st.slider(
+        "Lookback Window (Hours Ago)",
+        min_value=6,
+        max_value=168, # 7 Days
+        value=24,      # Default to last 24 hours
         step=1,
         format="%d hours ago"
     )
 
-    # 3. PREVIEW DATA (Ignoring 'approve' status so you can clean unapproved data)
+    # 3. PREVIEW DATA
+    # We ignore the 'approve' status here so you can clean data before it's finalized
     preview_q = f"""
         SELECT timestamp, temperature, NodeNum, Location 
         FROM `{MASTER_TABLE}` 
         WHERE Project = '{sel_proj}' 
-        AND timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {start_hr} HOUR) 
-                          AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {end_hr} HOUR)
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_hrs} HOUR)
+        ORDER BY timestamp ASC
     """
     p_df = client.query(preview_q).to_dataframe()
 
     if not p_df.empty:
-        # Apply local filters for Pipe and Node
+        # Apply local dropdown filters
         if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
         if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
 
         if not p_df.empty:
-            # 4. LASSO SELECTION GRAPH
-            fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
-                             title="Lasso the points you wish to purge",
-                             template="plotly_white", height=600)
+            # 4. INTERACTIVE LASSO GRAPH
+            # Points are colored by NodeNum for easy identification
+            fig = px.scatter(
+                p_df, 
+                x='timestamp', 
+                y='temperature', 
+                color='NodeNum', 
+                title=f"Lasso selection for {sel_proj} (Last {lookback_hrs} hours)",
+                template="plotly_white", 
+                height=600
+            )
             
-            # Default to Lasso mode
+            # FORCE LASSO MODE: This makes the Lasso tool active immediately
             fig.update_layout(dragmode='lasso', hovermode='closest')
-            fig.update_traces(marker=dict(size=10, opacity=0.7))
+            fig.update_traces(marker=dict(size=10, opacity=0.7, line=dict(width=1, color='DarkSlateGrey')))
 
-            # Capture the selection
+            # Capture selection
             selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
 
-            # 5. PURGE EXECUTION
+            # 5. EXECUTION
             if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
                 selection_list = selected_points["selection"]["points"]
-                st.error(f"⚠️ {len(selection_list)} points lassoed for permanent deletion.")
+                st.warning(f"⚠️ {len(selection_list)} points lassoed for deletion.")
                 
-                if st.button("🔥 PURGE SELECTED DATA"):
-                    with st.spinner("Deleting points from all source tables..."):
+                if st.button("🔥 PERMANENTLY PURGE DATA"):
+                    with st.spinner("Deleting specific data points..."):
                         for pt in selection_list:
                             ts_val = pt['x']
-                            # Get the NodeNum from the dataframe based on the selected point index
+                            # Fetch NodeNum from the dataframe based on the index of the selected point
                             node_val = p_df.iloc[pt['point_index']]['NodeNum']
                             
-                            # Clean across all known tables
-                            target_tables = [
-                                f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                                f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
-                                MASTER_TABLE
-                            ]
-                            
-                            for table in target_tables:
-                                # Using exact match for timestamp and NodeNum
-                                del_sql = f"DELETE FROM `{table}` WHERE NodeNum = '{node_val}' AND timestamp = '{ts_val}'"
+                            # Clean across all 3 tables
+                            # Note: Your screenshot confirmed raw_sensorpush uses 'NodeNum'
+                            for table in [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                                          f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
+                                          MASTER_TABLE]:
+                                del_sql = f"""
+                                    DELETE FROM `{table}` 
+                                    WHERE NodeNum = '{node_val}' 
+                                    AND timestamp = '{ts_val}'
+                                """
                                 client.query(del_sql).result()
                     
-                    st.success("Selected points purged. Refreshing view...")
-                    st.cache_data.clear()
+                    st.success("Surgical purge complete.")
+                    st.cache_data.clear() # Clear cache so graphs update everywhere
                     st.rerun()
             else:
-                st.warning("Use the Lasso tool (top right of graph) to circle the data you want to delete.")
+                st.info("💡 **Tip:** Use the Lasso tool to draw a circle around the points you want to delete.")
         else:
-            st.info("No data found for this specific Pipe/Node selection in the window.")
+            st.warning(f"No data points found for Pipe: {sel_pipe} / Node: {sel_node} in the last {lookback_hrs} hours.")
     else:
-        st.info("No data exists in the Master table for the last 7 days for this project.")
+        st.error(f"No data found in the Master table for project '{sel_proj}' in the last 7 days.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
