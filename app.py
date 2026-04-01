@@ -218,8 +218,6 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-import streamlit as st
-
 def get_sensorpush_connection():
     """
     Attempts to retrieve credentials from st.secrets.
@@ -249,7 +247,37 @@ if user:
 else:
     st.warning("Please configure your API keys to enable Cloud-to-Cloud Sync.")
 
+import streamlit as st
 
+def sync_all_accounts():
+    """
+    Iterates through all accounts defined under sensorpush_creds in secrets.
+    """
+    # 1. Access the main credentials block
+    if "sensorpush_creds" not in st.secrets:
+        st.error("Error: 'sensorpush_creds' section not found in secrets.")
+        return
+
+    creds_dict = st.secrets["sensorpush_creds"]
+
+    # 2. Iterate through account1, account2, etc.
+    for account_key, info in creds_dict.items():
+        email = info["email"]
+        password = info["password"]
+        
+        st.info(f"🔄 Starting sync for: {email}")
+        
+        # Implementation Logic:
+        # try:
+        #     token = get_api_token(email, password)
+        #     fetch_data(token, start_date, end_date)
+        #     st.success(f"✅ Sync complete for {account_key}")
+        # except Exception as e:
+        #     st.error(f"❌ Failed to sync {account_key}: {e}")
+
+# Call the function
+if st.button("Start Cloud-to-Cloud Sync"):
+    sync_all_accounts()
 ############################
 # --- Graph --- #
 ############################
