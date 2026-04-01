@@ -45,7 +45,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC) if display_df['timestamp'].dt.tz else display_df['timestamp'].dt.tz_localize(pytz.UTC)
 
         y_range = [-20, 80] if unit_mode == "Fahrenheit" else [-30, 30]
-        dt_major, dt_minor = 20, 5
+        dt_minor = 5
 
         display_df['label'] = display_df.apply(lambda r: f"{r.get('depth', r.get('bank', 'Unmapped'))}ft ({r.get('nodenum', 'Unknown')})", axis=1)
         
@@ -66,7 +66,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
             sdf = clean_df[clean_df['label'] == lbl]
             fig.add_trace(go.Scatter(x=sdf['timestamp'], y=sdf['temperature'], name=lbl, mode='lines', connectgaps=False))
 
-        # --- TIMELINE GRID (REVERTED TO STANDARD/LIGHTER) ---
+        # TIMELINE GRID (CLEAN/STANDARD)
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
             if ts.weekday() == 0 and ts.hour == 0: color, width = "Black", 2
             elif ts.hour == 0: color, width = "Gray", 1
@@ -82,9 +82,9 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         return fig
     except: return go.Figure()
 
-#######################
-# --- SIDEBAR UI --- #
-#######################
+########################
+# --- MAIN CONTENT --- #
+########################
 st.sidebar.title("📏 Dashboard Controls")
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
@@ -94,13 +94,9 @@ if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0
 if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))
 if st.sidebar.checkbox("Type A (10.2°F)", value=True): active_refs.append((10.2, "Type A"))
 
-########################
-# --- MAIN CONTENT --- #
-########################
 st.header(f"📊 Project {ACTIVE_PROJECT} Dashboard")
 tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
-# Direct string comparison for 'approve'
 q = f"""
     SELECT * FROM `{MASTER_TABLE}` 
     WHERE Project = '{ACTIVE_PROJECT}' 
@@ -119,7 +115,6 @@ if p_df.empty:
 else:
     p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_convert(pytz.UTC) if p_df['timestamp'].dt.tz else pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC)
     
-    # 1. TIMELINE
     with tab_time:
         weeks = st.slider("Weeks to View", 1, 12, 6)
         now = pd.Timestamp.now(tz=pytz.UTC)
@@ -131,7 +126,6 @@ else:
                 loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
                 st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"t_{loc}")
 
-    # 2. DEPTH PROFILE
     with tab_depth:
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_df = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
@@ -150,22 +144,23 @@ else:
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
                 
-                # --- DEPTH X-AXIS GRID (DARKENED 5-DEGREE INCREMENTS) ---
+                # --- TEMP X-AXIS GRID (DARKENED 5-DEGREE MINORS) ---
                 fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, 
                                    gridcolor='#222222', gridwidth=1.3, mirror=True, showline=True, linecolor='black')
                 # 20-degree Major lines
                 for x_v in range(-20, 81, 20):
                     fig_d.add_vline(x=x_v, line_width=2.5, line_color="Black")
 
-                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Black', gridwidth=1.5)
-                
+                # --- DEPTH Y-AXIS GRID (LIGHTER/STANDARD 10-FOOT MINORS) ---
+                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, 
+                                   gridcolor='LightGray', gridwidth=0.7, mirror=True, showline=True, linecolor='black')
+
                 for val, label in active_refs:
                     fig_d.add_vline(x=val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5)
 
                 fig_d.update_layout(plot_bgcolor='white', height=700)
                 st.plotly_chart(fig_d, use_container_width=True, key=f"d_{loc}")
 
-    # 3. TABLE
     with tab_table:
         latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}{unit_label}")
