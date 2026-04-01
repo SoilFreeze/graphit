@@ -566,30 +566,47 @@ elif service == "📊 Client Portal":
                     st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"p_time_{loc}")
 
        with tab_depth:
-            # We filter for only rows that actually have a Depth number
+            # 1. Filter for numeric depth and approved data
             depth_plot_df = approved_df.dropna(subset=['Depth_Num', 'NodeNum', 'Location'])
             
             if depth_plot_df.empty:
-                st.warning("No sensors with valid numeric 'Depth' values found in the approved data.")
+                st.warning("No approved data with valid Depth values found.")
             else:
                 for loc in sorted(depth_plot_df['Location'].unique()):
                     with st.expander(f"📏 {loc} Depth Profile", expanded=True):
                         loc_data = depth_plot_df[depth_plot_df['Location'] == loc].copy()
                         fig_d = go.Figure()
                         
-                        # Monday 6AM Snapshot Logic
+                        # Generate Monday Snapshots
                         mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
-                        for target_ts in [m.replace(hour=6) for m in mondays]:
-                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                        for target_ts in [m.replace(hour=6, minute=0, second=0) for m in mondays]:
+                            # Filter window for this specific Monday
+                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & 
+                                              (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                            
                             if not window.empty:
-                                snaps = [window[window['NodeNum']==n].sort_values(by='timestamp', key=lambda x: (x-target_ts).abs()).iloc[0] for n in window['NodeNum'].unique()]
+                                # Find closest reading for each node
+                                snaps = []
+                                for node in window['NodeNum'].unique():
+                                    ndf = window[window['NodeNum'] == node].copy()
+                                    ndf['diff'] = (ndf['timestamp'] - target_ts).abs()
+                                    snaps.append(ndf.sort_values('diff').iloc[0])
+                                
                                 snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
-                                fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
+                                fig_d.add_trace(go.Scatter(
+                                    x=snap_df['temperature'], 
+                                    y=snap_df['Depth_Num'], 
+                                    mode='lines+markers', 
+                                    name=target_ts.strftime('%m/%d/%Y')
+                                ))
 
+                        # Formatting
                         y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
                         fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
+                        for x_v in range(-20, 81, 20): fig_d.add_vline(x=x_v, line_width=2.0, line_color="Black")
                         fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray')
                         fig_d.update_layout(plot_bgcolor='white', height=700)
+                        
                         st.plotly_chart(fig_d, use_container_width=True, key=f"p_depth_{loc}")
 
         with tab_table:
