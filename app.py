@@ -164,6 +164,19 @@ def style_delta(val):
     elif val <= -5: bg, color = "#00008B", "white"  # Deep Freeze
     return f'background-color: {bg}; color: {color}'
 
+def refresh_bigquery_snapshot():
+    """Executes the BigQuery SQL to sync the snapshot with the Sheet."""
+    client = bigquery.Client()
+    
+    # The SQL command we discussed
+    sql = """
+    CREATE OR REPLACE TABLE `your_project.your_dataset.metadata_snapshot` AS
+    SELECT * FROM `your_project.your_dataset.metadata`
+    """
+    
+    query_job = client.query(sql)
+    query_job.result()  # This waits for the update to finish
+    
 #########################
 # --- CONFIGURATION --- #
 #########################
@@ -949,7 +962,7 @@ if st.button('Update App Data from Google Sheets'):
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
+    tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner", "Metadata Update"])
 
     ###########################
 # --- ADMIN TOOLS REVISED --- #
@@ -1040,6 +1053,21 @@ with tab_cleaner:
                             st.rerun()
                         except Exception as e:
                             st.error(f"Hide failed: {e}")
+
+with tab4:
+    st.header("Data Management")
+    st.info("Use the button below to force a sync between the Google Sheet and the BigQuery Snapshot.")
+    
+    if st.button('🔄 Update Snapshot from Google Sheets'):
+        try:
+            with st.spinner('Updating BigQuery... please wait.'):
+                refresh_bigquery_snapshot()
+            st.success('✅ Success! The `metadata_snapshot` table has been updated.')
+            st.balloons() # Just for a bit of flair!
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+
+
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
