@@ -221,137 +221,84 @@ def rebuild_master_table(mode="preserve"):
 
 # --- 1. CONFIGURATION & AUTH ---
 
-def get_sensorpush_token():
-    """
-    Authenticates with SensorPush using professional headers 
-    to avoid 400 Bad Request errors.
-    """
-    url = "https://api.sensorpush.com/v1/oauth/authorize"
+import streamlit as st
+import requests
+import pandas as pd
+from google.cloud import bigquery
+from datetime import datetime, timedelta
+
+# --- 1. SETUP BIGQUERY CLIENT ---
+# Ensure your Streamlit environment has Google Cloud credentials configured
+client = bigquery.Client()
+TABLE_ID = "sensorpush-export.sensor_data.raw_lord"
+
+def run_api_recovery(days):
+    """Fetches data from SensorPush and pushes to BigQuery"""
     
-    # 1. Define Headers (Crucial for many API gateways)
-    headers = {
-        "accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Streamlit-App-Data-Recovery" # Identifies your app
-    }
-    
+    # A. Get Credentials from st.secrets
     try:
-        # 2. Extract credentials from your specific secrets structure
         creds = st.secrets["sensorpush_creds"]["account1"]
-        payload = {
-            "email": creds["email"],
-            "password": creds["password"]
-        }
-        
-        # 3. Make the request
-        response = requests.post(url, json=payload, headers=headers)
-        
-        # If it fails, this will show us the actual error message from SensorPush
-        if response.status_code != 200:
-            st.error(f"API Error {response.status_code}: {response.text}")
-            return None
-            
-        return response.json().get("accesstoken")
+        email = creds["email"]
+        password = creds["password"]
+    except KeyError:
+        st.error("Missing [sensorpush_creds] in secrets.toml")
+        return
 
-    except Exception as e:
-        st.error(f"Connection Logic Error: {e}")
-        return None
-
-# --- 2. RETRIEVING SENSORS ---
-
-def get_sensor_list(token):
-    """Fetches all sensors associated with the account to get their IDs and Names."""
-    url = "https://api.sensorpush.com/v1/devices/sensors"
-    headers = {"accept": "application/json", "Authorization": token}
+    # B. Authenticate with SensorPush
+    auth_url = "https://api.sensorpush.com/v1/oauth/authorize"
+    auth_res = requests.post(auth_url, json={"email": email, "password": password})
     
-    try:
-        response = requests.post(url, headers=headers, json={})
-        response.raise_for_status()
-        return response.json() # Returns a dict of sensors
-    except Exception as e:
-        st.error(f"Failed to fetch sensors: {e}")
-        return {}
-
-# --- 3. FETCHING DATA SAMPLES ---
-
-def fetch_sensor_data(token, sensor_ids, start_date, end_date):
-    """
-    Retrieves data samples for specific sensors within a date range.
-    Dates should be in ISO format (e.g., '2023-01-01T00:00:00Z').
-    """
-    url = "https://api.sensorpush.com/v1/samples"
-    headers = {"accept": "application/json", "Authorization": token}
+    if auth_res.status_code != 200:
+        st.error(f"SensorPush Auth Failed: {auth_res.text}")
+        return
     
-    # Payload requires specific sensor IDs and the time range
+    token = auth_res.json().get("accesstoken")
+
+    # C. Fetch Data
+    stop_time = datetime.utcnow()
+    start_time = stop_time - timedelta(days=days)
+    
+    sample_url = "https://api.sensorpush.com/v1/samples"
     payload = {
-        "sensors": sensor_ids,
-        "startTime": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "stopTime": end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        "startTime": start_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "stopTime": stop_time.strftime("%Y-%m-%dT%H:%M:%SZ")
     }
+    headers = {"Authorization": token}
     
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        st.error(f"Failed to fetch data samples: {e}")
-        return None
+    with st.spinner(f"Downloading last {days} days of data..."):
+        res = requests.post(sample_url, json=payload, headers=headers)
+        data = res.json()
 
-# --- 4. DATA PROCESSING ---
-
-def process_to_dataframe(api_response, sensor_names):
-    """Converts the raw API JSON into a clean Pandas DataFrame."""
-    all_records = []
-    
-    if not api_response or 'sensors' not in api_response:
-        return pd.DataFrame()
-
-    for sensor_id, samples in api_response['sensors'].items():
-        name = sensor_names.get(sensor_id, sensor_id)
-        for sample in samples:
-            all_records.append({
-                "Timestamp": sample.get("observed"),
-                "Sensor": name,
-                "Temperature": sample.get("temperature"),
-                "Humidity": sample.get("humidity")
+    # D. Format for 'raw_lord' table
+    rows_to_insert = []
+    for sensor_id, samples in data.get("sensors", {}).items():
+        for s in samples:
+            rows_to_insert.append({
+                "timestamp": s.get("observed"),
+                "nodenumber": str(sensor_id), 
+                "value": float(s.get("temperature", 0))
             })
-            
-    df = pd.DataFrame(all_records)
-    if not df.empty:
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-    return df
 
-# --- MAIN APP LOGIC ---
+    # E. Upload to BigQuery
+    if rows_to_insert:
+        errors = client.insert_rows_json(TABLE_ID, rows_to_insert)
+        if not errors:
+            st.success(f"✅ Successfully recovered {len(rows_to_insert)} records to BigQuery!")
+        else:
+            st.error(f"BigQuery Insert Errors: {errors}")
+    else:
+        st.warning("No data found for this range.")
 
-st.title("📡 SensorPush Data Recovery")
+# --- 2. STREAMLIT UI ---
 
-# Date Inputs
-col1, col2 = st.columns(2)
-start = col1.date_input("Start Date")
-end = col2.date_input("End Date")
+st.header("📤 Data Ingestion & Recovery")
+st.info("Use this tool to manually sync data if the hourly collector missed any readings.")
 
-if st.button("Run Cloud-to-Cloud Sync"):
-    with st.spinner("Authenticating..."):
-        token = get_sensorpush_token()
+with st.expander("🛠️ Cloud-to-Cloud API Sync"):
+    days_to_sync = st.number_input("How many days to recover?", min_value=1, max_value=60, value=7)
     
-    if token:
-        with st.spinner("Fetching Sensors and Data..."):
-            # 1. Get sensors to map IDs to Names
-            sensors_raw = get_sensor_list(token)
-            sensor_map = {id: info.get('name') for id, info in sensors_raw.items()}
-            sensor_ids = list(sensor_map.keys())
-            
-            # 2. Get the actual data
-            raw_data = fetch_sensor_data(token, sensor_ids, start, end)
-            
-            # 3. Clean and display
-            df = process_to_dataframe(raw_data, sensor_map)
-            
-            if not df.empty:
-                st.success(f"Successfully recovered {len(df)} records!")
-                st.dataframe(df)
-            else:
-                st.warning("No data found for this range.")
+    if st.button("Start Sync Now"):
+        run_api_recovery(days_to_sync)
 
 
 ############################
