@@ -218,6 +218,54 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
+def fetch_sensorpush_data(start_dt, end_dt):
+    """
+    Handles API connection to SensorPush.
+    Note: Requires 'sensorpush_creds' in st.secrets.
+    """
+    try:
+        # 1. AUTHENTICATE
+        auth_url = "https://api.sensorpush.com/v1/oauth/authorize"
+        creds = st.secrets["sensorpush_creds"]
+        auth_payload = {"email": creds["email"], "password": creds["password"]}
+        
+        auth_res = requests.post(auth_url, json=auth_payload).json()
+        token = auth_res.get("accesstoken")
+        
+        if not token:
+            st.error("API Auth Failed: Check credentials.")
+            return pd.DataFrame()
+
+        # 2. FETCH DATA
+        data_url = "https://api.sensorpush.com/v1/samples"
+        headers = {"accept": "application/json", "Authorization": token}
+        # API expects ISO format strings
+        payload = {
+            "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
+        
+        res = requests.post(data_url, headers=headers, json=payload).json()
+        
+        # 3. TRANSFORM TO BIGQUERY SCHEMA
+        records = []
+        for sensor_id, samples in res.get("sensors", {}).items():
+            for s in samples:
+                records.append({
+                    "sensor_id": sensor_id,
+                    "timestamp": s["observed"],
+                    "temperature": s["temperature"]
+                })
+        
+        return pd.DataFrame(records)
+    except Exception as e:
+        st.error(f"API Sync Error: {e}")
+        return pd.DataFrame()
+
+
+############################
+# --- Graph --- #
+############################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
     High-Performance Graph Engine:
@@ -904,33 +952,42 @@ elif service == "🛠️ Admin Tools":
 
     with tab_cleaner:
         st.subheader("🧨 Surgical Data Cleaner")
-        st.write("Deletes bad data from both Raw Source tables.")
+        st.write("Deletes specific data ranges from Raw Source tables.")
         
-        # Timeframe selection
-        col1, col2 = st.columns(2)
-        start_del = col1.date_input("Start Date", datetime.now() - timedelta(days=1))
-        end_del = col2.date_input("End Date", datetime.now())
+        c1, c2 = st.columns(2)
+        start_del = c1.date_input("Start Date", datetime.now() - timedelta(days=1), key="del_start")
+        end_del = c2.date_input("End Date", datetime.now(), key="del_end")
         
-        # Node selection
-        node_to_clean = st.text_input("Enter NodeNum to clean (Optional - leave blank for all nodes)")
+        node_to_clean = st.text_input("Enter ID (sensor_id or NodeNum) to clean (Optional)")
 
-        if st.button("🔥 DELETE DATA FROM RAW SOURCES"):
-            for table in RAW_TABLES:
+        if st.button("🔥 PERMANENTLY DELETE DATA"):
+            # Map of tables and their primary ID columns
+            raw_map = {
+                f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush": "sensor_id",
+                f"{PROJECT_ID}.{DATASET_ID}.raw_lord": "NodeNum"
+            }
+            
+            for table, id_col in raw_map.items():
                 try:
-                    # Constructing deletion for raw tables
+                    # Construct deletion clause
                     del_clause = f"CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
                     if node_to_clean:
-                        del_clause += f" AND NodeNum = '{node_to_clean}'"
+                        # Clean the input to match scrubbed ID format
+                        clean_id = re.sub(r'[^0-9]', '', node_to_clean) if "sensorpush" in table else node_to_clean
+                        del_clause += f" AND {id_col} LIKE '%{clean_id}%'"
                     
                     delete_sql = f"DELETE FROM `{table}` WHERE {del_clause}"
                     
-                    with st.spinner(f"Deleting from {table}..."):
+                    with st.spinner(f"Purging {table}..."):
                         del_job = client.query(delete_sql)
                         del_job.result()
                         st.write(f"✔️ {table}: Removed {del_job.num_dml_affected_rows} records.")
+                        
                 except Exception as e:
-                    st.error(f"Error on {table}: {e}")
-            st.success("Surgical cleaning complete.")
+                    st.error(f"Error cleaning {table}: {e}")
+            
+            st.success("Surgical cleaning complete. Remember to run 'Deep Scrub' to update the master tables.")
+            st.cache_data.clear() # Force app to see the changes
 
 ###########################
 # --- END ADMIN TOOLS --- #
