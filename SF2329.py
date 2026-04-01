@@ -52,7 +52,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
             y_range = [-20, 80]
             dt_major, dt_minor = 20, 5
 
-        # 2. LABELING (Standard: Name + NodeNum)
+        # 2. LABELING
         display_df['label'] = display_df.apply(lambda r: f"{r.get('depth', r.get('bank', 'Unmapped'))}ft ({r.get('nodenum', 'Unknown')})", axis=1)
         
         # 3. GAP HANDLING
@@ -73,7 +73,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
             sdf = clean_df[clean_df['label'] == lbl]
             fig.add_trace(go.Scatter(x=sdf['timestamp'], y=sdf['temperature'], name=lbl, mode='lines', connectgaps=False))
 
-        # 4. STYLING & GRID (Standard: Monday Black, Daily Gray, 6h Light)
+        # 4. STYLING & GRID
         fig.update_layout(
             title={'text': f"{title} Time vs Temperature", 'x': 0, 'font': dict(size=18)},
             plot_bgcolor='white', hovermode="x unified", height=600, margin=dict(r=150)
@@ -116,15 +116,20 @@ def convert_val(f):
 ########################
 # --- MAIN CONTENT --- #
 ########################
-st.header(f"📊 Project {ACTIVE_PROJECT} Dashboard")
+st.header(f"📊 {ACTIVE_PROJECT} Dashboard")
 tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
-# Fetch Data
-q = f"SELECT * FROM `{MASTER_TABLE}` WHERE CAST(Project AS STRING) = '{ACTIVE_PROJECT}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)"
+# UPDATED QUERY: Added 'AND approve = "TRUE"' filter
+q = f"""
+    SELECT * FROM `{MASTER_TABLE}` 
+    WHERE Project = '{ACTIVE_PROJECT}' 
+    AND approve = 'TRUE'
+    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+"""
 p_df = client.query(q).to_dataframe()
 
 if p_df.empty:
-    st.warning("No data found for Project 2329.")
+    st.warning(f"No approved data found for Project: {ACTIVE_PROJECT}. Use Admin Tools to approve data.")
 else:
     p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_convert(pytz.UTC) if p_df['timestamp'].dt.tz else pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC)
     
@@ -145,21 +150,24 @@ else:
     with tab_depth:
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_df = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
-        for loc in sorted(depth_df['Location'].unique()):
-            with st.expander(f"📏 {loc} Depth Profile", expanded=True):
-                fig_d = go.Figure()
-                mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
-                for target_ts in [m.replace(hour=6) for m in mondays]:
-                    window = depth_df[(depth_df['Location'] == loc) & (depth_df['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (depth_df['timestamp'] <= target_ts + pd.Timedelta(days=1))]
-                    if not window.empty:
-                        snaps = window.loc[window.groupby('NodeNum')['timestamp'].apply(lambda x: (x - target_ts).abs().idxmin())].sort_values('Depth_Num')
-                        fig_d.add_trace(go.Scatter(x=snaps['temperature'], y=snaps['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
-                
-                y_lim = int(((depth_df[depth_df['Location']==loc]['Depth_Num'].max() // 5) + 1) * 5)
-                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80] if unit_mode=="Fahrenheit" else [-30, 30], dtick=5, gridcolor='LightGray')
-                fig_d.update_yaxes(title="Depth (ft)", range=[y_lim, 0], dtick=10, gridcolor='Gray')
-                fig_d.update_layout(plot_bgcolor='white', height=600)
-                st.plotly_chart(fig_d, use_container_width=True)
+        if depth_df.empty:
+            st.info("No approved depth-based data available for this project.")
+        else:
+            for loc in sorted(depth_df['Location'].unique()):
+                with st.expander(f"📏 {loc} Depth Profile", expanded=True):
+                    fig_d = go.Figure()
+                    mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
+                    for target_ts in [m.replace(hour=6) for m in mondays]:
+                        window = depth_df[(depth_df['Location'] == loc) & (depth_df['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (depth_df['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                        if not window.empty:
+                            snaps = window.loc[window.groupby('NodeNum')['timestamp'].apply(lambda x: (x - target_ts).abs().idxmin())].sort_values('Depth_Num')
+                            fig_d.add_trace(go.Scatter(x=snaps['temperature'], y=snaps['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
+                    
+                    y_lim = int(((depth_df[depth_df['Location']==loc]['Depth_Num'].max() // 5) + 1) * 5)
+                    fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80] if unit_mode=="Fahrenheit" else [-30, 30], dtick=5, gridcolor='LightGray')
+                    fig_d.update_yaxes(title="Depth (ft)", range=[y_lim, 0], dtick=10, gridcolor='Gray')
+                    fig_d.update_layout(plot_bgcolor='white', height=600)
+                    st.plotly_chart(fig_d, use_container_width=True)
 
     # 3. PROJECT DATA TAB
     with tab_table:
