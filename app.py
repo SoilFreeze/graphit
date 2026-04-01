@@ -78,51 +78,36 @@ if st.sidebar.button("🔄 Sync New Data Now", key="manual_refresh_sync"):
 ###########################
 # --- GLOBAL MEMORY --- #
 ###########################
+
+# 1. INITIALIZE ALL KEYS (Crucial to prevent AttributeErrors)
 if "master_df" not in st.session_state:
     st.session_state.master_df = pd.DataFrame()
     st.session_state.current_project = None
+    st.session_state.last_refresh = None  # <--- Add this line here!
 
-# Detail Load Logic
+if "summary_df" not in st.session_state:
+    st.session_state.summary_df = pd.DataFrame()
+
+# 2. Sidebar Refresh Button
+if st.sidebar.button("🔄 Sync New Data Now", key="manual_refresh_sync"):
+    st.session_state.current_project = None 
+    st.session_state.last_refresh = None # Reset on refresh
+    st.rerun()
+
+# 3. Data Load Logic
 if selected_project and st.session_state.current_project != selected_project:
     with st.spinner(f"⚡ Syncing {selected_project}..."):
-        # ... (rest of your BigQuery query code)
-        pass
+        # ... your BigQuery query code ...
+        
+        # After successful load, update the timestamp:
+        st.session_state.last_refresh = datetime.now().strftime("%m/%d %H:%M")
+        st.session_state.current_project = selected_project
+        st.session_state.master_df = df
 
-# A. Executive Summary Cache
-if "summary_df" not in st.session_state:
-    with st.spinner("📡 Syncing Global Command Center..."):
-        summary_q = f"SELECT * FROM `{MASTER_TABLE}` QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
-        st.session_state.summary_df = client.query(summary_q).to_dataframe()
-
-# B. Project Detail Cache
-if "master_df" not in st.session_state:
-    st.session_state.master_df = pd.DataFrame()
-    st.session_state.current_project = None
-
-# Trigger Detail Load ONLY if project changes
-if selected_project and st.session_state.current_project != selected_project:
-    with st.spinner(f"⚡ Loading High-Speed Cache for {selected_project}..."):
-        query = f"""
-            SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve, Project
-            FROM `{MASTER_TABLE}`
-            WHERE Project = '{selected_project}'
-            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
-            ORDER BY timestamp ASC
-        """
-        df = client.query(query).to_dataframe()
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
-            df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
-            df['is_approved'] = df['approve'].astype(str).str.upper().str.strip() == 'TRUE'
-            st.session_state.master_df = df
-            st.session_state.current_project = selected_project
-
-# Map local memory references
-summary_df = st.session_state.summary_df
-master_df = st.session_state.master_df
-approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty else pd.DataFrame()
-
-
+# 4. Safety Check for Display (Line 469)
+# Use .get() to safely check for the key without crashing
+if st.session_state.get("last_refresh"):
+    st.sidebar.caption(f"Last Data Sync: {st.session_state.last_refresh}")
         
 #########################
 # --- REBUILD TABLE --- #
