@@ -218,6 +218,54 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
+def fetch_sensorpush_data(start_dt, end_dt):
+    """
+    Handles API connection to SensorPush.
+    Note: Requires 'sensorpush_creds' in st.secrets.
+    """
+    try:
+        # 1. AUTHENTICATE
+        auth_url = "https://api.sensorpush.com/v1/oauth/authorize"
+        creds = st.secrets["sensorpush_creds"]
+        auth_payload = {"email": creds["email"], "password": creds["password"]}
+        
+        auth_res = requests.post(auth_url, json=auth_payload).json()
+        token = auth_res.get("accesstoken")
+        
+        if not token:
+            st.error("API Auth Failed: Check credentials.")
+            return pd.DataFrame()
+
+        # 2. FETCH DATA
+        data_url = "https://api.sensorpush.com/v1/samples"
+        headers = {"accept": "application/json", "Authorization": token}
+        # API expects ISO format strings
+        payload = {
+            "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
+        
+        res = requests.post(data_url, headers=headers, json=payload).json()
+        
+        # 3. TRANSFORM TO BIGQUERY SCHEMA
+        records = []
+        for sensor_id, samples in res.get("sensors", {}).items():
+            for s in samples:
+                records.append({
+                    "sensor_id": sensor_id,
+                    "timestamp": s["observed"],
+                    "temperature": s["temperature"]
+                })
+        
+        return pd.DataFrame(records)
+    except Exception as e:
+        st.error(f"API Sync Error: {e}")
+        return pd.DataFrame()
+
+
+############################
+# --- Graph --- #
+############################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
     High-Performance Graph Engine:
@@ -297,125 +345,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
     
     return fig
-########################
-# --- GRAPH ENGINE --- #
-########################
-def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
-    """
-    Standard Graph: Temp (y) vs Time (x)
-    - X-Axis: Dark line Monday midnight, medium midnight, light 6-hour.
-    - Y-Axis: Major lines at 20, minor at 5. Range 80 to -20.
-    - Legend: 'Bank' with location and nodenum in parentheses.
-    """
-    try:
-        display_df = df.copy()
-        if display_df.empty:
-            return go.Figure()
 
-        display_df.columns = [c.lower() for c in display_df.columns]
-        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        
-        if display_df['timestamp'].dt.tz is None:
-            display_df['timestamp'] = display_df['timestamp'].dt.tz_localize(pytz.UTC)
-        else:
-            display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC)
-
-        # 1. UNIT CONVERSION & RANGE
-        if unit_mode == "Celsius":
-            display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
-            y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-            dt_major, dt_minor = 10, 2 
-        else:
-            y_range = [-20, 80]
-            dt_major, dt_minor = 20, 5
-
-        # 2. SMART LABELING
-        def create_label(row):
-            b_val = str(row.get('bank', '')).strip().lower()
-            d_val = str(row.get('depth', '')).strip().lower()
-            s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
-            
-            if b_val not in ["", "none", "nan", "null"]:
-                return f"Bank {row['bank']} ({s_name})"
-            if d_val not in ["", "none", "nan", "null"]:
-                return f"{row['depth']}ft ({s_name})"
-            return f"Unmapped ({s_name})"
-
-        display_df['label'] = display_df.apply(create_label, axis=1)
-        
-        # 3. GAP HANDLING
-        processed_dfs = []
-        for lbl in sorted(display_df['label'].unique()):
-            s_df = display_df[display_df['label'] == lbl].copy().sort_values('timestamp')
-            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 6.0
-            if gap_mask.any():
-                gaps = s_df[gap_mask].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(seconds=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-            processed_dfs.append(s_df)
-        clean_df = pd.concat(processed_dfs) if processed_dfs else display_df
-        
-        # 4. FIGURE SETUP
-        fig = go.Figure()
-        for lbl in sorted(clean_df['label'].unique()):
-            sensor_df = clean_df[clean_df['label'] == lbl]
-            fig.add_trace(go.Scatter(
-                x=sensor_df['timestamp'], y=sensor_df['temperature'], 
-                name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
-            ))
-
-        # 5. STYLING & GRIDLINES
-        fig.update_layout(
-            title={'text': f"{title} Time vs Temperature", 'x': 0, 'xanchor': 'left', 'font': dict(size=18)},
-            plot_bgcolor='white', hovermode="x unified", height=600,
-            margin=dict(t=80, l=50, r=180, b=50),
-            legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
-        )
-        
-        # X-AXIS VERTICAL GRIDLINES (HIERARCHY)
-        grid_6h = pd.date_range(start=start_view, end=end_view, freq='6h')
-        for ts in grid_6h:
-            if ts.weekday() == 0 and ts.hour == 0:
-                # Monday Midnight - Darkest/Thickest
-                color, width = "Black", 2
-            elif ts.hour == 0:
-                # Other Midnights - Medium
-                color, width = "Gray", 1
-            else:
-                # 6-Hour Intervals - Lightest
-                color, width = "LightGray", 0.5
-            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
-        # "NOW" MARKER (Red Dashed)
-        now_marker = pd.Timestamp.now(tz=pytz.UTC)
-        fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dash")
-
-        # Y-AXIS GRID (20 Major, 5 Minor)
-        fig.update_yaxes(
-            title=f"Temp ({unit_label})", range=y_range,
-            gridcolor='Gainsboro', gridwidth=0.5, # Minor grid color
-            dtick=dt_minor,
-            mirror=True, showline=True, linecolor='black'
-        )
-        # Major Y-Gridlines (Every 20)
-        for y_val in range(int(y_range[0]), int(y_range[1]) + 1, dt_major):
-            fig.add_hline(y=y_val, line_width=1.2, line_color="DimGray", layer='below')
-
-        fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
-
-        # REFERENCE LINES
-        for val, label in active_refs:
-            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            # Type A: Burgundy (Maroon) dashed; Others: Blue dashed
-            l_color = "maroon" if "Type A" in label else "RoyalBlue"
-            fig.add_hline(y=c_val, line_dash="dash", line_color=l_color, opacity=0.8)
-        
-        return fig
-    except Exception as e:
-        st.error(f"Critical Graph Error: {e}")
-        return go.Figure()
 
 #######################
 # --- SIDEBAR UI --- #
@@ -829,122 +759,125 @@ elif service == "📉 Node Diagnostics":
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion & Recovery")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🧨 Surgical Cleaner", "🛠️ Maintenance"])
+    tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
 
     with tab1:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Upload Lord SensorConnect, Lord Desktop Log, or SensorPush CSVs.")
-        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_lab")
+        st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
+        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
         
         if u_file is not None:
+            import io
             filename = u_file.name.lower()
             raw_content = u_file.getvalue().decode('utf-8').splitlines()
             
+            # --- DETECT FILE TYPE ---
             is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
             is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
             
+            # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
             if is_lord_wide:
                 try:
                     start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
                     df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
+                    # Rename 'Time' to 'timestamp' and melt columns into 'NodeNum'
                     df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
                     df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
                     df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
                     df_long = df_long.dropna(subset=['temperature'])
                     
-                    st.success(f"✅ Lord Wide Parsed: {len(df_long)} readings.")
-                    if st.button("🚀 UPLOAD LORD WIDE"):
-                        client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                        st.success("Uploaded to raw_lord!")
+                    st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
+                    st.dataframe(df_long.head())
+                    if st.button("🚀 UPLOAD LORD WIDE DATA"):
+                        client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
+                                                         f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                        st.success("Uploaded successfully to raw_lord!")
                 except Exception as e: st.error(f"Lord Wide Error: {e}")
 
+            # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
             elif is_lord_narrow:
                 try:
                     df_ln = pd.read_csv(io.StringIO("\n".join(raw_content)))
-                    df_ln = df_ln.rename(columns={'Timestamp': 'timestamp', 'nodenumber': 'NodeNum', 'temperature': 'temperature'})
+                    # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
+                    df_ln = df_ln.rename(columns={
+                        'Timestamp': 'timestamp', 
+                        'nodenumber': 'NodeNum', 
+                        'temperature': 'temperature'
+                    })
                     df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
                     df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
-                    st.success(f"✅ Lord Narrow Parsed: {len(df_ln)} readings.")
-                    if st.button("🚀 UPLOAD LORD NARROW"):
-                        client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                        st.success("Uploaded to raw_lord!")
+                    
+                    st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
+                    st.dataframe(df_ln.head())
+                    if st.button("🚀 UPLOAD LORD NARROW DATA"):
+                        client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
+                                                         f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                        st.success("Uploaded successfully to raw_lord!")
                 except Exception as e: st.error(f"Lord Narrow Error: {e}")
 
+            # --- CASE 3: SENSORPUSH ---
             else:
                 try:
                     header_idx = -1
                     for i, line in enumerate(raw_content[:50]):
                         if "SensorId" in line or "Observed" in line:
                             header_idx = i; break
+                    
                     if header_idx != -1:
                         df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
                         ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
+                        
                         df_up = pd.DataFrame()
+                        # Mapping to the raw_sensorpush schema
                         df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
                         df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
                         t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
                         df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
                         df_up = df_up.dropna(subset=['timestamp', 'temperature'])
+
                         st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
                         if st.button("🚀 UPLOAD SENSORPUSH"):
                             client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                            st.success("Uploaded to raw_sensorpush!")
+                            st.success("Uploaded successfully to raw_sensorpush!")
+                    else:
+                        st.error("Format not recognized. Check CSV headers.")
                 except Exception as e: st.error(f"SensorPush Error: {e}")
 
     with tab2:
         st.subheader("📡 Cloud-to-Cloud API Sync")
         c1, c2 = st.columns(2)
-        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1), key="api_start")
-        end_date = c2.date_input("End Date", datetime.now(), key="api_end")
+        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
+        end_date = c2.date_input("End Date", datetime.now())
         
         if st.button("🛰️ FETCH & SYNC"):
+            # Level 3: Date Conversion
             start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
             end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
             
-            with st.spinner("Connecting to SensorPush API..."):
+            with st.spinner("Fetching data..."):
+                # Level 4: Call the Function
                 df_api = fetch_sensorpush_data(start_dt, end_dt)
+                
                 if not df_api.empty:
-                    client.load_table_from_dataframe(df_api, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                    st.success(f"✅ Integrated {len(df_api)} points!")
-                    st.cache_data.clear()
+                    # Level 5: Upload to BigQuery
+                    table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    client.load_table_from_dataframe(df_api, table_path).result()
+                    st.success(f"✅ Integrated {len(df_api)} points successfully!")
                 else:
-                    st.warning("No data returned. Check secrets for 'sensorpush_creds'.")
-
+                    # Level 5: Fallback
+                    st.warning("No data found for this range.")
+                    
     with tab3:
-        st.subheader("🧨 Surgical Data Cleaner")
-        st.warning("Permanently removes data from RAW source tables.")
-        col1, col2 = st.columns(2)
-        start_del = col1.date_input("Start Date", datetime.now() - timedelta(days=1), key="surg_start")
-        end_del = col2.date_input("End Date", datetime.now(), key="surg_end")
-        target_node = st.text_input("Sensor ID (Optional)", key="surg_node")
-
-        if st.button("🔥 EXECUTE PURGE"):
-            targets = [
-                {"table": f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", "id_col": "sensor_id"},
-                {"table": f"{PROJECT_ID}.{DATASET_ID}.raw_lord", "id_col": "NodeNum"}
-            ]
-            for t in targets:
-                try:
-                    query = f"DELETE FROM `{t['table']}` WHERE CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
-                    if target_node:
-                        clean_target = re.sub(r'[^0-9]', '', target_node) if "sensorpush" in t['table'] else target_node
-                        query += f" AND {t['id_col']} LIKE '%{clean_target}%'"
-                    client.query(query).result()
-                    st.write(f"✔️ {t['table']} cleaned.")
-                except Exception as e: st.error(f"Error on {t['table']}: {e}")
-            st.success("Purge complete.")
-            st.cache_data.clear()
-
-    with tab4:
         st.subheader("🛠️ Metadata Management")
-        u_meta = st.file_uploader("Upload Master Metadata CSV", type=['csv'], key="meta_upload")
+        u_meta = st.file_uploader("Upload Master_Log / Metadata CSV", type=['csv'])
         if u_meta:
             df_new_meta = pd.read_csv(u_meta)
             st.dataframe(df_new_meta.head())
             if st.button("Overwrite Master Metadata"):
+                # This replaces the mapping table in BigQuery
                 client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
                                                  job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-                st.success("Metadata Updated!")
+                st.success("Master Metadata Updated!")
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
@@ -1019,45 +952,43 @@ elif service == "🛠️ Admin Tools":
 
     with tab_cleaner:
         st.subheader("🧨 Surgical Data Cleaner")
-        st.warning("Caution: This permanently removes data from the RAW source tables.")
+        st.write("Deletes specific data ranges from Raw Source tables.")
         
-        col1, col2 = st.columns(2)
-        start_del = col1.date_input("Start Date", datetime.now() - timedelta(days=1), key="clean_start")
-        end_del = col2.date_input("End Date", datetime.now(), key="clean_end")
+        c1, c2 = st.columns(2)
+        start_del = c1.date_input("Start Date", datetime.now() - timedelta(days=1), key="del_start")
+        end_del = c2.date_input("End Date", datetime.now(), key="del_end")
         
-        # Allow user to target a specific sensor
-        target_node = st.text_input("Enter Sensor ID to delete (Leave blank for ALL sensors in range)")
+        node_to_clean = st.text_input("Enter ID (sensor_id or NodeNum) to clean (Optional)")
 
-        if st.button("🔥 EXECUTE PURGE"):
-            # We target the two main raw tables
-            targets = [
-                {"table": f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", "id_col": "sensor_id"},
-                {"table": f"{PROJECT_ID}.{DATASET_ID}.raw_lord", "id_col": "NodeNum"}
-            ]
+        if st.button("🔥 PERMANENTLY DELETE DATA"):
+            # Map of tables and their primary ID columns
+            raw_map = {
+                f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush": "sensor_id",
+                f"{PROJECT_ID}.{DATASET_ID}.raw_lord": "NodeNum"
+            }
             
-            for t in targets:
+            for table, id_col in raw_map.items():
                 try:
-                    # 1. Build the query
-                    query = f"DELETE FROM `{t['table']}` WHERE CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
+                    # Construct deletion clause
+                    del_clause = f"CAST(timestamp AS DATE) BETWEEN '{start_del}' AND '{end_del}'"
+                    if node_to_clean:
+                        # Clean the input to match scrubbed ID format
+                        clean_id = re.sub(r'[^0-9]', '', node_to_clean) if "sensorpush" in table else node_to_clean
+                        del_clause += f" AND {id_col} LIKE '%{clean_id}%'"
                     
-                    if target_node:
-                        # Ensure we match the numeric-only cleaning logic if it's SensorPush
-                        clean_target = re.sub(r'[^0-9]', '', target_node) if "sensorpush" in t['table'] else target_node
-                        query += f" AND {t['id_col']} LIKE '%{clean_target}%'"
+                    delete_sql = f"DELETE FROM `{table}` WHERE {del_clause}"
                     
-                    # 2. Run it
-                    with st.spinner(f"Purging {t['table']}..."):
-                        job = client.query(query)
-                        job.result()
-                        st.write(f"✔️ {t['table']}: Deleted {job.num_dml_affected_rows} rows.")
-                
+                    with st.spinner(f"Purging {table}..."):
+                        del_job = client.query(delete_sql)
+                        del_job.result()
+                        st.write(f"✔️ {table}: Removed {del_job.num_dml_affected_rows} records.")
+                        
                 except Exception as e:
-                    st.error(f"Error purging {t['table']}: {e}")
+                    st.error(f"Error cleaning {table}: {e}")
             
-            # 3. Refresh the App
-            st.success("Purge complete.")
-            st.cache_data.clear() 
-            st.info("Tip: Run 'Deep Data Scrub' in Admin Tools to update the master dashboard views.")
+            st.success("Surgical cleaning complete. Remember to run 'Deep Scrub' to update the master tables.")
+            st.cache_data.clear() # Force app to see the changes
+
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
