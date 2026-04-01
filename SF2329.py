@@ -126,6 +126,8 @@ else:
                 loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
                 st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"t_{loc}")
 
+    # ... [Keep everything above the same] ...
+
     with tab_depth:
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_df = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
@@ -144,22 +146,49 @@ else:
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
                 
-                # --- TEMP X-AXIS GRID (LIGHT GREY 5-DEGREE MINORS) ---
-                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, 
-                                   gridcolor='LightGray', gridwidth=0.5, mirror=True, showline=True, linecolor='black')
-                # 20-degree Major lines
+                # --- TEMP X-AXIS GRID (5-DEGREE LIGHT GRAY) ---
+                fig_d.update_xaxes(
+                    title=f"Temp ({unit_label})", 
+                    range=[-20, 80], 
+                    dtick=5, 
+                    showgrid=True,
+                    gridcolor='LightGray', 
+                    gridwidth=0.5, 
+                    mirror=True, 
+                    showline=True, 
+                    linecolor='black'
+                )
+                
+                # 20-degree Major lines (Solid Black)
                 for x_v in range(-20, 81, 20):
                     fig_d.add_vline(x=x_v, line_width=2.0, line_color="Black")
 
-                # --- DEPTH Y-AXIS GRID (STANDARD 10-FOOT MINORS) ---
-                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, 
-                                   gridcolor='LightGray', gridwidth=0.7, mirror=True, showline=True, linecolor='black')
+                # --- DEPTH Y-AXIS GRID (FORCE 10-FOOT LINES TO SHOW) ---
+                fig_d.update_yaxes(
+                    title="Depth (ft)", 
+                    range=[y_limit, 0], 
+                    dtick=10, 
+                    showgrid=True, # Force the grid to show
+                    gridcolor='LightGray', 
+                    gridwidth=0.7, 
+                    mirror=True, 
+                    showline=True, 
+                    linecolor='black'
+                )
 
+                # Reference Lines (Vertical on this graph)
                 for val, label in active_refs:
                     fig_d.add_vline(x=val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5)
 
-                fig_d.update_layout(plot_bgcolor='white', height=700)
+                fig_d.update_layout(
+                    plot_bgcolor='white', 
+                    height=700,
+                    xaxis=dict(zeroline=False),
+                    yaxis=dict(zeroline=False)
+                )
                 st.plotly_chart(fig_d, use_container_width=True, key=f"d_{loc}")
+
+    # ... [Keep table logic the same] ...
 
     with tab_table:
         latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
