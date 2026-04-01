@@ -943,99 +943,104 @@ elif service == "🛠️ Admin Tools":
 # --- SURGICAL CLEANER --- #
 ###########################
 with tab_cleaner:
-    st.subheader("🧨 Surgical Data Cleaner: Precision Drill-Down")
-    st.info("1. Set your date range. 2. Use the **Box Select** tool on the graph. 3. Click Delete.")
+    st.subheader("🧨 Surgical Data Cleaner: 7-Day Lasso")
+    st.info("1. Zoom in using the sliders. 2. **Lasso** the points you want to delete. 3. Confirm below.")
     
     # 1. FETCH METADATA FOR DROPDOWNS
+    # Ensuring we handle nulls to prevent 'sorted' errors
     meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="drill_proj")
+        sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
     with c2:
         pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
-        sel_pipe = st.selectbox("Pipe / Location", pipes, key="drill_pipe")
+        sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
     with c3:
         nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique()) if sel_pipe != "ALL" else ["ALL"]
-        sel_node = st.selectbox("Node ID", nodes, key="drill_node")
+        sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
 
     st.divider()
 
-    # 2. DRILL-DOWN DATE SLIDERS
-    st.write("### 📅 Set Deletion Window")
-    max_days = 84  # Matching your universal portal data limit
+    # 2. HARD-LIMITED 7-DAY SLIDERS
+    # This restricts the 'view' and 'cleaning' strictly to the last 168 hours
+    st.write("### 📅 Set View Window (Strict 7-Day Limit)")
     
-    # Using a range slider for start and end
-    start_date, end_date = st.slider(
-        "Select Date Range (Days Ago)",
-        value=(7, 0), # Default to last 7 days
+    # Range slider for the last 7 days (168 hours)
+    # Using hours gives you more granular control for the 'drill-down' view
+    start_hr, end_hr = st.slider(
+        "Select Window (Hours Ago)",
+        value=(168, 0), 
         min_value=0,
-        max_value=max_days,
-        format="%d days ago"
+        max_value=168,
+        format="%d hours ago"
     )
 
-    # Convert slider values to timestamps
-    # Note: 0 days ago = now
-    cutoff_start = datetime.now(pytz.UTC) - timedelta(days=start_date)
-    cutoff_end = datetime.now(pytz.UTC) - timedelta(days=end_date)
-
-    # 3. PREVIEW DATA BASED ON DRILL-DOWN
-    # We fetch based on the larger range first
+    # 3. PREVIEW DATA
+    # Based on your BigQuery schema: NodeNum, timestamp, and temperature
     preview_q = f"""
         SELECT timestamp, temperature, NodeNum, Location 
         FROM `{MASTER_TABLE}` 
         WHERE Project = '{sel_proj}' 
-        AND timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {start_date} DAY) 
-                          AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {end_date} DAY)
+        AND timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {start_hr} HOUR) 
+                          AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {end_hr} HOUR)
     """
     p_df = client.query(preview_q).to_dataframe()
 
     if not p_df.empty:
-        # Apply Pipe/Node filters
+        # Apply local filters
         if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
         if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
 
         if not p_df.empty:
-            # 4. INTERACTIVE BOX SELECTION GRAPH
+            # 4. INTERACTIVE LASSO SELECTION GRAPH
+            # We set dragmode to 'lasso' so you can circle points immediately
             fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
-                             title=f"Viewing: {cutoff_start.strftime('%m/%d')} to {cutoff_end.strftime('%m/%d')}",
+                             title="Lasso the points you wish to purge",
                              template="plotly_white", height=600)
             
-            fig.update_layout(dragmode='select', hovermode='closest')
-            fig.update_traces(marker=dict(size=8))
+            fig.update_layout(dragmode='lasso', hovermode='closest')
+            fig.update_traces(marker=dict(size=10, opacity=0.7))
 
-            # Capture the box selection
+            # Capture the lasso selection using Streamlit's native on_select
             selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
 
-            # 5. EXECUTION LOGIC
+            # 5. PURGE LOGIC
             if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
                 selection_list = selected_points["selection"]["points"]
-                st.success(f"📍 {len(selection_list)} points highlighted for deletion.")
+                st.error(f"⚠️ {len(selection_list)} points lassoed for permanent deletion.")
                 
-                if st.button("🔥 PERMANENTLY DELETE HIGHLIGHTED POINTS"):
-                    with st.spinner("Deleting..."):
+                if st.button("🔥 PURGE SELECTED DATA"):
+                    with st.spinner("Executing deletion..."):
                         for pt in selection_list:
-                            # Using the specific timestamp and NodeNum from each selected point
+                            # Pull specific coordinates for the 'surgical' strike
                             ts_val = pt['x']
                             node_val = p_df.iloc[pt['point_index']]['NodeNum']
                             
-                            # Clean from all 3 tables
-                            for table in [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                                          f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
-                                          MASTER_TABLE]:
-                                # Both raw tables and master table now confirmed to use NodeNum
-                                del_sql = f"DELETE FROM `{table}` WHERE NodeNum = '{node_val}' AND timestamp = '{ts_val}'"
+                            # Clean from all tables (Confirmed all use NodeNum via your screenshot)
+                            tables_to_clean = [
+                                f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                                f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
+                                MASTER_TABLE
+                            ]
+                            
+                            for table in tables_to_clean:
+                                del_sql = f"""
+                                    DELETE FROM `{table}` 
+                                    WHERE NodeNum = '{node_val}' 
+                                    AND timestamp = '{ts_val}'
+                                """
                                 client.query(del_sql).result()
                     
-                    st.success("Points successfully removed.")
+                    st.success("Lassoed points removed. Refreshing UI...")
                     st.cache_data.clear()
                     st.rerun()
             else:
-                st.warning("Please use the Box Select tool on the graph to choose points to delete.")
+                st.warning("No points selected. Use the Lasso tool to circle data on the chart.")
         else:
-            st.info("No data found for this specific selection within the date range.")
+            st.info("No data found for this selection within the specific hour window.")
     else:
-        st.info(f"No data found for {sel_proj} between {start_date} and {end_date} days ago.")
+        st.info("No data exists in the Master table for the last 7 days for this project.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
