@@ -379,13 +379,15 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 # --- GLOBAL DATA LOAD --- #
 ###########################
 
+# Initialize session state keys if they don't exist
 if "master_df" not in st.session_state:
     st.session_state.master_df = pd.DataFrame()
     st.session_state.current_project = None
 
+# Only fetch from BigQuery if the project selection actually changes
 if selected_project and st.session_state.current_project != selected_project:
-    with st.spinner(f"⚡ Syncing {selected_project}..."):
-        # We fetch 'Depth' here to ensure the profile can be built
+    with st.spinner(f"⚡ Syncing {selected_project} Data..."):
+        # PRUNED QUERY: We only select the columns needed for the UI
         query = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
             FROM `{MASTER_TABLE}`
@@ -397,13 +399,9 @@ if selected_project and st.session_state.current_project != selected_project:
             df = client.query(query).to_dataframe()
             
             if not df.empty:
-                # 1. Fix Timestamps
+                # PRE-PROCESSING: Do the heavy lifting once here
                 df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
-                
-                # 2. FORCE Numeric Depth (Crucial for Depth Profile)
                 df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
-                
-                # 3. Standardize Approval
                 df['is_approved'] = df['approve'].astype(str).str.upper().str.strip() == 'TRUE'
                 
                 st.session_state.master_df = df
@@ -411,12 +409,12 @@ if selected_project and st.session_state.current_project != selected_project:
             else:
                 st.session_state.master_df = pd.DataFrame()
         except Exception as e:
-            st.error(f"Sync Error: {e}")
+            st.error(f"Failed to sync project data: {e}")
 
-# Map local references
+# Create instant-access references for the pages below
 master_df = st.session_state.master_df
+# Instant filter for approved data (Client Portal) vs all data (Diagnostics)
 approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty else pd.DataFrame()
-
 ####################
 # --- SERVICES --- #
 ####################
@@ -546,296 +544,111 @@ elif service == "📊 Client Portal":
     if not selected_project:
         st.warning("Please select a project in the sidebar.")
     elif approved_df.empty:
-        st.info(f"No approved data found for {selected_project}. Vett data in Admin Tools.")
+        st.info(f"No approved data found for {selected_project}. Vett data in Admin Tools to display here.")
     else:
         st.header(f"📊 Project Status: {selected_project}")
         tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
-        # Shared time calculations (Full Week Logic)
+        # Shared Controls (Filtered instantly from memory)
         weeks_view = st.slider("Weeks to View", 1, 12, 6, key="portal_slider")
         now = pd.Timestamp.now(tz=pytz.UTC)
         end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks_view)
 
-        # --- TAB 1: TIMELINE ---
         with tab_time:
             locs = sorted(approved_df['Location'].dropna().unique())
             for loc in locs:
                 with st.expander(f"📈 {loc}", expanded=True):
-                    # Filter instantly from memory
+                    # Local memory filter (No BigQuery delay)
                     loc_data = approved_df[(approved_df['Location'] == loc) & (approved_df['timestamp'] >= start_view)]
-                    st.plotly_chart(
-                        build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), 
-                        use_container_width=True, 
-                        key=f"p_time_{loc}"
-                    )
+                    if not loc_data.empty:
+                        st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"p_time_{loc}")
 
-        # --- TAB 2: DEPTH PROFILE ---
         with tab_depth:
-            # Filter for numeric depth values pre-calculated in Global Load
+            # Uses Depth_Num pre-calculated in Global Load
             depth_plot_df = approved_df.dropna(subset=['Depth_Num', 'NodeNum', 'Location'])
-            
             if depth_plot_df.empty:
-                st.warning("No sensors with valid numeric 'Depth' values found in the approved data.")
+                st.warning("No approved sensors with valid numeric 'Depth' values found.")
             else:
                 for loc in sorted(depth_plot_df['Location'].unique()):
                     with st.expander(f"📏 {loc} Depth Profile", expanded=True):
                         loc_data = depth_plot_df[depth_plot_df['Location'] == loc].copy()
                         fig_d = go.Figure()
                         
+                        # Monday 6AM Snapshots (Vectorized Memory Filter)
                         mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
                         for target_ts in [m.replace(hour=6, minute=0, second=0) for m in mondays]:
-                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & 
-                                              (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
-                            
+                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
                             if not window.empty:
-                                snaps = []
-                                for node in window['NodeNum'].unique():
-                                    ndf = window[window['NodeNum'] == node].copy()
-                                    ndf['diff'] = (ndf['timestamp'] - target_ts).abs()
-                                    snaps.append(ndf.sort_values('diff').iloc[0])
-                                
+                                snaps = [window[window['NodeNum']==n].sort_values(by='timestamp', key=lambda x: (x-target_ts).abs()).iloc[0] for n in window['NodeNum'].unique()]
                                 snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
-                                fig_d.add_trace(go.Scatter(
-                                    x=snap_df['temperature'], y=snap_df['Depth_Num'], 
-                                    mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')
-                                ))
+                                fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
 
-                        # Formatting
+                        # Axis Styling (Surface at 0, 10ft Grid)
                         y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
-                        fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
+                        fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray', gridwidth=0.5)
                         for x_v in range(-20, 81, 20): fig_d.add_vline(x=x_v, line_width=2.0, line_color="Black")
-                        fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray')
-                        fig_d.update_layout(plot_bgcolor='white', height=700)
+                        fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray', gridwidth=0.7)
                         
+                        for val, label in active_refs:
+                            fig_d.add_vline(x=val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5)
+
+                        fig_d.update_layout(plot_bgcolor='white', height=700)
                         st.plotly_chart(fig_d, use_container_width=True, key=f"p_depth_{loc}")
 
-        # --- TAB 3: TABLE ---
         with tab_table:
+            # Latest reading per node (Instant GroupBy)
             latest = approved_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-            latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
-            latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) else f"{r['Depth']} ft", axis=1)
-            st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']], use_container_width=True, hide_index=True)
+            latest['Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
+            latest['Pos'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r['Depth']} ft", axis=1)
+            st.dataframe(latest[['Location', 'Pos', 'Temp', 'NodeNum']], use_container_width=True, hide_index=True)
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
 ###########################
-# --- NODE DIAGNOSTIC --- #
-###########################  
+# --- NODE DIAGNOSTICS --- #
+###########################
 elif service == "📉 Node Diagnostics":
-    st.header(f"📉 Node Diagnostics: {selected_project}")
-    
     if not selected_project:
-        st.warning("Please select a project.")
+        st.warning("Please select a project in the sidebar.")
     elif master_df.empty:
-        st.warning("No data found.")
+        st.warning(f"No data available in the Master Cache for {selected_project}.")
     else:
+        st.header(f"📉 Diagnostics: {selected_project} (Full Raw View)")
+        
         # Instant Location Picker from memory
-        locs = sorted(master_df['Location'].dropna().unique())
+        loc_options = sorted(master_df['Location'].dropna().unique())
         c1, c2 = st.columns([2, 1])
-        sel_loc = c1.selectbox("Select Pipe / Bank", locs)
-        weeks_view = c2.slider("Lookback (Weeks)", 1, 12, 6, key="diag_slider")
+        sel_loc = c1.selectbox("Select Pipe / Bank to Analyze", loc_options)
+        weeks_diag = c2.slider("Lookback (Weeks)", 1, 12, 6, key="diag_slider")
 
+        # Time range logic
         now = pd.Timestamp.now(tz=pytz.UTC)
         end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        start_view = end_view - timedelta(weeks=weeks_view)
+        start_view = end_view - timedelta(weeks=weeks_diag)
 
-        # Instant local filter
+        # Local memory filter
         diag_data = master_df[(master_df['Location'] == sel_loc) & (master_df['timestamp'] >= start_view)]
         
-        st.subheader("📈 Timeline Analysis")
-        st.plotly_chart(build_standard_sf_graph(diag_data, sel_loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True)
-        try:
-            # 1. ANALYTICS CONTROLS
-            # Fetch locations for the selected project
-            loc_q = f"SELECT DISTINCT Location FROM `{MASTER_TABLE}` WHERE Project = '{selected_project}'"
-            loc_df = client.query(loc_q).to_dataframe()
-            
-            c1, c2 = st.columns([2, 1])
-            with c1: 
-                sel_loc = st.selectbox("Select Pipe / Bank to Analyze", sorted(loc_df['Location'].dropna().unique()))
-            with c2: 
-                weeks_view = st.slider("Lookback (Weeks)", 1, 12, 6)
+        if diag_data.empty:
+            st.info("No data found for this location in the selected timeframe.")
+        else:
+            # 1. Timeline Chart (Includes unapproved data)
+            st.subheader(f"📈 Raw Timeline: {sel_loc}")
+            st.plotly_chart(build_standard_sf_graph(diag_data, sel_loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"diag_t_{sel_loc}")
 
-            # 2. DATE CALCULATIONS
-            # Ensures we show full weeks ending at the next Monday midnight
-            now = pd.Timestamp.now(tz=pytz.UTC)
-            days_until_monday = (7 - now.weekday()) % 7
-            if days_until_monday == 0: days_until_monday = 7
-            end_view = (now + pd.Timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
-            start_view = end_view - timedelta(weeks=weeks_view)
+            st.divider()
 
-            # 3. DATA FETCHING
-            diag_q = f"""
-                SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
-                FROM `{MASTER_TABLE}`
-                WHERE Project = '{selected_project}' AND Location = '{sel_loc}'
-                AND timestamp >= '{start_view.strftime('%Y-%m-%d %H:%M:%S')}'
-                ORDER BY timestamp ASC
-            """
-            with st.spinner("Fetching diagnostic data..."):
-                df_diag = client.query(diag_q).to_dataframe()
-            
-            if df_diag.empty:
-                st.warning(f"No data found for {sel_loc} in the selected timeframe.")
-            else:
-                df_diag['timestamp'] = pd.to_datetime(df_diag['timestamp'])
-                if df_diag['timestamp'].dt.tz is None:
-                    df_diag['timestamp'] = df_diag['timestamp'].dt.tz_localize(pytz.UTC)
-                else:
-                    df_diag['timestamp'] = df_diag['timestamp'].dt.tz_convert(pytz.UTC)
-
-                # --- 4. TIME VS TEMPERATURE GRAPH (TOP) ---
-                st.subheader("📈 Timeline Analysis")
-                fig_time = build_standard_sf_graph(df_diag, sel_loc, start_view, end_view, active_refs, unit_mode, unit_label)
-                st.plotly_chart(fig_time, use_container_width=True)
-
-                st.divider()
-
-                # --- 5. DEPTH VS TEMPERATURE GRAPH (MIDDLE) ---
-                st.subheader("📏 Depth Profile Analysis")
-                df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
-                depth_only_df = df_diag.dropna(subset=['Depth_Num', 'NodeNum']).copy()
-                
-                if depth_only_df.empty:
-                    st.info("No depth-based sensors found for this location.")
-                else:
-                    # Generate Monday 6AM Snapshots
-                    all_mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
-                    target_times = [m.replace(hour=6, minute=0, second=0, microsecond=0) for m in all_mondays]
-                    
-                    fig_depth = go.Figure()
-                    for target_ts in target_times:
-                        # 24-hour search window
-                        window_df = depth_only_df[(depth_only_df['timestamp'] >= target_ts - pd.Timedelta(days=1)) & 
-                                                  (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(days=1))]
-                        if window_df.empty: continue
-                        
-                        snapshot_points = []
-                        for node in window_df['NodeNum'].unique():
-                            node_df = window_df[window_df['NodeNum'] == node].copy()
-                            node_df['diff'] = (node_df['timestamp'] - target_ts).abs()
-                            closest = node_df.sort_values('diff').iloc[0]
-                            if closest['diff'] <= pd.Timedelta(days=1):
-                                snapshot_points.append(closest)
-                        
-                        if snapshot_points:
-                            snap_df = pd.DataFrame(snapshot_points).sort_values('Depth_Num')
-                            fig_depth.add_trace(go.Scatter(
-                                x=snap_df['temperature'], y=snap_df['Depth_Num'],
-                                mode='lines+markers', 
-                                name=target_ts.strftime('%m/%d/%Y'), # Legend shows date only
-                                hovertemplate="Depth: %{y}ft<br>Temp: %{x}°"
-                            ))
-
-                    # Depth Axis Logic: Rounded to nearest 5 or 10
-                    max_d = depth_only_df['Depth_Num'].max()
-                    y_limit = int(((max_d // 5) + 1) * 5)
-                    y_major = 20 if y_limit > 60 else 10
-                    y_minor = 10 if y_limit > 60 else 5
-
-                    fig_depth.update_xaxes(
-                        title=f"Temp ({unit_label})", range=[-20, 80] if unit_mode == "Fahrenheit" else [-30, 30],
-                        dtick=5, gridcolor='LightGray', mirror=True, showline=True, linecolor='black'
-                    )
-                    # Add major vertical lines at 20 degree intervals
-                    for x_v in range(-20, 81, 20):
-                        fig_depth.add_vline(x=x_v, line_width=1, line_color="Gray")
-
-                    fig_depth.update_yaxes(
-                        title="Depth (ft) - Surface at 0", range=[y_limit, 0], 
-                        dtick=y_major, gridcolor='Gray', mirror=True, showline=True, linecolor='black'
-                    )
-                    # Add minor horizontal lines
-                    for d_v in range(0, y_limit + 1, y_minor):
-                        fig_depth.add_hline(y=d_v, line_width=0.5, line_color="LightGray")
-
-                    fig_depth.update_layout(
-                        title=f"{sel_loc}: Depth vs Temperature", 
-                        plot_bgcolor='white', height=700,
-                        legend=dict(title="Weekly Snapshots (6AM)", orientation="v", x=1.02, y=1)
-                    )
-                    
-                    # Add Freezing Reference Line
-                    freeze_val = 32 if unit_mode == "Fahrenheit" else 0
-                    fig_depth.add_vline(x=freeze_val, line_dash="dash", line_color="RoyalBlue", opacity=0.5)
-                    
-                    st.plotly_chart(fig_depth, use_container_width=True)
-
-                st.divider()
-
-                # --- 6. SENSOR SUMMARY TABLE (BOTTOM) ---
-                st.subheader(f"📋 Engineering Summary: {sel_loc}")
-                
-                # Query latest data for all nodes in this pipe
-                summary_q = f"""
-                    SELECT * FROM `{MASTER_TABLE}` 
-                    WHERE Project = '{selected_project}' AND Location = '{sel_loc}'
-                    QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1
-                """
-                raw_summary = client.query(summary_q).to_dataframe()
-                
-                if not raw_summary.empty:
-                    summary_rows = []
-                    for _, row in raw_summary.iterrows():
-                        node_id = row['NodeNum']
-                        ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-                        hrs_ago = int((now - ts).total_seconds() / 3600)
-                        
-                        # 24H Metrics for Min, Max, and Delta
-                        metrics_q = f"""
-                            SELECT 
-                                MIN(temperature) as min_24, 
-                                MAX(temperature) as max_24,
-                                (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' ORDER BY timestamp DESC LIMIT 1) - 
-                                (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as delta_24
-                            FROM `{MASTER_TABLE}` 
-                            WHERE NodeNum = '{node_id}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-                        """
-                        m_res = client.query(metrics_q).to_dataframe()
-                        min_v = m_res['min_24'].iloc[0] if not m_res.empty else None
-                        max_v = m_res['max_24'].iloc[0] if not m_res.empty else None
-                        raw_delta = m_res['delta_24'].iloc[0] if not m_res.empty else None
-
-                        # Status indicators
-                        status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-                        pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
-
-                        summary_rows.append({
-                            "Node": node_id,
-                            "Pos/Depth": pos_display,
-                            "Min (24h)": f"{round(convert_val(min_v), 1)}{unit_label}" if pd.notnull(min_v) else "N/A",
-                            "Max (24h)": f"{round(convert_val(max_v), 1)}{unit_label}" if pd.notnull(max_v) else "N/A",
-                            "Delta (24h)": f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F",
-                            "Delta_Val": raw_delta,
-                            "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
-                        })
-                    
-                    summary_df = pd.DataFrame(summary_rows)
-                    
-                    # Styling logic for Delta column
-                    def style_delta(val):
-                        if val is None: return ""
-                        bg, color = "", "black"
-                        if val >= 5: bg, color = "#FF0000", "white"
-                        elif val >= 2: bg = "#FFA500"
-                        elif val >= 0.5: bg = "#FFFF00"
-                        elif -0.5 <= val <= 0.5: bg, color = "#008000", "white"
-                        elif -2 < val < -0.5: bg = "#ADD8E6"
-                        elif -5 < val <= -2: bg, color = "#4169E1", "white"
-                        elif val <= -5: bg, color = "#00008B", "white"
-                        return f'background-color: {bg}; color: {color}'
-
-                    st.dataframe(
-                        summary_df[["Node", "Pos/Depth", "Min (24h)", "Max (24h)", "Delta (24h)", "Last Seen"]].style.apply(
-                            lambda x: [style_delta(rv) for rv in summary_df['Delta_Val']], axis=0, subset=['Delta (24h)']
-                        ),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-        except Exception as e:
-            st.error(f"Diagnostics Error: {e}")
+            # 2. Raw Table (For Surgical Inspection)
+            st.subheader("📋 Surgical Reading Inspection")
+            with st.expander("View Individual Samples", expanded=False):
+                # Highlight unapproved data in red for the admin
+                st.dataframe(
+                    diag_data[['timestamp', 'NodeNum', 'Depth', 'temperature', 'is_approved']]
+                    .sort_values('timestamp', ascending=False)
+                    .style.apply(lambda x: ['background-color: #ffcccc' if not v else '' for v in x], subset=['is_approved'], axis=0),
+                    use_container_width=True, hide_index=True
+                )
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
