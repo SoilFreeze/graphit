@@ -35,6 +35,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     - 3-tier Grid Hierarchy
     - 6-Hour Gap Detection (Breaks the line)
     - Red 'Now' Line
+    - ZERO-VALUE FILTER: Prevents vertical lines dropping to 0
     - CLEANED LEGENDS: Removes (6226...) strings
     - HOVER FORMATTING: 1 decimal place
     """
@@ -42,36 +43,22 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     plot_df = df.copy()
 
-    # --- 0. NEW: CLEAN LABELING LOGIC ---
-    # This logic ensures the legend ONLY shows "12.0ft" or "Bank 1"
+    # 1. CLEAN LABELING LOGIC
+    # This removes the (NodeNum) from the legend strings
     def get_clean_label(r):
         bank = str(r.get('Bank', '')).strip().lower()
         depth = str(r.get('Depth', '')).strip()
-        
         if bank not in ["", "none", "nan", "null"]:
             return f"Bank {r['Bank']}"
         return f"{depth}ft" if "ft" not in depth.lower() else depth
 
     plot_df['label'] = plot_df.apply(get_clean_label, axis=1)
-    
-    # Unit Conversion
-    if unit_mode == "Celsius":
-        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-        dt_major, dt_minor = 10, 2 
-    else:
-        y_range = [-20, 80]
-        dt_major, dt_minor = 20, 5
-    
-    fig = go.Figure()
 
-    # --- NEW: VERTICAL LINE FIX ---
-    # Convert exactly 0.0 to None so Plotly breaks the line instead of diving to 0
+    # 2. ZERO-VALUE FILTER & UNIT CONVERSION
+    # Convert exactly 0.0 to None so Plotly breaks the line
     plot_df.loc[plot_df['temperature'] == 0, 'temperature'] = None
 
-    # Unit Conversion Logic
     if unit_mode == "Celsius":
-        # Only convert if the value isn't None
         plot_df['temperature'] = plot_df['temperature'].apply(
             lambda x: (x - 32) * 5/9 if x is not None else None
         )
@@ -81,27 +68,19 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         y_range = [-20, 80]
         dt_major, dt_minor = 20, 5
 
-    # Labeling Logic
-    plot_df['label'] = plot_df.apply(
-        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
-        else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
-    )
-    
     fig = go.Figure()
     
-    # 1. CORE DATA PLOTTING WITH GAP HANDLING
+    # 3. CORE DATA PLOTTING WITH GAP HANDLING
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         
-        # --- GAP DETECTOR ---
-        # If time between points > 6 hours, insert a row with temperature=None to break the line
+        # Gap Detector: If time > 6 hours, insert None to break the line
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 6.0
         
         if gap_mask.any():
             gaps = s_df[gap_mask].copy()
             gaps['temperature'] = None
-            # Move the 'gap' point slightly back so it sits between the real data points
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
@@ -110,11 +89,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             y=s_df['temperature'], 
             name=lbl, 
             mode='lines', 
-            connectgaps=False, # CRITICAL: Ensures Nones actually break the line
-            line=dict(width=2)
+            connectgaps=False, 
+            line=dict(width=2),
+            # Set hover to 1 decimal place
+            hovertemplate=f"<b>{lbl}</b><br>Temp: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 2. GRID HIERARCHY (Monday/Midnight markers)
+    # 4. GRID HIERARCHY (Monday/Midnight markers)
     grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
     for ts in grid_times:
         if ts.weekday() == 0 and ts.hour == 0:
@@ -125,11 +106,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             color, width = "LightGray", 0.5
         fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    # 3. RED "NOW" LINE
+    # 5. RED "NOW" LINE
     now_marker = pd.Timestamp.now(tz=pytz.UTC)
     fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 4. STYLING & AXIS CONFIG
+    # 6. STYLING & AXIS CONFIG
     fig.update_layout(
         title={'text': title, 'x': 0, 'font': dict(size=18)},
         plot_bgcolor='white', 
@@ -145,7 +126,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     for y_val in range(int(y_range[0]), int(y_range[1]) + 1, dt_major):
         fig.add_hline(y=y_val, line_width=1.2, line_color="DimGray", layer='below')
 
-    # Reference Thresholds (Freezing, Type A, Type B)
+    # Reference Thresholds
     for val, label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
