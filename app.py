@@ -1017,7 +1017,7 @@ elif service == "🛠️ Admin Tools":
             if success_count > 0:
                 st.success("Approval command sent to available raw tables.")
 
-   with tab_cleaner:
+    with tab_cleaner:
         st.subheader("🧨 Surgical Data Cleaner")
         st.warning("Caution: This permanently removes data from the RAW source tables.")
         
