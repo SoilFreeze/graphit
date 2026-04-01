@@ -509,11 +509,12 @@ elif service == "📊 Client Portal":
         st.header(f"📊 Project Status: {target_proj}")
         tab_time, tab_depth, tab_table = st.tabs(["📈 Time vs Temp", "📏 Depth vs Temp", "📋 Project Data"])
 
-        # Fetch up to 12 weeks of data
+        # FETCH DATA: Now strictly filtering for approved readings only
         portal_q = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
             FROM `{MASTER_TABLE}`
             WHERE CAST(Project AS STRING) LIKE '%{target_proj}%' 
+            AND approve = 'TRUE'
             AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
             ORDER BY Location ASC, timestamp ASC
         """
@@ -521,7 +522,7 @@ elif service == "📊 Client Portal":
             p_df = client.query(portal_q).to_dataframe()
             
             if p_df.empty:
-                st.info(f"No data found for Project {target_proj} in the last 12 weeks.")
+                st.info(f"No approved data found for Project {target_proj}. Please approve data in Admin Tools to make it visible here.")
             else:
                 p_df['timestamp'] = pd.to_datetime(p_df['timestamp'])
                 if p_df['timestamp'].dt.tz is None: 
@@ -550,107 +551,54 @@ elif service == "📊 Client Portal":
                             st.plotly_chart(fig, use_container_width=True)
 
                 with tab_depth:
-                    # Fix: Ensure Depth is numeric and drop rows where essential ID data is missing to avoid the '<' error
                     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
                     depth_only_df = p_df.dropna(subset=['Depth_Num', 'NodeNum', 'Location']).copy()
                     d_locs = sorted(depth_only_df['Location'].unique())
                     
                     if not d_locs: 
-                        st.info("No depth-based data found.")
+                        st.info("No approved depth-based data found.")
                     else:
                         d_page = st.number_input("Profile Page", 1, max((len(d_locs)//10)+1, 1), 1, key=f"dp_{target_proj}")
                         for loc in d_locs[(d_page-1)*10 : d_page*10]:
                             with st.expander(f"📏 {loc} Depth Profile", expanded=True):
                                 loc_data = depth_only_df[depth_only_df['Location'] == loc].copy()
                                 
-                                # 1. GENERATE MONDAY 6 AM TARGETS
-                                end_period = pd.Timestamp.now(tz=pytz.UTC)
-                                start_period = end_period - pd.Timedelta(weeks=12)
-                                all_mondays = pd.date_range(start=start_period, end=end_period, freq='W-MON')
+                                # Generate Monday 6 AM Targets
+                                all_mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
                                 target_times = [m.replace(hour=6, minute=0, second=0, microsecond=0) for m in all_mondays]
                                 
                                 fig_d = go.Figure()
-                                
-                                # 2. SNAPSHOT LOGIC
                                 for target_ts in target_times:
-                                    window_start = target_ts - pd.Timedelta(days=1)
-                                    window_end = target_ts + pd.Timedelta(days=1)
-                                    window_df = loc_data[(loc_data['timestamp'] >= window_start) & (loc_data['timestamp'] <= window_end)]
-                                    
-                                    if window_df.empty:
-                                        continue
+                                    window_df = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & 
+                                                         (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                                    if window_df.empty: continue
                                     
                                     snapshot_points = []
-                                    # Safe grouping by NodeNum
                                     for node in window_df['NodeNum'].unique():
                                         node_df = window_df[window_df['NodeNum'] == node].copy()
                                         node_df['time_diff'] = (node_df['timestamp'] - target_ts).abs()
-                                        # Sort by time difference to target
-                                        closest_row = node_df.sort_values('time_diff').iloc[0]
-                                        
-                                        if closest_row['time_diff'] <= pd.Timedelta(days=1):
-                                            snapshot_points.append(closest_row)
+                                        snapshot_points.append(node_df.sort_values('time_diff').iloc[0])
                                     
                                     if snapshot_points:
                                         snap_df = pd.DataFrame(snapshot_points).sort_values('Depth_Num')
                                         fig_d.add_trace(go.Scatter(
-                                            x=snap_df['temperature'], 
-                                            y=snap_df['Depth_Num'],
-                                            mode='lines+markers',
-                                            name=target_ts.strftime('%m/%d/%Y'),
-                                            hovertemplate="Depth: %{y}ft<br>Temp: %{x}°"
+                                            x=snap_df['temperature'], y=snap_df['Depth_Num'],
+                                            mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')
                                         ))
 
-                                # 3. AXIS STYLING
+                                # Axis Styling
                                 max_d = loc_data['Depth_Num'].max() if not loc_data.empty else 10
                                 y_limit = int(((max_d // 5) + 1) * 5)
-                                y_dtick = 20 if y_limit > 60 else 10
-                                y_minor = 10 if y_limit > 60 else 5
-
-                                # X-axis: -20 to 80
-                                x_range = [-20, 80] if unit_mode == "Fahrenheit" else [-30, 30]
-                                fig_d.update_xaxes(
-                                    title=f"Temp ({unit_label})", range=x_range,
-                                    dtick=5, gridcolor='LightGray', showgrid=True,
-                                    mirror=True, showline=True, linecolor='black'
-                                )
-                                # Major grid every 20
-                                for x_val in range(-20, 81, 20):
-                                    fig_d.add_vline(x=x_val, line_width=1, line_color="Gray")
-
-                                # Y-axis: Depth (0 at top)
-                                fig_d.update_yaxes(
-                                    title="Depth (ft)", range=[y_limit, 0], 
-                                    dtick=y_dtick, gridcolor='Gray',
-                                    mirror=True, showline=True, linecolor='black'
-                                )
-                                for d_val in range(0, y_limit + 1, y_minor):
-                                    fig_d.add_hline(y=d_val, line_width=0.5, line_color="LightGray")
-
-                                fig_d.update_layout(
-                                    title=f"{loc}: Weekly Depth Profiles (Monday 6AM)",
-                                    plot_bgcolor='white', height=650,
-                                    legend=dict(title="Snapshot Date", orientation="v", x=1.02, y=1)
-                                )
-                                
-                                freeze_val = 32 if unit_mode == "Fahrenheit" else 0
-                                fig_d.add_vline(x=freeze_val, line_dash="dash", line_color="RoyalBlue", opacity=0.6)
-                                
+                                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, gridcolor='LightGray')
+                                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Gray')
+                                fig_d.update_layout(plot_bgcolor='white', height=650)
                                 st.plotly_chart(fig_d, use_container_width=True)
 
                 with tab_table:
-                    latest_q = f"""
-                        SELECT Location, Depth, Bank, temperature, NodeNum 
-                        FROM `{MASTER_TABLE}` 
-                        WHERE CAST(Project AS STRING) LIKE '%{target_proj}%' 
-                        QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1 
-                        ORDER BY Location ASC
-                    """
-                    l_df = client.query(latest_q).to_dataframe()
-                    if not l_df.empty:
-                        l_df['Pos'] = l_df.apply(lambda r: f"Bank {r['Bank']}" if str(r['Bank']).strip().lower() not in ["","none","nan","null"] else f"{r['Depth']} ft", axis=1)
-                        l_df['Current Temp'] = l_df['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
-                        st.dataframe(l_df[["Location", "Pos", "Current Temp", "NodeNum"]], use_container_width=True, hide_index=True)
+                    latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+                    latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
+                    latest['Pos'] = latest.apply(lambda r: f"Bank {r['Bank']}" if str(r['Bank']).strip().lower() not in ["","none","nan","null"] else f"{r['Depth']} ft", axis=1)
+                    st.dataframe(latest[["Location", "Pos", "Current Temp", "NodeNum"]], use_container_width=True, hide_index=True)
 
         except Exception as e:
             st.error(f"Portal Error: {e}")
