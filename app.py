@@ -44,23 +44,63 @@ def get_bq_client():
         return None
 
 client = get_bq_client()
+#######################
+# --- SIDEBAR UI --- #
+#######################
+st.sidebar.title("❄️ SoilFreeze Lab")
+
+service = st.sidebar.selectbox("📂 Select Page", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+st.sidebar.divider()
+
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+def convert_val(f_val):
+    if f_val is None: return None
+    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
+
+st.sidebar.divider()
+
+# 1. Project Selection (Defined BEFORE Global Memory)
+selected_project = None
+if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools", "🏠 Executive Summary"]:
+    try:
+        proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
+        proj_df = client.query(proj_q).to_dataframe()
+        selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
+    except: 
+        st.sidebar.warning("No projects found.")
+
+st.sidebar.divider()
+st.sidebar.write("### 📏 Reference Lines")
+active_refs = []
+if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True): active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True): active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.append((10.2, "Type A"))
+
+# 2. Add a Manual Refresh Button
+if st.sidebar.button("🔄 Sync New Data Now"):
+    st.session_state.current_project = None
+    if "summary_df" in st.session_state: del st.session_state.summary_df
+    st.rerun()
+
 ###########################
 # --- GLOBAL MEMORY --- #
 ###########################
+# This engine powers the high-speed switching between pages
 
-# 1. Executive Summary Cache (Global Overview)
+# A. Executive Summary Cache
 if "summary_df" not in st.session_state:
     with st.spinner("📡 Syncing Global Command Center..."):
-        # Fetch only the LATEST reading for every node in the entire system
         summary_q = f"SELECT * FROM `{MASTER_TABLE}` QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
         st.session_state.summary_df = client.query(summary_q).to_dataframe()
 
-# 2. Project Detail Cache (High-Resolution History)
+# B. Project Detail Cache
 if "master_df" not in st.session_state:
     st.session_state.master_df = pd.DataFrame()
     st.session_state.current_project = None
 
-# Logic to refresh project data ONLY if project selection changes
+# Trigger Detail Load ONLY if project changes
 if selected_project and st.session_state.current_project != selected_project:
     with st.spinner(f"⚡ Loading High-Speed Cache for {selected_project}..."):
         query = f"""
@@ -78,9 +118,13 @@ if selected_project and st.session_state.current_project != selected_project:
             st.session_state.master_df = df
             st.session_state.current_project = selected_project
 
-# Map Local References
+# Map local memory references
 summary_df = st.session_state.summary_df
 master_df = st.session_state.master_df
+approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty else pd.DataFrame()
+
+
+        
 #########################
 # --- REBUILD TABLE --- #
 #########################
@@ -378,38 +422,7 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
         st.error(f"Critical Graph Error: {e}")
         return go.Figure()
 
-#######################
-# --- SIDEBAR UI --- #
-#######################
-st.sidebar.title("❄️ SoilFreeze Lab")
 
-service = st.sidebar.selectbox("📂 Select Page", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
-st.sidebar.divider()
-
-unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
-unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
-
-def convert_val(f_val):
-    if f_val is None: return None
-    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
-
-st.sidebar.divider()
-
-# Project Selection
-selected_project = None
-if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
-    try:
-        proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
-        proj_df = client.query(proj_q).to_dataframe()
-        selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
-    except: st.sidebar.warning("No projects found.")
-
-st.sidebar.divider()
-st.sidebar.write("### 📏 Reference Lines")
-active_refs = []
-if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True): active_refs.append((26.6, "Type B"))
-if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.append((10.2, "Type A"))
 
 ###########################
 # --- GLOBAL DATA LOAD --- #
@@ -463,23 +476,19 @@ approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty
 # --- SERVICES --- #
 ####################
 #############################
-# --- Executive Summary --- #
+# --- EXECUTIVE SUMMARY --- #
 #############################
 if service == "🏠 Executive Summary":
-    st.header("🏠 Executive Summary: Global Overview")
+    st.header("🏠 Executive Summary")
     
-    # 1. Filter the cached summary if a project is selected in sidebar
+    # Instant memory filter
     display_summary = summary_df.copy()
     if selected_project:
         display_summary = display_summary[display_summary['Project'] == selected_project]
 
-    # 2. UI Controls (Sorting/Filtering)
-    c1, c2 = st.columns(2)
-    sort_choice = c1.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"])
-    sort_order = c2.radio("Order", ["Descending", "Ascending"], horizontal=True)
-
-    # 3. Data Processing (In-Memory)
     now = pd.Timestamp.now(tz=pytz.UTC)
+    
+    # Local Processing (Instant)
     rows = []
     for _, row in display_summary.iterrows():
         ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
@@ -490,17 +499,14 @@ if service == "🏠 Executive Summary":
             "Project": row['Project'],
             "Node": row['NodeNum'],
             "Location": row['Location'],
-            "Position": f"Bank {row['Bank']}" if pd.notnull(row['Bank']) and str(row['Bank']).strip() != "" else f"{row['Depth']} ft",
             "Temp": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
             "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}",
             "hrs": hrs_ago
         })
     
-    final_df = pd.DataFrame(rows)
-    if sort_choice == "Hours Since Last Seen":
-        final_df = final_df.sort_values("hrs", ascending=(sort_order == "Ascending"))
+    st.dataframe(pd.DataFrame(rows).drop(columns=['hrs']), use_container_width=True, hide_index=True)
 
-    st.dataframe(final_df[["Project", "Node", "Location", "Position", "Temp", "Last Seen"]], use_container_width=True, hide_index=True)
+
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
@@ -579,11 +585,11 @@ elif service == "📉 Node Diagnostics":
     if not selected_project:
         st.warning("Please select a project in the sidebar.")
     elif master_df.empty:
-        st.info("Loading project details...")
+        st.info("No data cached for this project.")
     else:
         st.header(f"📉 Diagnostics: {selected_project}")
         
-        # 1. Controls (Pulls instantly from cached master_df)
+        # Pull options from memory
         loc_options = sorted(master_df['Location'].dropna().unique())
         c1, c2 = st.columns([2, 1])
         sel_loc = c1.selectbox("Select Pipe / Bank", loc_options)
@@ -593,38 +599,34 @@ elif service == "📉 Node Diagnostics":
         end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks_diag)
 
-        # 2. Filter Memory (Instant)
+        # Local filter
         diag_data = master_df[(master_df['Location'] == sel_loc) & (master_df['timestamp'] >= start_view)]
         
-        # 3. Timeline Analysis
         st.subheader(f"📈 Raw Timeline: {sel_loc}")
-        st.plotly_chart(build_standard_sf_graph(diag_data, sel_loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"d_t_{sel_loc}")
+        st.plotly_chart(build_standard_sf_graph(diag_data, sel_loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True)
 
-        # 4. Depth Profile Snapshots
         st.divider()
-        st.subheader("📏 Depth Profile Snapshots")
+        st.subheader("📏 Depth Profile Analysis")
         depth_diag = diag_data.dropna(subset=['Depth_Num']).copy()
         if not depth_diag.empty:
             fig_d = go.Figure()
             mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
-            for target_ts in [m.replace(hour=6) for m in mondays]:
-                window = depth_diag[(depth_diag['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (depth_diag['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+            for m_ts in [m.replace(hour=6) for m in mondays]:
+                window = depth_diag[(depth_diag['timestamp'] >= m_ts - pd.Timedelta(days=1)) & (depth_diag['timestamp'] <= m_ts + pd.Timedelta(days=1))]
                 if not window.empty:
-                    snaps = [window[window['NodeNum']==n].sort_values(by='timestamp', key=lambda x: (x-target_ts).abs()).iloc[0] for n in window['NodeNum'].unique()]
+                    snaps = [window[window['NodeNum']==n].sort_values(by='timestamp', key=lambda x: (x-m_ts).abs()).iloc[0] for n in window['NodeNum'].unique()]
                     snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
-                    fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
+                    fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=m_ts.strftime('%m/%d/%Y')))
             
             y_limit = int(((depth_diag['Depth_Num'].max() // 5) + 1) * 5)
-            fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
+            fig_d.update_xaxes(title="Temp", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
             fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray')
             fig_d.update_layout(plot_bgcolor='white', height=600)
-            st.plotly_chart(fig_d, use_container_width=True, key=f"d_d_{sel_loc}")
-        
-        # 5. Diagnostic Table
+            st.plotly_chart(fig_d, use_container_width=True)
+
         st.divider()
         st.subheader("📋 Engineering Summary")
-        summary_df = diag_data.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-        st.dataframe(summary_df[['timestamp', 'NodeNum', 'Depth', 'temperature', 'is_approved']], use_container_width=True, hide_index=True)
+        st.dataframe(diag_data.sort_values('timestamp', ascending=False).head(100), use_container_width=True, hide_index=True)
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
