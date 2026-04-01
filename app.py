@@ -551,41 +551,44 @@ elif service == "📊 Client Portal":
         st.header(f"📊 Project Status: {selected_project}")
         tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
-        # Shared time calculations
-        weeks_view = st.sidebar.slider("Weeks to View", 1, 12, 6, key="portal_slider") # Moved to sidebar for global control or keep here
+        # Shared time calculations (Full Week Logic)
+        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="portal_slider")
         now = pd.Timestamp.now(tz=pytz.UTC)
         end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks_view)
 
+        # --- TAB 1: TIMELINE ---
         with tab_time:
             locs = sorted(approved_df['Location'].dropna().unique())
             for loc in locs:
                 with st.expander(f"📈 {loc}", expanded=True):
-                    # Instant Filtering from Memory
+                    # Filter instantly from memory
                     loc_data = approved_df[(approved_df['Location'] == loc) & (approved_df['timestamp'] >= start_view)]
-                    st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"p_time_{loc}")
+                    st.plotly_chart(
+                        build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), 
+                        use_container_width=True, 
+                        key=f"p_time_{loc}"
+                    )
 
-       with tab_depth:
-            # 1. Filter for numeric depth and approved data
+        # --- TAB 2: DEPTH PROFILE ---
+        with tab_depth:
+            # Filter for numeric depth values pre-calculated in Global Load
             depth_plot_df = approved_df.dropna(subset=['Depth_Num', 'NodeNum', 'Location'])
             
             if depth_plot_df.empty:
-                st.warning("No approved data with valid Depth values found.")
+                st.warning("No sensors with valid numeric 'Depth' values found in the approved data.")
             else:
                 for loc in sorted(depth_plot_df['Location'].unique()):
                     with st.expander(f"📏 {loc} Depth Profile", expanded=True):
                         loc_data = depth_plot_df[depth_plot_df['Location'] == loc].copy()
                         fig_d = go.Figure()
                         
-                        # Generate Monday Snapshots
                         mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
                         for target_ts in [m.replace(hour=6, minute=0, second=0) for m in mondays]:
-                            # Filter window for this specific Monday
                             window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & 
                                               (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
                             
                             if not window.empty:
-                                # Find closest reading for each node
                                 snaps = []
                                 for node in window['NodeNum'].unique():
                                     ndf = window[window['NodeNum'] == node].copy()
@@ -594,10 +597,8 @@ elif service == "📊 Client Portal":
                                 
                                 snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
                                 fig_d.add_trace(go.Scatter(
-                                    x=snap_df['temperature'], 
-                                    y=snap_df['Depth_Num'], 
-                                    mode='lines+markers', 
-                                    name=target_ts.strftime('%m/%d/%Y')
+                                    x=snap_df['temperature'], y=snap_df['Depth_Num'], 
+                                    mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')
                                 ))
 
                         # Formatting
@@ -609,8 +610,8 @@ elif service == "📊 Client Portal":
                         
                         st.plotly_chart(fig_d, use_container_width=True, key=f"p_depth_{loc}")
 
+        # --- TAB 3: TABLE ---
         with tab_table:
-            # Table generation from memory
             latest = approved_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
             latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
             latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) else f"{r['Depth']} ft", axis=1)
