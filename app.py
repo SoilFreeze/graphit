@@ -379,15 +379,13 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 # --- GLOBAL DATA LOAD --- #
 ###########################
 
-# Initialize session state for data caching
 if "master_df" not in st.session_state:
     st.session_state.master_df = pd.DataFrame()
     st.session_state.current_project = None
 
-# Only fetch from BigQuery if the project selection changes
 if selected_project and st.session_state.current_project != selected_project:
-    with st.spinner(f"⚡ Syncing {selected_project} (Optimizing Pipelines)..."):
-        # PRUNED QUERY: Only select necessary columns to reduce data transfer time
+    with st.spinner(f"⚡ Syncing {selected_project}..."):
+        # We fetch 'Depth' here to ensure the profile can be built
         query = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
             FROM `{MASTER_TABLE}`
@@ -399,10 +397,13 @@ if selected_project and st.session_state.current_project != selected_project:
             df = client.query(query).to_dataframe()
             
             if not df.empty:
-                # PRE-PROCESSING: Convert units and types once here
+                # 1. Fix Timestamps
                 df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
+                
+                # 2. FORCE Numeric Depth (Crucial for Depth Profile)
                 df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
-                # Standardize 'approve' to a boolean
+                
+                # 3. Standardize Approval
                 df['is_approved'] = df['approve'].astype(str).str.upper().str.strip() == 'TRUE'
                 
                 st.session_state.master_df = df
@@ -410,11 +411,10 @@ if selected_project and st.session_state.current_project != selected_project:
             else:
                 st.session_state.master_df = pd.DataFrame()
         except Exception as e:
-            st.error(f"Failed to sync project data: {e}")
+            st.error(f"Sync Error: {e}")
 
-# Create local variables for easy access in the rest of the script
+# Map local references
 master_df = st.session_state.master_df
-# Instant filter for approved data (for Client Portal)
 approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty else pd.DataFrame()
 
 ####################
@@ -565,13 +565,32 @@ elif service == "📊 Client Portal":
                     loc_data = approved_df[(approved_df['Location'] == loc) & (approved_df['timestamp'] >= start_view)]
                     st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"p_time_{loc}")
 
-        with tab_depth:
-            depth_only = approved_df.dropna(subset=['Depth_Num', 'NodeNum', 'Location'])
-            for loc in sorted(depth_only['Location'].unique()):
-                with st.expander(f"📏 {loc} Depth Profile", expanded=True):
-                    loc_data = depth_only[depth_only['Location'] == loc]
-                    # ... [Insert your existing Depth Profile plotting logic here using loc_data] ...
-                    # It will now run instantly because data is local.
+       with tab_depth:
+            # We filter for only rows that actually have a Depth number
+            depth_plot_df = approved_df.dropna(subset=['Depth_Num', 'NodeNum', 'Location'])
+            
+            if depth_plot_df.empty:
+                st.warning("No sensors with valid numeric 'Depth' values found in the approved data.")
+            else:
+                for loc in sorted(depth_plot_df['Location'].unique()):
+                    with st.expander(f"📏 {loc} Depth Profile", expanded=True):
+                        loc_data = depth_plot_df[depth_plot_df['Location'] == loc].copy()
+                        fig_d = go.Figure()
+                        
+                        # Monday 6AM Snapshot Logic
+                        mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
+                        for target_ts in [m.replace(hour=6) for m in mondays]:
+                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                            if not window.empty:
+                                snaps = [window[window['NodeNum']==n].sort_values(by='timestamp', key=lambda x: (x-target_ts).abs()).iloc[0] for n in window['NodeNum'].unique()]
+                                snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
+                                fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
+
+                        y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
+                        fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
+                        fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray')
+                        fig_d.update_layout(plot_bgcolor='white', height=700)
+                        st.plotly_chart(fig_d, use_container_width=True, key=f"p_depth_{loc}")
 
         with tab_table:
             # Table generation from memory
