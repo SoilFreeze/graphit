@@ -218,29 +218,43 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-import streamlit as st
-import requests
-import pandas as pd
-from datetime import datetime
 
 # --- 1. CONFIGURATION & AUTH ---
 
 def get_sensorpush_token():
-    """Authenticates with SensorPush and returns a temporary access token."""
+    """
+    Authenticates with SensorPush using professional headers 
+    to avoid 400 Bad Request errors.
+    """
     url = "https://api.sensorpush.com/v1/oauth/authorize"
+    
+    # 1. Define Headers (Crucial for many API gateways)
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Streamlit-App-Data-Recovery" # Identifies your app
+    }
+    
     try:
-        # Accessing your verified secrets structure
+        # 2. Extract credentials from your specific secrets structure
         creds = st.secrets["sensorpush_creds"]["account1"]
         payload = {
             "email": creds["email"],
             "password": creds["password"]
         }
         
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
+        # 3. Make the request
+        response = requests.post(url, json=payload, headers=headers)
+        
+        # If it fails, this will show us the actual error message from SensorPush
+        if response.status_code != 200:
+            st.error(f"API Error {response.status_code}: {response.text}")
+            return None
+            
         return response.json().get("accesstoken")
+
     except Exception as e:
-        st.error(f"Authentication Failed: {e}")
+        st.error(f"Connection Logic Error: {e}")
         return None
 
 # --- 2. RETRIEVING SENSORS ---
