@@ -66,18 +66,18 @@ def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_m
             sdf = clean_df[clean_df['label'] == lbl]
             fig.add_trace(go.Scatter(x=sdf['timestamp'], y=sdf['temperature'], name=lbl, mode='lines', connectgaps=False))
 
-        # TIMELINE X-AXIS GRID
+        # --- TIMELINE GRID (REVERTED TO STANDARD/LIGHTER) ---
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
-            if ts.weekday() == 0 and ts.hour == 0: color, width = "Black", 2.5
-            elif ts.hour == 0: color, width = "#222222", 1.8
-            else: color, width = "#444444", 1.2 # Darker 6h lines
+            if ts.weekday() == 0 and ts.hour == 0: color, width = "Black", 2
+            elif ts.hour == 0: color, width = "Gray", 1
+            else: color, width = "LightGray", 0.5 
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        fig.update_yaxes(range=y_range, gridcolor='#333333', gridwidth=1, dtick=dt_minor)
+        fig.update_yaxes(range=y_range, gridcolor='Gainsboro', gridwidth=0.5, dtick=dt_minor)
         fig.update_layout(plot_bgcolor='white', height=600, margin=dict(r=150))
         
         for val, label in active_refs:
-            fig.add_hline(y=val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5)
+            fig.add_hline(y=val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2)
         
         return fig
     except: return go.Figure()
@@ -100,7 +100,7 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=True): active_refs.append((10.2
 st.header(f"📊 Project {ACTIVE_PROJECT} Dashboard")
 tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
-# FIXED QUERY: Direct string comparison for 'approve'
+# Direct string comparison for 'approve'
 q = f"""
     SELECT * FROM `{MASTER_TABLE}` 
     WHERE Project = '{ACTIVE_PROJECT}' 
@@ -150,7 +150,7 @@ else:
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
                 
-                # DEPTH X-AXIS GRID (5-degree increments) - DARKEST GRAY
+                # --- DEPTH X-AXIS GRID (DARKENED 5-DEGREE INCREMENTS) ---
                 fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, 
                                    gridcolor='#222222', gridwidth=1.3, mirror=True, showline=True, linecolor='black')
                 # 20-degree Major lines
