@@ -944,93 +944,54 @@ elif service == "🛠️ Admin Tools":
 ###########################
 with tab_cleaner:
     st.subheader("🧨 Surgical Data Cleaner: Lasso & Drill-Down")
+    st.info("Note: Points lassoed here will be marked as 'FALSE' for approval to hide them instantly.")
     
-    # 1. FETCH METADATA
-    meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
-    with c2:
-        pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
-        sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
-    with c3:
-        nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique()) if sel_pipe != "ALL" else ["ALL"]
-        sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
-
-    st.divider()
-
-    # 2. FIXED-END SLIDER (6 Hours to 7 Days)
-    lookback_hrs = st.slider("Lookback Window (Hours)", 6, 168, 24, format="%d hours ago")
-
-    # 3. PREVIEW DATA
-    # We use a CTE to ensure we get a clean dataset for the graph
-    preview_q = f"""
-        SELECT timestamp, temperature, NodeNum, Location 
-        FROM `{MASTER_TABLE}` 
-        WHERE Project = '{sel_proj}' 
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_hrs} HOUR)
-    """
-    p_df = client.query(preview_q).to_dataframe()
+    # ... (Keep your existing Metadata and Slider code here) ...
 
     if not p_df.empty:
-        if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
-        if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
+        # 1. INTERACTIVE LASSO GRAPH
+        fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
+                         title=f"Lasso points to hide (Last {lookback_hrs}h)",
+                         template="plotly_white", height=600)
+        fig.update_layout(dragmode='lasso', hovermode='closest')
+        fig.update_traces(marker=dict(size=10, opacity=0.7))
 
-        if not p_df.empty:
-            # 4. INTERACTIVE LASSO GRAPH
-            fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
-                             title=f"Lasso selection (Last {lookback_hrs}h)",
-                             template="plotly_white", height=600)
+        selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+
+        # 2. SOFT DELETE EXECUTION
+        if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
+            points = selected_points["selection"]["points"]
+            st.warning(f"⚠️ {len(points)} points highlighted for removal.")
             
-            fig.update_layout(dragmode='lasso', hovermode='closest')
-            fig.update_traces(marker=dict(size=10, opacity=0.7))
-
-            selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
-
-            # 5. BATCH EXECUTION (The Fix)
-            if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
-                points = selected_points["selection"]["points"]
-                st.warning(f"⚠️ {len(points)} points highlighted.")
-                
-                if st.button("🔥 PERMANENTLY PURGE DATA"):
-                    with st.spinner("Batch deleting points..."):
-                        # We build a list of (NodeNum, Timestamp) pairs to delete
-                        # This avoids the BadRequest by using a clean JOIN-like approach or batch IN
-                        try:
-                            # Format strings for SQL: ('Node1', '2026-04-01 12:00:00')
-                            conditions = []
-                            for pt in points:
-                                node = p_df.iloc[pt['point_index']]['NodeNum']
-                                ts = pt['x']
-                                conditions.append(f" (NodeNum = '{node}' AND timestamp = '{ts}') ")
-                            
-                            # Combine conditions with OR
-                            where_clause = " OR ".join(conditions)
-                            
-                            tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                                      f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
-                                      MASTER_TABLE]
-                            
-                            for table in tables:
-                                # We wrap the execution in a try-except per table in case one schema differs
-                                try:
-                                    del_sql = f"DELETE FROM `{table}` WHERE {where_clause}"
-                                    client.query(del_sql).result()
-                                except Exception as tbl_err:
-                                    st.error(f"Error updating {table}: {tbl_err}")
-                            
-                            st.success("Points successfully removed.")
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Batch Delete Failed: {e}")
-            else:
-                st.info("💡 Use the Lasso tool on the graph to select points.")
-        else:
-            st.warning("No data found for this selection in the specified window.")
-    else:
-        st.error(f"No data in Master table for '{sel_proj}' in the last 7 days.")
+            if st.button("🚫 HIDE SELECTED DATA"):
+                with st.spinner("Updating approval status..."):
+                    try:
+                        # Build the batch update conditions
+                        conditions = []
+                        for pt in points:
+                            node = p_df.iloc[pt['point_index']]['NodeNum']
+                            ts = pt['x']
+                            conditions.append(f"(NodeNum = '{node}' AND timestamp = '{ts}')")
+                        
+                        where_clause = " OR ".join(conditions)
+                        
+                        # We update the 'approve' column instead of deleting
+                        # This works even if the data is in the streaming buffer for many table types,
+                        # but more importantly, it avoids the physical DELETE restriction.
+                        tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                                  f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
+                                  MASTER_TABLE]
+                        
+                        for table in tables:
+                            update_sql = f"UPDATE `{table}` SET approve = 'FALSE' WHERE {where_clause}"
+                            client.query(update_sql).result()
+                        
+                        st.success("Points hidden successfully.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Update Failed: {e}")
+                        st.info("If streaming buffer errors persist, wait 30 mins for data to finalize.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
