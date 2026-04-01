@@ -935,24 +935,76 @@ with tab_scrub:
             except Exception as e:
                 st.error(f"Scrub Error: {e}")
 
-    with tab_approve:
-        st.subheader("✅ Bulk Approval")
-        st.info("Marking data as approved in both raw_sensorpush and raw_lord.")
-        if st.button("Mark All Data as Approved"):
-            success_count = 0
-            for table in RAW_TABLES:
+###########################
+# --- ADMIN TOOLS REVISED --- #
+###########################
+with tab_approve:
+    st.subheader("✅ Bulk Approval")
+    st.info("This will set all records to 'TRUE' EXCEPT those you have explicitly marked as 'FALSE' with the Lasso tool.")
+    
+    if st.button("🚀 Approve All Pending Data"):
+        success_count = 0
+        # List of all tables that need approval updates
+        tables = [
+            f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+            f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
+            MASTER_TABLE
+        ]
+        
+        with st.spinner("Updating approval statuses..."):
+            for table in tables:
                 try:
-                    # Note: This assumes 'approve' or 'is_approved' column exists in raw tables
-                    # Based on your SP schema, the column is named 'approve'
-                    approve_sql = f"UPDATE `{table}` SET approve = 'TRUE' WHERE 1=1" 
-                    job = client.query(approve_sql)
-                    job.result()
+                    # SQL Logic: Update to TRUE if the current value isn't already 'FALSE'
+                    # We use UPPER() to handle 'false', 'False', or 'FALSE'
+                    approve_sql = f"""
+                        UPDATE `{table}` 
+                        SET approve = 'TRUE' 
+                        WHERE approve IS NULL 
+                        OR UPPER(approve) != 'FALSE'
+                    """
+                    client.query(approve_sql).result()
                     success_count += 1
                 except Exception as e:
-                    st.warning(f"Could not update {table}: {e}")
+                    st.warning(f"Note: Could not update {table} (it may be empty or schema differs): {e}")
+        
+        if success_count > 0:
+            st.success(f"Approval complete across {success_count} tables.")
+            st.cache_data.clear()
+
+with tab_scrub:
+    st.subheader("🧹 Deep Data Scrub & Final Purge")
+    st.info("This permanently deletes any points marked 'FALSE' and reduces data to 1-hour intervals.")
+    
+    scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+
+    if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
+        with st.spinner("Performing hard delete of rejected points..."):
+            # The Scrub SQL now strictly removes 'FALSE' points during the dedup process
+            scrub_sql = f"""
+            CREATE OR REPLACE TABLE `{target_table}` AS 
+            SELECT * EXCEPT(rn) FROM (
+                SELECT *, 
+                       ROW_NUMBER() OVER(
+                           PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                           ORDER BY timestamp DESC
+                       ) as rn
+                FROM `{target_table}` 
+                WHERE (approve IS NULL OR UPPER(approve) != 'FALSE')
+                AND temperature IS NOT NULL
+            ) WHERE rn = 1
+            """
             
-            if success_count > 0:
-                st.success("Approval command sent to available raw tables.")
+            # Also physically remove the 'FALSE' points from the Master Table
+            purge_master_sql = f"DELETE FROM `{MASTER_TABLE}` WHERE UPPER(approve) = 'FALSE'"
+            
+            try:
+                client.query(scrub_sql).result()
+                client.query(purge_master_sql).result()
+                st.success("Database purged of all rejected data points.")
+                st.cache_data.clear()
+            except Exception as e:
+                st.error(f"Purge Error: {e}")
 
 ###########################
 # --- SURGICAL CLEANER --- #
