@@ -218,123 +218,126 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-def get_sensorpush_connection():
-    """
-    Attempts to retrieve credentials from st.secrets.
-    Provides clear documentation on what is missing if a KeyError occurs.
-    """
+import streamlit as st
+import requests
+import pandas as pd
+from datetime import datetime
+
+# --- 1. CONFIGURATION & AUTH ---
+
+def get_sensorpush_token():
+    """Authenticates with SensorPush and returns a temporary access token."""
+    url = "https://api.sensorpush.com/v1/oauth/authorize"
     try:
-        # Accessing the 'sensorpush_creds' key defined in secrets.toml
-        creds = st.secrets["sensorpush_creds"]
+        # Accessing your verified secrets structure
+        creds = st.secrets["sensorpush_creds"]["account1"]
+        payload = {
+            "email": creds["email"],
+            "password": creds["password"]
+        }
         
-        email = creds["username"]
-        password = creds["password"]
-        
-        # Here you would typically initialize your API client
-        # Example: client = SensorPushClient(email, password)
-        return email, password
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        return response.json().get("accesstoken")
+    except Exception as e:
+        st.error(f"Authentication Failed: {e}")
+        return None
 
-    except KeyError:
-        st.error("Missing Credentials: Please ensure 'sensorpush_creds' is defined in your secrets.")
-        return None, None
+# --- 2. RETRIEVING SENSORS ---
 
-# Usage in your app
-user, pw = get_sensorpush_connection()
-
-if user:
-    st.success(f"Authenticated as {user}. Proceeding with API Sync...")
-    # Trigger your API Recovery logic here
-else:
-    st.warning("Please configure your API keys to enable Cloud-to-Cloud Sync.")
-
-import streamlit as st
-
-def sync_all_accounts():
-    """
-    Iterates through all accounts defined under sensorpush_creds in secrets.
-    """
-    # 1. Access the main credentials block
-    if "sensorpush_creds" not in st.secrets:
-        st.error("Error: 'sensorpush_creds' section not found in secrets.")
-        return
-
-    creds_dict = st.secrets["sensorpush_creds"]
-
-    # 2. Iterate through account1, account2, etc.
-    for account_key, info in creds_dict.items():
-        email = info["email"]
-        password = info["password"]
-        
-        st.info(f"🔄 Starting sync for: {email}")
-        
-        # Implementation Logic:
-        # try:
-        #     token = get_api_token(email, password)
-        #     fetch_data(token, start_date, end_date)
-        #     st.success(f"✅ Sync complete for {account_key}")
-        # except Exception as e:
-        #     st.error(f"❌ Failed to sync {account_key}: {e}")
-
-# Call the function
-if st.button("Start Cloud-to-Cloud Sync"):
-    sync_all_accounts()
-
-# This will print the keys available under sensorpush_creds to your app
-if "sensorpush_creds" in st.secrets:
-    st.write("Available accounts:", list(st.secrets["sensorpush_creds"].keys()))
-else:
-    st.error("The main key 'sensorpush_creds' is totally missing.")
-
-import streamlit as st
-
-def get_api_data():
-    # 1. Check if the root key exists
-    if "sensorpush_creds" not in st.secrets:
-        st.error("Missing [sensorpush_creds] section in secrets.")
-        return
-
-    # 2. Get the credentials dictionary
-    creds = st.secrets["sensorpush_creds"]
-
-    # 3. Access specific account data safely
-    try:
-        # Note: We access it like a dictionary: [parent][child][field]
-        acc1_email = creds["account1"]["email"]
-        acc1_pass = creds["account1"]["password"]
-        
-        st.success(f"Successfully retrieved credentials for {acc1_email}")
-        return acc1_email, acc1_pass
-        
-    except (KeyError, TypeError) as e:
-        st.error(f"Structure Error: The app found {type(creds)} but expected a dictionary.")
-        st.info("Current keys found: " + str(list(creds.keys())))
-
-# Run the check
-get_api_data()
-
-import streamlit as st
-
-def troubleshoot_secrets():
-    st.subheader("Secret Diagnostic")
+def get_sensor_list(token):
+    """Fetches all sensors associated with the account to get their IDs and Names."""
+    url = "https://api.sensorpush.com/v1/devices/sensors"
+    headers = {"accept": "application/json", "Authorization": token}
     
-    if "sensorpush_creds" not in st.secrets:
-        st.error("❌ Root key 'sensorpush_creds' not found.")
-        return
+    try:
+        response = requests.post(url, headers=headers, json={})
+        response.raise_for_status()
+        return response.json() # Returns a dict of sensors
+    except Exception as e:
+        st.error(f"Failed to fetch sensors: {e}")
+        return {}
 
-    raw_creds = st.secrets["sensorpush_creds"]
-    st.write(f"Data type detected: `{type(raw_creds)}`")
+# --- 3. FETCHING DATA SAMPLES ---
 
-    if isinstance(raw_creds, dict):
-        st.success("✅ Success! Found dictionary structure.")
-        # Access account 1
-        acc1 = raw_creds.get("account1")
-        if acc1:
-            st.write(f"Account 1 Email: {acc1.get('email')}")
-    else:
-        st.error("❌ Data is being read as a LIST. Check for extra brackets in secrets.")
-        st.code(raw_creds) # This will show us exactly what it is holding
+def fetch_sensor_data(token, sensor_ids, start_date, end_date):
+    """
+    Retrieves data samples for specific sensors within a date range.
+    Dates should be in ISO format (e.g., '2023-01-01T00:00:00Z').
+    """
+    url = "https://api.sensorpush.com/v1/samples"
+    headers = {"accept": "application/json", "Authorization": token}
+    
+    # Payload requires specific sensor IDs and the time range
+    payload = {
+        "sensors": sensor_ids,
+        "startTime": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "stopTime": end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Failed to fetch data samples: {e}")
+        return None
 
-troubleshoot_secrets()
+# --- 4. DATA PROCESSING ---
+
+def process_to_dataframe(api_response, sensor_names):
+    """Converts the raw API JSON into a clean Pandas DataFrame."""
+    all_records = []
+    
+    if not api_response or 'sensors' not in api_response:
+        return pd.DataFrame()
+
+    for sensor_id, samples in api_response['sensors'].items():
+        name = sensor_names.get(sensor_id, sensor_id)
+        for sample in samples:
+            all_records.append({
+                "Timestamp": sample.get("observed"),
+                "Sensor": name,
+                "Temperature": sample.get("temperature"),
+                "Humidity": sample.get("humidity")
+            })
+            
+    df = pd.DataFrame(all_records)
+    if not df.empty:
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+    return df
+
+# --- MAIN APP LOGIC ---
+
+st.title("📡 SensorPush Data Recovery")
+
+# Date Inputs
+col1, col2 = st.columns(2)
+start = col1.date_input("Start Date")
+end = col2.date_input("End Date")
+
+if st.button("Run Cloud-to-Cloud Sync"):
+    with st.spinner("Authenticating..."):
+        token = get_sensorpush_token()
+    
+    if token:
+        with st.spinner("Fetching Sensors and Data..."):
+            # 1. Get sensors to map IDs to Names
+            sensors_raw = get_sensor_list(token)
+            sensor_map = {id: info.get('name') for id, info in sensors_raw.items()}
+            sensor_ids = list(sensor_map.keys())
+            
+            # 2. Get the actual data
+            raw_data = fetch_sensor_data(token, sensor_ids, start, end)
+            
+            # 3. Clean and display
+            df = process_to_dataframe(raw_data, sensor_map)
+            
+            if not df.empty:
+                st.success(f"Successfully recovered {len(df)} records!")
+                st.dataframe(df)
+            else:
+                st.warning("No data found for this range.")
 
 
 ############################
