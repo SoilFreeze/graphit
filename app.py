@@ -220,47 +220,60 @@ def rebuild_master_table(mode="preserve"):
 ############################
 def fetch_sensorpush_data(start_dt, end_dt):
     """
-    Handles API connection to SensorPush.
-    Note: Requires 'sensorpush_creds' in st.secrets.
+    Handles API connection for multiple SensorPush accounts.
+    Iterates through [sensorpush_accounts] in st.secrets.
     """
-    try:
-        # 1. AUTHENTICATE
-        auth_url = "https://api.sensorpush.com/v1/oauth/authorize"
-        creds = st.secrets["sensorpush_creds"]
-        auth_payload = {"email": creds["email"], "password": creds["password"]}
-        
-        auth_res = requests.post(auth_url, json=auth_payload).json()
-        token = auth_res.get("accesstoken")
-        
-        if not token:
-            st.error("API Auth Failed: Check credentials.")
-            return pd.DataFrame()
-
-        # 2. FETCH DATA
-        data_url = "https://api.sensorpush.com/v1/samples"
-        headers = {"accept": "application/json", "Authorization": token}
-        # API expects ISO format strings
-        payload = {
-            "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        }
-        
-        res = requests.post(data_url, headers=headers, json=payload).json()
-        
-        # 3. TRANSFORM TO BIGQUERY SCHEMA
-        records = []
-        for sensor_id, samples in res.get("sensors", {}).items():
-            for s in samples:
-                records.append({
-                    "sensor_id": sensor_id,
-                    "timestamp": s["observed"],
-                    "temperature": s["temperature"]
-                })
-        
-        return pd.DataFrame(records)
-    except Exception as e:
-        st.error(f"API Sync Error: {e}")
+    all_records = []
+    
+    if "sensorpush_accounts" not in st.secrets:
+        st.error("Missing [sensorpush_accounts] in Streamlit Secrets.")
         return pd.DataFrame()
+
+    accounts = st.secrets["sensorpush_accounts"]
+    
+    # Iterate through each account (account1, account2, etc.)
+    for acc_key in accounts:
+        try:
+            creds = accounts[acc_key]
+            email = creds["email"]
+            password = creds["password"]
+            
+            # 1. AUTHENTICATE
+            auth_url = "https://api.sensorpush.com/v1/oauth/authorize"
+            auth_payload = {"email": email, "password": password}
+            
+            auth_res = requests.post(auth_url, json=auth_payload).json()
+            token = auth_res.get("accesstoken")
+            
+            if not token:
+                st.warning(f"API Auth Failed for {email}. Skipping.")
+                continue
+
+            # 2. FETCH DATA
+            data_url = "https://api.sensorpush.com/v1/samples"
+            headers = {"accept": "application/json", "Authorization": token}
+            payload = {
+                "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            }
+            
+            res = requests.post(data_url, headers=headers, json=payload).json()
+            
+            # 3. TRANSFORM TO RECORDS
+            for sensor_id, samples in res.get("sensors", {}).items():
+                for s in samples:
+                    all_records.append({
+                        "sensor_id": sensor_id,
+                        "timestamp": s["observed"],
+                        "temperature": s["temperature"]
+                    })
+            
+            st.info(f"✅ Synced account: {email}")
+            
+        except Exception as e:
+            st.error(f"Error syncing {acc_key}: {e}")
+
+    return pd.DataFrame(all_records)
 
 
 ############################
