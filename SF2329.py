@@ -130,6 +130,7 @@ if p_df.empty:
 else:
     p_df['timestamp'] = pd.to_datetime(p_df['timestamp']).dt.tz_convert(pytz.UTC) if p_df['timestamp'].dt.tz else pd.to_datetime(p_df['timestamp']).dt.tz_localize(pytz.UTC)
     
+    # 1. TIMELINE TAB
     with tab_time:
         weeks = st.slider("Weeks to View", 1, 12, 6)
         now = pd.Timestamp.now(tz=pytz.UTC)
@@ -138,15 +139,23 @@ else:
         
         locs = sorted(p_df['Location'].dropna().unique())
         for loc in locs:
+            # Added a unique key to the expander
             with st.expander(f"📈 {loc}", expanded=True):
                 loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
-                st.plotly_chart(build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True)
+                # Added a unique key to the plotly_chart
+                st.plotly_chart(
+                    build_standard_sf_graph(loc_data, loc, start_view, end_view, active_refs, unit_mode, unit_label), 
+                    use_container_width=True,
+                    key=f"time_chart_{loc}" 
+                )
 
+    # 2. DEPTH PROFILE TAB
     with tab_depth:
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_df = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
         
         for loc in sorted(depth_df['Location'].unique()):
+            # Added a unique key to the expander
             with st.expander(f"📏 {loc} Depth Profile", expanded=True):
                 loc_data = depth_df[depth_df['Location'] == loc].copy()
                 fig_d = go.Figure()
@@ -168,25 +177,24 @@ else:
                 y_dtick = 20 if y_limit > 60 else 10
                 y_minor = 10 if y_limit > 60 else 5
 
-                # X-Axis Styling (TEMP)
                 x_range = [-20, 80] if unit_mode == "Fahrenheit" else [-30, 30]
                 fig_d.update_xaxes(title=f"Temp ({unit_label})", range=x_range, dtick=5, gridcolor='DimGray', gridwidth=0.7, mirror=True, showline=True, linecolor='black')
                 for x_v in range(-20, 81, 20):
                     fig_d.add_vline(x=x_v, line_width=1.5, line_color="Gray")
 
-                # Y-Axis Styling (DEPTH)
                 fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=y_dtick, gridcolor='Gray', gridwidth=1.0, mirror=True, showline=True, linecolor='black')
                 for d_v in range(0, y_limit + 1, y_minor):
                     fig_d.add_hline(y=d_v, line_width=0.8, line_color="DimGray")
 
-                # Reference Lines
                 for val, label in active_refs:
                     c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
                     fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=1.0, line_width=2)
 
                 fig_d.update_layout(plot_bgcolor='white', height=700, legend=dict(title="Monday 6AM Snapshots"))
-                st.plotly_chart(fig_d, use_container_width=True)
+                # Added a unique key to the plotly_chart
+                st.plotly_chart(fig_d, use_container_width=True, key=f"depth_chart_{loc}")
 
+    # 3. PROJECT DATA TAB
     with tab_table:
         latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
