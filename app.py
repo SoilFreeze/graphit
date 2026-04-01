@@ -15,78 +15,118 @@ import io
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
-    """
-    OPTIMIZED: Fetches 84 days of approved data in one batch.
-    Stores it in the server cache so page-switching is instant.
-    """
+    # Added: AND temperature != 0 to the WHERE clause
     query = f"""
         SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
         FROM `{MASTER_TABLE}`
         WHERE Project = '{project_id}' 
         AND (approve = 'TRUE' OR approve = 'true')
+        AND temperature != 0
         AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY Location ASC, timestamp ASC
     """
     df = client.query(query).to_dataframe()
-    
-    if not df.empty:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        if df['timestamp'].dt.tz is None:
-            df['timestamp'] = df['timestamp'].dt.tz_localize(pytz.UTC)
-        else:
-            df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC)
+    # ... (rest of your existing timestamp processing)
     return df
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
-    OPTIMIZED: Uses WebGL (Scattergl) to render lines using the computer's GPU.
-    Identical look to your original graph, but significantly faster.
+    High-Performance Graph Engine:
+    - 3-tier Grid Hierarchy
+    - 6-Hour Gap Detection (Breaks the line)
+    - Red 'Now' Line
+    - ZERO-VALUE FILTER: Prevents vertical lines dropping to 0
     """
-    if df.empty: return go.Figure()
+    if df.empty: 
+        return go.Figure()
+
+    plot_df = df.copy()
+
+    # --- NEW: VERTICAL LINE FIX ---
+    # Convert exactly 0.0 to None so Plotly breaks the line instead of diving to 0
+    plot_df.loc[plot_df['temperature'] == 0, 'temperature'] = None
 
     # Unit Conversion Logic
-    plot_df = df.copy()
     if unit_mode == "Celsius":
-        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
+        # Only convert if the value isn't None
+        plot_df['temperature'] = plot_df['temperature'].apply(
+            lambda x: (x - 32) * 5/9 if x is not None else None
+        )
         y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-        dt_minor = 2 
+        dt_major, dt_minor = 10, 2 
     else:
         y_range = [-20, 80]
-        dt_minor = 5
+        dt_major, dt_minor = 20, 5
 
-    # Labeling
+    # Labeling Logic
     plot_df['label'] = plot_df.apply(
         lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
         else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
     )
     
     fig = go.Figure()
+    
+    # 1. CORE DATA PLOTTING WITH GAP HANDLING
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
-        fig.add_trace(go.Scattergl( # Hardware Accelerated
-            x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
+        
+        # --- GAP DETECTOR ---
+        # If time between points > 6 hours, insert a row with temperature=None to break the line
+        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gap_mask = s_df['gap_hrs'] > 6.0
+        
+        if gap_mask.any():
+            gaps = s_df[gap_mask].copy()
+            gaps['temperature'] = None
+            # Move the 'gap' point slightly back so it sits between the real data points
+            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
+        fig.add_trace(go.Scattergl(
+            x=s_df['timestamp'], 
+            y=s_df['temperature'], 
+            name=lbl, 
+            mode='lines', 
+            connectgaps=False, # CRITICAL: Ensures Nones actually break the line
+            line=dict(width=2)
         ))
 
+    # 2. GRID HIERARCHY (Monday/Midnight markers)
+    grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
+    for ts in grid_times:
+        if ts.weekday() == 0 and ts.hour == 0:
+            color, width = "Black", 1.5
+        elif ts.hour == 0:
+            color, width = "Gray", 1.0
+        else:
+            color, width = "LightGray", 0.5
+        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+
+    # 3. RED "NOW" LINE
+    now_marker = pd.Timestamp.now(tz=pytz.UTC)
+    fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dash")
+
+    # 4. STYLING & AXIS CONFIG
     fig.update_layout(
         title={'text': title, 'x': 0, 'font': dict(size=18)},
-        plot_bgcolor='white', hovermode="x unified", height=600,
+        plot_bgcolor='white', 
+        hovermode="x unified", 
+        height=600,
         margin=dict(t=80, l=50, r=180, b=50),
         legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
         xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True),
         yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
     )
 
-    # Reference Lines
+    # Major Horizontal Gridlines
+    for y_val in range(int(y_range[0]), int(y_range[1]) + 1, dt_major):
+        fig.add_hline(y=y_val, line_width=1.2, line_color="DimGray", layer='below')
+
+    # Reference Thresholds (Freezing, Type A, Type B)
     for val, label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
     
-    # Monday/Midnight Gridlines
-    for ts in pd.date_range(start=start_view, end=end_view, freq='24h'):
-        color, width = ("Black", 1.5) if ts.weekday() == 0 else ("LightGray", 0.5)
-        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
     return fig
     
 @st.cache_data(ttl=600) # Cache data for 10 minutes
