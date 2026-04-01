@@ -11,7 +11,7 @@ import pytz
 #########################
 ACTIVE_PROJECT = "2329" 
 
-st.set_page_config(page_title=f"Project {ACTIVE_PROJECT} Dashboard", layout="wide")
+st.set_page_config(page_title=f"Project {ACTIVE_PROJECT} Dashboard", layout = "wide")
 
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
@@ -144,14 +144,14 @@ else:
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
                 
-                # --- TEMP X-AXIS GRID (DARKENED 5-DEGREE MINORS) ---
+                # --- TEMP X-AXIS GRID (LIGHT GREY 5-DEGREE MINORS) ---
                 fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, 
-                                   gridcolor='#222222', gridwidth=1.3, mirror=True, showline=True, linecolor='black')
+                                   gridcolor='LightGray', gridwidth=0.5, mirror=True, showline=True, linecolor='black')
                 # 20-degree Major lines
                 for x_v in range(-20, 81, 20):
-                    fig_d.add_vline(x=x_v, line_width=2.5, line_color="Black")
+                    fig_d.add_vline(x=x_v, line_width=2.0, line_color="Black")
 
-                # --- DEPTH Y-AXIS GRID (LIGHTER/STANDARD 10-FOOT MINORS) ---
+                # --- DEPTH Y-AXIS GRID (STANDARD 10-FOOT MINORS) ---
                 fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, 
                                    gridcolor='LightGray', gridwidth=0.7, mirror=True, showline=True, linecolor='black')
 
