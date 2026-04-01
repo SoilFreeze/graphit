@@ -889,36 +889,51 @@ elif service == "🛠️ Admin Tools":
     
     tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
 
-    # 1. DEEP DATA SCRUB (Updated for NodeNum)
-    with tab_scrub:
-        st.subheader("🧹 Deep Data Scrub")
-        scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
-        
-        # Mapping based on your BigQuery screenshot
-        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-        # Both tables now use NodeNum based on your schema
-        id_col = "NodeNum" 
+###########################
+# --- DEEP DATA SCRUB --- #
+###########################
+with tab_scrub:
+    st.subheader("🧹 Deep Data Scrub & Purge")
+    st.info("This will dedup data to hourly intervals AND permanently delete any points you marked 'FALSE' with the Lasso tool.")
+    
+    scrub_target = st.radio("Select Source Table to Purge", ["SensorPush", "Lord"], horizontal=True)
+    
+    # Mapping based on your schema
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+    id_col = "NodeNum" 
 
-        if st.button(f"🚀 Execute 1-Hour Scrub on {scrub_target}"):
-            with st.spinner(f"Cleaning {scrub_target}..."):
-                dedup_sql = f"""
-                CREATE OR REPLACE TABLE `{target_table}` AS 
-                SELECT * EXCEPT(rn) FROM (
-                    SELECT *, 
-                           ROW_NUMBER() OVER(
-                               PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                               ORDER BY timestamp DESC
-                           ) as rn
-                    FROM `{target_table}` 
-                    WHERE temperature IS NOT NULL
-                ) WHERE rn = 1
-                """
-                try:
-                    client.query(dedup_sql).result()
-                    st.success(f"Success! {target_table} now has one record per hour.")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Scrub Error: {e}")
+    if st.button(f"🚀 Execute Physical Purge on {scrub_target}"):
+        with st.spinner(f"Purging and deduping {scrub_target}..."):
+            # This SQL:
+            # 1. Filters out any rows where approve is 'FALSE' (case-insensitive)
+            # 2. Dedups the remaining rows to 1-hour intervals
+            scrub_sql = f"""
+            CREATE OR REPLACE TABLE `{target_table}` AS 
+            SELECT * EXCEPT(rn) FROM (
+                SELECT *, 
+                       ROW_NUMBER() OVER(
+                           PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                           ORDER BY timestamp DESC
+                       ) as rn
+                FROM `{target_table}` 
+                WHERE (approve IS NULL OR (UPPER(approve) != 'FALSE'))
+                AND temperature IS NOT NULL
+            ) WHERE rn = 1
+            """
+            
+            # Also clean the MASTER_TABLE of false points
+            clean_master_sql = f"DELETE FROM `{MASTER_TABLE}` WHERE UPPER(approve) = 'FALSE'"
+            
+            try:
+                # 1. Scrub the Raw Table
+                client.query(scrub_sql).result()
+                # 2. Purge the Master Table
+                client.query(clean_master_sql).result()
+                
+                st.success(f"Success! {target_table} and Master Table have been purged of 'FALSE' points and deduped.")
+                st.cache_data.clear()
+            except Exception as e:
+                st.error(f"Scrub Error: {e}")
 
     with tab_approve:
         st.subheader("✅ Bulk Approval")
