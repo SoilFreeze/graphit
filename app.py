@@ -35,12 +35,35 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     - 3-tier Grid Hierarchy
     - 6-Hour Gap Detection (Breaks the line)
     - Red 'Now' Line
-    - ZERO-VALUE FILTER: Prevents vertical lines dropping to 0
+    - CLEANED LEGENDS: Removes (6226...) strings
+    - HOVER FORMATTING: 1 decimal place
     """
-    if df.empty: 
-        return go.Figure()
+    if df.empty: return go.Figure()
 
     plot_df = df.copy()
+
+    # --- 0. NEW: CLEAN LABELING LOGIC ---
+    # This logic ensures the legend ONLY shows "12.0ft" or "Bank 1"
+    def get_clean_label(r):
+        bank = str(r.get('Bank', '')).strip().lower()
+        depth = str(r.get('Depth', '')).strip()
+        
+        if bank not in ["", "none", "nan", "null"]:
+            return f"Bank {r['Bank']}"
+        return f"{depth}ft" if "ft" not in depth.lower() else depth
+
+    plot_df['label'] = plot_df.apply(get_clean_label, axis=1)
+    
+    # Unit Conversion
+    if unit_mode == "Celsius":
+        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
+        y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
+        dt_major, dt_minor = 10, 2 
+    else:
+        y_range = [-20, 80]
+        dt_major, dt_minor = 20, 5
+    
+    fig = go.Figure()
 
     # --- NEW: VERTICAL LINE FIX ---
     # Convert exactly 0.0 to None so Plotly breaks the line instead of diving to 0
@@ -973,8 +996,6 @@ elif service == "🛠️ Admin Tools":
 ###########################
 # --- ADMIN TOOLS REVISED --- #
 ###########################
-
-
 with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
         scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
