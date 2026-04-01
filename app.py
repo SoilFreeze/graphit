@@ -44,7 +44,43 @@ def get_bq_client():
         return None
 
 client = get_bq_client()
+###########################
+# --- GLOBAL MEMORY --- #
+###########################
 
+# 1. Executive Summary Cache (Global Overview)
+if "summary_df" not in st.session_state:
+    with st.spinner("📡 Syncing Global Command Center..."):
+        # Fetch only the LATEST reading for every node in the entire system
+        summary_q = f"SELECT * FROM `{MASTER_TABLE}` QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
+        st.session_state.summary_df = client.query(summary_q).to_dataframe()
+
+# 2. Project Detail Cache (High-Resolution History)
+if "master_df" not in st.session_state:
+    st.session_state.master_df = pd.DataFrame()
+    st.session_state.current_project = None
+
+# Logic to refresh project data ONLY if project selection changes
+if selected_project and st.session_state.current_project != selected_project:
+    with st.spinner(f"⚡ Loading High-Speed Cache for {selected_project}..."):
+        query = f"""
+            SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve, Project
+            FROM `{MASTER_TABLE}`
+            WHERE Project = '{selected_project}'
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+            ORDER BY timestamp ASC
+        """
+        df = client.query(query).to_dataframe()
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
+            df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
+            df['is_approved'] = df['approve'].astype(str).str.upper().str.strip() == 'TRUE'
+            st.session_state.master_df = df
+            st.session_state.current_project = selected_project
+
+# Map Local References
+summary_df = st.session_state.summary_df
+master_df = st.session_state.master_df
 #########################
 # --- REBUILD TABLE --- #
 #########################
@@ -430,118 +466,41 @@ approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty
 # --- Executive Summary --- #
 #############################
 if service == "🏠 Executive Summary":
-    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+    st.header("🏠 Executive Summary: Global Overview")
     
-    # 1. SORTING & CONTROLS
-    st.write("### ↕️ Sorting & View Options")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        sort_choice = st.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"])
-    with c2:
-        sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
-    
-    # 2. DATA QUERY
-    summary_q = f"SELECT * FROM `{MASTER_TABLE}`"
-    if selected_project: 
-        summary_q += f" WHERE Project = '{selected_project}'"
-    summary_q += " QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
-    
-    try:
-        with st.spinner("Syncing Command Center..."):
-            raw_data = client.query(summary_q).to_dataframe()
+    # 1. Filter the cached summary if a project is selected in sidebar
+    display_summary = summary_df.copy()
+    if selected_project:
+        display_summary = display_summary[display_summary['Project'] == selected_project]
+
+    # 2. UI Controls (Sorting/Filtering)
+    c1, c2 = st.columns(2)
+    sort_choice = c1.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"])
+    sort_order = c2.radio("Order", ["Descending", "Ascending"], horizontal=True)
+
+    # 3. Data Processing (In-Memory)
+    now = pd.Timestamp.now(tz=pytz.UTC)
+    rows = []
+    for _, row in display_summary.iterrows():
+        ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
+        hrs_ago = int((now - ts).total_seconds() / 3600)
+        status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
         
-        if raw_data.empty:
-            st.warning("📡 No sensors found.")
-        else:
-            summary_rows = []
-            now = pd.Timestamp.now(tz=pytz.UTC)
-            
-            for _, row in raw_data.iterrows():
-                node_id = row['NodeNum']
-                ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-                hrs_ago = int((now - ts).total_seconds() / 3600)
-                
-                # Fetch 24H Metrics
-                metrics_q = f"""
-                    SELECT 
-                        MIN(temperature) as min_24, 
-                        MAX(temperature) as max_24,
-                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' ORDER BY timestamp DESC LIMIT 1) - 
-                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as delta_24
-                    FROM `{MASTER_TABLE}` 
-                    WHERE NodeNum = '{node_id}' 
-                    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-                """
-                m_res = client.query(metrics_q).to_dataframe()
-                min_val = m_res['min_24'].iloc[0] if not m_res.empty else None
-                max_val = m_res['max_24'].iloc[0] if not m_res.empty else None
-                raw_delta = m_res['delta_24'].iloc[0] if not m_res.empty else None
+        rows.append({
+            "Project": row['Project'],
+            "Node": row['NodeNum'],
+            "Location": row['Location'],
+            "Position": f"Bank {row['Bank']}" if pd.notnull(row['Bank']) and str(row['Bank']).strip() != "" else f"{row['Depth']} ft",
+            "Temp": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
+            "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}",
+            "hrs": hrs_ago
+        })
+    
+    final_df = pd.DataFrame(rows)
+    if sort_choice == "Hours Since Last Seen":
+        final_df = final_df.sort_values("hrs", ascending=(sort_order == "Ascending"))
 
-                # Status and Delta logic (No color if >24h)
-                if hrs_ago > 24:
-                    status_icon, delta_text, delta_style = "🔴", "-", None
-                else:
-                    status_icon = "🟠" if hrs_ago > 12 else ("🟡" if hrs_ago > 6 else "🟢")
-                    delta_text = f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F"
-                    delta_style = raw_delta
-
-                pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
-
-                summary_rows.append({
-                    "Project": row['Project'],
-                    "Node": node_id,
-                    "Pipe/Bank": row['Location'],
-                    "Pos/Depth": pos_display,
-                    "Min": f"{round(convert_val(min_val), 1)}°F" if pd.notnull(min_val) else "N/A",
-                    "Max": f"{round(convert_val(max_val), 1)}°F" if pd.notnull(max_val) else "N/A",
-                    "Delta_Val": delta_style, 
-                    "Delta": delta_text,
-                    "Hours_Ago": hrs_ago,
-                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}hr) {status_icon}"
-                })
-
-            summary_df = pd.DataFrame(summary_rows)
-
-            # 3. APPLY SORTING
-            asc = (sort_order == "Ascending")
-            if sort_choice == "Hours Since Last Seen":
-                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=asc)
-            elif sort_choice == "Delta Magnitude":
-                summary_df['abs_d'] = summary_df['Delta_Val'].abs().fillna(-1)
-                summary_df = summary_df.sort_values(by="abs_d", ascending=asc).drop(columns=['abs_d'])
-
-            # 4. PAGINATION (100 per page)
-            batch_size = 100
-            total_pages = max((len(summary_df) // batch_size) + 1, 1)
-            page = st.number_input("Page", 1, total_pages, 1)
-            display_batch = summary_df.iloc[(page-1)*batch_size : page*batch_size]
-
-            # 5. STYLING
-            def style_delta(val):
-                if val is None: return ""
-                bg, color = "", "black"
-                if val >= 5: bg, color = "#FF0000", "white"
-                elif val >= 2: bg = "#FFA500"
-                elif val >= 0.5: bg = "#FFFF00"
-                elif -0.5 <= val <= 0.5: bg, color = "#008000", "white"
-                elif -2 < val < -0.5: bg = "#ADD8E6"
-                elif -5 < val <= -2: bg, color = "#4169E1", "white"
-                elif val <= -5: bg, color = "#00008B", "white"
-                return f'background-color: {bg}; color: {color}'
-
-            st.subheader(f"📡 Engineering Command Center ({len(summary_df)} sensors)")
-            
-            # Use st.dataframe with hide_index=True to remove the left column
-            st.dataframe(
-            display_batch[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
-                lambda x: [style_delta(rv) for rv in display_batch['Delta_Val']], axis=0, subset=['Delta']
-            ),
-            use_container_width=True,
-            hide_index=True,
-            height=600
-        )
-    except Exception as e: 
-        st.error(f"Summary Error: {traceback.format_exc()}")
+    st.dataframe(final_df[["Project", "Node", "Location", "Position", "Temp", "Last Seen"]], use_container_width=True, hide_index=True)
 #################################
 # --- END EXECUTIVE SUMMARY --- #
 #################################
@@ -620,116 +579,52 @@ elif service == "📉 Node Diagnostics":
     if not selected_project:
         st.warning("Please select a project in the sidebar.")
     elif master_df.empty:
-        st.warning(f"No data available in the Master Cache for {selected_project}.")
+        st.info("Loading project details...")
     else:
-        st.header(f"📉 Diagnostics: {selected_project} (Full Raw View)")
+        st.header(f"📉 Diagnostics: {selected_project}")
         
-        # 1. CONTROLS
+        # 1. Controls (Pulls instantly from cached master_df)
         loc_options = sorted(master_df['Location'].dropna().unique())
         c1, c2 = st.columns([2, 1])
-        sel_loc = c1.selectbox("Select Pipe / Bank to Analyze", loc_options)
-        weeks_diag = c2.slider("Lookback (Weeks)", 1, 12, 6, key="diag_slider")
+        sel_loc = c1.selectbox("Select Pipe / Bank", loc_options)
+        weeks_diag = c2.slider("Lookback (Weeks)", 1, 12, 6)
 
-        # 2. TIME CALCULATIONS
         now = pd.Timestamp.now(tz=pytz.UTC)
         end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=weeks_diag)
 
-        # 3. FILTER DATA
+        # 2. Filter Memory (Instant)
         diag_data = master_df[(master_df['Location'] == sel_loc) & (master_df['timestamp'] >= start_view)]
         
-        if diag_data.empty:
-            st.info("No data found for this location in the selected timeframe.")
-        else:
-            # --- SECTION 1: TIMELINE ---
-            st.subheader(f"📈 Raw Timeline: {sel_loc}")
-            st.plotly_chart(build_standard_sf_graph(diag_data, sel_loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"diag_t_{sel_loc}")
+        # 3. Timeline Analysis
+        st.subheader(f"📈 Raw Timeline: {sel_loc}")
+        st.plotly_chart(build_standard_sf_graph(diag_data, sel_loc, start_view, end_view, active_refs, unit_mode, unit_label), use_container_width=True, key=f"d_t_{sel_loc}")
 
-            st.divider()
-
-            # --- SECTION 2: DEPTH PROFILE (RESTORED) ---
-            st.subheader("📏 Depth Profile Analysis")
-            depth_diag = diag_data.dropna(subset=['Depth_Num', 'NodeNum']).copy()
+        # 4. Depth Profile Snapshots
+        st.divider()
+        st.subheader("📏 Depth Profile Snapshots")
+        depth_diag = diag_data.dropna(subset=['Depth_Num']).copy()
+        if not depth_diag.empty:
+            fig_d = go.Figure()
+            mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
+            for target_ts in [m.replace(hour=6) for m in mondays]:
+                window = depth_diag[(depth_diag['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (depth_diag['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                if not window.empty:
+                    snaps = [window[window['NodeNum']==n].sort_values(by='timestamp', key=lambda x: (x-target_ts).abs()).iloc[0] for n in window['NodeNum'].unique()]
+                    snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
+                    fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
             
-            if depth_diag.empty:
-                st.info("No depth-based sensors found for this location.")
-            else:
-                fig_d = go.Figure()
-                mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
-                
-                for target_ts in [m.replace(hour=6, minute=0, second=0) for m in mondays]:
-                    # Find readings within +/- 24h of Monday 6am
-                    window = depth_diag[(depth_diag['timestamp'] >= target_ts - pd.Timedelta(days=1)) & 
-                                        (depth_diag['timestamp'] <= target_ts + pd.Timedelta(days=1))]
-                    if not window.empty:
-                        snaps = []
-                        for node in window['NodeNum'].unique():
-                            ndf = window[window['NodeNum'] == node].copy()
-                            ndf['diff'] = (ndf['timestamp'] - target_ts).abs()
-                            snaps.append(ndf.sort_values('diff').iloc[0])
-                        
-                        snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
-                        fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
-
-                y_limit = int(((depth_diag['Depth_Num'].max() // 5) + 1) * 5)
-                fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
-                for x_v in range(-20, 81, 20): fig_d.add_vline(x=x_v, line_width=2.0, line_color="Black")
-                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray')
-                fig_d.update_layout(plot_bgcolor='white', height=700)
-                st.plotly_chart(fig_d, use_container_width=True, key=f"diag_d_{sel_loc}")
-
-            st.divider()
-
-            # --- SECTION 3: ENGINEERING SUMMARY TABLE (RESTORED) ---
-            st.subheader(f"📋 Engineering Summary: {sel_loc}")
-            
-            # Latest reading per node for this location
-            summary_df = diag_data.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-            
-            summary_rows = []
-            for _, row in summary_df.iterrows():
-                node_id = row['NodeNum']
-                # Get 24H window from the master_df for metrics
-                node_24h = master_df[(master_df['NodeNum'] == node_id) & 
-                                     (master_df['timestamp'] >= now - pd.Timedelta(hours=24))]
-                
-                if not node_24h.empty:
-                    min_24 = node_24h['temperature'].min()
-                    max_24 = node_24h['temperature'].max()
-                    delta_24 = node_24h['temperature'].iloc[-1] - node_24h['temperature'].iloc[0]
-                else:
-                    min_24, max_24, delta_24 = None, None, None
-
-                hrs_ago = int((now - row['timestamp']).total_seconds() / 3600)
-                status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-                pos_display = f"Bank {row['Bank']}" if pd.notnull(row['Bank']) and str(row['Bank']).strip() != "" else f"{row['Depth']} ft"
-
-                summary_rows.append({
-                    "Node": node_id,
-                    "Pos/Depth": pos_display,
-                    "Min (24h)": f"{round(convert_val(min_24), 1)}{unit_label}" if pd.notnull(min_24) else "N/A",
-                    "Max (24h)": f"{round(convert_val(max_24), 1)}{unit_label}" if pd.notnull(max_24) else "N/A",
-                    "Delta (24h)": f"{round(delta_24, 1)}°F" if pd.notnull(delta_24) else "0.0°F",
-                    "Delta_Val": delta_24,
-                    "Last Seen": f"{row['timestamp'].strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
-                })
-            
-            final_summary = pd.DataFrame(summary_rows)
-            
-            def style_delta(val):
-                if val is None: return ""
-                bg, color = "", "black"
-                if val >= 2: bg, color = "#FF0000", "white"
-                elif -0.5 <= val <= 0.5: bg, color = "#008000", "white"
-                elif val <= -2: bg, color = "#00008B", "white"
-                return f'background-color: {bg}; color: {color}'
-
-            st.dataframe(
-                final_summary[["Node", "Pos/Depth", "Min (24h)", "Max (24h)", "Delta (24h)", "Last Seen"]].style.apply(
-                    lambda x: [style_delta(rv) for rv in final_summary['Delta_Val']], axis=0, subset=['Delta (24h)']
-                ),
-                use_container_width=True, hide_index=True
-            )
+            y_limit = int(((depth_diag['Depth_Num'].max() // 5) + 1) * 5)
+            fig_d.update_xaxes(title=f"Temp ({unit_label})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
+            fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray')
+            fig_d.update_layout(plot_bgcolor='white', height=600)
+            st.plotly_chart(fig_d, use_container_width=True, key=f"d_d_{sel_loc}")
+        
+        # 5. Diagnostic Table
+        st.divider()
+        st.subheader("📋 Engineering Summary")
+        summary_df = diag_data.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+        st.dataframe(summary_df[['timestamp', 'NodeNum', 'Depth', 'temperature', 'is_approved']], use_container_width=True, hide_index=True)
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
