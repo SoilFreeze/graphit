@@ -943,80 +943,99 @@ elif service == "🛠️ Admin Tools":
 # --- SURGICAL CLEANER --- #
 ###########################
 with tab_cleaner:
-    st.subheader("🧨 Surgical Data Cleaner: Box Selection")
-    st.info("Use the **Box Select** or **Lasso Select** tool on the top right of the graph to highlight specific points for deletion.")
+    st.subheader("🧨 Surgical Data Cleaner: Precision Drill-Down")
+    st.info("1. Set your date range. 2. Use the **Box Select** tool on the graph. 3. Click Delete.")
     
-    # 1. FETCH METADATA
+    # 1. FETCH METADATA FOR DROPDOWNS
     meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="box_proj")
+        sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="drill_proj")
     with c2:
         pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
-        sel_pipe = st.selectbox("Pipe / Location", pipes, key="box_pipe")
+        sel_pipe = st.selectbox("Pipe / Location", pipes, key="drill_pipe")
     with c3:
         nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique()) if sel_pipe != "ALL" else ["ALL"]
-        sel_node = st.selectbox("Node ID", nodes, key="box_node")
+        sel_node = st.selectbox("Node ID", nodes, key="drill_node")
 
-    # 2. PREVIEW DATA
+    st.divider()
+
+    # 2. DRILL-DOWN DATE SLIDERS
+    st.write("### 📅 Set Deletion Window")
+    max_days = 84  # Matching your universal portal data limit
+    
+    # Using a range slider for start and end
+    start_date, end_date = st.slider(
+        "Select Date Range (Days Ago)",
+        value=(7, 0), # Default to last 7 days
+        min_value=0,
+        max_value=max_days,
+        format="%d days ago"
+    )
+
+    # Convert slider values to timestamps
+    # Note: 0 days ago = now
+    cutoff_start = datetime.now(pytz.UTC) - timedelta(days=start_date)
+    cutoff_end = datetime.now(pytz.UTC) - timedelta(days=end_date)
+
+    # 3. PREVIEW DATA BASED ON DRILL-DOWN
+    # We fetch based on the larger range first
     preview_q = f"""
         SELECT timestamp, temperature, NodeNum, Location 
         FROM `{MASTER_TABLE}` 
         WHERE Project = '{sel_proj}' 
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+        AND timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {start_date} DAY) 
+                          AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {end_date} DAY)
     """
     p_df = client.query(preview_q).to_dataframe()
 
     if not p_df.empty:
+        # Apply Pipe/Node filters
         if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
         if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
 
-        # 3. INTERACTIVE GRAPH
-        fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
-                         title="Drag a box over points to select them",
-                         template="plotly_white", height=500)
-        
-        # Force the box select tool to be active by default
-        fig.update_layout(dragmode='select') 
-
-        # Capture selection events
-        selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
-
-        # 4. PROCESSING THE SELECTION
-        if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
-            # Extract data from the selected points
-            points_data = selected_points["selection"]["points"]
-            st.write(f"✅ {len(points_data)} points selected.")
+        if not p_df.empty:
+            # 4. INTERACTIVE BOX SELECTION GRAPH
+            fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
+                             title=f"Viewing: {cutoff_start.strftime('%m/%d')} to {cutoff_end.strftime('%m/%d')}",
+                             template="plotly_white", height=600)
             
-            # Create a summary of what is about to be deleted
-            del_summary = pd.DataFrame(points_data)
-            
-            if st.button("🔥 DELETE SELECTED POINTS"):
-                with st.spinner("Executing surgical strike..."):
-                    for pt in points_data:
-                        # BigQuery timestamp strings need careful formatting
-                        ts_val = pt['x']
-                        node_val = pt['customdata'] if 'customdata' in pt else p_df.iloc[pt['point_index']]['NodeNum']
-                        
-                        # Delete from all relevant tables
-                        for table in [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                                      f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
-                                      MASTER_TABLE]:
-                            del_sql = f"""
-                                DELETE FROM `{table}` 
-                                WHERE NodeNum = '{node_val}' 
-                                AND timestamp = '{ts_val}'
-                            """
-                            client.query(del_sql).result()
+            fig.update_layout(dragmode='select', hovermode='closest')
+            fig.update_traces(marker=dict(size=8))
+
+            # Capture the box selection
+            selected_points = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+
+            # 5. EXECUTION LOGIC
+            if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
+                selection_list = selected_points["selection"]["points"]
+                st.success(f"📍 {len(selection_list)} points highlighted for deletion.")
                 
-                st.success("Selected points removed from database.")
-                st.cache_data.clear()
-                st.rerun()
+                if st.button("🔥 PERMANENTLY DELETE HIGHLIGHTED POINTS"):
+                    with st.spinner("Deleting..."):
+                        for pt in selection_list:
+                            # Using the specific timestamp and NodeNum from each selected point
+                            ts_val = pt['x']
+                            node_val = p_df.iloc[pt['point_index']]['NodeNum']
+                            
+                            # Clean from all 3 tables
+                            for table in [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                                          f"{PROJECT_ID}.{DATASET_ID}.raw_lord", 
+                                          MASTER_TABLE]:
+                                # Both raw tables and master table now confirmed to use NodeNum
+                                del_sql = f"DELETE FROM `{table}` WHERE NodeNum = '{node_val}' AND timestamp = '{ts_val}'"
+                                client.query(del_sql).result()
+                    
+                    st.success("Points successfully removed.")
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
+                st.warning("Please use the Box Select tool on the graph to choose points to delete.")
         else:
-            st.warning("No points selected. Use the box tool on the graph above.")
+            st.info("No data found for this specific selection within the date range.")
     else:
-        st.info("No data found for this selection in the last 7 days.")
+        st.info(f"No data found for {sel_proj} between {start_date} and {end_date} days ago.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
