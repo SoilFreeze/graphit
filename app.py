@@ -284,6 +284,33 @@ if "sensorpush_creds" in st.secrets:
     st.write("Available accounts:", list(st.secrets["sensorpush_creds"].keys()))
 else:
     st.error("The main key 'sensorpush_creds' is totally missing.")
+
+import streamlit as st
+
+def get_api_data():
+    # 1. Check if the root key exists
+    if "sensorpush_creds" not in st.secrets:
+        st.error("Missing [sensorpush_creds] section in secrets.")
+        return
+
+    # 2. Get the credentials dictionary
+    creds = st.secrets["sensorpush_creds"]
+
+    # 3. Access specific account data safely
+    try:
+        # Note: We access it like a dictionary: [parent][child][field]
+        acc1_email = creds["account1"]["email"]
+        acc1_pass = creds["account1"]["password"]
+        
+        st.success(f"Successfully retrieved credentials for {acc1_email}")
+        return acc1_email, acc1_pass
+        
+    except (KeyError, TypeError) as e:
+        st.error(f"Structure Error: The app found {type(creds)} but expected a dictionary.")
+        st.info("Current keys found: " + str(list(creds.keys())))
+
+# Run the check
+get_api_data()
 ############################
 # --- Graph --- #
 ############################
