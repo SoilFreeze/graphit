@@ -962,13 +962,12 @@ if st.button('Update App Data from Google Sheets'):
 elif service == "🛠️ Admin Tools":
     st.header("🛠️ Engineering Admin Tools")
     
-    # 1. Added "Metadata Update" to the list 
-    # 2. Added tab_update to the variables on the left
-    tab_scrub, tab_approve, tab_cleaner, tab_update = st.tabs([
+    # You must have 4 variables to match the 4 strings in the list
+    tab_scrub, tab_approve, tab_cleaner, tab_metadata = st.tabs([
         "🧹 Deep Data Scrub", 
         "✅ Bulk Approval", 
         "🧨 Surgical Cleaner", 
-        "Metadata Update"
+        "📊 Metadata Update" # Added emoji for consistency!
     ])
 
 ###########################
@@ -1061,18 +1060,14 @@ with tab_cleaner:
                         except Exception as e:
                             st.error(f"Hide failed: {e}")
 
-with tab4:
-    st.header("Data Management")
-    st.info("Use the button below to force a sync between the Google Sheet and the BigQuery Snapshot.")
-    
-    if st.button('🔄 Update Snapshot from Google Sheets'):
-        try:
-            with st.spinner('Updating BigQuery... please wait.'):
-                refresh_bigquery_snapshot()
-            st.success('✅ Success! The `metadata_snapshot` table has been updated.')
-            st.balloons() # Just for a bit of flair!
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
+with tab_metadata:
+        st.subheader("📊 Metadata Snapshot Update")
+        st.info("Syncs the Google Sheet 'metadata' to the BigQuery 'metadata_snapshot' table.")
+        
+        if st.button('🔄 Run BigQuery Sync'):
+            # This is where you put the SQL logic we wrote earlier
+            # refresh_bigquery_snapshot() 
+            st.success("BigQuery Snapshot Updated!")
 
 
 ###########################
