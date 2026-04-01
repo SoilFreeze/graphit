@@ -43,8 +43,9 @@ def get_bq_client():
 client = get_bq_client()
 
 ###########################
-# --- 2. GLOBAL MEMORY --- #
+# --- GLOBAL MEMORY --- #
 ###########################
+# 1. Initialize all Session State keys (Crucial to prevent KeyErrors)
 if "master_df" not in st.session_state:
     st.session_state.master_df = pd.DataFrame()
     st.session_state.summary_df = pd.DataFrame()
@@ -52,103 +53,108 @@ if "master_df" not in st.session_state:
     st.session_state.last_refresh = None
 
 ###########################
-# --- 3. HELPER FUNCS --- #
+# --- GLOBAL MEMORY --- #
 ###########################
-def convert_val(f_val, unit_mode):
-    if f_val is None: return None
-    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
 
-def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
-    try:
-        display_df = df.copy()
-        if display_df.empty: return go.Figure()
-        display_df.columns = [c.lower() for c in display_df.columns]
-        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        if display_df['timestamp'].dt.tz is None:
-            display_df['timestamp'] = display_df['timestamp'].dt.tz_localize(pytz.UTC)
-        else:
-            display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC)
-
-        if unit_mode == "Celsius":
-            display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
-            y_range = [-30, 30]
-            dt_minor = 2
-        else:
-            y_range = [-20, 80]
-            dt_minor = 5
-
-        def create_label(row):
-            b_val = str(row.get('bank', '')).strip().lower()
-            d_val = str(row.get('depth', '')).strip().lower()
-            s_name = str(row.get('nodenum', row.get('sensor_name', 'Unknown')))
-            if b_val not in ["", "none", "nan", "null"]: return f"Bank {row['bank']} ({s_name})"
-            if d_val not in ["", "none", "nan", "null"]: return f"{row['depth']}ft ({s_name})"
-            return f"Unmapped ({s_name})"
-
-        display_df['label'] = display_df.apply(create_label, axis=1)
-        
-        fig = go.Figure()
-        for lbl in sorted(display_df['label'].unique()):
-            s_df = display_df[display_df['label'] == lbl].sort_values('timestamp')
-            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 6.0
-            if gap_mask.any():
-                gaps = s_df[gap_mask].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] -= pd.Timedelta(seconds=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-            fig.add_trace(go.Scatter(x=s_df['timestamp'], y=s_df['temperature'], name=lbl, mode='lines', connectgaps=False))
-
-        fig.update_layout(title=f"{title}", plot_bgcolor='white', hovermode="x unified", height=600, margin=dict(r=150),
-                          legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02))
-        
-        grid_6h = pd.date_range(start=start_view, end=end_view, freq='6h')
-        for ts in grid_6h:
-            color, width = ("Black", 2) if (ts.weekday()==0 and ts.hour==0) else (("Gray", 1) if ts.hour==0 else ("LightGray", 0.5))
-            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
-        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, gridcolor='Gainsboro', dtick=dt_minor)
-        fig.update_xaxes(range=[start_view, end_view], mirror=True, showline=True, linecolor='black')
-
-        for val, label in active_refs:
-            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
-        return fig
-    except Exception as e:
-        st.error(f"Graph Error: {e}")
-        return go.Figure()
-
-###########################
-# --- 4. SIDEBAR UI --- #
-###########################
-st.sidebar.title("❄️ SoilFreeze Lab")
-service = st.sidebar.selectbox("📂 Select Page", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
-st.sidebar.divider()
-
-unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
-unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
-
-# Project Selection
-selected_project = None
-try:
-    proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
-    proj_df = client.query(proj_q).to_dataframe()
-    selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
-except:
-    st.sidebar.warning("No projects found.")
-
-st.sidebar.divider()
-active_refs = []
-if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))
-if st.sidebar.checkbox("Type A (10.2°F)", value=True): active_refs.append((10.2, "Type A"))
-
-if st.sidebar.button("🔄 Sync New Data Now", key="global_sync_btn"):
+# 1. Initialize all Session State keys (Crucial to prevent KeyErrors)
+if "master_df" not in st.session_state:
     st.session_state.master_df = pd.DataFrame()
     st.session_state.summary_df = pd.DataFrame()
     st.session_state.current_project = None
+    st.session_state.last_refresh = None
+
+# 2. Sidebar Setup & Refresh Button
+st.sidebar.title("❄️ SoilFreeze Lab")
+service = st.sidebar.selectbox("📂 Select Page", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+
+# Unit Conversion Logic (Global)
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+def convert_val(f_val):
+    if f_val is None: return None
+    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
+
+st.sidebar.divider()
+
+# 3. Project Selection (Required for Detail Sync)
+selected_project = None
+if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools", "🏠 Executive Summary"]:
+    try:
+        # We cache the project list itself for 1 hour to keep the sidebar snappy
+        @st.cache_data(ttl=3600)
+        def get_project_list():
+            proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
+            return client.query(proj_q).to_dataframe()
+        
+        proj_df = get_project_list()
+        selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
+    except Exception as e: 
+        st.sidebar.warning(f"No projects found: {e}")
+
+st.sidebar.divider()
+
+# 4. Manual Sync Button (Unique Key to prevent DuplicateElementId)
+if st.sidebar.button("🔄 Sync New Data Now", key="global_manual_sync_btn"):
+    st.session_state.master_df = pd.DataFrame()
+    st.session_state.summary_df = pd.DataFrame() # Forces reload of Executive Summary
+    st.session_state.current_project = None 
     st.rerun()
 
+##############################
+# --- 5. DATA SYNC LOGIC --- #
+##############################
+
+# A. Sync Global Summary (For Executive Summary Page)
+# If summary_df is empty, we MUST fetch it now
+if st.session_state.summary_df.empty:
+    with st.spinner("📡 Syncing Global Command Center..."):
+        try:
+            summary_q = f"SELECT * FROM `{MASTER_TABLE}` QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
+            st.session_state.summary_df = client.query(summary_q).to_dataframe()
+        except Exception as e:
+            st.error(f"Global Summary Fetch Failed: {e}")
+
+# B. Sync Project Detail History (Loads once per project selection)
+if selected_project and st.session_state.current_project != selected_project:
+    with st.spinner(f"⚡ Syncing {selected_project} History..."):
+        query = f"""
+            SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve, Project
+            FROM `{MASTER_TABLE}`
+            WHERE Project = '{selected_project}'
+            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+            ORDER BY timestamp ASC
+        """
+        try:
+            df = client.query(query).to_dataframe()
+            if not df.empty:
+                # Pre-processing into memory to save CPU time later
+                df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
+                df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
+                df['is_approved'] = df['approve'].astype(str).str.upper().str.strip() == 'TRUE'
+                
+                st.session_state.master_df = df
+                st.session_state.current_project = selected_project
+                st.session_state.last_refresh = datetime.now().strftime("%m/%d %H:%M")
+            else:
+                st.session_state.master_df = pd.DataFrame()
+        except Exception as e:
+            st.error(f"Project Detail Sync Failed: {e}")
+
+# Map Global References for the sections below
+summary_df = st.session_state.summary_df
+master_df = st.session_state.master_df
+approved_df = master_df[master_df['is_approved'] == True] if not master_df.empty else pd.DataFrame()
+
+if st.session_state.get("last_refresh"):
+    st.sidebar.caption(f"Last Project Sync: {st.session_state.last_refresh}")
+
+st.sidebar.divider()
+st.sidebar.write("### 📏 Reference Lines")
+active_refs = []
+if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True, key="ref_32"): active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True, key="ref_26"): active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True, key="ref_10"): active_refs.append((10.2, "Type A"))
 ##############################
 # --- 5. DATA SYNC ENGINE --- #
 ##############################
