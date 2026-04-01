@@ -397,6 +397,9 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 #############################
 # --- Executive Summary --- #
 #############################
+#############################
+# --- Executive Summary --- #
+#############################
 if service == "🏠 Executive Summary":
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
@@ -408,69 +411,71 @@ if service == "🏠 Executive Summary":
     with c2:
         sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
     
-    # 2. DATA QUERY
-    summary_q = f"SELECT * FROM `{MASTER_TABLE}`"
-    if selected_project: 
-        summary_q += f" WHERE Project = '{selected_project}'"
-    summary_q += " QUALIFY ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) = 1"
+    # 2. BATCH DATA QUERY (Optimized to 1 Query instead of N queries)
+    # Fetch all data for the last 24H for the entire project at once
+    summary_q = f"""
+        WITH RecentData AS (
+            SELECT *,
+                FIRST_VALUE(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp ASC) as first_temp_24h,
+                ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) as latest_rank
+            FROM `{MASTER_TABLE}`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            {"AND Project = '" + selected_project + "'" if selected_project else ""}
+        )
+        SELECT 
+            NodeNum, Project, Location, Bank, Depth, timestamp, temperature,
+            first_temp_24h,
+            MIN(temperature) OVER(PARTITION BY NodeNum) as min_24h,
+            MAX(temperature) OVER(PARTITION BY NodeNum) as max_24h
+        FROM RecentData
+        WHERE latest_rank = 1
+    """
     
     try:
-        with st.spinner("Syncing Command Center..."):
-            raw_data = client.query(summary_q).to_dataframe()
+        with st.spinner("⚡ Syncing Command Center (Batch Processing)..."):
+            raw_summary_df = client.query(summary_q).to_dataframe()
         
-        if raw_data.empty:
-            st.warning("📡 No sensors found.")
+        if raw_summary_df.empty:
+            st.warning("📡 No active sensors seen in the last 24 hours.")
         else:
-            summary_rows = []
             now = pd.Timestamp.now(tz=pytz.UTC)
             
-            for _, row in raw_data.iterrows():
-                node_id = row['NodeNum']
+            # 3. PROCESSING LOGIC (Pandas is faster than SQL for these calculations)
+            def process_row(row):
+                # Time handling
                 ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
                 hrs_ago = int((now - ts).total_seconds() / 3600)
                 
-                # Fetch 24H Metrics
-                metrics_q = f"""
-                    SELECT 
-                        MIN(temperature) as min_24, 
-                        MAX(temperature) as max_24,
-                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' ORDER BY timestamp DESC LIMIT 1) - 
-                        (SELECT temperature FROM `{MASTER_TABLE}` WHERE NodeNum = '{node_id}' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) ORDER BY timestamp ASC LIMIT 1) as delta_24
-                    FROM `{MASTER_TABLE}` 
-                    WHERE NodeNum = '{node_id}' 
-                    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-                """
-                m_res = client.query(metrics_q).to_dataframe()
-                min_val = m_res['min_24'].iloc[0] if not m_res.empty else None
-                max_val = m_res['max_24'].iloc[0] if not m_res.empty else None
-                raw_delta = m_res['delta_24'].iloc[0] if not m_res.empty else None
-
-                # Status and Delta logic (No color if >24h)
+                # Delta Calculation
+                raw_delta = row['temperature'] - row['first_temp_24h']
+                
+                # Status Icon Logic
                 if hrs_ago > 24:
-                    status_icon, delta_text, delta_style = "🔴", "-", None
+                    status_icon, delta_text, delta_val = "🔴", "-", None
                 else:
-                    status_icon = "🟠" if hrs_ago > 12 else ("🟡" if hrs_ago > 6 else "🟢")
-                    delta_text = f"{round(raw_delta, 1)}°F" if pd.notnull(raw_delta) else "0.0°F"
-                    delta_style = raw_delta
+                    status_icon = "🟢" if hrs_ago < 6 else ("🟡" if hrs_ago < 12 else "🟠")
+                    delta_text = f"{round(raw_delta, 1)}°F"
+                    delta_val = raw_delta
 
-                pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
+                # Position Labeling
+                pos_label = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
 
-                summary_rows.append({
+                return pd.Series({
                     "Project": row['Project'],
-                    "Node": node_id,
+                    "Node": row['NodeNum'],
                     "Pipe/Bank": row['Location'],
-                    "Pos/Depth": pos_display,
-                    "Min": f"{round(convert_val(min_val), 1)}°F" if pd.notnull(min_val) else "N/A",
-                    "Max": f"{round(convert_val(max_val), 1)}°F" if pd.notnull(max_val) else "N/A",
-                    "Delta_Val": delta_style, 
+                    "Pos/Depth": pos_label,
+                    "Min": f"{round(convert_val(row['min_24h']), 1)}{unit_label}",
+                    "Max": f"{round(convert_val(row['max_24h']), 1)}{unit_label}",
+                    "Delta_Val": delta_val, 
                     "Delta": delta_text,
                     "Hours_Ago": hrs_ago,
-                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}hr) {status_icon}"
+                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
                 })
 
-            summary_df = pd.DataFrame(summary_rows)
+            summary_df = raw_summary_df.apply(process_row, axis=1)
 
-            # 3. APPLY SORTING
+            # 4. APPLY SORTING
             asc = (sort_order == "Ascending")
             if sort_choice == "Hours Since Last Seen":
                 summary_df = summary_df.sort_values(by="Hours_Ago", ascending=asc)
@@ -478,36 +483,31 @@ if service == "🏠 Executive Summary":
                 summary_df['abs_d'] = summary_df['Delta_Val'].abs().fillna(-1)
                 summary_df = summary_df.sort_values(by="abs_d", ascending=asc).drop(columns=['abs_d'])
 
-            # 4. PAGINATION (100 per page)
-            batch_size = 100
-            total_pages = max((len(summary_df) // batch_size) + 1, 1)
-            page = st.number_input("Page", 1, total_pages, 1)
-            display_batch = summary_df.iloc[(page-1)*batch_size : page*batch_size]
-
-            # 5. STYLING
+            # 5. STYLING FUNCTION
             def style_delta(val):
-                if val is None: return ""
+                if val is None or pd.isna(val): return ""
                 bg, color = "", "black"
-                if val >= 5: bg, color = "#FF0000", "white"
-                elif val >= 2: bg = "#FFA500"
-                elif val >= 0.5: bg = "#FFFF00"
-                elif -0.5 <= val <= 0.5: bg, color = "#008000", "white"
-                elif -2 < val < -0.5: bg = "#ADD8E6"
-                elif -5 < val <= -2: bg, color = "#4169E1", "white"
-                elif val <= -5: bg, color = "#00008B", "white"
+                if val >= 5: bg, color = "#FF0000", "white"     # Critical Heat
+                elif val >= 2: bg = "#FFA500"                   # Warning Heat
+                elif val >= 0.5: bg = "#FFFF00"                 # Slight Rise
+                elif -0.5 <= val <= 0.5: bg, color = "#008000", "white" # Stable
+                elif -2 < val < -0.5: bg = "#ADD8E6"            # Slight Cooling
+                elif -5 < val <= -2: bg, color = "#4169E1", "white" # Strong Cooling
+                elif val <= -5: bg, color = "#00008B", "white"  # Deep Freeze
                 return f'background-color: {bg}; color: {color}'
 
+            # 6. DISPLAY
             st.subheader(f"📡 Engineering Command Center ({len(summary_df)} sensors)")
             
-            # Use st.dataframe with hide_index=True to remove the left column
             st.dataframe(
-            display_batch[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
-                lambda x: [style_delta(rv) for rv in display_batch['Delta_Val']], axis=0, subset=['Delta']
-            ),
-            use_container_width=True,
-            hide_index=True,
-            height=600
-        )
+                summary_df[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
+                    lambda x: [style_delta(rv) for rv in summary_df['Delta_Val']], axis=0, subset=['Delta']
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=600
+            )
+            
     except Exception as e: 
         st.error(f"Summary Error: {traceback.format_exc()}")
 #################################
