@@ -918,6 +918,28 @@ elif service == "📤 Data Intake Lab":
                 client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
                                                  job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
                 st.success("Master Metadata Updated!")
+
+from google.cloud import bigquery
+
+def refresh_snapshot():
+    client = bigquery.Client()
+    
+    sql = """
+    CREATE OR REPLACE TABLE `your_project.your_dataset.metadata_snapshot` AS
+    SELECT * FROM `your_project.your_dataset.metadata`
+    """
+    
+    try:
+        query_job = client.query(sql)
+        query_job.result()  # Wait for the job to complete
+        return "Success! Snapshot updated."
+    except Exception as e:
+        return f"Error: {e}"
+
+# In your Streamlit UI
+if st.button('Update App Data from Google Sheets'):
+    result = refresh_snapshot()
+    st.success(result)
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
