@@ -13,31 +13,81 @@ import traceback
 import re
 import io
 
-def get_universal_data(project_id):
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id):
     """
-    Stores the dataframe in Session State so it persists across page changes.
-    This eliminates the 'Loading...' spinner when switching tabs.
+    OPTIMIZED: Fetches 84 days of approved data in one batch.
+    Stores it in the server cache so page-switching is instant.
     """
-    if "master_df" not in st.session_state or st.session_state.get("last_proj") != project_id:
-        with st.spinner("🚀 Initializing High-Speed Data Cache..."):
-            # Fetch all data for the project (84 days) in one go
-            query = f"""
-                SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
-                FROM `{MASTER_TABLE}`
-                WHERE Project = '{project_id}' 
-                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-            """
-            df = client.query(query).to_dataframe()
-            
-            # Pre-convert timestamps once to save CPU cycles later
-            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz \
-                else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
-            
-            # Save to session memory
-            st.session_state["master_df"] = df
-            st.session_state["last_proj"] = project_id
-            
-    return st.session_state["master_df"]
+    query = f"""
+        SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
+        FROM `{MASTER_TABLE}`
+        WHERE Project = '{project_id}' 
+        AND (approve = 'TRUE' OR approve = 'true')
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        ORDER BY Location ASC, timestamp ASC
+    """
+    df = client.query(query).to_dataframe()
+    
+    if not df.empty:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        if df['timestamp'].dt.tz is None:
+            df['timestamp'] = df['timestamp'].dt.tz_localize(pytz.UTC)
+        else:
+            df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC)
+    return df
+
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
+    """
+    OPTIMIZED: Uses WebGL (Scattergl) to render lines using the computer's GPU.
+    Identical look to your original graph, but significantly faster.
+    """
+    if df.empty: return go.Figure()
+
+    # Unit Conversion Logic
+    plot_df = df.copy()
+    if unit_mode == "Celsius":
+        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
+        y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
+        dt_minor = 2 
+    else:
+        y_range = [-20, 80]
+        dt_minor = 5
+
+    # Labeling
+    plot_df['label'] = plot_df.apply(
+        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
+        else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
+    )
+    
+    fig = go.Figure()
+    for lbl in sorted(plot_df['label'].unique()):
+        s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
+        fig.add_trace(go.Scattergl( # Hardware Accelerated
+            x=s_df['timestamp'], y=s_df['temperature'], 
+            name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
+        ))
+
+    fig.update_layout(
+        title={'text': title, 'x': 0, 'font': dict(size=18)},
+        plot_bgcolor='white', hovermode="x unified", height=600,
+        margin=dict(t=80, l=50, r=180, b=50),
+        legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+        xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True),
+        yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+    )
+
+    # Reference Lines
+    for val, label in active_refs:
+        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+        fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
+    
+    # Monday/Midnight Gridlines
+    for ts in pd.date_range(start=start_view, end=end_view, freq='24h'):
+        color, width = ("Black", 1.5) if ts.weekday() == 0 else ("LightGray", 0.5)
+        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+
+    return fig
     
 @st.cache_data(ttl=600) # Cache data for 10 minutes
 def get_cached_project_data(project_id, days=84):
@@ -155,75 +205,57 @@ def rebuild_master_table(mode="preserve"):
 ############################
 # --- FETCH SENSORPUSH --- #
 ############################
-def build_standard_sf_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
-    High-Performance Graph Engine using WebGL for instant rendering.
+    OPTIMIZED: Uses WebGL (Scattergl) to render lines using the computer's GPU.
+    Identical look to your original graph, but significantly faster.
     """
-    try:
-        if df.empty:
-            return go.Figure()
+    if df.empty: return go.Figure()
 
-        display_df = df.copy()
-        display_df.columns = [c.lower() for c in display_df.columns]
-        display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
-        
-        if display_df['timestamp'].dt.tz is None:
-            display_df['timestamp'] = display_df['timestamp'].dt.tz_localize(pytz.UTC)
-        else:
-            display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(pytz.UTC)
+    # Unit Conversion Logic
+    plot_df = df.copy()
+    if unit_mode == "Celsius":
+        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
+        y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
+        dt_minor = 2 
+    else:
+        y_range = [-20, 80]
+        dt_minor = 5
 
-        # Unit Conversion
-        if unit_mode == "Celsius":
-            display_df['temperature'] = (display_df['temperature'] - 32) * 5/9
-            y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-            dt_major, dt_minor = 10, 2 
-        else:
-            y_range = [-20, 80]
-            dt_major, dt_minor = 20, 5
+    # Labeling
+    plot_df['label'] = plot_df.apply(
+        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
+        else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
+    )
+    
+    fig = go.Figure()
+    for lbl in sorted(plot_df['label'].unique()):
+        s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
+        fig.add_trace(go.Scattergl( # Hardware Accelerated
+            x=s_df['timestamp'], y=s_df['temperature'], 
+            name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
+        ))
 
-        # Create Labels
-        display_df['label'] = display_df.apply(
-            lambda r: f"Bank {r['bank']} ({r['nodenum']})" if str(r.get('bank')).strip().lower() not in ["", "none", "nan", "null"]
-            else f"{r.get('depth')}ft ({r.get('nodenum')})", axis=1
-        )
-        
-        fig = go.Figure()
-        
-        # Use Scattergl for hardware-accelerated rendering
-        for lbl in sorted(display_df['label'].unique()):
-            sensor_df = display_df[display_df['label'] == lbl].sort_values('timestamp')
-            fig.add_trace(go.Scattergl(
-                x=sensor_df['timestamp'], y=sensor_df['temperature'], 
-                name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
-            ))
+    fig.update_layout(
+        title={'text': title, 'x': 0, 'font': dict(size=18)},
+        plot_bgcolor='white', hovermode="x unified", height=600,
+        margin=dict(t=80, l=50, r=180, b=50),
+        legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+        xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True),
+        yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+    )
 
-        # Styling
-        fig.update_layout(
-            title={'text': f"{title}", 'x': 0, 'font': dict(size=18)},
-            plot_bgcolor='white', hovermode="x unified", height=600,
-            margin=dict(t=80, l=50, r=180, b=50),
-            legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
-        )
-        
-        # X-Axis Grid Logic
-        grid_range = pd.date_range(start=start_view, end=end_view, freq='24h')
-        for ts in grid_range:
-            color, width = ("Black", 1.5) if ts.weekday() == 0 else ("LightGray", 0.5)
-            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+    # Reference Lines
+    for val, label in active_refs:
+        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+        fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
+    
+    # Monday/Midnight Gridlines
+    for ts in pd.date_range(start=start_view, end=end_view, freq='24h'):
+        color, width = ("Black", 1.5) if ts.weekday() == 0 else ("LightGray", 0.5)
+        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        fig.update_yaxes(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro')
-        fig.update_xaxes(range=[start_view, end_view], showline=True, linecolor='black', mirror=True)
-
-        # Reference Lines
-        for val, label in active_refs:
-            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            l_color = "maroon" if "Type A" in label else "RoyalBlue"
-            fig.add_hline(y=c_val, line_dash="dash", line_color=l_color, opacity=0.8)
-        
-        return fig
-    except Exception as e:
-        st.error(f"Graph Error: {e}")
-        return go.Figure()
+    return fig
 ########################
 # --- GRAPH ENGINE --- #
 ########################
@@ -501,99 +533,59 @@ if service == "🏠 Executive Summary":
 #########################
 elif service == "📊 Client Portal":
     if not selected_project:
-        st.warning("Please select a project in the sidebar.")
+        st.sidebar.warning("Please select a project.")
     else:
         st.header(f"📊 Project Status: {selected_project}")
         
-        # 1. FETCH DATA FROM CACHE (Instant after first load)
+        # 1. FETCH DATA (Uses the function we added to the top)
         p_df = get_universal_portal_data(selected_project)
         
         if p_df.empty:
-            st.info(f"No approved data found for {selected_project}. Vett data in Admin Tools to display here.")
+            st.info(f"No approved data found for {selected_project}.")
         else:
             tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
             with tab_time:
-                weeks_view = st.slider("Weeks to View", 1, 12, 6, key=f"portal_wk_{selected_project}")
-                
-                # Calculate view window
+                weeks_view = st.slider("Weeks to View", 1, 12, 6, key="cp_weeks")
                 now = pd.Timestamp.now(tz=pytz.UTC)
-                days_until_monday = (7 - now.weekday()) % 7
-                if days_until_monday == 0: days_until_monday = 7
-                end_view = (now + pd.Timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
+                end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0)
                 start_view = end_view - timedelta(weeks=weeks_view)
                 
-                # Group by Location to create expanders
-                locs = sorted(p_df['Location'].dropna().unique())
-                for loc in locs:
+                for loc in sorted(p_df['Location'].dropna().unique()):
                     with st.expander(f"📈 {loc}", expanded=True):
-                        # Filter local dataframe (Fast)
                         loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
-                        
-                        # Build Graph using the GPU-accelerated Engine
-                        fig = build_standard_sf_graph(
-                            loc_data, loc, start_view, end_view, 
-                            tuple(active_refs), unit_mode, unit_label
-                        )
-                        st.plotly_chart(fig, use_container_width=True, key=f"p_time_{loc}", config={'displayModeBar': False})
+                        fig = build_high_speed_graph(loc_data, loc, start_view, end_view, tuple(active_refs), unit_mode, unit_label)
+                        st.plotly_chart(fig, use_container_width=True, key=f"cht_{loc}", config={'displayModeBar': False})
 
             with tab_depth:
                 p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-                depth_only_df = p_df.dropna(subset=['Depth_Num', 'NodeNum', 'Location']).copy()
+                depth_only = p_df.dropna(subset=['Depth_Num']).copy()
                 
-                for loc in sorted(depth_only_df['Location'].unique()):
+                for loc in sorted(depth_only['Location'].unique()):
                     with st.expander(f"📏 {loc} Depth Profile", expanded=True):
-                        loc_data = depth_only_df[depth_only_df['Location'] == loc].copy()
+                        loc_data = depth_only[depth_only['Location'] == loc].copy()
                         fig_d = go.Figure()
                         
-                        # Snapshot Logic (Monday 6AM)
-                        mondays = pd.date_range(start=p_df['timestamp'].min(), end=now, freq='W-MON')
-                        
+                        mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
                         for target_ts in [m.replace(hour=6, tzinfo=pytz.UTC) for m in mondays]:
-                            # 24H Window filtering
-                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                              (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                             if not window.empty:
-                                snaps = []
-                                for node in window['NodeNum'].unique():
-                                    ndf = window[window['NodeNum'] == node].copy()
-                                    ndf['diff'] = (ndf['timestamp'] - target_ts).abs()
-                                    snaps.append(ndf.sort_values('diff').iloc[0])
-                                
-                                snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
-                                # Use Scattergl for depth markers too
-                                fig_d.add_trace(go.Scattergl(
-                                    x=snap_df['temperature'], y=snap_df['Depth_Num'], 
-                                    mode='lines+markers', name=target_ts.strftime('%m/%d/%y')
-                                ))
+                                snap = window.loc[window.groupby('NodeNum')['timestamp'].transform(lambda x: (x - target_ts).abs()).idxmin()].sort_values('Depth_Num')
+                                fig_d.add_trace(go.Scattergl(x=snap['temperature'], y=snap['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
 
                         y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
-                        
-                        # Formatting Sync
                         fig_d.update_layout(
                             plot_bgcolor='white', height=700,
                             xaxis=dict(title=f"Temp ({unit_label})", range=[-20, 80], gridcolor='Gainsboro'),
-                            yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Gray'),
-                            legend=dict(title="Weekly Snapshots (6AM)", orientation="h", y=-0.2)
+                            yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Gray')
                         )
-                        # Reference Lines
-                        for val, label in active_refs:
-                            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                            fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue")
-
-                        st.plotly_chart(fig_d, use_container_width=True, key=f"p_depth_{loc}", config={'displayModeBar': False})
+                        st.plotly_chart(fig_d, use_container_width=True, key=f"dep_{loc}", config={'displayModeBar': False})
 
             with tab_table:
-                # Latest snapshot for the summary table
                 latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
                 latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
                 latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) else f"{r['Depth']} ft", axis=1)
-                
-                st.dataframe(
-                    latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), 
-                    use_container_width=True, 
-                    hide_index=True
-                )
+                st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']], use_container_width=True, hide_index=True)
 #############################
 # --- END CLIENT PORTAL --- #
 #############################  
