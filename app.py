@@ -973,6 +973,43 @@ elif service == "🛠️ Admin Tools":
 ###########################
 # --- ADMIN TOOLS REVISED --- #
 ###########################
+
+
+with tab_scrub:
+        st.subheader("🧹 Deep Data Scrub")
+        scrub_target = st.radio("Select Source Table", ["SensorPush", "Lord"], horizontal=True)
+        
+        # Mapping to your confirmed schema
+        if scrub_target == "SensorPush":
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+            id_col = "sensor_id"
+        else:
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+            id_col = "NodeNum" 
+
+        if st.button(f"🚀 Execute Physical 1-Hour Scrub on {scrub_target}"):
+            with st.spinner(f"Hard-cleaning {scrub_target} to hourly intervals..."):
+                # This SQL physically reduces the table size by overwriting it
+                dedup_sql = f"""
+                CREATE OR REPLACE TABLE `{target_table}` AS 
+                SELECT * EXCEPT(rn) FROM (
+                    SELECT *, 
+                           ROW_NUMBER() OVER(
+                               PARTITION BY {id_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                               ORDER BY timestamp DESC
+                           ) as rn
+                    FROM `{target_table}` 
+                    WHERE temperature IS NOT NULL
+                ) WHERE rn = 1
+                """
+                try:
+                    client.query(dedup_sql).result()
+                    st.success(f"Success! {target_table} now contains exactly 1 record per hour per node.")
+                    # Clear cache so the app pulls the new, smaller dataset
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Scrub Error: {e}")
+                    
 with tab_approve:
     st.subheader("✅ Bulk Approval")
     if st.button("🚀 Approve All Pending Data"):
