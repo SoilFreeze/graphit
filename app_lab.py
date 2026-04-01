@@ -13,9 +13,9 @@ import traceback
 import re
 import io
 
-###########################
-# --- 1. CONFIGURATION --- #
-###########################
+#########################
+# --- CONFIGURATION --- #
+#########################
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
 DATASET_ID = "Temperature" 
@@ -25,8 +25,12 @@ METADATA_TABLE = "master_metadata"
 
 @st.cache_resource
 def get_bq_client():
+    """Handles authentication with BigQuery."""
     try:
-        SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive"]
+        SCOPES = [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/drive"
+        ]
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
