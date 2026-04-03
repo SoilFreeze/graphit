@@ -262,65 +262,125 @@ def fetch_sensorpush_data(start_dt, end_dt):
 # --- Graph --- #
 #################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
-    if df.empty: return go.Figure()
+    """
+    High-speed Plotly engine with Local Time support.
+    Switches to 'Markers' mode if 'Scrubbing' or 'Diag' is in the title.
+    """
+    if df.empty:
+        return go.Figure()
 
     plot_df = df.copy()
     
-    # --- LOCAL TIME CONVERSION ---
+    # 1. TIMEZONE CONVERSION
+    # Convert UTC data to the user's preferred local display zone
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
+    
+    # Adjust the 'Camera' window and the 'Red Now Line' to match the local zone
     start_local = start_view.astimezone(pytz.timezone(display_tz))
     end_local = end_view.astimezone(pytz.timezone(display_tz))
     now_local = pd.Timestamp.now(tz=display_tz)
 
-    # Unit Conversion
+    # 2. UNIT CONVERSION
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
         y_range, dt_minor = [-30, 30], 2
     else:
+        # Standard Fahrenheit range for ground/concrete monitoring
         y_range, dt_minor = [-20, 80], 5
 
-    # Labeling
+    # 3. LABELING LOGIC
+    # Prioritizes 'Bank' for horizontal pipes and 'Depth' for vertical sticks
     plot_df['label'] = plot_df.apply(
         lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
         else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
     )
     
+    # 4. PLOT MODE (Lines vs Points)
+    # Scrubbing needs individual points to make the Lasso tool accurate
+    is_admin = "Scrubbing" in title or "Diag" in title
+    plot_mode = 'markers' if is_admin else 'lines'
+    marker_size = 7 if is_admin else 3
+
     fig = go.Figure()
+    
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         hover_name = lbl.split('(')[0].strip()
 
-        # Gap Detection (6 hrs)
-        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gap_mask = s_df['gap_hrs'] > 6.0
-        if gap_mask.any():
-            gaps = s_df[gap_mask].copy()
-            gaps['temperature'] = None
-            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+        # 5. GAP DETECTION
+        # If no data for > 6 hours, break the line so it doesn't "stretch" across gaps
+        if not is_admin:
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            gap_mask = s_df['gap_hrs'] > 6.0
+            if gap_mask.any():
+                gaps = s_df[gap_mask].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
         fig.add_trace(go.Scattergl(
-            x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', connectgaps=False, line=dict(width=2),
+            x=s_df['timestamp'], 
+            y=s_df['temperature'], 
+            name=lbl, 
+            mode=plot_mode,
+            marker=dict(size=marker_size, opacity=0.7 if is_admin else 1.0),
+            connectgaps=False,
             customdata=[hover_name] * len(s_df),
-            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
+            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<br>%{{x|%b %d, %H:%M}}<extra></extra>"
         ))
 
-    # Gridlines (Monday=Black, Midnight=Gray)
+    # 6. GRID HIERARCHY (Monday=Black, Midnight=Gray)
     grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
     for ts in grid_times:
-        color, width = ("Black", 1.2) if (ts.weekday()==0 and ts.hour==0) else (("Gray", 0.8) if ts.hour==0 else ("LightGray", 0.4))
+        if ts.weekday() == 0 and ts.hour == 0:
+            color, width = "Black", 1.2 # Monday Start
+        elif ts.hour == 0:
+            color, width = "Gray", 0.8  # Nightly transitions
+        else:
+            color, width = "LightGray", 0.3
         fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    # Red Now Line
+    # 7. REFERENCE LINES (Type A / Type B Limits)
+    for val, ref_label in active_refs:
+        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+        fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in ref_label else "RoyalBlue", 
+                      annotation_text=ref_label, annotation_position="top right")
+
+    # 8. RED "NOW" LINE (Local)
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
+    # 9. FINAL LAYOUT
     fig.update_layout(
-        title={'text': title, 'x': 0}, plot_bgcolor='white', hovermode="x unified", height=600,
+        title={'text': f"{title} ({display_tz})", 'x': 0},
+        plot_bgcolor='white',
+        hovermode="x unified" if not is_admin else "closest",
+        height=600,
         margin=dict(t=80, l=50, r=180, b=50),
-        xaxis=dict(range=[start_local, end_local], showline=True, linecolor='black', mirror=True),
-        yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+        xaxis=dict(
+            range=[start_local, end_local],
+            showline=True, 
+            linecolor='black', 
+            mirror=True,
+            tickformat='%b %d\n%H:%M'
+        ),
+        yaxis=dict(
+            title=f"Temperature ({unit_label})",
+            range=y_range,
+            dtick=dt_minor,
+            gridcolor='Gainsboro',
+            showline=True,
+            linecolor='black',
+            mirror=True
+        ),
+        legend=dict(
+            title="Sensors",
+            orientation="v",
+            x=1.02,
+            y=1,
+            xanchor="left"
+        )
     )
+    
     return fig
     
 #######################
@@ -1006,81 +1066,132 @@ elif service == "🛠️ Admin Tools":
                         st.error(f"Scrub Error: {e}")
     
         # 4. SURGICAL CLEANER (Lasso Selection)
+        # --- TAB 3: SURGICAL CLEANER (Inside Admin Tools) ---
         with tab_cleaner:
-            st.subheader("✂️ Surgical Data Cleaner")
-            
+            st.subheader("🧨 Surgical Data Cleaner")
+            st.info("💡 **Instructions:** Use the **Lasso Select** or **Box Select** (top right of the graph) to highlight noisy points. Once highlighted, the button below will allow you to hide them from the portal.")
+        
             if not selected_project:
-                st.warning("👈 Please select a project in the sidebar.")
+                st.warning("👈 Please select a Project in the sidebar to begin.")
             else:
-                # FETCH RAW DATA (Including unapproved)
-                with st.spinner("Loading interactive scrub window..."):
+                # 1. FETCH RAW DATA
+                # We fetch ONLY_APPROVED=FALSE so we can see the noise we need to scrub
+                with st.spinner(f"📥 Loading raw sensor streams for {selected_project}..."):
                     p_df = get_universal_portal_data(selected_project, only_approved=False)
-
+        
                 if p_df.empty:
-                    st.info("No data available to scrub.")
+                    st.warning(f"No data found for project {selected_project}.")
                 else:
-                    # UI CONTROLS
+                    # 2. SELECTION CONTROLS
                     loc_options = sorted(p_df['Location'].dropna().unique())
-                    sel_loc = st.selectbox("Select Pipe to Scrub", loc_options)
-                    lookback = st.slider("Window (Days)", 1, 30, 7)
-
-                    # TIME CALCULATIONS
-                    now_utc = pd.Timestamp.now(tz='UTC')
-                    start_v, end_v = now_utc - timedelta(days=lookback), now_utc + timedelta(hours=6)
                     
-                    # FILTER FOR GRAPH
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="scrub_loc_picker")
+                    with c2:
+                        lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7, key="scrub_days_slider")
+        
+                    # 3. DATE CALCULATIONS (UTC Base)
+                    now_utc = pd.Timestamp.now(tz='UTC')
+                    start_view = now_utc - timedelta(days=lookback_days)
+                    end_view = now_utc + timedelta(hours=6)
+        
+                    # Filter dataframe for the specific location/pipe
                     scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy()
-
-                    # RENDER THE GRAPH (Crucial for Lasso to work)
+        
+                    # 4. RENDER THE INTERACTIVE GRAPH (Markers Mode)
+                    # The title 'Scrubbing Interface' triggers the 'markers' mode in our graph function
                     fig_scrub = build_high_speed_graph(
-                        scrub_plot_df, f"Scrubbing: {sel_loc}", 
-                        start_v, end_v, tuple(active_refs), 
-                        unit_mode, unit_label, display_tz=display_tz
+                        scrub_plot_df, 
+                        f"Scrubbing Interface: {sel_loc}", 
+                        start_view, 
+                        end_view, 
+                        tuple(active_refs), 
+                        unit_mode, 
+                        unit_label,
+                        display_tz=display_tz # Uses Sidebar TZ (NY/Pacific/UTC)
                     )
-
+        
+                    # CRITICAL: on_select="rerun" captures the Lasso/Box tool selection data
                     selected_data = st.plotly_chart(
-                        fig_scrub, use_container_width=True, 
-                        on_select="rerun", key=f"scrub_chart_{sel_loc}"
+                        fig_scrub, 
+                        use_container_width=True, 
+                        on_select="rerun", 
+                        key=f"scrub_chart_{sel_loc}"
                     )
-
-                    # PROCESSING SELECTION
+        
+                    st.divider()
+        
+                    # 5. EXECUTE THE SCRUB
+                    st.markdown("### 🚫 Execute Rejection")
+                    
+                    # Check if any points were highlighted by the user
                     if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
                         points = selected_data["selection"]["points"]
-                        st.write(f"🎯 **{len(points)}** points highlighted.")
-                    
-                        if st.button("🚫 HIDE SELECTED DATA (Hourly)"):
-                            with st.spinner("Writing rejection rules..."):
+                        st.write(f"✅ **{len(points)}** points currently highlighted.")
+        
+                        if st.button("🚨 HIDE SELECTED DATA (Align to Top of Hour)", type="primary"):
+                            with st.spinner("Writing rejection rules to BigQuery..."):
                                 try:
                                     rejection_records = []
                                     for pt in points:
+                                        # 1. Capture the timestamp from the Plotly X-axis
                                         raw_ts = pd.to_datetime(pt['x'])
-                                        # Convert to UTC and floor to top of hour
-                                        scrubbed_ts = raw_ts.tz_convert('UTC').floor('h')
+                                        
+                                        # 2. Force to UTC and Floor to Top of the Hour
+                                        # This ensures our 'TIMESTAMP_TRUNC' join catches every reading in that hour
+                                        scrub_ts = raw_ts.tz_convert('UTC').floor('h')
+                                        
+                                        # 3. Map back to NodeNum using the DataFrame index from the point
                                         node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
                                         
                                         rejection_records.append({
                                             "NodeNum": str(node_id),
-                                            "timestamp": scrubbed_ts,
-                                            "reason": "Admin Surgical Scrub",
+                                            "timestamp": scrub_ts,
+                                            "reason": "Surgical Admin Scrub",
                                             "Project": selected_project
                                         })
-                                    
+        
                                     if rejection_records:
+                                        # Deduplicate in case multiple points in one hour were selected
                                         rej_df = pd.DataFrame(rejection_records).drop_duplicates()
+                                        
+                                        # Upload to 'manual_rejections' table (Append Mode)
                                         job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                        client.load_table_from_dataframe(
+                                        job = client.load_table_from_dataframe(
                                             rej_df, 
                                             f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
                                             job_config=job_config
-                                        ).result()
+                                        )
+                                        job.result() # Wait for BQ to confirm
                                         
-                                        st.success(f"✅ Hidden {len(rej_df)} unique hourly blocks.")
+                                        st.success(f"Successfully hidden {len(rej_df)} unique hourly records for {sel_loc}!")
+                                        
+                                        # 4. REFRESH: Clear cache and rerun to update all graphs immediately
                                         st.cache_data.clear()
                                         st.rerun()
+        
                                 except Exception as e:
-                                    st.error(f"❌ Error during scrubbing: {e}")
+                                    st.error(f"❌ Scrubbing Failed: {e}")
                     else:
-                        st.info("💡 Use the **Lasso** tool on the graph above to select data.")
+                        st.info("💡 **Selection Required:** Use the Lasso or Box Select tool on the graph above to highlight the noise you want to remove.")
+        
+                    # 6. AUDIT LOG (Bottom of Tab)
+                    with st.expander("📝 View Recent Rejections for this Project"):
+                        audit_query = f"""
+                            SELECT NodeNum, timestamp, reason 
+                            FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections` 
+                            WHERE Project = '{selected_project}' 
+                            ORDER BY timestamp DESC LIMIT 20
+                        """
+                        try:
+                            audit_df = client.query(audit_query).to_dataframe()
+                            if not audit_df.empty:
+                                st.dataframe(audit_df, use_container_width=True)
+                            else:
+                                st.write("No manual rejections found for this project yet.")
+                        except:
+                            st.write("Unable to load rejection audit log.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
