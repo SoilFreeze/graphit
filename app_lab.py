@@ -460,47 +460,29 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 # --- Global Overview --- #
 #############################
 if service == "🌐 Global Overview":
-    st.header("🌐 Global Site Overview")
-    
-    # 1. Fetch the list of all projects
-    all_projs = get_project_list()
-    
-    # 2. Timeframe Controls
-    lookback_weeks = st.sidebar.slider("Global Lookback (Weeks)", 1, 8, 4)
-    now = pd.Timestamp.now(tz=pytz.UTC)
-    end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0)
-    start_view = end_view - timedelta(weeks=lookback_weeks)
+    # SPEED BOOST: One query for everyone
+    with st.spinner("🚀 Rapid Sync: Fetching all site data..."):
+        all_data_df = get_all_projects_data(only_approved=True)
 
-    if len(all_projs) == 0:
-        st.warning("No projects found in the database.")
+    if all_data_df.empty:
+        st.warning("No data found.")
     else:
-        for proj in sorted(all_projs):
-            # 3. PROJECT MINIMIZER: Wrap the whole project in an expander
+        # Get list of projects present in the returned data
+        projects = sorted(all_data_df['Project'].unique())
+        
+        for proj in projects:
             with st.expander(f"🏗️ Project: {proj}", expanded=True):
+                # Fast Pandas filtering (Microseconds)
+                proj_df = all_data_df[all_data_df['Project'] == proj]
                 
-                # Fetch approved data for this specific project
-                df_global = get_universal_portal_data(proj, only_approved=True)
-                
-                if df_global.empty:
-                    st.info("No approved data available for this project.")
-                else:
-                    # 4. GRAPH MINIMIZER: Iterate through locations
-                    for loc in sorted(df_global['Location'].unique()):
-                        loc_data = df_global[df_global['Location'] == loc]
-                        combined_title = f"📈 Project {proj} - {loc}"
-                        
-                        # Wrap each individual graph in its own expander
-                        with st.expander(f"📍 {loc}", expanded=True):
-                            fig = build_high_speed_graph(
-                                loc_data, 
-                                combined_title, 
-                                start_view, 
-                                end_view, 
-                                tuple(active_refs), 
-                                unit_mode, 
-                                unit_label
-                            )
-                            st.plotly_chart(fig, use_container_width=True, key=f"glob_exp_{proj}_{loc}")
+                for loc in sorted(proj_df['Location'].unique()):
+                    loc_df = proj_df[proj_df['Location'] == loc]
+                    
+                    with st.expander(f"📍 {loc}", expanded=True):
+                        # build_high_speed_graph is already using WebGL (Scattergl) 
+                        # so it is already GPU optimized!
+                        fig = build_high_speed_graph(...) 
+                        st.plotly_chart(fig, use_container_width=True)
 #############################
 # --- Executive Summary --- #
 #############################
