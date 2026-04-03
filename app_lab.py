@@ -649,7 +649,7 @@ elif service == "📊 Client Portal":
 ###########################
 # --- NODE DIAGNOSTIC --- #
 ###########################  
-lif service == "📉 Node Diagnostics":
+elif service == "📉 Node Diagnostics":
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
     if not selected_project:
