@@ -38,7 +38,7 @@ def get_universal_portal_data(project_id, only_approved=True):
                 -- Check against our new manual_rejections table
                 CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as approve
             FROM UnifiedRaw r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
                 ON r.NodeNum = m.PhysicalID
             LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej
                 ON r.NodeNum = rej.NodeNum AND r.timestamp = rej.timestamp
@@ -251,7 +251,7 @@ def rebuild_master_table(mode="preserve"):
             m.Depth as depth, 
             {status_logic} as is_approved
         FROM HourlyDedupped h 
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
             -- Match by stripping the Google Sheet PhysicalID of all non-digits too
             ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
         {join_clause}
@@ -926,7 +926,7 @@ elif service == "📤 Data Intake Lab":
                 st.dataframe(df_new_meta.head())
                 if st.button("Overwrite Master Metadata"):
                     # This replaces the mapping table in BigQuery
-                    client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
+                    client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.metadata", 
                                                      job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
                     st.success("Master Metadata Updated!")
 ###############################
