@@ -1066,132 +1066,112 @@ elif service == "🛠️ Admin Tools":
                         st.error(f"Scrub Error: {e}")
     
         # 4. SURGICAL CLEANER (Lasso Selection)
-        # --- TAB 3: SURGICAL CLEANER (Inside Admin Tools) ---
-        with tab_cleaner:
-            st.subheader("🧨 Surgical Data Cleaner")
-            st.info("💡 **Instructions:** Use the **Lasso Select** or **Box Select** (top right of the graph) to highlight noisy points. Once highlighted, the button below will allow you to hide them from the portal.")
-        
-            if not selected_project:
-                st.warning("👈 Please select a Project in the sidebar to begin.")
-            else:
-                # 1. FETCH RAW DATA
-                # We fetch ONLY_APPROVED=FALSE so we can see the noise we need to scrub
-                with st.spinner(f"📥 Loading raw sensor streams for {selected_project}..."):
-                    p_df = get_universal_portal_data(selected_project, only_approved=False)
-        
-                if p_df.empty:
-                    st.warning(f"No data found for project {selected_project}.")
-                else:
-                    # 2. SELECTION CONTROLS
-                    loc_options = sorted(p_df['Location'].dropna().unique())
-                    
-                    c1, c2 = st.columns([2, 1])
-                    with c1:
-                        sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="scrub_loc_picker")
-                    with c2:
-                        lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7, key="scrub_days_slider")
-        
-                    # 3. DATE CALCULATIONS (UTC Base)
-                    now_utc = pd.Timestamp.now(tz='UTC')
-                    start_view = now_utc - timedelta(days=lookback_days)
-                    end_view = now_utc + timedelta(hours=6)
-        
-                    # Filter dataframe for the specific location/pipe
-                    scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy()
-        
-                    # 4. RENDER THE INTERACTIVE GRAPH (Markers Mode)
-                    # The title 'Scrubbing Interface' triggers the 'markers' mode in our graph function
-                    fig_scrub = build_high_speed_graph(
-                        scrub_plot_df, 
-                        f"Scrubbing Interface: {sel_loc}", 
-                        start_view, 
-                        end_view, 
-                        tuple(active_refs), 
-                        unit_mode, 
-                        unit_label,
-                        display_tz=display_tz # Uses Sidebar TZ (NY/Pacific/UTC)
-                    )
-        
-                    # CRITICAL: on_select="rerun" captures the Lasso/Box tool selection data
-                    selected_data = st.plotly_chart(
-                        fig_scrub, 
-                        use_container_width=True, 
-                        on_select="rerun", 
-                        key=f"scrub_chart_{sel_loc}"
-                    )
-        
-                    st.divider()
-        
-                    # 5. EXECUTE THE SCRUB
-                    st.markdown("### 🚫 Execute Rejection")
-                    
-                    # Check if any points were highlighted by the user
-                    if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
-                        points = selected_data["selection"]["points"]
-                        st.write(f"✅ **{len(points)}** points currently highlighted.")
-        
-                        if st.button("🚨 HIDE SELECTED DATA (Align to Top of Hour)", type="primary"):
-                            with st.spinner("Writing rejection rules to BigQuery..."):
-                                try:
-                                    rejection_records = []
-                                    for pt in points:
-                                        # 1. Capture the timestamp from the Plotly X-axis
-                                        raw_ts = pd.to_datetime(pt['x'])
-                                        
-                                        # 2. Force to UTC and Floor to Top of the Hour
-                                        # This ensures our 'TIMESTAMP_TRUNC' join catches every reading in that hour
-                                        scrub_ts = raw_ts.tz_convert('UTC').floor('h')
-                                        
-                                        # 3. Map back to NodeNum using the DataFrame index from the point
-                                        node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
-                                        
-                                        rejection_records.append({
-                                            "NodeNum": str(node_id),
-                                            "timestamp": scrub_ts,
-                                            "reason": "Surgical Admin Scrub",
-                                            "Project": selected_project
-                                        })
-        
-                                    if rejection_records:
-                                        # Deduplicate in case multiple points in one hour were selected
-                                        rej_df = pd.DataFrame(rejection_records).drop_duplicates()
-                                        
-                                        # Upload to 'manual_rejections' table (Append Mode)
-                                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                        job = client.load_table_from_dataframe(
-                                            rej_df, 
-                                            f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
-                                            job_config=job_config
-                                        )
-                                        job.result() # Wait for BQ to confirm
-                                        
-                                        st.success(f"Successfully hidden {len(rej_df)} unique hourly records for {sel_loc}!")
-                                        
-                                        # 4. REFRESH: Clear cache and rerun to update all graphs immediately
-                                        st.cache_data.clear()
-                                        st.rerun()
-        
-                                except Exception as e:
-                                    st.error(f"❌ Scrubbing Failed: {e}")
-                    else:
-                        st.info("💡 **Selection Required:** Use the Lasso or Box Select tool on the graph above to highlight the noise you want to remove.")
-        
-                    # 6. AUDIT LOG (Bottom of Tab)
-                    with st.expander("📝 View Recent Rejections for this Project"):
-                        audit_query = f"""
-                            SELECT NodeNum, timestamp, reason 
-                            FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections` 
-                            WHERE Project = '{selected_project}' 
-                            ORDER BY timestamp DESC LIMIT 20
-                        """
+        # --- TAB 3: SURGICAL CLEANER ---
+with tab_cleaner:
+    st.subheader("🧨 Surgical Data Cleaner")
+    st.info("💡 **Instructions:** Use the **Lasso** or **Box Select** tools on the graph to highlight noisy points. The system will automatically hide the entire hour for those selections.")
+
+    if not selected_project:
+        st.warning("👈 Please select a Project in the sidebar.")
+    else:
+        # 1. FETCH RAW DATA (Including Rejected/Unapproved)
+        with st.spinner(f"📥 Loading raw data for {selected_project}..."):
+            # only_approved=False allows us to see the points we want to hide
+            p_df = get_universal_portal_data(selected_project, only_approved=False)
+
+        if p_df.empty:
+            st.warning(f"No data found for project {selected_project}.")
+        else:
+            # 2. SELECTION CONTROLS
+            loc_options = sorted(p_df['Location'].dropna().unique())
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="admin_scrub_loc")
+            with c2:
+                lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7, key="admin_scrub_days")
+
+            # 3. DATE CALCULATIONS
+            now_utc = pd.Timestamp.now(tz='UTC')
+            start_view = now_utc - timedelta(days=lookback_days)
+            end_view = now_utc + timedelta(hours=6)
+
+            # Filter for the specific location
+            scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy()
+
+            # 4. RENDER THE INTERACTIVE GRAPH (MARKERS MODE)
+            # The 'Scrubbing' keyword in the title triggers 'markers' in our graph function
+            fig_scrub = build_high_speed_graph(
+                scrub_plot_df, 
+                f"Scrubbing Interface: {sel_loc}", 
+                start_view, 
+                end_view, 
+                tuple(active_refs), 
+                unit_mode, 
+                unit_label,
+                display_tz=display_tz
+            )
+
+            # on_select="rerun" captures the Lasso/Box tool selection data
+            selected_data = st.plotly_chart(
+                fig_scrub, 
+                use_container_width=True, 
+                on_select="rerun", 
+                key=f"scrub_chart_{sel_loc}"
+            )
+
+            st.divider()
+
+            # 5. EXECUTE THE HOURLY SCRUB
+            st.markdown("### 🚫 Execute Rejection")
+            
+            if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
+                points = selected_data["selection"]["points"]
+                st.write(f"✅ **{len(points)}** data points highlighted.")
+
+                if st.button("🚨 HIDE SELECTED DATA (Align to Top of Hour)", type="primary"):
+                    with st.spinner("Writing hourly rejection rules..."):
                         try:
-                            audit_df = client.query(audit_query).to_dataframe()
-                            if not audit_df.empty:
-                                st.dataframe(audit_df, use_container_width=True)
-                            else:
-                                st.write("No manual rejections found for this project yet.")
-                        except:
-                            st.write("Unable to load rejection audit log.")
+                            rejection_records = []
+                            for pt in points:
+                                # A. Get the timestamp from the plot click
+                                raw_ts = pd.to_datetime(pt['x'])
+                                
+                                # B. Convert to UTC and FLOOR to the top of the hour
+                                # This ensures the join catches every reading in that 60-min block
+                                scrub_ts = raw_ts.tz_convert('UTC').floor('h')
+                                
+                                # C. Map back to NodeNum using the dataframe index
+                                node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
+                                
+                                rejection_records.append({
+                                    "NodeNum": str(node_id),
+                                    "timestamp": scrub_ts,
+                                    "reason": "Top-of-Hour Surgical Scrub",
+                                    "Project": selected_project
+                                })
+
+                            if rejection_records:
+                                # Deduplicate (prevents redundant entries for the same hour)
+                                rej_df = pd.DataFrame(rejection_records).drop_duplicates()
+                                
+                                # Upload to 'manual_rejections' table
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(
+                                    rej_df, 
+                                    f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
+                                    job_config=job_config
+                                ).result()
+                                
+                                st.success(f"Successfully hidden {len(rej_df)} hourly blocks for {sel_loc}!")
+                                
+                                # Clear cache so changes reflect on all pages immediately
+                                st.cache_data.clear()
+                                st.rerun()
+
+                        except Exception as e:
+                            st.error(f"❌ Scrubbing Failed: {e}")
+            else:
+                st.info("💡 **Selection Required:** Use the Lasso or Box Select tool on the graph above to highlight the noise you want to remove.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
