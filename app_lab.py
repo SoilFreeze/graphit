@@ -441,34 +441,58 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 if service == "🌐 Global Overview":
     st.header("🌐 Global Site Overview")
     
-    # ONE query to rule them all
-    all_data_df = get_all_projects_data(only_approved=True)
+    # 1. Rapid Fetch: One query for all data points
+    with st.spinner("🚀 Rapid Sync: Aligning Timezones & Fetching Data..."):
+        all_data_df = get_all_projects_data(only_approved=True)
 
     if all_data_df.empty:
-        st.warning("No data found across all projects.")
+        st.warning("No approved data found across any active projects.")
     else:
-        # Timeframe for graphs
-        lookback = st.sidebar.slider("Global View (Weeks)", 1, 8, 4)
-        now = pd.Timestamp.now(tz=pytz.UTC)
-        end_v = (now + pd.Timedelta(days=(7-now.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
-        start_v = end_v - timedelta(weeks=lookback)
+        # 2. Timeframe Controls (Synced to UTC)
+        lookback_weeks = st.sidebar.slider("Global Lookback (Weeks)", 1, 8, 4)
+        now_utc = pd.Timestamp.now(tz=pytz.UTC)
+        
+        # Calculate window relative to the current UTC time
+        end_view = (now_utc + pd.Timedelta(days=(7 - now_utc.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0)
+        start_view = end_view - timedelta(weeks=lookback_weeks)
 
-        # Loop through projects found in the data
-        for proj in sorted(all_data_df['Project'].unique()):
+        # 3. Iterate through Projects
+        projects_found = sorted(all_data_df['Project'].unique())
+        
+        for proj in projects_found:
+            # PROJECT MINIMIZER
             with st.expander(f"🏗️ Project: {proj}", expanded=True):
-                # Fast Pandas filtering (Happens in your RAM, not BigQuery)
-                p_df = all_data_df[all_data_df['Project'] == proj]
                 
-                for loc in sorted(p_df['Location'].unique()):
-                    loc_df = p_df[p_df['Location'] == loc]
-                    
+                # Fast RAM filtering for the specific project
+                proj_df = all_data_df[all_data_df['Project'] == proj]
+                locations = sorted(proj_df['Location'].dropna().unique())
+                
+                if not locations:
+                    st.info("No locations/pipes mapped for this project.")
+                
+                for loc in locations:
+                    # GRAPH MINIMIZER
                     with st.expander(f"📍 {loc}", expanded=True):
+                        
+                        # Filter for the specific pipe/location
+                        loc_df = proj_df[proj_df['Project'] == proj] # Safety check
+                        loc_df = proj_df[proj_df['Location'] == loc]
+                        
+                        # Prepare Title
+                        combined_title = f"📈 Project {proj} - {loc}"
+                        
+                        # Render high-speed GPU graph
                         fig = build_high_speed_graph(
-                            loc_df, f"📈 {proj} - {loc}", 
-                            start_v, end_v, tuple(active_refs), 
-                            unit_mode, unit_label
+                            loc_df, 
+                            combined_title, 
+                            start_view, 
+                            end_view, 
+                            tuple(active_refs), 
+                            unit_mode, 
+                            unit_label
                         )
-                        st.plotly_chart(fig, use_container_width=True, key=f"glob_{proj}_{loc}")
+                        
+                        st.plotly_chart(fig, use_container_width=True, key=f"glob_page_{proj}_{loc}")
 #############################
 # --- Executive Summary --- #
 #############################
