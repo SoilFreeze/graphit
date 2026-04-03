@@ -378,39 +378,82 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 ###########################
 # --- GLOBAL OVERVIEW --- #
 ###########################
+#############################
+# --- Project Overview --- #
+#############################
 if service == "🌐 Global Overview":
-    st.header(f"🌐 Project Overview: {selected_project}")
+    st.header("🌐 Project Overview")
     
-    if not selected_project:
-        st.warning("👈 Please select a Project in the sidebar to begin.")
+    # 1. FETCH ALL AVAILABLE PROJECTS FOR THE DROPDOWN
+    # This query gets the list of unique projects from your metadata
+    project_list_query = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+    try:
+        available_projects = client.query(project_list_query).to_dataframe()['Project'].tolist()
+        available_projects = sorted([str(p) for p in available_projects])
+    except Exception:
+        available_projects = []
+
+    # 2. PROJECT SELECTOR (Directly on the page)
+    # If a project is already selected in the sidebar, we use it as the default
+    default_ix = 0
+    if selected_project in available_projects:
+        default_ix = available_projects.index(selected_project)
+    
+    target_project = st.selectbox(
+        "🏗️ Select a Project to View", 
+        available_projects, 
+        index=default_ix,
+        key="global_overview_proj_picker"
+    )
+
+    if not target_project:
+        st.info("👈 Please select a project from the dropdown above to view the timeline graphs.")
     else:
-        # 1. Fetch data for just the one selected project
-        with st.spinner(f"Aligning timezones for {selected_project}..."):
-            p_df = get_universal_portal_data(selected_project, only_approved=True)
+        # 3. FETCH DATA FOR THE CHOSEN PROJECT
+        with st.spinner(f"Aligning NY & Pacific timezones for {target_project}..."):
+            # We use our UTC-Hardened function here
+            p_df = get_universal_portal_data(target_project, only_approved=True)
 
         if p_df.empty:
-            st.info(f"No approved data found for project {selected_project}.")
+            st.warning(f"No approved data found for project {target_project}. Check 'Node Diagnostics' to see if data is being rejected.")
         else:
-            # 2. Setup Timeframe (UTC Aware)
-            lookback = st.sidebar.slider("View Lookback (Weeks)", 1, 8, 4)
+            # 4. TIMEFRAME CONTROLS (UTC STANDARDIZED)
+            lookback = st.sidebar.slider("View Lookback (Weeks)", 1, 12, 4, key="ov_lookback")
+            
+            # This 'now_utc' is what fixes the New York offset issue
             now_utc = pd.Timestamp.now(tz='UTC')
-            end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
+            
+            # Align window to the upcoming Monday at Midnight (UTC)
+            end_view = (now_utc + pd.Timedelta(days=(7 - now_utc.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
             start_view = end_view - timedelta(weeks=lookback)
 
-            # 3. Minimize by Graph
-            locations = sorted(p_df['Location'].unique())
+            st.divider()
+            st.subheader(f"Current Status: {target_project}")
+
+            # 5. RENDER COLLAPSIBLE GRAPHS BY PIPE/LOCATION
+            locations = sorted(p_df['Location'].dropna().unique())
+            
             for loc in locations:
-                with st.expander(f"📍 {loc}", expanded=True):
+                # Wrap each graph in an expander so you can minimize them
+                with st.expander(f"📍 Location: {loc}", expanded=True):
                     loc_df = p_df[p_df['Location'] == loc]
                     
+                    # Create the title: Project - Location
+                    graph_title = f"📈 {target_project} - {loc}"
+                    
+                    # Call the High-Speed Engine
                     fig = build_high_speed_graph(
                         loc_df, 
-                        f"📈 {selected_project} - {loc}", 
-                        start_view, end_view, 
+                        graph_title, 
+                        start_view, 
+                        end_view, 
                         tuple(active_refs), 
-                        unit_mode, unit_label
+                        unit_mode, 
+                        unit_label
                     )
-                    st.plotly_chart(fig, use_container_width=True, key=f"ov_{selected_project}_{loc}")
+                    
+                    # Key must be unique to prevent Streamlit duplicate widget errors
+                    st.plotly_chart(fig, use_container_width=True, key=f"ov_chart_{target_project}_{loc}")
 #############################
 # --- Executive Summary --- #
 #############################
