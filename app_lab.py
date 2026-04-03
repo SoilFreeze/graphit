@@ -57,57 +57,6 @@ def get_all_projects_data(only_approved=True):
         st.error(f"Batch Query Error: {e}")
         return pd.DataFrame()
 
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
-    if df.empty: return go.Figure()
-
-    plot_df = df.copy()
-    # Unit Conversion
-    if unit_mode == "Celsius":
-        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-        dt_minor = 2 
-    else:
-        y_range = [-20, 80]
-        dt_minor = 5
-
-    # Labeling Logic
-    plot_df['label'] = plot_df.apply(
-        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
-        else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
-    )
-    
-    fig = go.Figure()
-    for lbl in sorted(plot_df['label'].unique()):
-        s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
-        
-        # SIMPLIFIED HOVER LABEL: "Bank R1" instead of "Bank R1 (62260...)"
-        hover_name = lbl.split('(')[0].strip()
-
-        # Gap Detection (6 hours)
-        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gap_mask = s_df['gap_hrs'] > 6.0
-        if gap_mask.any():
-            gaps = s_df[gap_mask].copy()
-            gaps['temperature'] = None
-            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-
-        fig.add_trace(go.Scattergl(
-            x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', connectgaps=False, 
-            customdata=[hover_name] * len(s_df),
-            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
-        ))
-
-    fig.update_layout(
-        title={'text': title, 'x': 0, 'font': dict(size=18)},
-        plot_bgcolor='white', hovermode="x unified", height=600,
-        margin=dict(t=80, l=50, r=180, b=50),
-        xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True),
-        yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
-    )
-    return fig
-
 def check_admin_access():
     if "admin_authenticated" not in st.session_state:
         st.session_state["admin_authenticated"] = False
@@ -309,12 +258,6 @@ def fetch_sensorpush_data(start_dt, end_dt):
 # --- Graph --- #
 ############################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
-    """
-    High-Performance Graph Engine:
-    - 3-tier Grid Hierarchy
-    - 6-Hour Gap Detection (Breaks the line)
-    - Red 'Now' Line
-    """
     if df.empty: return go.Figure()
 
     plot_df = df.copy()
@@ -322,25 +265,25 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
         y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-        dt_major, dt_minor = 10, 2 
+        dt_minor = 2 
     else:
         y_range = [-20, 80]
-        dt_major, dt_minor = 20, 5
+        dt_minor = 5
 
-    # Labeling
+    # Labeling Logic
     plot_df['label'] = plot_df.apply(
         lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
         else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
     )
     
     fig = go.Figure()
-    
-    # 1. CORE DATA PLOTTING WITH GAP HANDLING
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         
-        # --- GAP DETECTOR ---
-        # If time between points > 6 hours, insert a None row to break the line
+        # SIMPLIFIED HOVER LABEL: "Bank R1" instead of "Bank R1 (62260...)"
+        hover_name = lbl.split('(')[0].strip()
+
+        # Gap Detection (6 hours)
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 6.0
         if gap_mask.any():
@@ -351,44 +294,20 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
+            name=lbl, mode='lines', connectgaps=False, 
+            customdata=[hover_name] * len(s_df),
+            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 2. GRID HIERARCHY
-    grid_times = pd.date_range(start=start_view, end=end_view, freq='6h')
-    for ts in grid_times:
-        if ts.weekday() == 0 and ts.hour == 0:
-            color, width = "Black", 1.5
-        elif ts.hour == 0:
-            color, width = "Gray", 1.0
-        else:
-            color, width = "LightGray", 0.5
-        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
-    # 3. RED "NOW" LINE
-    now_marker = pd.Timestamp.now(tz=pytz.UTC)
-    fig.add_vline(x=now_marker, line_width=2, line_color="Red", layer='above', line_dash="dash")
-
-    # 4. STYLING
     fig.update_layout(
         title={'text': title, 'x': 0, 'font': dict(size=18)},
         plot_bgcolor='white', hovermode="x unified", height=600,
         margin=dict(t=80, l=50, r=180, b=50),
-        legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
         xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True),
         yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
     )
-
-    for y_val in range(int(y_range[0]), int(y_range[1]) + 1, dt_major):
-        fig.add_hline(y=y_val, line_width=1.2, line_color="DimGray", layer='below')
-
-    for val, label in active_refs:
-        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-        fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
-    
     return fig
-
-
+    
 #######################
 # --- SIDEBAR UI --- #
 #######################
@@ -435,58 +354,34 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 if service == "🌐 Global Overview":
     st.header("🌐 Global Site Overview")
     
-    # 1. Rapid Fetch: One query for all data points
-    with st.spinner("🚀 Rapid Sync: Aligning Timezones & Fetching Data..."):
+    # ONE batch query for the whole page
+    with st.spinner("🚀 Rapid Sync: Aligning Timezones..."):
         all_data_df = get_all_projects_data(only_approved=True)
 
     if all_data_df.empty:
-        st.warning("No approved data found across any active projects.")
+        st.warning("No approved data found.")
     else:
-        # 2. Timeframe Controls (Synced to UTC)
-        lookback_weeks = st.sidebar.slider("Global Lookback (Weeks)", 1, 8, 4)
+        lookback = st.sidebar.slider("Global View (Weeks)", 1, 8, 4)
         now_utc = pd.Timestamp.now(tz=pytz.UTC)
-        
-        # Calculate window relative to the current UTC time
-        end_view = (now_utc + pd.Timedelta(days=(7 - now_utc.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0)
-        start_view = end_view - timedelta(weeks=lookback_weeks)
+        end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
+        start_view = end_view - timedelta(weeks=lookback)
 
-        # 3. Iterate through Projects
-        projects_found = sorted(all_data_df['Project'].unique())
-        
-        for proj in projects_found:
-            # PROJECT MINIMIZER
+        for proj in sorted(all_data_df['Project'].unique()):
+            # MINIMIZE BY PROJECT
             with st.expander(f"🏗️ Project: {proj}", expanded=True):
-                
-                # Fast RAM filtering for the specific project
                 proj_df = all_data_df[all_data_df['Project'] == proj]
-                locations = sorted(proj_df['Location'].dropna().unique())
                 
-                if not locations:
-                    st.info("No locations/pipes mapped for this project.")
-                
-                for loc in locations:
-                    # GRAPH MINIMIZER
+                for loc in sorted(proj_df['Location'].unique()):
+                    loc_df = proj_df[proj_df['Location'] == loc]
+                    
+                    # MINIMIZE BY GRAPH
                     with st.expander(f"📍 {loc}", expanded=True):
-                        
-                        # Filter for the specific pipe/location
-                        loc_df = proj_df[proj_df['Project'] == proj] # Safety check
-                        loc_df = proj_df[proj_df['Location'] == loc]
-                        
-                        # Prepare Title
-                        combined_title = f"📈 Project {proj} - {loc}"
-                        
-                        # Render high-speed GPU graph
                         fig = build_high_speed_graph(
-                            loc_df, 
-                            combined_title, 
-                            start_view, 
-                            end_view, 
-                            tuple(active_refs), 
-                            unit_mode, 
-                            unit_label
+                            loc_df, f"📈 {proj} - {loc}", 
+                            start_view, end_view, tuple(active_refs), 
+                            unit_mode, unit_label
                         )
-                        
-                        st.plotly_chart(fig, use_container_width=True, key=f"glob_page_{proj}_{loc}")
+                        st.plotly_chart(fig, use_container_width=True, key=f"glob_{proj}_{loc}")
 #############################
 # --- Executive Summary --- #
 #############################
