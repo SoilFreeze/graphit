@@ -815,7 +815,6 @@ elif service == "📤 Data Intake Lab":
 
         with tab1:
             st.subheader("📄 Manual File Ingestion")
-            st.subheader("📄 Manual File Ingestion")
             st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
             u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
             
@@ -922,63 +921,67 @@ elif service == "📤 Data Intake Lab":
                         
         # Add this to your "📤 Data Intake Lab" tabs or a new section
         with tab3:
-            st.subheader("📥 Export Project Data")
+    st.subheader("📥 Export Project Data")
+    
+    # 1. PROJECT SELECTION (In case it's not set in the sidebar)
+    # We fetch the list of unique projects from the metadata table
+    all_projects_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+    all_projs = client.query(all_projects_q).to_dataframe()['Project'].tolist()
+    
+    # If a project is selected in sidebar, use it as default; otherwise, let user pick
+    default_ix = all_projs.index(selected_project) if selected_project in all_projs else 0
+    target_project = st.selectbox("1️⃣ Select Project to Export", sorted(all_projs), index=default_ix)
+
+    if target_project:
+        # 2. FETCH DATA FOR FILTERS
+        with st.spinner(f"Loading data for {target_project}..."):
+            # Fetch ALL data (unapproved included) for THIS project
+            export_df = get_universal_portal_data(target_project, only_approved=False)
+
+        if export_df.empty:
+            st.warning(f"No data found for {target_project}.")
+        else:
+            # 3. PIPE & DATE FILTERS
+            c1, c2 = st.columns(2)
             
-            # 1. Fetch the data first to populate the dropdowns
-            # We use only_approved=False so admins can export everything
-            with st.spinner("Preparing export filters..."):
-                export_df = get_universal_portal_data(selected_project, only_approved=False)
+            with c1:
+                # Pipe Selection
+                pipes = ["All Pipes"] + sorted(export_df['Location'].dropna().unique().tolist())
+                sel_pipe = st.selectbox("2️⃣ Select Pipe / Location", pipes)
+            
+            with c2:
+                # Date Range Selection
+                min_ts = export_df['timestamp'].min().date()
+                max_ts = export_df['timestamp'].max().date()
+                # We use a key to ensure this widget doesn't reset unexpectedly
+                export_range = st.date_input("3️⃣ Select Date Range", value=(min_ts, max_ts), key="export_range_picker")
 
-            if export_df.empty:
-                st.warning(f"No data found for project {selected_project}.")
-            else:
-                c1, c2 = st.columns(2)
-                
-                with c1:
-                    # Explicitly pull unique values from the 'Location' column
-                    # We use .dropna() to avoid errors with empty location fields
-                    available_pipes = sorted(export_df['Location'].dropna().unique().tolist())
-                    pipe_options = ["All Pipes"] + available_pipes
-                    selected_pipe = st.selectbox("Select Pipe / Location", pipe_options, key="export_pipe_sel")
-                
-                with c2:
-                    # Dynamic date range based on the actual data
-                    min_ts = export_df['timestamp'].min().date()
-                    max_ts = export_df['timestamp'].max().date()
-                    export_range = st.date_input("Select Date Range", value=(min_ts, max_ts))
+            # 4. APPLY FILTERS
+            df_final = export_df.copy()
+            
+            if sel_pipe != "All Pipes":
+                df_final = df_final[df_final['Location'] == sel_pipe]
+            
+            if isinstance(export_range, tuple) and len(export_range) == 2:
+                start, end = export_range
+                df_final = df_final[(df_final['timestamp'].dt.date >= start) & (df_final['timestamp'].dt.date <= end)]
 
-                # 2. Apply Filters to the DataFrame
-                filtered_df = export_df.copy()
+            # 5. DOWNLOAD BUTTON
+            st.divider()
+            st.write(f"📊 **Result:** Found {len(df_final)} rows for export.")
+            
+            if not df_final.empty:
+                # Standardize units if needed
+                if unit_mode == "Celsius":
+                    df_final['temperature'] = (df_final['temperature'] - 32) * 5/9
                 
-                # Filter by Pipe
-                if selected_pipe != "All Pipes":
-                    filtered_df = filtered_df[filtered_df['Location'] == selected_pipe]
-                
-                # Filter by Date (Ensuring the user selected a full range)
-                if isinstance(export_range, tuple) and len(export_range) == 2:
-                    start_date, end_date = export_range
-                    filtered_df = filtered_df[
-                        (filtered_df['timestamp'].dt.date >= start_date) & 
-                        (filtered_df['timestamp'].dt.date <= end_date)
-                    ]
-
-                st.write(f"✅ Ready to export: **{len(filtered_df)}** rows.")
-                
-                if not filtered_df.empty:
-                    # Optional: Convert to Fahrenheit/Celsius based on sidebar
-                    if unit_mode == "Celsius":
-                        filtered_df['temperature'] = (filtered_df['temperature'] - 32) * 5/9
-                    
-                    # 3. Create the Download Button
-                    csv_string = filtered_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="💾 Generate & Download CSV",
-                        data=csv_string,
-                        file_name=f"{selected_project}_{selected_pipe.replace(' ', '_')}_export.csv",
-                        mime='text/csv'
-                    )
-                else:
-                    st.info("No rows match the selected filters.")
+                csv_bytes = df_final.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="💾 Download CSV",
+                    data=csv_bytes,
+                    file_name=f"Export_{target_project}_{sel_pipe}.csv",
+                    mime='text/csv'
+                )
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
