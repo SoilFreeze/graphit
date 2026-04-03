@@ -92,7 +92,27 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
     return fig
+
+def check_admin_access():
+    """Returns True if the user is authenticated, otherwise shows password input."""
+    if "admin_authenticated" not in st.session_state:
+        st.session_state["admin_authenticated"] = False
+
+    if st.session_state["admin_authenticated"]:
+        return True
+
+    # Password input UI
+    st.warning("🔒 This area is restricted to Engineering Admins.")
+    pwd_input = st.text_input("Enter Admin Password", type="password")
     
+    if st.button("Unlock Tools"):
+        if pwd_input == st.secrets["admin_password"]:
+            st.session_state["admin_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
 @st.cache_data(ttl=600) # Cache data for 10 minutes
 def get_cached_project_data(project_id, days=84):
     """
@@ -762,127 +782,128 @@ elif service == "📉 Node Diagnostics":
 # --- DATA INTAKE LAB --- #
 ###############################
 elif service == "📤 Data Intake Lab":
-    st.header("📤 Data Ingestion & Recovery")
+    if check_admin_access():
+        st.header("📤 Data Ingestion & Recovery")
     
-    tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
-
-    with tab1:
-        st.subheader("📄 Manual File Ingestion")
-        st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
-        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
-        
-        if u_file is not None:
-            import io
-            filename = u_file.name.lower()
-            raw_content = u_file.getvalue().decode('utf-8').splitlines()
+        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
+    
+        with tab1:
+            st.subheader("📄 Manual File Ingestion")
+            st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
+            u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
             
-            # --- DETECT FILE TYPE ---
-            is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
-            is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
-            
-            # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
-            if is_lord_wide:
-                try:
-                    start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
-                    df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
-                    # Rename 'Time' to 'timestamp' and melt columns into 'NodeNum'
-                    df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
-                    df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
-                    df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
-                    df_long = df_long.dropna(subset=['temperature'])
-                    
-                    st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
-                    st.dataframe(df_long.head())
-                    if st.button("🚀 UPLOAD LORD WIDE DATA"):
-                        client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
-                                                         f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                        st.success("Uploaded successfully to raw_lord!")
-                except Exception as e: st.error(f"Lord Wide Error: {e}")
-
-            # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
-            elif is_lord_narrow:
-                try:
-                    df_ln = pd.read_csv(io.StringIO("\n".join(raw_content)))
-                    # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
-                    df_ln = df_ln.rename(columns={
-                        'Timestamp': 'timestamp', 
-                        'nodenumber': 'NodeNum', 
-                        'temperature': 'temperature'
-                    })
-                    df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
-                    df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
-                    
-                    st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
-                    st.dataframe(df_ln.head())
-                    if st.button("🚀 UPLOAD LORD NARROW DATA"):
-                        client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
-                                                         f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                        st.success("Uploaded successfully to raw_lord!")
-                except Exception as e: st.error(f"Lord Narrow Error: {e}")
-
-            # --- CASE 3: SENSORPUSH ---
-            else:
-                try:
-                    header_idx = -1
-                    for i, line in enumerate(raw_content[:50]):
-                        if "SensorId" in line or "Observed" in line:
-                            header_idx = i; break
-                    
-                    if header_idx != -1:
-                        df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
-                        ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
-                        
-                        df_up = pd.DataFrame()
-                        # Mapping to the raw_sensorpush schema
-                        df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
-                        df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
-                        t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
-                        df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
-                        df_up = df_up.dropna(subset=['timestamp', 'temperature'])
-
-                        st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
-                        if st.button("🚀 UPLOAD SENSORPUSH"):
-                            client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                            st.success("Uploaded successfully to raw_sensorpush!")
-                    else:
-                        st.error("Format not recognized. Check CSV headers.")
-                except Exception as e: st.error(f"SensorPush Error: {e}")
-
-    with tab2:
-        st.subheader("📡 Cloud-to-Cloud API Sync")
-        c1, c2 = st.columns(2)
-        start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
-        end_date = c2.date_input("End Date", datetime.now())
-        
-        if st.button("🛰️ FETCH & SYNC"):
-            # Level 3: Date Conversion
-            start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
-            end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
-            
-            with st.spinner("Fetching data..."):
-                # Level 4: Call the Function
-                df_api = fetch_sensorpush_data(start_dt, end_dt)
+            if u_file is not None:
+                import io
+                filename = u_file.name.lower()
+                raw_content = u_file.getvalue().decode('utf-8').splitlines()
                 
-                if not df_api.empty:
-                    # Level 5: Upload to BigQuery
-                    table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                    client.load_table_from_dataframe(df_api, table_path).result()
-                    st.success(f"✅ Integrated {len(df_api)} points successfully!")
+                # --- DETECT FILE TYPE ---
+                is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
+                is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
+                
+                # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
+                if is_lord_wide:
+                    try:
+                        start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
+                        df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
+                        # Rename 'Time' to 'timestamp' and melt columns into 'NodeNum'
+                        df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
+                        df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
+                        df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
+                        df_long = df_long.dropna(subset=['temperature'])
+                        
+                        st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
+                        st.dataframe(df_long.head())
+                        if st.button("🚀 UPLOAD LORD WIDE DATA"):
+                            client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
+                                                             f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                            st.success("Uploaded successfully to raw_lord!")
+                    except Exception as e: st.error(f"Lord Wide Error: {e}")
+    
+                # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
+                elif is_lord_narrow:
+                    try:
+                        df_ln = pd.read_csv(io.StringIO("\n".join(raw_content)))
+                        # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
+                        df_ln = df_ln.rename(columns={
+                            'Timestamp': 'timestamp', 
+                            'nodenumber': 'NodeNum', 
+                            'temperature': 'temperature'
+                        })
+                        df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
+                        df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
+                        
+                        st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
+                        st.dataframe(df_ln.head())
+                        if st.button("🚀 UPLOAD LORD NARROW DATA"):
+                            client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
+                                                             f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                            st.success("Uploaded successfully to raw_lord!")
+                    except Exception as e: st.error(f"Lord Narrow Error: {e}")
+
+                # --- CASE 3: SENSORPUSH ---
                 else:
-                    # Level 5: Fallback
-                    st.warning("No data found for this range.")
+                    try:
+                        header_idx = -1
+                        for i, line in enumerate(raw_content[:50]):
+                            if "SensorId" in line or "Observed" in line:
+                                header_idx = i; break
+                        
+                        if header_idx != -1:
+                            df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
+                            ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
+                            
+                            df_up = pd.DataFrame()
+                            # Mapping to the raw_sensorpush schema
+                            df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
+                            df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
+                            t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
+                            df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
+                            df_up = df_up.dropna(subset=['timestamp', 'temperature'])
+    
+                            st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
+                            if st.button("🚀 UPLOAD SENSORPUSH"):
+                                client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                                st.success("Uploaded successfully to raw_sensorpush!")
+                        else:
+                            st.error("Format not recognized. Check CSV headers.")
+                    except Exception as e: st.error(f"SensorPush Error: {e}")
+
+        with tab2:
+            st.subheader("📡 Cloud-to-Cloud API Sync")
+            c1, c2 = st.columns(2)
+            start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
+            end_date = c2.date_input("End Date", datetime.now())
+            
+            if st.button("🛰️ FETCH & SYNC"):
+                # Level 3: Date Conversion
+                start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
+                end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
+                
+                with st.spinner("Fetching data..."):
+                    # Level 4: Call the Function
+                    df_api = fetch_sensorpush_data(start_dt, end_dt)
                     
-    with tab3:
-        st.subheader("🛠️ Metadata Management")
-        u_meta = st.file_uploader("Upload Master_Log / Metadata CSV", type=['csv'])
-        if u_meta:
-            df_new_meta = pd.read_csv(u_meta)
-            st.dataframe(df_new_meta.head())
-            if st.button("Overwrite Master Metadata"):
-                # This replaces the mapping table in BigQuery
-                client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
-                                                 job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-                st.success("Master Metadata Updated!")
+                    if not df_api.empty:
+                        # Level 5: Upload to BigQuery
+                        table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                        client.load_table_from_dataframe(df_api, table_path).result()
+                        st.success(f"✅ Integrated {len(df_api)} points successfully!")
+                    else:
+                        # Level 5: Fallback
+                        st.warning("No data found for this range.")
+                        
+        with tab3:
+            st.subheader("🛠️ Metadata Management")
+            u_meta = st.file_uploader("Upload Master_Log / Metadata CSV", type=['csv'])
+            if u_meta:
+                df_new_meta = pd.read_csv(u_meta)
+                st.dataframe(df_new_meta.head())
+                if st.button("Overwrite Master Metadata"):
+                    # This replaces the mapping table in BigQuery
+                    client.load_table_from_dataframe(df_new_meta, f"{PROJECT_ID}.{DATASET_ID}.master_metadata", 
+                                                     job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
+                    st.success("Master Metadata Updated!")
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
@@ -890,134 +911,135 @@ elif service == "📤 Data Intake Lab":
 # --- ADMIN TOOLS --- #
 #######################             
 elif service == "🛠️ Admin Tools":
-    st.header("🛠️ Engineering Admin Tools")
+    if check_admin_access():
+        st.header("🛠️ Engineering Admin Tools")
     
-    # 1. DEFINE TABS FIRST (Fixes the NameError)
-    tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
-
-    # 2. BULK APPROVAL (Only targets physical RAW tables)
-    with tab_approve:
-        st.subheader("✅ Bulk Approval")
-        st.info("Sets records to 'TRUE' unless they were specifically marked 'FALSE' with the Lasso tool.")
-        
-        if st.button("🚀 Approve All Pending Data"):
-            # We ONLY update raw tables; the MASTER_TABLE View will reflect changes automatically
-            raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                          f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+        # 1. DEFINE TABS FIRST (Fixes the NameError)
+        tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
+    
+        # 2. BULK APPROVAL (Only targets physical RAW tables)
+        with tab_approve:
+            st.subheader("✅ Bulk Approval")
+            st.info("Sets records to 'TRUE' unless they were specifically marked 'FALSE' with the Lasso tool.")
             
-            with st.spinner("Processing approvals..."):
-                for table in raw_tables:
+            if st.button("🚀 Approve All Pending Data"):
+                # We ONLY update raw tables; the MASTER_TABLE View will reflect changes automatically
+                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                              f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+                
+                with st.spinner("Processing approvals..."):
+                    for table in raw_tables:
+                        try:
+                            approve_sql = f"""
+                                UPDATE `{table}` 
+                                SET approve = 'TRUE' 
+                                WHERE approve IS NULL 
+                                OR UPPER(CAST(approve AS STRING)) != 'FALSE'
+                            """
+                            client.query(approve_sql).result()
+                        except Exception as e:
+                            st.warning(f"Could not update {table}: {e}")
+                st.success("Bulk approval complete.")
+                st.cache_data.clear()
+    
+        # 3. DEEP DATA SCRUB (Physical Purge of RAW tables)
+        with tab_scrub:
+            st.subheader("🧹 Deep Data Scrub & Final Purge")
+            st.info("Permanently deletes 'FALSE' points and reduces data to 1-hour intervals.")
+            
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+    
+            if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
+                with st.spinner("Executing hard delete and dedup..."):
+                    scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS 
+                    SELECT * EXCEPT(rn) FROM (
+                        SELECT *, 
+                               ROW_NUMBER() OVER(
+                                   PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                                   ORDER BY timestamp DESC
+                               ) as rn
+                        FROM `{target_table}` 
+                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
+                        AND temperature IS NOT NULL
+                    ) WHERE rn = 1
+                    """
+                    # Note: Purge for Master Table removed as it is a VIEW
                     try:
-                        approve_sql = f"""
-                            UPDATE `{table}` 
-                            SET approve = 'TRUE' 
-                            WHERE approve IS NULL 
-                            OR UPPER(CAST(approve AS STRING)) != 'FALSE'
-                        """
-                        client.query(approve_sql).result()
+                        client.query(scrub_sql).result()
+                        st.success(f"{scrub_target} purged of rejected points and deduped.")
+                        st.cache_data.clear()
                     except Exception as e:
-                        st.warning(f"Could not update {table}: {e}")
-            st.success("Bulk approval complete.")
-            st.cache_data.clear()
-
-    # 3. DEEP DATA SCRUB (Physical Purge of RAW tables)
-    with tab_scrub:
-        st.subheader("🧹 Deep Data Scrub & Final Purge")
-        st.info("Permanently deletes 'FALSE' points and reduces data to 1-hour intervals.")
-        
-        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
-        target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-
-        if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
-            with st.spinner("Executing hard delete and dedup..."):
-                scrub_sql = f"""
-                CREATE OR REPLACE TABLE `{target_table}` AS 
-                SELECT * EXCEPT(rn) FROM (
-                    SELECT *, 
-                           ROW_NUMBER() OVER(
-                               PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                               ORDER BY timestamp DESC
-                           ) as rn
-                    FROM `{target_table}` 
-                    WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
-                    AND temperature IS NOT NULL
-                ) WHERE rn = 1
-                """
-                # Note: Purge for Master Table removed as it is a VIEW
-                try:
-                    client.query(scrub_sql).result()
-                    st.success(f"{scrub_target} purged of rejected points and deduped.")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Scrub Error: {e}")
-
-    # 4. SURGICAL CLEANER (Lasso Selection)
-    with tab_cleaner:
-        st.subheader("🧨 Surgical Data Cleaner: Lasso Selection")
-        p_df = pd.DataFrame() # Initialize to avoid NameError
-
-        # Fetch Metadata
-        meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
-        with c2:
-            pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
-            sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
-        with c3:
-            if sel_pipe == "ALL":
-                nodes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['NodeNum'].unique())
-            else:
-                nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique())
-            sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
-
-        st.divider()
-        lookback_hrs = st.slider("Lookback Window (Hours)", 6, 168, 24, format="%d hours ago")
-
-        preview_q = f"""
-            SELECT timestamp, temperature, NodeNum, Location 
-            FROM `{MASTER_TABLE}` 
-            WHERE Project = '{sel_proj}' 
-            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_hrs} HOUR)
-            ORDER BY timestamp ASC
-        """
-        p_df = client.query(preview_q).to_dataframe()
-
-        if not p_df.empty:
-            if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
-            if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
-
+                        st.error(f"Scrub Error: {e}")
+    
+        # 4. SURGICAL CLEANER (Lasso Selection)
+        with tab_cleaner:
+            st.subheader("🧨 Surgical Data Cleaner: Lasso Selection")
+            p_df = pd.DataFrame() # Initialize to avoid NameError
+    
+            # Fetch Metadata
+            meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
+    
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
+            with c2:
+                pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
+                sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
+            with c3:
+                if sel_pipe == "ALL":
+                    nodes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['NodeNum'].unique())
+                else:
+                    nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique())
+                sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
+    
+            st.divider()
+            lookback_hrs = st.slider("Lookback Window (Hours)", 6, 168, 24, format="%d hours ago")
+    
+            preview_q = f"""
+                SELECT timestamp, temperature, NodeNum, Location 
+                FROM `{MASTER_TABLE}` 
+                WHERE Project = '{sel_proj}' 
+                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_hrs} HOUR)
+                ORDER BY timestamp ASC
+            """
+            p_df = client.query(preview_q).to_dataframe()
+    
             if not p_df.empty:
-                fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
-                                 title="Lasso selection tool active", template="plotly_white", height=600)
-                fig.update_layout(dragmode='lasso', hovermode='closest')
-                fig.update_traces(marker=dict(size=10, opacity=0.7))
-
-                # Use width='stretch' to avoid deprecation warnings
-                selected_points = st.plotly_chart(fig, width='stretch', on_select="rerun")
-
-                if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
-                    points = selected_points["selection"]["points"]
-                    st.warning(f"⚠️ {len(points)} points highlighted.")
-                    
-                    if st.button("🚫 HIDE SELECTED DATA"):
-                        with st.spinner("Updating raw tables..."):
-                            try:
-                                conditions = [f"(NodeNum = '{p_df.iloc[pt['point_index']]['NodeNum']}' AND timestamp = CAST('{pt['x']}' AS TIMESTAMP))" for pt in points]
-                                where_clause = " OR ".join(conditions)
-                                
-                                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                                              f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
-                                              
-                                for table in raw_tables:
-                                    client.query(f"UPDATE `{table}` SET approve = 'FALSE' WHERE {where_clause}").result()
-                                
-                                st.success("Points hidden. Refreshing cache...")
-                                st.cache_data.clear()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Hide failed: {e}")
+                if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
+                if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
+    
+                if not p_df.empty:
+                    fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
+                                     title="Lasso selection tool active", template="plotly_white", height=600)
+                    fig.update_layout(dragmode='lasso', hovermode='closest')
+                    fig.update_traces(marker=dict(size=10, opacity=0.7))
+    
+                    # Use width='stretch' to avoid deprecation warnings
+                    selected_points = st.plotly_chart(fig, width='stretch', on_select="rerun")
+    
+                    if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
+                        points = selected_points["selection"]["points"]
+                        st.warning(f"⚠️ {len(points)} points highlighted.")
+                        
+                        if st.button("🚫 HIDE SELECTED DATA"):
+                            with st.spinner("Updating raw tables..."):
+                                try:
+                                    conditions = [f"(NodeNum = '{p_df.iloc[pt['point_index']]['NodeNum']}' AND timestamp = CAST('{pt['x']}' AS TIMESTAMP))" for pt in points]
+                                    where_clause = " OR ".join(conditions)
+                                    
+                                    raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                                                  f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+                                                  
+                                    for table in raw_tables:
+                                        client.query(f"UPDATE `{table}` SET approve = 'FALSE' WHERE {where_clause}").result()
+                                    
+                                    st.success("Points hidden. Refreshing cache...")
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Hide failed: {e}")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
