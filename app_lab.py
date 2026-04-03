@@ -15,18 +15,13 @@ import io
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
-    # This CTE unifies the two different raw table schemas
-    unified_raw_sql = f"""
+    query = f"""
         WITH UnifiedRaw AS (
-            -- If SensorPush uses 'sensor_id', rename it to 'NodeNum' here
-            SELECT sensor_id AS NodeNum, timestamp, temperature 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
-            -- Lord already uses 'NodeNum'
-            SELECT NodeNum, timestamp, temperature 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ),
-        FinalData AS (
+        JoinedData AS (
             SELECT 
                 r.NodeNum, 
                 r.timestamp, 
@@ -35,33 +30,25 @@ def get_universal_portal_data(project_id, only_approved=True):
                 m.Bank, 
                 m.Depth, 
                 m.Project,
-                -- Check against our new manual_rejections table
-                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as approve
+                -- Logic: If the point exists in manual_rejections, it is NOT approved
+                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
             FROM UnifiedRaw r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
-                ON r.NodeNum = m.PhysicalID
-            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
                 ON r.NodeNum = rej.NodeNum AND r.timestamp = rej.timestamp
         )
-        SELECT * FROM FinalData
+        SELECT * FROM JoinedData
         WHERE Project = '{project_id}'
-        { "AND approve = 'TRUE'" if only_approved else "" }
+        { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
         AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY Location ASC, timestamp ASC
     """
-    try:
-        df = client.query(unified_raw_sql).to_dataframe()
-        
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            if df['timestamp'].dt.tz is None:
-                df['timestamp'] = df['timestamp'].dt.tz_localize(pytz.UTC)
-            else:
-                df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC)
-        return df
-    except Exception as e:
-        st.error(f"Query Error: {e}")
-        return pd.DataFrame()
+    df = client.query(query).to_dataframe()
+    
+    if not df.empty:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else df['timestamp'].dt.tz_localize(pytz.UTC)
+    return df
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
