@@ -649,15 +649,24 @@ elif service == "📊 Client Portal":
 ###########################
 # --- NODE DIAGNOSTIC --- #
 ###########################  
-elif service == "📉 Node Diagnostics":
+lif service == "📉 Node Diagnostics":
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
     if not selected_project:
         st.warning("Please select a project in the sidebar.")
     else:
         try:
-            # CHANGE: Set only_approved=False to see raw/unapproved data
-            all_data = get_universal_portal_data(selected_project, only_approved=False)
+            # CHANGE: Use the new unified function instead of the deleted one
+            # We set only_approved=False so you can see raw data for troubleshooting
+            all_site_data = get_all_projects_data(only_approved=False)
+            
+            # Filter the big dataset down to just your active project
+            all_data = all_site_data[all_site_data['Project'] == selected_project]
+            
+            if all_data.empty:
+                st.warning(f"No data found for project {selected_project}.")
+            else:
+                loc_options = sorted(all_data['Location'].dropna().unique())
             
             loc_options = sorted(all_data['Location'].dropna().unique())
                        
