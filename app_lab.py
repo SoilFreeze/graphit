@@ -1049,16 +1049,16 @@ elif service == "🛠️ Admin Tools":
                         st.warning(f"⚠️ {len(points)} points highlighted.")
                         
                        # UPDATE THIS IN YOUR ADMIN TOOLS -> SURGICAL CLEANER SECTION
-                    if st.button("🚫 HIDE SELECTED DATA"):
-                        with st.spinner("Updating rejections..."):
-                            try:
-                                rejection_records = []
-                                for pt in points:
-                                    rejection_records.append({
-                                        "NodeNum": p_df.iloc[pt['point_index']]['NodeNum'], # Key must be NodeNum
-                                        "timestamp": pd.to_datetime(pt['x']),
-                                        "reason": "Lasso Hidden"
-                                    })
+                        if st.button("🚫 HIDE SELECTED DATA"):
+                            with st.spinner("Updating rejections..."):
+                                try:
+                                    rejection_records = []
+                                    for pt in points:
+                                        rejection_records.append({
+                                            "NodeNum": p_df.iloc[pt['point_index']]['NodeNum'], # Key must be NodeNum
+                                            "timestamp": pd.to_datetime(pt['x']),
+                                            "reason": "Lasso Hidden"
+                                        })
                                     
                                     raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
                                                   f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
