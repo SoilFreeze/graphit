@@ -405,7 +405,7 @@ service = st.sidebar.selectbox(
     "📂 Select Page", 
     ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
     index=0  # Sets Global Overview as the landing page
-)st.sidebar.divider()
+    )st.sidebar.divider()
 
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
