@@ -15,7 +15,10 @@ import io
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
-    # Standardize the query to use exact column names from your images
+    """
+    Fetches data from unified raw tables and joins with metadata.
+    Filters out points found in the manual_rejections table.
+    """
     query = f"""
         WITH UnifiedRaw AS (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
@@ -28,9 +31,10 @@ def get_universal_portal_data(project_id, only_approved=True):
                 r.timestamp, 
                 r.temperature,
                 m.Location, 
-                -- Use COALESCE or check if Bank exists in your metadata table
+                m.Bank, 
                 m.Depth, 
                 m.Project,
+                -- Since we renamed the column to NodeNum, this join will now succeed
                 CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
@@ -47,17 +51,15 @@ def get_universal_portal_data(project_id, only_approved=True):
         df = client.query(query).to_dataframe()
         
         if not df.empty:
-            # Ensure timestamp is datetime and UTC
+            # Ensure proper datetime format for Plotly
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
             
-            # Re-add a 'Bank' column as empty string if it's missing from SQL 
-            # to prevent the Graph Engine from crashing
+            # Ensure Bank exists even if null in metadata to prevent UI errors
             if 'Bank' not in df.columns:
-                df['Bank'] = ""
+                df['Bank'] = None
                 
         return df
     except Exception as e:
-        # This will print the specific BigQuery error (e.g., 'Column Bank not found')
         st.error(f"BigQuery Error: {e}")
         return pd.DataFrame()
 
@@ -1046,11 +1048,17 @@ elif service == "🛠️ Admin Tools":
                         points = selected_points["selection"]["points"]
                         st.warning(f"⚠️ {len(points)} points highlighted.")
                         
-                        if st.button("🚫 HIDE SELECTED DATA"):
-                            with st.spinner("Updating raw tables..."):
-                                try:
-                                    conditions = [f"(NodeNum = '{p_df.iloc[pt['point_index']]['NodeNum']}' AND timestamp = CAST('{pt['x']}' AS TIMESTAMP))" for pt in points]
-                                    where_clause = " OR ".join(conditions)
+                       # UPDATE THIS IN YOUR ADMIN TOOLS -> SURGICAL CLEANER SECTION
+                    if st.button("🚫 HIDE SELECTED DATA"):
+                        with st.spinner("Updating rejections..."):
+                            try:
+                                rejection_records = []
+                                for pt in points:
+                                    rejection_records.append({
+                                        "NodeNum": p_df.iloc[pt['point_index']]['NodeNum'], # Key must be NodeNum
+                                        "timestamp": pd.to_datetime(pt['x']),
+                                        "reason": "Lasso Hidden"
+                                    })
                                     
                                     raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
                                                   f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
