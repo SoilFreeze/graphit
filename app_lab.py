@@ -401,8 +401,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 #######################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-service = st.sidebar.selectbox("📂 Select Page", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
-st.sidebar.divider()
+service = st.sidebar.selectbox(
+    "📂 Select Page", 
+    ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
+    index=0  # Sets Global Overview as the landing page
+)st.sidebar.divider()
 
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
@@ -432,6 +435,62 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 ####################
 # --- SERVICES --- #
 ####################
+#############################
+# --- Global Overview --- #
+#############################
+if service == "🌐 Global Overview":
+    st.header("🌐 Global Site Overview")
+    st.write("Visualizing all approved data across all active projects.")
+
+    # 1. Fetch the list of all projects
+    all_projects = get_project_list()
+    
+    # 2. Set the global timeframe (e.g., last 4 weeks)
+    weeks_view = st.sidebar.slider("Global View (Weeks)", 1, 12, 4, key="global_weeks")
+    now = pd.Timestamp.now(tz=pytz.UTC)
+    # Align view to the upcoming Monday at Midnight
+    end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_view = end_view - timedelta(weeks=weeks_view)
+
+    if not all_projects.any():
+        st.warning("No projects found in the database.")
+    else:
+        # 3. Iterate through every project
+        for proj in sorted(all_projects):
+            # Fetch approved data for this specific project
+            p_df = get_universal_portal_data(proj, only_approved=True)
+            
+            if p_df.empty:
+                continue # Skip projects with no approved data
+            
+            st.subheader(f"🏗️ Project: {proj}")
+            
+            # 4. Iterate through every location in the project
+            locations = sorted(p_df['Location'].dropna().unique())
+            
+            for loc in locations:
+                # Filter data for this specific location and timeframe
+                loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
+                
+                if not loc_data.empty:
+                    # Create a combined title for the graph
+                    graph_title = f"📈 {proj} — {loc}"
+                    
+                    # Generate the high-speed GPU-accelerated graph
+                    fig = build_high_speed_graph(
+                        loc_data, 
+                        graph_title, 
+                        start_view, 
+                        end_view, 
+                        tuple(active_refs), 
+                        unit_mode, 
+                        unit_label
+                    )
+                    
+                    # Display the graph
+                    st.plotly_chart(fig, use_container_width=True, key=f"glob_{proj}_{loc}", config={'displayModeBar': False})
+            
+            st.divider() # Visual break between projects
 #############################
 # --- Executive Summary --- #
 #############################
