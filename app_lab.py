@@ -639,122 +639,150 @@ elif service == "📉 Node Diagnostics":
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
     if not selected_project:
-        st.warning("👈 Please select a Project in the sidebar to begin diagnostics.")
+        st.warning("👈 Please select a project in the sidebar.")
     else:
-        # 1. FETCH ALL DATA (Including Rejected/Unapproved)
-        # We set only_approved=False so we can see the "noise" to scrub it
-        with st.spinner(f"🔍 Accessing raw sensor streams for {selected_project}..."):
-            all_data = get_universal_portal_data(selected_project, only_approved=False)
-        
-        if all_data.empty:
-            st.warning(f"No raw data found for project {selected_project}.")
-        else:
-            # 2. TIMEFRAME & LOCATION SELECTORS
-            # We use a slider for a shorter diagnostic window (usually 1-14 days)
-            lookback_days = st.sidebar.slider("Diagnostic Window (Days)", 1, 14, 7, key="diag_lookback")
+        try:
+            # 1. FETCH ALL DATA (Including Rejected/Unapproved for scrubbing)
+            # We use only_approved=False to see the noise we want to hide
+            with st.spinner("🔍 Syncing raw diagnostic streams..."):
+                all_data = get_universal_portal_data(selected_project, only_approved=False)
             
-            # Standardize 'now' to UTC for the window calculation
-            now_utc = pd.Timestamp.now(tz='UTC')
-            start_view = now_utc - timedelta(days=lookback_days)
-            end_view = now_utc + timedelta(hours=6) # Buffer for potential NY clock drift
+            if all_data.empty:
+                st.warning(f"No data found for project {selected_project}.")
+            else:
+                # 2. SELECTION CONTROLS
+                loc_options = sorted(all_data['Location'].dropna().unique())
+                
+                c1, c2 = st.columns([2, 1])
+                with c1: 
+                    sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options)
+                with c2: 
+                    weeks_view = st.slider("Lookback (Weeks)", 1, 12, 4, key="diag_lookback")
 
-            loc_options = sorted(all_data['Location'].dropna().unique())
-            selected_loc = st.selectbox("Select Pipe/Location to Inspect", loc_options)
-            
-            # Filter for the specific pipe
-            diag_df = all_data[all_data['Location'] == selected_loc].copy()
+                # 3. UTC DATE CALCULATIONS (Standardized)
+                now_utc = pd.Timestamp.now(tz=pytz.UTC)
+                # Align end_view to upcoming Monday midnight UTC
+                days_until_monday = (7 - now_utc.weekday()) % 7 or 7
+                end_view = (now_utc + pd.Timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
+                start_view = end_view - timedelta(weeks=weeks_view)
 
-            # 3. RENDER DIAGNOSTIC GRAPH
-            st.subheader(f"Timeline: {selected_loc}")
-            st.caption(f"Currently viewing in **{tz_mode}**. Points hidden in 'Project Overview' are visible here for scrubbing.")
-            
-            fig = build_high_speed_graph(
-                diag_df, 
-                f"Diagnostic: {selected_loc}", 
-                start_view, 
-                end_view, 
-                tuple(active_refs), 
-                unit_mode, 
-                unit_label,
-                display_tz=display_tz # Passes your US/Eastern or US/Pacific preference
-            )
-            
-            # CRITICAL: Use on_select="rerun" to capture Lasso tool data
-            selected_data = st.plotly_chart(
-                fig, 
-                use_container_width=True, 
-                on_select="rerun", 
-                key=f"diag_chart_{selected_loc}"
-            )
+                # Filter for chosen location
+                df_diag = all_data[all_data['Location'] == sel_loc].copy()
 
-            # 4. SURGICAL DATA CLEANER (The Scrubbing Logic)
-            st.divider()
-            st.subheader("✂️ Surgical Data Cleaner")
-            
-            # Extract points from the Lasso/Box selection
-            if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
-                points = selected_data["selection"]["points"]
-                st.write(f"🎯 **{len(points)}** points highlighted.")
+                # --- 4. TABS FOR ORGANIZATION ---
+                tab1, tab2, tab3 = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "🛠️ Scrubbing & Summary"])
 
-                if st.button("🚫 HIDE SELECTED DATA (Top of Hour)"):
-                    with st.spinner("Writing rejection rules to BigQuery..."):
-                        try:
-                            rejection_list = []
-                            for pt in points:
-                                # Convert plot X (which is in Local Time) back to UTC
-                                raw_ts = pd.to_datetime(pt['x'])
-                                
-                                # FLOOR to Top of Hour for standardized database entry
-                                # We ensure it is UTC before flooring to match BigQuery storage
-                                scrub_ts = raw_ts.tz_convert('UTC').floor('h')
-                                
-                                # Retrieve NodeNum from the dataframe index
-                                node_id = diag_df.iloc[pt['point_index']]['NodeNum']
-                                
-                                rejection_list.append({
-                                    "NodeNum": str(node_id),
-                                    "timestamp": scrub_ts,
-                                    "reason": "Top-of-Hour Scrub",
-                                    "Project": selected_project
-                                })
+                # --- TAB 1: TIMELINE ANALYSIS ---
+                with tab1:
+                    st.caption(f"Viewing in **{tz_mode}**. Use Lasso tool to select points for scrubbing.")
+                    fig_time = build_high_speed_graph(
+                        df_diag, sel_loc, start_view, end_view, 
+                        tuple(active_refs), unit_mode, unit_label, 
+                        display_tz=display_tz # Passes Local Time preference
+                    )
+                    
+                    # Capture Lasso data
+                    selected_data = st.plotly_chart(fig_time, use_container_width=True, on_select="rerun", key=f"diag_chart_{sel_loc}")
 
-                            if rejection_list:
-                                # Bulk upload the new rejection rules
-                                rej_df = pd.DataFrame(rejection_list)
-                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                job = client.load_table_from_dataframe(
-                                    rej_df, 
-                                    f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
-                                    job_config=job_config
-                                )
-                                job.result()
+                # --- TAB 2: DEPTH PROFILE ANALYSIS ---
+                with tab2:
+                    df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
+                    depth_only_df = df_diag.dropna(subset=['Depth_Num', 'NodeNum']).copy()
+                    
+                    if depth_only_df.empty:
+                        st.info("No depth-based sensors found for this location.")
+                    else:
+                        fig_depth = go.Figure()
+                        mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
+                        
+                        for m_date in mondays:
+                            target_ts = m_date.replace(hour=6, minute=0, second=0, tzinfo=pytz.UTC)
+                            
+                            # Grab points within 12h of Monday 6AM UTC
+                            window = depth_only_df[
+                                (depth_only_df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(hours=12))
+                            ]
+                            
+                            if not window.empty:
+                                snap_list = []
+                                for node in window['NodeNum'].unique():
+                                    node_data = window[window['NodeNum'] == node].copy()
+                                    node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
+                                    snap_list.append(node_data.sort_values('diff').iloc[0])
                                 
-                                st.success(f"✅ Successfully scrubbed {len(rejection_list)} hours from the Project Overview!")
+                                snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
+                                fig_depth.add_trace(go.Scattergl(
+                                    x=snap_df['temperature'], y=snap_df['Depth_Num'],
+                                    mode='lines+markers', name=target_ts.strftime('%m/%d/%y')
+                                ))
+
+                        y_limit = int(((depth_only_df['Depth_Num'].max() // 5) + 1) * 5)
+                        fig_depth.update_layout(
+                            plot_bgcolor='white', height=700,
+                            xaxis=dict(title=f"Temp ({unit_label})", showgrid=True, gridcolor='Gainsboro'),
+                            yaxis=dict(title="Depth (ft)", range=[y_limit, 0], showgrid=True, gridcolor='Gray'),
+                            legend=dict(title="Snapshots (6AM UTC)", x=1.02, y=1)
+                        )
+                        st.plotly_chart(fig_depth, use_container_width=True)
+
+                # --- TAB 3: SCRUBBING & SUMMARY ---
+                with tab3:
+                    # A. SURGICAL CLEANER
+                    st.subheader("✂️ Surgical Data Cleaner")
+                    if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
+                        pts = selected_data["selection"]["points"]
+                        st.write(f"🎯 **{len(pts)}** points highlighted on the Timeline tab.")
+                        
+                        if st.button("🚫 HIDE SELECTED DATA (Top of Hour)"):
+                            try:
+                                rejection_list = []
+                                for pt in pts:
+                                    raw_ts = pd.to_datetime(pt['x'])
+                                    # Convert to UTC and floor to the top of the hour
+                                    scrub_ts = raw_ts.tz_convert('UTC').floor('h')
+                                    node_id = df_diag.iloc[pt['point_index']]['NodeNum']
+                                    
+                                    rejection_list.append({
+                                        "NodeNum": str(node_id), 
+                                        "timestamp": scrub_ts, 
+                                        "reason": "Top-of-Hour Scrub", 
+                                        "Project": selected_project
+                                    })
                                 
-                                # Reset cache and rerun to show the points as 'Rejected' (or hidden)
+                                client.load_table_from_dataframe(pd.DataFrame(rejection_list), f"{PROJECT_ID}.{DATASET_ID}.manual_rejections").result()
+                                st.success("✅ Scrubbed to BigQuery!")
                                 st.cache_data.clear()
                                 st.rerun()
+                            except Exception as e:
+                                st.error(f"Scrub Error: {e}")
+                    else:
+                        st.info("💡 Highlight points on the **Timeline** tab to enable scrubbing.")
 
-                        except Exception as e:
-                            st.error(f"❌ Error during scrubbing process: {e}")
-            else:
-                st.info("💡 **How to scrub data:** Use the **Lasso Select** or **Box Select** tool in the graph's top-right menu to highlight noisy data points, then click the button that appears here.")
+                    st.divider()
 
-            # 5. NODE HEALTH SUMMARY TABLE
-            st.subheader("Node Health & Sync Status")
-            health_table = diag_df.groupby('NodeNum').agg({
-                'timestamp': 'max',
-                'temperature': 'last',
-                'is_currently_approved': lambda x: (x == 'TRUE').sum()
-            }).rename(columns={
-                'timestamp': 'Last Seen (UTC)',
-                'temperature': f'Latest Reading ({unit_label})',
-                'is_currently_approved': 'Approved Count'
-            })
-            
-            # Format the 'Last Seen' for readability
-            health_table['Last Seen (UTC)'] = health_table['Last Seen (UTC)'].dt.strftime('%Y-%m-%d %H:%M')
-            st.dataframe(health_table, use_container_width=True)
+                    # B. ENGINEERING SUMMARY TABLE
+                    st.subheader(f"📋 Node Health Summary")
+                    latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+                    summary_rows = []
+                    
+                    for _, row in latest_nodes.iterrows():
+                        node_id = row['NodeNum']
+                        hrs_ago = int((now_utc - row['timestamp']).total_seconds() / 3600)
+                        status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
+                        pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
+
+                        summary_rows.append({
+                            "Node": node_id,
+                            "Position": pos_display,
+                            "Last Seen (UTC)": f"{row['timestamp'].strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}",
+                            "Status": "Approved" if row['is_currently_approved'] == 'TRUE' else "Rejected"
+                        })
+                    
+                    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+        except Exception as e:
+            st.error(f"Diagnostics Error: {traceback.format_exc()}")
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
