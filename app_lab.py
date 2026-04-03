@@ -14,16 +14,20 @@ import re
 import io
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
+def get_universal_portal_data(project_id, only_approved=True):
     """
-    OPTIMIZED: Fetches 84 days of approved data in one batch.
-    Stores it in the server cache so page-switching is instant.
+    Fetches 84 days of data. 
+    If only_approved is True, it filters for approved data.
+    If False, it fetches everything (useful for Diagnostics).
     """
+    # Logic to handle the WHERE clause dynamically
+    approval_filter = "AND (approve = 'TRUE' OR approve = 'true')" if only_approved else ""
+    
     query = f"""
         SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
         FROM `{MASTER_TABLE}`
         WHERE Project = '{project_id}' 
-        AND (approve = 'TRUE' OR approve = 'true')
+        {approval_filter}
         AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY Location ASC, timestamp ASC
     """
@@ -624,10 +628,11 @@ elif service == "📉 Node Diagnostics":
         st.warning("Please select a project in the sidebar.")
     else:
         try:
-            # 1. DATA ACCESS & CONTROLS
-            all_data = get_universal_portal_data(selected_project)
-            loc_options = sorted(all_data['Location'].dropna().unique())
+            # CHANGE: Set only_approved=False to see raw/unapproved data
+            all_data = get_universal_portal_data(selected_project, only_approved=False)
             
+            loc_options = sorted(all_data['Location'].dropna().unique())
+                       
             c1, c2 = st.columns([2, 1])
             with c1: 
                 sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options)
