@@ -15,6 +15,7 @@ import io
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
+    # Standardize the query to use exact column names from your images
     query = f"""
         WITH UnifiedRaw AS (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
@@ -27,10 +28,9 @@ def get_universal_portal_data(project_id, only_approved=True):
                 r.timestamp, 
                 r.temperature,
                 m.Location, 
-                m.Bank, 
+                -- Use COALESCE or check if Bank exists in your metadata table
                 m.Depth, 
                 m.Project,
-                -- Logic: If the point exists in manual_rejections, it is NOT approved
                 CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
@@ -43,12 +43,23 @@ def get_universal_portal_data(project_id, only_approved=True):
         AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY Location ASC, timestamp ASC
     """
-    df = client.query(query).to_dataframe()
-    
-    if not df.empty:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else df['timestamp'].dt.tz_localize(pytz.UTC)
-    return df
+    try:
+        df = client.query(query).to_dataframe()
+        
+        if not df.empty:
+            # Ensure timestamp is datetime and UTC
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            
+            # Re-add a 'Bank' column as empty string if it's missing from SQL 
+            # to prevent the Graph Engine from crashing
+            if 'Bank' not in df.columns:
+                df['Bank'] = ""
+                
+        return df
+    except Exception as e:
+        # This will print the specific BigQuery error (e.g., 'Column Bank not found')
+        st.error(f"BigQuery Error: {e}")
+        return pd.DataFrame()
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
