@@ -15,31 +15,53 @@ import io
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
-    """
-    Fetches 84 days of data. 
-    If only_approved is True, it filters for approved data.
-    If False, it fetches everything (useful for Diagnostics).
-    """
-    # Logic to handle the WHERE clause dynamically
-    approval_filter = "AND (approve = 'TRUE' OR approve = 'true')" if only_approved else ""
-    
-    query = f"""
-        SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
-        FROM `{MASTER_TABLE}`
-        WHERE Project = '{project_id}' 
-        {approval_filter}
+    # This CTE unifies the two different raw table schemas
+    unified_raw_sql = f"""
+        WITH UnifiedRaw AS (
+            -- If SensorPush uses 'sensor_id', rename it to 'NodeNum' here
+            SELECT sensor_id AS NodeNum, timestamp, temperature 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            -- Lord already uses 'NodeNum'
+            SELECT NodeNum, timestamp, temperature 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ),
+        FinalData AS (
+            SELECT 
+                r.NodeNum, 
+                r.timestamp, 
+                r.temperature,
+                m.Location, 
+                m.Bank, 
+                m.Depth, 
+                m.Project,
+                -- Check against our new manual_rejections table
+                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as approve
+            FROM UnifiedRaw r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.master_metadata` m 
+                ON r.NodeNum = m.PhysicalID
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej
+                ON r.NodeNum = rej.NodeNum AND r.timestamp = rej.timestamp
+        )
+        SELECT * FROM FinalData
+        WHERE Project = '{project_id}'
+        { "AND approve = 'TRUE'" if only_approved else "" }
         AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY Location ASC, timestamp ASC
     """
-    df = client.query(query).to_dataframe()
-    
-    if not df.empty:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        if df['timestamp'].dt.tz is None:
-            df['timestamp'] = df['timestamp'].dt.tz_localize(pytz.UTC)
-        else:
-            df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC)
-    return df
+    try:
+        df = client.query(unified_raw_sql).to_dataframe()
+        
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            if df['timestamp'].dt.tz is None:
+                df['timestamp'] = df['timestamp'].dt.tz_localize(pytz.UTC)
+            else:
+                df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC)
+        return df
+    except Exception as e:
+        st.error(f"Query Error: {e}")
+        return pd.DataFrame()
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
     """
