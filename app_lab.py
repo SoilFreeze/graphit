@@ -16,25 +16,8 @@ import io
 @st.cache_data(ttl=600)
 def get_all_projects_data(only_approved=True):
     """
-    FEEDS GLOBAL VIEW: Fetches data for ALL projects in one single trip.
-    """
-    approval_filter = "AND (is_approved = TRUE)" if only_approved else ""
-    
-    query = f"""
-        SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, Project
-        FROM `{MASTER_TABLE}`
-        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-        {approval_filter}
-        ORDER BY Project, Location, timestamp ASC
-    """
-    df = client.query(query).to_dataframe()
-    if not df.empty:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-    return df
-    
-    """
-    Fetches data from unified raw tables and joins with metadata.
-    Filters out points found in the manual_rejections table.
+    ULTRA-FAST: Unifies hardware, joins metadata, and checks rejections 
+    for ALL projects in a single trip.
     """
     query = f"""
         WITH UnifiedRaw AS (
@@ -44,14 +27,8 @@ def get_all_projects_data(only_approved=True):
         ),
         JoinedData AS (
             SELECT 
-                r.NodeNum, 
-                r.timestamp, 
-                r.temperature,
-                m.Location, 
-                m.Bank, 
-                m.Depth, 
-                m.Project,
-                -- Since we renamed the column to NodeNum, this join will now succeed
+                r.NodeNum, r.timestamp, r.temperature,
+                m.Location, m.Bank, m.Depth, m.Project,
                 CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
@@ -59,25 +36,20 @@ def get_all_projects_data(only_approved=True):
                 ON r.NodeNum = rej.NodeNum AND r.timestamp = rej.timestamp
         )
         SELECT * FROM JoinedData
-        WHERE Project = '{project_id}'
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-        ORDER BY Location ASC, timestamp ASC
+        ORDER BY Project ASC, Location ASC, timestamp ASC
     """
     try:
         df = client.query(query).to_dataframe()
-        
         if not df.empty:
-            # Ensure proper datetime format for Plotly
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            
-            # Ensure Bank exists even if null in metadata to prevent UI errors
+            # Fill missing Bank values to prevent UI errors
             if 'Bank' not in df.columns:
-                df['Bank'] = None
-                
+                df['Bank'] = ""
         return df
     except Exception as e:
-        st.error(f"BigQuery Error: {e}")
+        st.error(f"Batch Query Error: {e}")
         return pd.DataFrame()
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
@@ -456,33 +428,37 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 #############################
 # --- Global Overview --- #
 #############################
-#############################
-# --- Global Overview --- #
-#############################
 if service == "🌐 Global Overview":
-    # SPEED BOOST: One query for everyone
-    with st.spinner("🚀 Rapid Sync: Fetching all site data..."):
-        all_data_df = get_all_projects_data(only_approved=True)
+    st.header("🌐 Global Site Overview")
+    
+    # ONE query to rule them all
+    all_data_df = get_all_projects_data(only_approved=True)
 
     if all_data_df.empty:
-        st.warning("No data found.")
+        st.warning("No data found across all projects.")
     else:
-        # Get list of projects present in the returned data
-        projects = sorted(all_data_df['Project'].unique())
-        
-        for proj in projects:
+        # Timeframe for graphs
+        lookback = st.sidebar.slider("Global View (Weeks)", 1, 8, 4)
+        now = pd.Timestamp.now(tz=pytz.UTC)
+        end_v = (now + pd.Timedelta(days=(7-now.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
+        start_v = end_v - timedelta(weeks=lookback)
+
+        # Loop through projects found in the data
+        for proj in sorted(all_data_df['Project'].unique()):
             with st.expander(f"🏗️ Project: {proj}", expanded=True):
-                # Fast Pandas filtering (Microseconds)
-                proj_df = all_data_df[all_data_df['Project'] == proj]
+                # Fast Pandas filtering (Happens in your RAM, not BigQuery)
+                p_df = all_data_df[all_data_df['Project'] == proj]
                 
-                for loc in sorted(proj_df['Location'].unique()):
-                    loc_df = proj_df[proj_df['Location'] == loc]
+                for loc in sorted(p_df['Location'].unique()):
+                    loc_df = p_df[p_df['Location'] == loc]
                     
                     with st.expander(f"📍 {loc}", expanded=True):
-                        # build_high_speed_graph is already using WebGL (Scattergl) 
-                        # so it is already GPU optimized!
-                        fig = build_high_speed_graph(...) 
-                        st.plotly_chart(fig, use_container_width=True)
+                        fig = build_high_speed_graph(
+                            loc_df, f"📈 {proj} - {loc}", 
+                            start_v, end_v, tuple(active_refs), 
+                            unit_mode, unit_label
+                        )
+                        st.plotly_chart(fig, use_container_width=True, key=f"glob_{proj}_{loc}")
 #############################
 # --- Executive Summary --- #
 #############################
