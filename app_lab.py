@@ -807,10 +807,11 @@ elif service == "📉 Node Diagnostics":
 # --- DATA INTAKE LAB --- #
 ###############################
 elif service == "📤 Data Intake Lab":
-    if check_admin_access():
+    if check_admin_access():  # This is the "gatekeeper"
         st.header("📤 Data Ingestion & Recovery")
-    
-        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Maintenance"])
+        
+        # ALL code for this section must be indented 4 spaces from here
+        tab1, tab2, tab3, tab4 = st.tabs(["Manual", "API", "Maintenance", "Download"])
     
         with tab1:
             st.subheader("📄 Manual File Ingestion")
@@ -919,61 +920,61 @@ elif service == "📤 Data Intake Lab":
                         st.warning("No data found for this range.")
                         
         # Add this to your "📤 Data Intake Lab" tabs or a new section
-with tab3: # or create a new tab4
-    st.subheader("📥 Export Project Data")
-    st.info("Select a specific pipe and timeframe to generate a downloadable CSV file.")
-
-    # 1. Fetch data for the selected project to populate filters
-    # We fetch 'all' data here so the user can choose what to export
-    export_df = get_universal_portal_data(selected_project, only_approved=False)
-
-    if export_df.empty:
-        st.warning("No data available for this project to export.")
-    else:
-        c1, c2 = st.columns(2)
+        with tab3: # or create a new tab4
+            st.subheader("📥 Export Project Data")
+            st.info("Select a specific pipe and timeframe to generate a downloadable CSV file.")
         
-        with c1:
-            # Pipe Selection
-            pipe_options = ["All Pipes"] + sorted(export_df['Location'].unique().tolist())
-            selected_pipe = st.selectbox("Select Pipe/Location", pipe_options)
+            # 1. Fetch data for the selected project to populate filters
+            # We fetch 'all' data here so the user can choose what to export
+            export_df = get_universal_portal_data(selected_project, only_approved=False)
         
-        with c2:
-            # Timeframe Selection
-            min_date = export_df['timestamp'].min().date()
-            max_date = export_df['timestamp'].max().date()
-            date_range = st.date_input("Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
-
-        # 2. Filter Logic
-        filtered_export = export_df.copy()
+            if export_df.empty:
+                st.warning("No data available for this project to export.")
+            else:
+                c1, c2 = st.columns(2)
+                
+                with c1:
+                    # Pipe Selection
+                    pipe_options = ["All Pipes"] + sorted(export_df['Location'].unique().tolist())
+                    selected_pipe = st.selectbox("Select Pipe/Location", pipe_options)
+                
+                with c2:
+                    # Timeframe Selection
+                    min_date = export_df['timestamp'].min().date()
+                    max_date = export_df['timestamp'].max().date()
+                    date_range = st.date_input("Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
         
-        if selected_pipe != "All Pipes":
-            filtered_export = filtered_export[filtered_export['Location'] == selected_pipe]
+                # 2. Filter Logic
+                filtered_export = export_df.copy()
+                
+                if selected_pipe != "All Pipes":
+                    filtered_export = filtered_export[filtered_export['Location'] == selected_pipe]
+                
+                if len(date_range) == 2:
+                    start_date, end_date = date_range
+                    # Convert to datetime for comparison
+                    filtered_export = filtered_export[
+                        (filtered_export['timestamp'].dt.date >= start_date) & 
+                        (filtered_export['timestamp'].dt.date <= end_date)
+                    ]
         
-        if len(date_range) == 2:
-            start_date, end_date = date_range
-            # Convert to datetime for comparison
-            filtered_export = filtered_export[
-                (filtered_export['timestamp'].dt.date >= start_date) & 
-                (filtered_export['timestamp'].dt.date <= end_date)
-            ]
-
-        st.write(f"📊 **Preview:** {len(filtered_export)} rows found.")
-        st.dataframe(filtered_export.head(10), use_container_width=True)
-
-        # 3. CSV Conversion & Download
-        if not filtered_export.empty:
-            # Convert to CSV
-            csv_data = filtered_export.to_csv(index=False).encode('utf-8')
-            
-            # Dynamic Filename
-            file_name = f"{selected_project}_{selected_pipe.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.csv"
-            
-            st.download_button(
-                label="🚀 Download CSV",
-                data=csv_data,
-                file_name=file_name,
-                mime='text/csv',
-            )
+                st.write(f"📊 **Preview:** {len(filtered_export)} rows found.")
+                st.dataframe(filtered_export.head(10), use_container_width=True)
+        
+                # 3. CSV Conversion & Download
+                if not filtered_export.empty:
+                    # Convert to CSV
+                    csv_data = filtered_export.to_csv(index=False).encode('utf-8')
+                    
+                    # Dynamic Filename
+                    file_name = f"{selected_project}_{selected_pipe.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.csv"
+                    
+                    st.download_button(
+                        label="🚀 Download CSV",
+                        data=csv_data,
+                        file_name=file_name,
+                        mime='text/csv',
+                    )
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
