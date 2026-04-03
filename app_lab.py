@@ -1054,27 +1054,32 @@ elif service == "🛠️ Admin Tools":
                         
                        # UPDATE THIS IN YOUR ADMIN TOOLS -> SURGICAL CLEANER SECTION
                         if st.button("🚫 HIDE SELECTED DATA"):
-                            with st.spinner("Updating rejections..."):
+                            with st.spinner("Scrubbing data to the top of the hour..."):
                                 try:
                                     rejection_records = []
                                     for pt in points:
+                                        # 1. Get the raw timestamp from the plot
+                                        raw_ts = pd.to_datetime(pt['x'])
+                                        
+                                        # 2. FLOOR to the top of the hour (e.g., 12:45 -> 12:00)
+                                        # .floor('H') is the cleanest way to do this in Pandas
+                                        scrubbed_ts = raw_ts.floor('H')
+                                        
                                         rejection_records.append({
-                                            "NodeNum": p_df.iloc[pt['point_index']]['NodeNum'], # Key must be NodeNum
-                                            "timestamp": pd.to_datetime(pt['x']),
-                                            "reason": "Lasso Hidden"
+                                            "NodeNum": p_df.iloc[pt['point_index']]['NodeNum'],
+                                            "timestamp": scrubbed_ts,
+                                            "reason": "Top-of-Hour Scrub"
                                         })
                                     
-                                    raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                                                  f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
-                                                  
-                                    for table in raw_tables:
-                                        client.query(f"UPDATE `{table}` SET approve = 'FALSE' WHERE {where_clause}").result()
-                                    
-                                    st.success("Points hidden. Refreshing cache...")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Hide failed: {e}")
+                                    # Convert to DataFrame and upload to BigQuery
+                                    rej_df = pd.DataFrame(rejection_records)
+                                    job = client.load_table_from_dataframe(
+                                        rej_df, 
+                                        f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+                                    )
+                                    job.result()
+                                    st.success(f"✅ Successfully scrubbed {len(points)} points to the top of the hour!")
+                                    st.cache_data.clear() # Clear cache to update graphs immediately
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
