@@ -18,33 +18,31 @@ import io
 ################################
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
-    """
-    ONE PROJECT AT A TIME: Standardizes NY and Pacific data to UTC.
-    """
-    uery = f"""
-    WITH UnifiedRaw AS (
-        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-        UNION ALL
-        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-    ),
-    JoinedData AS (
-        SELECT 
-            r.NodeNum, r.timestamp, r.temperature,
-            m.Location, m.Bank, m.Depth, m.Project,
-            # JOIN logic: Truncate BOTH timestamps to the hour for the comparison
-            CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
-        FROM UnifiedRaw r
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
-            ON r.NodeNum = rej.NodeNum 
-            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = TIMESTAMP_TRUNC(rej.timestamp, HOUR)
-    )
+    query = f"""
+        WITH UnifiedRaw AS (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ),
+        JoinedData AS (
+            SELECT 
+                r.NodeNum, r.timestamp, r.temperature,
+                m.Location, m.Bank, m.Depth, m.Project,
+                # TRUNCATE BOTH TO HOUR: This is the magic that makes the scrub work
+                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
+            FROM UnifiedRaw r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
+                ON r.NodeNum = rej.NodeNum 
+                AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = TIMESTAMP_TRUNC(rej.timestamp, HOUR)
+        )
         SELECT * FROM JoinedData
         WHERE Project = '{project_id}'
         { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
         AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY Location ASC, timestamp ASC
     """
+    # ... rest of function (convert to pd.datetime with utc=True) ...
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
@@ -1006,82 +1004,73 @@ elif service == "🛠️ Admin Tools":
     
         # 4. SURGICAL CLEANER (Lasso Selection)
         with tab_cleaner:
-            st.subheader("🧨 Surgical Data Cleaner: Lasso Selection")
-            p_df = pd.DataFrame() # Initialize to avoid NameError
-    
-            # Fetch Metadata
-            meta_df = client.query(f"SELECT DISTINCT Project, Location, NodeNum FROM `{MASTER_TABLE}`").to_dataframe().fillna("N/A")
-    
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                sel_proj = st.selectbox("Project", sorted(meta_df['Project'].unique()), key="lasso_proj")
-            with c2:
-                pipes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['Location'].unique())
-                sel_pipe = st.selectbox("Pipe / Location", pipes, key="lasso_pipe")
-            with c3:
-                if sel_pipe == "ALL":
-                    nodes = ["ALL"] + sorted(meta_df[meta_df['Project'] == sel_proj]['NodeNum'].unique())
-                else:
-                    nodes = ["ALL"] + sorted(meta_df[meta_df['Location'] == sel_pipe]['NodeNum'].unique())
-                sel_node = st.selectbox("Node ID", nodes, key="lasso_node")
-    
-            st.divider()
-            lookback_hrs = st.slider("Lookback Window (Hours)", 6, 168, 24, format="%d hours ago")
-    
-            preview_q = f"""
-                SELECT timestamp, temperature, NodeNum, Location 
-                FROM `{MASTER_TABLE}` 
-                WHERE Project = '{sel_proj}' 
-                AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_hrs} HOUR)
-                ORDER BY timestamp ASC
-            """
-            p_df = client.query(preview_q).to_dataframe()
-    
-            if not p_df.empty:
-                if sel_pipe != "ALL": p_df = p_df[p_df['Location'] == sel_pipe]
-                if sel_node != "ALL": p_df = p_df[p_df['NodeNum'] == sel_node]
-    
-                if not p_df.empty:
-                    fig = px.scatter(p_df, x='timestamp', y='temperature', color='NodeNum', 
-                                     title="Lasso selection tool active", template="plotly_white", height=600)
-                    fig.update_layout(dragmode='lasso', hovermode='closest')
-                    fig.update_traces(marker=dict(size=10, opacity=0.7))
-    
-                    # Use width='stretch' to avoid deprecation warnings
-                    selected_points = st.plotly_chart(fig, width='stretch', on_select="rerun")
-    
-                    if selected_points and "selection" in selected_points and len(selected_points["selection"]["points"]) > 0:
-                        points = selected_points["selection"]["points"]
-                        st.warning(f"⚠️ {len(points)} points highlighted.")
-                        
-                       # UPDATE THIS IN YOUR ADMIN TOOLS -> SURGICAL CLEANER SECTION
-                        if st.button("🚫 HIDE SELECTED DATA"):
-                            with st.spinner("Scrubbing data to the top of the hour..."):
-                                try:
-                                    rejection_records = []
-                                    for pt in points:
-                                        # 1. Get the raw timestamp from the plot
-                                        raw_ts = pd.to_datetime(pt['x'])
-                                        
-                                        # 2. FLOOR to the top of the hour (e.g., 12:45 -> 12:00)
-                                        # .floor('H') is the cleanest way to do this in Pandas
-                                        scrubbed_ts = raw_ts.floor('H')
-                                        
-                                        rejection_records.append({
-                                            "NodeNum": p_df.iloc[pt['point_index']]['NodeNum'],
-                                            "timestamp": scrubbed_ts,
-                                            "reason": "Top-of-Hour Scrub"
-                                        })
-                                    
-                                    # Convert to DataFrame and upload to BigQuery
-                                    rej_df = pd.DataFrame(rejection_records)
-                                    job = client.load_table_from_dataframe(
-                                        rej_df, 
-                                        f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-                                    )
-                                    job.result()
-                                    st.success(f"✅ Successfully scrubbed {len(points)} points to the top of the hour!")
-                                    st.cache_data.clear() # Clear cache to update graphs immediately
+            # --- SURGICAL DATA CLEANER (LASSO TOOL) ---
+            st.subheader("✂️ Surgical Data Cleaner")
+            st.info("Use the Lasso or Box Select on the graph above, then click the button below to scrub those hours.")
+            
+            # This captures the selection data from the Plotly chart
+            # Ensure your plotly_chart call above uses: on_select="rerun"
+            event_data = st.session_state.get("plotly_selection") # or however you've named your selection capture
+            
+            if event_data and "points" in event_data:
+                points = event_data["points"]
+                st.write(f"🎯 **{len(points)}** points selected.")
+            
+                if st.button("🚫 HIDE SELECTED DATA"):
+                    with st.spinner("Processing scrub to the top of the hour..."):
+                        try:
+                            rejection_records = []
+                            
+                            for pt in points:
+                                # 1. Capture the raw timestamp from the X-axis
+                                raw_ts = pd.to_datetime(pt['x'])
+                                
+                                # 2. Floor to the TOP OF THE HOUR (e.g., 10:45 -> 10:00)
+                                # This ensures the join catches all readings in that hour
+                                scrubbed_ts = raw_ts.floor('h')
+                                
+                                # 3. Get the NodeNum from the underlying dataframe
+                                # Using point_index to map back to the original data row
+                                node_id = p_df.iloc[pt['point_index']]['NodeNum']
+                                
+                                rejection_records.append({
+                                    "NodeNum": node_id,
+                                    "timestamp": scrubbed_ts,
+                                    "reason": "Top-of-Hour Scrub",
+                                    "project": selected_project
+                                })
+            
+                            if rejection_records:
+                                # Convert to DataFrame
+                                rej_df = pd.DataFrame(rejection_records)
+                                
+                                # Upload to BigQuery (Append mode)
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                
+                                job = client.load_table_from_dataframe(
+                                    rej_df, 
+                                    f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
+                                    job_config=job_config
+                                )
+                                
+                                # Wait for job to complete
+                                job.result()
+                                
+                                st.success(f"✅ Successfully scrubbed {len(rejection_records)} hours for Project {selected_project}!")
+                                
+                                # 4. CLEAR CACHE: This forces the graphs to reload and hide the points immediately
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.warning("No valid points found in selection.")
+            
+                        except Exception as e:
+                            # This 'except' block fixes the SyntaxError you saw
+                            st.error(f"❌ Error during scrubbing: {str(e)}")
+                            st.write("Ensure the 'manual_rejections' table schema matches: NodeNum (STRING), timestamp (TIMESTAMP), reason (STRING)")
+            
+            else:
+                st.write("💡 *Select points on the graph above to enable the hide button.*")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
