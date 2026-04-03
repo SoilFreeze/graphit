@@ -18,7 +18,9 @@ import io
 ################################
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
-    """Fetches project data and standardizes to UTC."""
+    """
+    Standardizes NY and Pacific data to UTC and handles hourly scrubbing joins.
+    """
     query = f"""
         WITH UnifiedRaw AS (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
@@ -29,6 +31,7 @@ def get_universal_portal_data(project_id, only_approved=True):
             SELECT 
                 r.NodeNum, r.timestamp, r.temperature,
                 m.Location, m.Bank, m.Depth, m.Project,
+                # Join logic: Truncate both to the hour so the scrub works
                 CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
@@ -45,8 +48,10 @@ def get_universal_portal_data(project_id, only_approved=True):
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
+            # Force UTC alignment for all incoming data
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            if 'Bank' not in df.columns: df['Bank'] = ""
+            if 'Bank' not in df.columns:
+                df['Bank'] = ""
         return df
     except Exception as e:
         st.error(f"BigQuery Error: {e}")
@@ -261,51 +266,60 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     plot_df = df.copy()
     
-    # --- NEW: LOCAL TIME CONVERSION ---
-    # Convert data timestamps from UTC to the chosen display zone
+    # --- LOCAL TIME CONVERSION ---
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
-    
-    # Adjust the view window (the 'camera') to match the display zone
     start_local = start_view.astimezone(pytz.timezone(display_tz))
     end_local = end_view.astimezone(pytz.timezone(display_tz))
     now_local = pd.Timestamp.now(tz=display_tz)
 
-    # (Keep your existing Unit Conversion & Labeling logic here...)
+    # Unit Conversion
+    if unit_mode == "Celsius":
+        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
+        y_range, dt_minor = [-30, 30], 2
+    else:
+        y_range, dt_minor = [-20, 80], 5
 
-    fig = go.Figure()
+    # Labeling
+    plot_df['label'] = plot_df.apply(
+        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
+        else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
+    )
     
+    fig = go.Figure()
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         hover_name = lbl.split('(')[0].strip()
 
-        # (Keep Gap Detection logic here...)
+        # Gap Detection (6 hrs)
+        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gap_mask = s_df['gap_hrs'] > 6.0
+        if gap_mask.any():
+            gaps = s_df[gap_mask].copy()
+            gaps['temperature'] = None
+            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', connectgaps=False,
+            name=lbl, mode='lines', connectgaps=False, line=dict(width=2),
             customdata=[hover_name] * len(s_df),
-            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<br>%{{x|%b %d, %H:%M}}<extra></extra>"
+            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # --- UPDATED: LOCAL GRID HIERARCHY ---
-    # We generate gridlines based on the local time (Midnight/Mondays)
+    # Gridlines (Monday=Black, Midnight=Gray)
     grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
     for ts in grid_times:
-        if ts.weekday() == 0 and ts.hour == 0:
-            color, width = "Black", 1.2 # Monday Midnight
-        elif ts.hour == 0:
-            color, width = "Gray", 0.8  # Other Midnights
-        else:
-            color, width = "LightGray", 0.4
+        color, width = ("Black", 1.2) if (ts.weekday()==0 and ts.hour==0) else (("Gray", 0.8) if ts.hour==0 else ("LightGray", 0.4))
         fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    # --- UPDATED: RED "NOW" LINE (LOCAL) ---
+    # Red Now Line
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
     fig.update_layout(
-        title={'text': f"{title} ({tz_mode})", 'x': 0},
+        title={'text': title, 'x': 0}, plot_bgcolor='white', hovermode="x unified", height=600,
+        margin=dict(t=80, l=50, r=180, b=50),
         xaxis=dict(range=[start_local, end_local], showline=True, linecolor='black', mirror=True),
-        # (Keep the rest of your layout settings...)
+        yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
     )
     return fig
     
@@ -366,76 +380,27 @@ display_tz = tz_lookup[tz_mode]
 if service == "🌐 Global Overview":
     st.header("🌐 Project Overview")
     
-    # 1. FETCH ALL AVAILABLE PROJECTS FOR THE DROPDOWN
-    # This query gets the list of unique projects from your metadata
+    # 1. Project Selector
     project_list_query = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-    try:
-        available_projects = client.query(project_list_query).to_dataframe()['Project'].tolist()
-        available_projects = sorted([str(p) for p in available_projects])
-    except Exception:
-        available_projects = []
-
-    # 2. PROJECT SELECTOR (Directly on the page)
-    # If a project is already selected in the sidebar, we use it as the default
-    default_ix = 0
-    if selected_project in available_projects:
-        default_ix = available_projects.index(selected_project)
+    available_projects = sorted(client.query(project_list_query).to_dataframe()['Project'].astype(str).tolist())
     
-    target_project = st.selectbox(
-        "🏗️ Select a Project to View", 
-        available_projects, 
-        index=default_ix,
-        key="global_overview_proj_picker"
-    )
+    target_project = st.selectbox("🏗️ Select a Project", available_projects, key="global_proj_picker")
 
-    if not target_project:
-        st.info("👈 Please select a project from the dropdown above to view the timeline graphs.")
-    else:
-        # 3. FETCH DATA FOR THE CHOSEN PROJECT
-        with st.spinner(f"Aligning NY & Pacific timezones for {target_project}..."):
-            # We use our UTC-Hardened function here
+    if target_project:
+        with st.spinner("Loading site timeline..."):
             p_df = get_universal_portal_data(target_project, only_approved=True)
 
-        if p_df.empty:
-            st.warning(f"No approved data found for project {target_project}. Check 'Node Diagnostics' to see if data is being rejected.")
-        else:
-            # 4. TIMEFRAME CONTROLS (UTC STANDARDIZED)
-            lookback = st.sidebar.slider("View Lookback (Weeks)", 1, 12, 4, key="ov_lookback")
-            
-            # This 'now_utc' is what fixes the New York offset issue
+        if not p_df.empty:
+            lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4)
             now_utc = pd.Timestamp.now(tz='UTC')
-            
-            # Align window to the upcoming Monday at Midnight (UTC)
-            end_view = (now_utc + pd.Timedelta(days=(7 - now_utc.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
             start_view = end_view - timedelta(weeks=lookback)
 
-            st.divider()
-            st.subheader(f"Current Status: {target_project}")
-
-            # 5. RENDER COLLAPSIBLE GRAPHS BY PIPE/LOCATION
-            locations = sorted(p_df['Location'].dropna().unique())
-            
-            for loc in locations:
-                # Wrap each graph in an expander so you can minimize them
-                with st.expander(f"📍 Location: {loc}", expanded=True):
+            for loc in sorted(p_df['Location'].unique()):
+                with st.expander(f"📍 {loc}", expanded=True):
                     loc_df = p_df[p_df['Location'] == loc]
-                    
-                    # Create the title: Project - Location
-                    graph_title = f"📈 {target_project} - {loc}"
-                    
-                    # Call the High-Speed Engine
-                    fig = build_high_speed_graph(
-                        loc_df, 
-                        graph_title, 
-                        start_view, 
-                        end_view, 
-                        tuple(active_refs), 
-                        unit_mode, 
-                        unit_label
-                    )
-                    
-                    # Key must be unique to prevent Streamlit duplicate widget errors
-                    st.plotly_chart(fig, use_container_width=True, key=f"ov_chart_{target_project}_{loc}")
+                    fig = build_high_speed_graph(loc_df, f"📈 {target_project} - {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
+                    st.plotly_chart(fig, use_container_width=True, key=f"ov_{target_project}_{loc}")
 #############################
 # --- Executive Summary --- #
 #############################
@@ -670,41 +635,51 @@ elif service == "📊 Client Portal":
 ###########################
 # --- NODE DIAGNOSTIC --- #
 ###########################  
-@st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, only_approved=True):
-    """Fetches project data and standardizes to UTC."""
-    query = f"""
-        WITH UnifiedRaw AS (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ),
-        JoinedData AS (
-            SELECT 
-                r.NodeNum, r.timestamp, r.temperature,
-                m.Location, m.Bank, m.Depth, m.Project,
-                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
-            FROM UnifiedRaw r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
-            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
-                ON r.NodeNum = rej.NodeNum 
-                AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = TIMESTAMP_TRUNC(rej.timestamp, HOUR)
-        )
-        SELECT * FROM JoinedData
-        WHERE Project = '{project_id}'
-        { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-        ORDER BY Location ASC, timestamp ASC
-    """
-    try:
-        df = client.query(query).to_dataframe()
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            if 'Bank' not in df.columns: df['Bank'] = ""
-        return df
-    except Exception as e:
-        st.error(f"BigQuery Error: {e}")
-        return pd.DataFrame()
+elif service == "📉 Node Diagnostics":
+    st.header(f"📉 Node Diagnostics: {selected_project}")
+    
+    if not selected_project:
+        st.warning("👈 Select a Project in the sidebar.")
+    else:
+        with st.spinner("Fetching raw data..."):
+            all_data = get_universal_portal_data(selected_project, only_approved=False)
+        
+        if not all_data.empty:
+            now_utc = pd.Timestamp.now(tz='UTC')
+            lookback_days = st.sidebar.slider("Days", 1, 14, 7)
+            start_view, end_view = now_utc - timedelta(days=lookback_days), now_utc + timedelta(hours=6)
+
+            loc_options = sorted(all_data['Location'].unique())
+            selected_loc = st.selectbox("Select Pipe", loc_options)
+            diag_df = all_data[all_data['Location'] == selected_loc].copy()
+
+            fig = build_high_speed_graph(diag_df, f"Diag: {selected_loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
+            
+            selected_data = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=f"diag_chart_{selected_loc}")
+
+            st.subheader("✂️ Surgical Data Cleaner")
+            if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
+                points = selected_data["selection"]["points"]
+                if st.button("🚫 HIDE SELECTED DATA (Top of Hour)"):
+                    try:
+                        rejection_list = []
+                        for pt in points:
+                            raw_ts = pd.to_datetime(pt['x'])
+                            # Convert local display time back to UTC before flooring for the DB
+                            scrub_ts = raw_ts.tz_convert('UTC').floor('h')
+                            node_id = diag_df.iloc[pt['point_index']]['NodeNum']
+                            
+                            rejection_list.append({"NodeNum": str(node_id), "timestamp": scrub_ts, "reason": "Hourly Scrub", "Project": selected_project})
+
+                        job = client.load_table_from_dataframe(pd.DataFrame(rejection_list), f"{PROJECT_ID}.{DATASET_ID}.manual_rejections")
+                        job.result()
+                        st.success("✅ Scrubbed!")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
+            else:
+                st.info("💡 Use Lasso tool to select points.")
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
