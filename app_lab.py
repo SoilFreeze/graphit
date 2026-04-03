@@ -14,7 +14,24 @@ import re
 import io
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, only_approved=True):
+def get_all_projects_data(only_approved=True):
+    """
+    FEEDS GLOBAL VIEW: Fetches data for ALL projects in one single trip.
+    """
+    approval_filter = "AND (is_approved = TRUE)" if only_approved else ""
+    
+    query = f"""
+        SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, Project
+        FROM `{MASTER_TABLE}`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        {approval_filter}
+        ORDER BY Project, Location, timestamp ASC
+    """
+    df = client.query(query).to_dataframe()
+    if not df.empty:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    return df
+    
     """
     Fetches data from unified raw tables and joins with metadata.
     Filters out points found in the manual_rejections table.
