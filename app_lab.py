@@ -21,22 +21,24 @@ def get_universal_portal_data(project_id, only_approved=True):
     """
     ONE PROJECT AT A TIME: Standardizes NY and Pacific data to UTC.
     """
-    query = f"""
-        WITH UnifiedRaw AS (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ),
-        JoinedData AS (
-            SELECT 
-                r.NodeNum, r.timestamp, r.temperature,
-                m.Location, m.Bank, m.Depth, m.Project,
-                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
-            FROM UnifiedRaw r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
-            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
-                ON r.NodeNum = rej.NodeNum AND r.timestamp = rej.timestamp
-        )
+    uery = f"""
+    WITH UnifiedRaw AS (
+        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+        UNION ALL
+        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+    ),
+    JoinedData AS (
+        SELECT 
+            r.NodeNum, r.timestamp, r.temperature,
+            m.Location, m.Bank, m.Depth, m.Project,
+            # JOIN logic: Truncate BOTH timestamps to the hour for the comparison
+            CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
+        FROM UnifiedRaw r
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
+        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
+            ON r.NodeNum = rej.NodeNum 
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = TIMESTAMP_TRUNC(rej.timestamp, HOUR)
+    )
         SELECT * FROM JoinedData
         WHERE Project = '{project_id}'
         { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
