@@ -16,24 +16,44 @@ import io
 ################################
 # --- GET ALL PROJECT DATA --- #
 ################################
-lif service == "📉 Node Diagnostics":
-    st.header(f"📉 Node Diagnostics: {selected_project}")
-    
-    if not selected_project:
-        st.warning("Please select a project in the sidebar.")
-    else:
-        try:
-            # CHANGE: Use the new unified function instead of the deleted one
-            # We set only_approved=False so you can see raw data for troubleshooting
-            all_site_data = get_all_projects_data(only_approved=False)
-            
-            # Filter the big dataset down to just your active project
-            all_data = all_site_data[all_site_data['Project'] == selected_project]
-            
-            if all_data.empty:
-                st.warning(f"No data found for project {selected_project}.")
-            else:
-                loc_options = sorted(all_data['Location'].dropna().unique())
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id, only_approved=True):
+    """
+    ONE PROJECT AT A TIME: Standardizes NY and Pacific data to UTC.
+    """
+    query = f"""
+        WITH UnifiedRaw AS (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ),
+        JoinedData AS (
+            SELECT 
+                r.NodeNum, r.timestamp, r.temperature,
+                m.Location, m.Bank, m.Depth, m.Project,
+                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
+            FROM UnifiedRaw r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
+                ON r.NodeNum = rej.NodeNum AND r.timestamp = rej.timestamp
+        )
+        SELECT * FROM JoinedData
+        WHERE Project = '{project_id}'
+        { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        ORDER BY Location ASC, timestamp ASC
+    """
+    try:
+        df = client.query(query).to_dataframe()
+        if not df.empty:
+            # FORCE UTC to align NY and Pacific timezones
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            if 'Bank' not in df.columns:
+                df['Bank'] = ""
+        return df
+    except Exception as e:
+        st.error(f"BigQuery Error: {e}")
+        return pd.DataFrame()
 ##############################
 # --- CHECK ADMIN ACCESS --- #
 ##############################
@@ -629,149 +649,65 @@ elif service == "📉 Node Diagnostics":
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
     if not selected_project:
-        st.warning("Please select a project in the sidebar.")
+        st.warning("👈 Please select a Project in the sidebar to begin.")
     else:
-        # Fetches all raw data (approved + rejected) for troubleshooting
-        all_data = get_universal_portal_data(selected_project, only_approved=False)
+        # 1. Fetch ALL data (including rejected points) for troubleshooting
+        with st.spinner("Fetching diagnostic data..."):
+            all_data = get_universal_portal_data(selected_project, only_approved=False)
         
-        # ... your existing diagnostics logic (table, node list, etc.) ...
-        try:
-            # CHANGE: Use the new unified function instead of the deleted one
-            # We set only_approved=False so you can see raw data for troubleshooting
-            all_site_data = get_all_projects_data(only_approved=False)
-            
-            # Filter the big dataset down to just your active project
-            all_data = all_site_data[all_site_data['Project'] == selected_project]
-            
-            if all_data.empty:
-                st.warning(f"No data found for project {selected_project}.")
-            else:
-                loc_options = sorted(all_data['Location'].dropna().unique())
-            
+        if all_data.empty:
+            st.warning(f"No data found for project {selected_project}.")
+        else:
+            # 2. Timezone-Aware Now Line and Range
+            now_utc = pd.Timestamp.now(tz='UTC')
+            lookback_days = st.sidebar.slider("Diagnostic Window (Days)", 1, 14, 7)
+            start_view = now_utc - timedelta(days=lookback_days)
+            end_view = now_utc + timedelta(hours=12) # Buffer for future-dated NY points
+
+            # 3. Location / Pipe Filter
             loc_options = sorted(all_data['Location'].dropna().unique())
-                       
-            c1, c2 = st.columns([2, 1])
-            with c1: 
-                sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options)
-            with c2: 
-                weeks_view = st.slider("Lookback (Weeks)", 1, 12, 6, key="diag_lookback")
-
-            # 2. DATE CALCULATIONS
-            now = pd.Timestamp.now(tz=pytz.UTC)
-            days_until_monday = (7 - now.weekday()) % 7
-            if days_until_monday == 0: days_until_monday = 7
-            end_view = (now + pd.Timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
-            start_view = end_view - timedelta(weeks=weeks_view)
-
-            df_diag = all_data[all_data['Location'] == sel_loc].copy()
+            selected_loc = st.selectbox("Select Pipe/Location", loc_options)
             
-            if df_diag.empty:
-                st.warning(f"No data found for {sel_loc} in the selected timeframe.")
-            else:
-                # --- 3. TIME VS TEMPERATURE GRAPH ---
-                st.subheader("📈 Timeline Analysis")
-                fig_time = build_high_speed_graph(df_diag, sel_loc, start_view, end_view, tuple(active_refs), unit_mode, unit_label)
-                st.plotly_chart(fig_time, use_container_width=True, config={'displayModeBar': False})
+            # Filter the dataframe for the selected location
+            diag_df = all_data[all_data['Location'] == selected_loc]
+            
+            # 4. Diagnostic Metrics
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                total_nodes = diag_df['NodeNum'].nunique()
+                st.metric("Active Nodes", total_nodes)
+            with c2:
+                rejected_pts = len(diag_df[diag_df['is_currently_approved'] == 'FALSE'])
+                st.metric("Rejected Points", rejected_pts)
+            with c3:
+                last_seen = diag_df['timestamp'].max()
+                st.write(f"**Last Sync (UTC):** \n{last_seen.strftime('%Y-%m-%d %H:%M') if not pd.isnull(last_seen) else 'N/A'}")
 
-                st.divider()
+            # 5. Render the Diagnostic Graph
+            st.subheader(f"Timeline: {selected_loc}")
+            fig = build_high_speed_graph(
+                diag_df, 
+                f"Diagnostic View: {selected_loc}", 
+                start_view, 
+                end_view, 
+                tuple(active_refs), 
+                unit_mode, 
+                unit_label
+            )
+            st.plotly_chart(fig, use_container_width=True, key=f"diag_{selected_project}_{selected_loc}")
 
-                # --- 4. DEPTH VS TEMPERATURE GRAPH ---
-                st.subheader("📏 Depth Profile Analysis")
-                df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
-                depth_only_df = df_diag.dropna(subset=['Depth_Num', 'NodeNum']).copy()
-                
-                if depth_only_df.empty:
-                    st.info("No depth-based sensors found for this location.")
-                else:
-                    fig_depth = go.Figure()
-                    mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
-                    
-                    for m_date in mondays:
-                        # --- FIXED TIMEZONE LOGIC ---
-                        # If m_date has no timezone, localize it. If it has one, just set the hour.
-                        target_ts = m_date.replace(hour=6, minute=0, second=0)
-                        if target_ts.tzinfo is None:
-                            target_ts = target_ts.tz_localize(pytz.UTC)
-                        else:
-                            target_ts = target_ts.tz_convert(pytz.UTC)
-                        
-                        window = depth_only_df[(depth_only_df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                               (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                        
-                        if not window.empty:
-                            snap_list = []
-                            for node in window['NodeNum'].unique():
-                                node_data = window[window['NodeNum'] == node].copy()
-                                node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
-                                snap_list.append(node_data.sort_values('diff').iloc[0])
-                            
-                            snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
-                            fig_depth.add_trace(go.Scattergl(
-                                x=snap_df['temperature'], y=snap_df['Depth_Num'],
-                                mode='lines+markers', name=target_ts.strftime('%m/%d/%y')
-                            ))
-
-                    # Grid Styling
-                    x_range = [-20, 80] if unit_mode == "Fahrenheit" else [(-20-32)*5/9, (80-32)*5/9]
-                    y_limit = int(((depth_only_df['Depth_Num'].max() // 5) + 1) * 5)
-
-                    fig_depth.update_layout(
-                        plot_bgcolor='white', height=700,
-                        xaxis=dict(title=f"Temp ({unit_label})", range=x_range, dtick=5 if unit_mode=="Fahrenheit" else 2, 
-                                   showgrid=True, gridcolor='Gainsboro'),
-                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, 
-                                   showgrid=True, gridcolor='Gray', gridwidth=0.7),
-                        legend=dict(title="Weekly Snapshots (6AM)", orientation="v", x=1.02, y=1)
-                    )
-                    for x_v in range(int(x_range[0]), int(x_range[1]) + 1, 20 if unit_mode=="Fahrenheit" else 10):
-                        fig_depth.add_vline(x=x_v, line_width=1.5, line_color="DimGray")
-                    for val, label in active_refs:
-                        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                        fig_depth.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5)
-                    
-                    st.plotly_chart(fig_depth, use_container_width=True, config={'displayModeBar': False})
-
-                st.divider()
-
-                # --- 5. ENGINEERING SUMMARY TABLE ---
-                st.subheader(f"📋 Engineering Summary: {sel_loc}")
-                latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-                summary_rows = []
-                
-                for _, row in latest_nodes.iterrows():
-                    node_id = row['NodeNum']
-                    day_data = df_diag[(df_diag['NodeNum'] == node_id) & (df_diag['timestamp'] >= now - pd.Timedelta(hours=24))]
-                    
-                    if not day_data.empty:
-                        min_v, max_v = day_data['temperature'].min(), day_data['temperature'].max()
-                        raw_delta = day_data['temperature'].iloc[-1] - day_data['temperature'].iloc[0]
-                    else:
-                        min_v, max_v, raw_delta = None, None, None
-
-                    hrs_ago = int((now - row['timestamp']).total_seconds() / 3600)
-                    status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-                    pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
-
-                    summary_rows.append({
-                        "Node": node_id,
-                        "Pos/Depth": pos_display,
-                        "Min (24h)": f"{round(convert_val(min_v), 1)}{unit_label}" if min_v is not None else "N/A",
-                        "Max (24h)": f"{round(convert_val(max_v), 1)}{unit_label}" if max_v is not None else "N/A",
-                        "Delta (24h)": f"{round(raw_delta, 1)}°F" if raw_delta is not None else "0.0°F",
-                        "Delta_Val": raw_delta,
-                        "Last Seen": f"{row['timestamp'].strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
-                    })
-                
-                summary_df = pd.DataFrame(summary_rows)
-                st.dataframe(
-                    summary_df[["Node", "Pos/Depth", "Min (24h)", "Max (24h)", "Delta (24h)", "Last Seen"]].style.apply(
-                        lambda x: [style_delta(rv) for rv in summary_df['Delta_Val']], axis=0, subset=['Delta (24h)']
-                    ),
-                    use_container_width=True, hide_index=True
-                )
-
-        except Exception as e:
-            st.error(f"Diagnostics Error: {traceback.format_exc()}")
+            # 6. Detailed Node List Table
+            st.subheader("Node Status Summary")
+            summary_table = diag_df.groupby('NodeNum').agg({
+                'timestamp': 'max',
+                'temperature': 'mean',
+                'is_currently_approved': lambda x: (x == 'TRUE').sum()
+            }).rename(columns={
+                'timestamp': 'Last Seen',
+                'temperature': f'Avg Temp ({unit_label})',
+                'is_currently_approved': 'Approved Count'
+            })
+            st.dataframe(summary_table, use_container_width=True)
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
