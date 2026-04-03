@@ -16,8 +16,8 @@ import io
 @st.cache_data(ttl=600)
 def get_all_projects_data(only_approved=True):
     """
-    ULTRA-FAST: Unifies hardware, joins metadata, and checks rejections 
-    for ALL projects in a single trip.
+    ULTRA-FAST & TIMEZONE STABLE: 
+    Unifies hardware, joins metadata, and standardizes all timestamps to UTC.
     """
     query = f"""
         WITH UnifiedRaw AS (
@@ -43,8 +43,18 @@ def get_all_projects_data(only_approved=True):
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            # Fill missing Bank values to prevent UI errors
+            # --- CRITICAL TIMEZONE ALIGNMENT ---
+            # 1. Convert to datetime
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # 2. Standardize to UTC
+            # If the DB has no zone, we assume UTC. If it has a zone (like NY), we convert it.
+            if df['timestamp'].dt.tz is None:
+                df['timestamp'] = df['timestamp'].dt.tz_localize(pytz.UTC)
+            else:
+                df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC)
+            
+            # 3. Prevent UI crashes if Bank is missing
             if 'Bank' not in df.columns:
                 df['Bank'] = ""
         return df
