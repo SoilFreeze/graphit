@@ -18,6 +18,7 @@ import io
 ################################
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
+    """Fetches project data and standardizes to UTC."""
     query = f"""
         WITH UnifiedRaw AS (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
@@ -28,7 +29,6 @@ def get_universal_portal_data(project_id, only_approved=True):
             SELECT 
                 r.NodeNum, r.timestamp, r.temperature,
                 m.Location, m.Bank, m.Depth, m.Project,
-                # TRUNCATE BOTH TO HOUR: This is the magic that makes the scrub work
                 CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
@@ -42,14 +42,11 @@ def get_universal_portal_data(project_id, only_approved=True):
         AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY Location ASC, timestamp ASC
     """
-    # ... rest of function (convert to pd.datetime with utc=True) ...
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
-            # FORCE UTC to align NY and Pacific timezones
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            if 'Bank' not in df.columns:
-                df['Bank'] = ""
+            if 'Bank' not in df.columns: df['Bank'] = ""
         return df
     except Exception as e:
         st.error(f"BigQuery Error: {e}")
@@ -673,80 +670,41 @@ elif service == "📊 Client Portal":
 ###########################
 # --- NODE DIAGNOSTIC --- #
 ###########################  
-elif service == "📉 Node Diagnostics":
-    st.header(f"📉 Node Diagnostics: {selected_project}")
-    
-    if not selected_project:
-        st.warning("👈 Please select a Project in the sidebar to begin.")
-    else:
-        # 1. Fetch ALL data (including rejected points) for troubleshooting
-        with st.spinner("Fetching diagnostic data..."):
-            all_data = get_universal_portal_data(selected_project, only_approved=False)
-        
-        if all_data.empty:
-            st.warning(f"No data found for project {selected_project}.")
-        else:
-            # 2. Timezone-Aware Now Line and Range
-            now_utc = pd.Timestamp.now(tz='UTC')
-            lookback_days = st.sidebar.slider("Diagnostic Window (Days)", 1, 14, 7)
-            start_view = now_utc - timedelta(days=lookback_days)
-            end_view = now_utc + timedelta(hours=12) # Buffer for future-dated NY points
-
-            # 3. Location / Pipe Filter
-            loc_options = sorted(all_data['Location'].dropna().unique())
-            selected_loc = st.selectbox("Select Pipe/Location", loc_options)
-            
-            # Filter the dataframe for the selected location
-            diag_df = all_data[all_data['Location'] == selected_loc]
-            
-            # 4. Diagnostic Metrics
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                total_nodes = diag_df['NodeNum'].nunique()
-                st.metric("Active Nodes", total_nodes)
-            with c2:
-                rejected_pts = len(diag_df[diag_df['is_currently_approved'] == 'FALSE'])
-                st.metric("Rejected Points", rejected_pts)
-            with c3:
-                last_seen = diag_df['timestamp'].max()
-                st.write(f"**Last Sync (UTC):** \n{last_seen.strftime('%Y-%m-%d %H:%M') if not pd.isnull(last_seen) else 'N/A'}")
-
-            # 5. Render the Diagnostic Graph
-            st.subheader(f"Timeline: {selected_loc}")
-            fig = build_high_speed_graph(
-                diag_df, 
-                f"Diagnostic View: {selected_loc}", 
-                start_view, 
-                end_view, 
-                tuple(active_refs), 
-                unit_mode, 
-                unit_label
-            )
-            st.plotly_chart(fig, use_container_width=True, key=f"diag_{selected_project}_{selected_loc}")
-
-            # 6. Detailed Node List Table
-            st.subheader("Node Status Summary")
-            summary_table = diag_df.groupby('NodeNum').agg({
-                'timestamp': 'max',
-                'temperature': 'mean',
-                'is_currently_approved': lambda x: (x == 'TRUE').sum()
-            }).rename(columns={
-                'timestamp': 'Last Seen',
-                'temperature': f'Avg Temp ({unit_label})',
-                'is_currently_approved': 'Approved Count'
-            })
-            st.dataframe(summary_table, use_container_width=True)
-            # Inside Project Overview or Node Diagnostics
-fig = build_high_speed_graph(
-    loc_df, 
-    graph_title, 
-    start_view, 
-    end_view, 
-    tuple(active_refs), 
-    unit_mode, 
-    unit_label,
-    display_tz=display_tz # <--- Pass the sidebar selection here
-)
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id, only_approved=True):
+    """Fetches project data and standardizes to UTC."""
+    query = f"""
+        WITH UnifiedRaw AS (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ),
+        JoinedData AS (
+            SELECT 
+                r.NodeNum, r.timestamp, r.temperature,
+                m.Location, m.Bank, m.Depth, m.Project,
+                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
+            FROM UnifiedRaw r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
+                ON r.NodeNum = rej.NodeNum 
+                AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = TIMESTAMP_TRUNC(rej.timestamp, HOUR)
+        )
+        SELECT * FROM JoinedData
+        WHERE Project = '{project_id}'
+        { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        ORDER BY Location ASC, timestamp ASC
+    """
+    try:
+        df = client.query(query).to_dataframe()
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            if 'Bank' not in df.columns: df['Bank'] = ""
+        return df
+    except Exception as e:
+        st.error(f"BigQuery Error: {e}")
+        return pd.DataFrame()
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
