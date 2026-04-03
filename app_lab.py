@@ -43,18 +43,13 @@ def get_all_projects_data(only_approved=True):
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
-            # --- CRITICAL TIMEZONE ALIGNMENT ---
-            # 1. Convert to datetime
+            # --- TIMEZONE ALIGNMENT ---
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            
-            # 2. Standardize to UTC
-            # If the DB has no zone, we assume UTC. If it has a zone (like NY), we convert it.
             if df['timestamp'].dt.tz is None:
                 df['timestamp'] = df['timestamp'].dt.tz_localize(pytz.UTC)
             else:
                 df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC)
             
-            # 3. Prevent UI crashes if Bank is missing
             if 'Bank' not in df.columns:
                 df['Bank'] = ""
         return df
@@ -63,14 +58,10 @@ def get_all_projects_data(only_approved=True):
         return pd.DataFrame()
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label):
-    """
-    OPTIMIZED: Uses WebGL (Scattergl) to render lines using the computer's GPU.
-    Identical look to your original graph, but significantly faster.
-    """
     if df.empty: return go.Figure()
 
-    # Unit Conversion Logic
     plot_df = df.copy()
+    # Unit Conversion
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
         y_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
@@ -79,7 +70,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         y_range = [-20, 80]
         dt_minor = 5
 
-    # Labeling
+    # Labeling Logic
     plot_df['label'] = plot_df.apply(
         lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
         else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
@@ -88,30 +79,33 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig = go.Figure()
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
-        fig.add_trace(go.Scattergl( # Hardware Accelerated
+        
+        # SIMPLIFIED HOVER LABEL: "Bank R1" instead of "Bank R1 (62260...)"
+        hover_name = lbl.split('(')[0].strip()
+
+        # Gap Detection (6 hours)
+        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gap_mask = s_df['gap_hrs'] > 6.0
+        if gap_mask.any():
+            gaps = s_df[gap_mask].copy()
+            gaps['temperature'] = None
+            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
+        fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', connectgaps=False, line=dict(width=2)
+            name=lbl, mode='lines', connectgaps=False, 
+            customdata=[hover_name] * len(s_df),
+            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
     fig.update_layout(
         title={'text': title, 'x': 0, 'font': dict(size=18)},
         plot_bgcolor='white', hovermode="x unified", height=600,
         margin=dict(t=80, l=50, r=180, b=50),
-        legend=dict(title="Sensors", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
         xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True),
         yaxis=dict(title=f"Temp ({unit_label})", range=y_range, dtick=dt_minor, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
     )
-
-    # Reference Lines
-    for val, label in active_refs:
-        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-        fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", opacity=0.8)
-    
-    # Monday/Midnight Gridlines
-    for ts in pd.date_range(start=start_view, end=end_view, freq='24h'):
-        color, width = ("Black", 1.5) if ts.weekday() == 0 else ("LightGray", 0.5)
-        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
     return fig
 
 def check_admin_access():
