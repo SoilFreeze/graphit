@@ -639,150 +639,123 @@ elif service == "📉 Node Diagnostics":
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
     if not selected_project:
-        st.warning("👈 Please select a project in the sidebar.")
+        st.warning("👈 Please select a project in the sidebar to begin analysis.")
     else:
         try:
-            # 1. FETCH ALL DATA (Including Rejected/Unapproved for scrubbing)
-            # We use only_approved=False to see the noise we want to hide
-            with st.spinner("🔍 Syncing raw diagnostic streams..."):
+            # 1. DATA ACCESS & TIMEFRAME
+            # Fetch all data (including unapproved) for full engineering visibility
+            with st.spinner("🔍 Syncing diagnostic streams..."):
                 all_data = get_universal_portal_data(selected_project, only_approved=False)
             
             if all_data.empty:
                 st.warning(f"No data found for project {selected_project}.")
             else:
-                # 2. SELECTION CONTROLS
+                # Layout for Top Controls
                 loc_options = sorted(all_data['Location'].dropna().unique())
-                
                 c1, c2 = st.columns([2, 1])
                 with c1: 
                     sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options)
                 with c2: 
                     weeks_view = st.slider("Lookback (Weeks)", 1, 12, 4, key="diag_lookback")
 
-                # 3. UTC DATE CALCULATIONS (Standardized)
+                # Date Calculations (Standardized UTC)
                 now_utc = pd.Timestamp.now(tz=pytz.UTC)
-                # Align end_view to upcoming Monday midnight UTC
                 days_until_monday = (7 - now_utc.weekday()) % 7 or 7
                 end_view = (now_utc + pd.Timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
                 start_view = end_view - timedelta(weeks=weeks_view)
 
-                # Filter for chosen location
+                # Filter data for the specific location
                 df_diag = all_data[all_data['Location'] == sel_loc].copy()
 
-                # --- 4. TABS FOR ORGANIZATION ---
-                tab1, tab2, tab3 = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "🛠️ Scrubbing & Summary"])
+                # --- 2. THE THREE ANALYSIS SECTIONS ---
+                
+                # SECTION A: TIMELINE ANALYSIS
+                st.subheader("📈 Timeline Analysis")
+                st.caption(f"Viewing historical trends in **{tz_mode}**.")
+                fig_time = build_high_speed_graph(
+                    df_diag, sel_loc, start_view, end_view, 
+                    tuple(active_refs), unit_mode, unit_label, 
+                    display_tz=display_tz
+                )
+                st.plotly_chart(fig_time, use_container_width=True, config={'displayModeBar': True}, key=f"diag_time_{sel_loc}")
 
-                # --- TAB 1: TIMELINE ANALYSIS ---
-                with tab1:
-                    st.caption(f"Viewing in **{tz_mode}**. Use Lasso tool to select points for scrubbing.")
-                    fig_time = build_high_speed_graph(
-                        df_diag, sel_loc, start_view, end_view, 
-                        tuple(active_refs), unit_mode, unit_label, 
-                        display_tz=display_tz # Passes Local Time preference
+                st.divider()
+
+                # SECTION B: DEPTH PROFILE ANALYSIS
+                st.subheader("📏 Depth Profile Analysis")
+                df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
+                depth_only_df = df_diag.dropna(subset=['Depth_Num', 'NodeNum']).copy()
+                
+                if depth_only_df.empty:
+                    st.info("No depth-based sensors (ground sticks/strings) found for this location.")
+                else:
+                    fig_depth = go.Figure()
+                    # Generate snapshots for Monday mornings at 6:00 AM UTC
+                    mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
+                    
+                    for m_date in mondays:
+                        target_ts = m_date.replace(hour=6, minute=0, second=0, tzinfo=pytz.UTC)
+                        
+                        # Grab closest points within a 12-hour window of the target
+                        window = depth_only_df[
+                            (depth_only_df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                            (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(hours=12))
+                        ]
+                        
+                        if not window.empty:
+                            snap_list = []
+                            for node in window['NodeNum'].unique():
+                                node_data = window[window['NodeNum'] == node].copy()
+                                node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
+                                snap_list.append(node_data.sort_values('diff').iloc[0])
+                            
+                            snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
+                            fig_depth.add_trace(go.Scattergl(
+                                x=snap_df['temperature'], y=snap_df['Depth_Num'],
+                                mode='lines+markers', name=target_ts.strftime('%m/%d/%y')
+                            ))
+
+                    # Formatting the Vertical Profile
+                    y_limit = int(((depth_only_df['Depth_Num'].max() // 5) + 1) * 5)
+                    x_range = [-20, 80] if unit_mode == "Fahrenheit" else [(-20-32)*5/9, (80-32)*5/9]
+                    
+                    fig_depth.update_layout(
+                        plot_bgcolor='white', height=700,
+                        xaxis=dict(title=f"Temp ({unit_label})", range=x_range, showgrid=True, gridcolor='Gainsboro'),
+                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='Gray'),
+                        legend=dict(title="Weekly Snapshots (6AM UTC)", x=1.02, y=1)
                     )
+                    st.plotly_chart(fig_depth, use_container_width=True)
+
+                st.divider()
+
+                # SECTION C: ENGINEERING STATUS TABLE
+                st.subheader(f"📋 Engineering Summary: {sel_loc}")
+                latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+                summary_rows = []
+                
+                for _, row in latest_nodes.iterrows():
+                    node_id = row['NodeNum']
+                    # Calculate how long since the last packet in UTC
+                    hrs_ago = int((now_utc - row['timestamp']).total_seconds() / 3600)
+                    status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
                     
-                    # Capture Lasso data
-                    selected_data = st.plotly_chart(fig_time, use_container_width=True, on_select="rerun", key=f"diag_chart_{sel_loc}")
+                    # Position Labeling
+                    pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
 
-                # --- TAB 2: DEPTH PROFILE ANALYSIS ---
-                with tab2:
-                    df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
-                    depth_only_df = df_diag.dropna(subset=['Depth_Num', 'NodeNum']).copy()
-                    
-                    if depth_only_df.empty:
-                        st.info("No depth-based sensors found for this location.")
-                    else:
-                        fig_depth = go.Figure()
-                        mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
-                        
-                        for m_date in mondays:
-                            target_ts = m_date.replace(hour=6, minute=0, second=0, tzinfo=pytz.UTC)
-                            
-                            # Grab points within 12h of Monday 6AM UTC
-                            window = depth_only_df[
-                                (depth_only_df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(hours=12))
-                            ]
-                            
-                            if not window.empty:
-                                snap_list = []
-                                for node in window['NodeNum'].unique():
-                                    node_data = window[window['NodeNum'] == node].copy()
-                                    node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
-                                    snap_list.append(node_data.sort_values('diff').iloc[0])
-                                
-                                snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
-                                fig_depth.add_trace(go.Scattergl(
-                                    x=snap_df['temperature'], y=snap_df['Depth_Num'],
-                                    mode='lines+markers', name=target_ts.strftime('%m/%d/%y')
-                                ))
-
-                        y_limit = int(((depth_only_df['Depth_Num'].max() // 5) + 1) * 5)
-                        fig_depth.update_layout(
-                            plot_bgcolor='white', height=700,
-                            xaxis=dict(title=f"Temp ({unit_label})", showgrid=True, gridcolor='Gainsboro'),
-                            yaxis=dict(title="Depth (ft)", range=[y_limit, 0], showgrid=True, gridcolor='Gray'),
-                            legend=dict(title="Snapshots (6AM UTC)", x=1.02, y=1)
-                        )
-                        st.plotly_chart(fig_depth, use_container_width=True)
-
-                # --- TAB 3: SCRUBBING & SUMMARY ---
-                with tab3:
-                    # A. SURGICAL CLEANER
-                    st.subheader("✂️ Surgical Data Cleaner")
-                    if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
-                        pts = selected_data["selection"]["points"]
-                        st.write(f"🎯 **{len(pts)}** points highlighted on the Timeline tab.")
-                        
-                        if st.button("🚫 HIDE SELECTED DATA (Top of Hour)"):
-                            try:
-                                rejection_list = []
-                                for pt in pts:
-                                    raw_ts = pd.to_datetime(pt['x'])
-                                    # Convert to UTC and floor to the top of the hour
-                                    scrub_ts = raw_ts.tz_convert('UTC').floor('h')
-                                    node_id = df_diag.iloc[pt['point_index']]['NodeNum']
-                                    
-                                    rejection_list.append({
-                                        "NodeNum": str(node_id), 
-                                        "timestamp": scrub_ts, 
-                                        "reason": "Top-of-Hour Scrub", 
-                                        "Project": selected_project
-                                    })
-                                
-                                client.load_table_from_dataframe(pd.DataFrame(rejection_list), f"{PROJECT_ID}.{DATASET_ID}.manual_rejections").result()
-                                st.success("✅ Scrubbed to BigQuery!")
-                                st.cache_data.clear()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Scrub Error: {e}")
-                    else:
-                        st.info("💡 Highlight points on the **Timeline** tab to enable scrubbing.")
-
-                    st.divider()
-
-                    # B. ENGINEERING SUMMARY TABLE
-                    st.subheader(f"📋 Node Health Summary")
-                    latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-                    summary_rows = []
-                    
-                    for _, row in latest_nodes.iterrows():
-                        node_id = row['NodeNum']
-                        hrs_ago = int((now_utc - row['timestamp']).total_seconds() / 3600)
-                        status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-                        pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
-
-                        summary_rows.append({
-                            "Node": node_id,
-                            "Position": pos_display,
-                            "Last Seen (UTC)": f"{row['timestamp'].strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}",
-                            "Status": "Approved" if row['is_currently_approved'] == 'TRUE' else "Rejected"
-                        })
-                    
-                    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+                    summary_rows.append({
+                        "Node": node_id,
+                        "Position": pos_display,
+                        "Last Reading": f"{round(row['temperature'], 1)}{unit_label}",
+                        "Last Seen (UTC)": f"{row['timestamp'].strftime('%m/%d %H:%M')} ({hrs_ago}h ago)",
+                        "Health": status_icon,
+                        "Approval": "✅ Approved" if row['is_currently_approved'] == 'TRUE' else "❌ Rejected"
+                    })
+                
+                st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
         except Exception as e:
-            st.error(f"Diagnostics Error: {traceback.format_exc()}")
+            st.error(f"Diagnostics Rendering Error: {traceback.format_exc()}")
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
@@ -975,16 +948,15 @@ elif service == "🛠️ Admin Tools":
     if check_admin_access():
         st.header("🛠️ Engineering Admin Tools")
     
-        # 1. DEFINE TABS FIRST (Fixes the NameError)
-        tab_scrub, tab_approve, tab_cleaner = st.tabs(["🧹 Deep Data Scrub", "✅ Bulk Approval", "🧨 Surgical Cleaner"])
+        # 1. DEFINE TABS
+        tab_approve, tab_scrub, tab_cleaner = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
     
-        # 2. BULK APPROVAL (Only targets physical RAW tables)
+        # 2. BULK APPROVAL
         with tab_approve:
             st.subheader("✅ Bulk Approval")
-            st.info("Sets records to 'TRUE' unless they were specifically marked 'FALSE' with the Lasso tool.")
+            st.info("Sets records to 'TRUE' in raw tables. This does not override 'FALSE' points marked in the Surgical Cleaner.")
             
             if st.button("🚀 Approve All Pending Data"):
-                # We ONLY update raw tables; the MASTER_TABLE View will reflect changes automatically
                 raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
                               f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
                 
@@ -1003,10 +975,10 @@ elif service == "🛠️ Admin Tools":
                 st.success("Bulk approval complete.")
                 st.cache_data.clear()
     
-        # 3. DEEP DATA SCRUB (Physical Purge of RAW tables)
+        # 3. DEEP DATA SCRUB (Physical Purge)
         with tab_scrub:
             st.subheader("🧹 Deep Data Scrub & Final Purge")
-            st.info("Permanently deletes 'FALSE' points and reduces data to 1-hour intervals.")
+            st.error("⚠️ WARNING: This permanently deletes data from RAW tables.")
             
             scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
             target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
@@ -1026,83 +998,89 @@ elif service == "🛠️ Admin Tools":
                         AND temperature IS NOT NULL
                     ) WHERE rn = 1
                     """
-                    # Note: Purge for Master Table removed as it is a VIEW
                     try:
                         client.query(scrub_sql).result()
-                        st.success(f"{scrub_target} purged of rejected points and deduped.")
+                        st.success(f"{scrub_target} purged and deduped to 1-hour intervals.")
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"Scrub Error: {e}")
     
         # 4. SURGICAL CLEANER (Lasso Selection)
         with tab_cleaner:
-            # --- SURGICAL DATA CLEANER (LASSO TOOL) ---
             st.subheader("✂️ Surgical Data Cleaner")
-            st.info("Use the Lasso or Box Select on the graph above, then click the button below to scrub those hours.")
             
-            # This captures the selection data from the Plotly chart
-            # Ensure your plotly_chart call above uses: on_select="rerun"
-            event_data = st.session_state.get("plotly_selection") # or however you've named your selection capture
-            
-            if event_data and "points" in event_data:
-                points = event_data["points"]
-                st.write(f"🎯 **{len(points)}** points selected.")
-            
-                if st.button("🚫 HIDE SELECTED DATA"):
-                    with st.spinner("Processing scrub to the top of the hour..."):
-                        try:
-                            rejection_records = []
-                            
-                            for pt in points:
-                                # 1. Capture the raw timestamp from the X-axis
-                                raw_ts = pd.to_datetime(pt['x'])
-                                
-                                # 2. Floor to the TOP OF THE HOUR (e.g., 10:45 -> 10:00)
-                                # This ensures the join catches all readings in that hour
-                                scrubbed_ts = raw_ts.floor('h')
-                                
-                                # 3. Get the NodeNum from the underlying dataframe
-                                # Using point_index to map back to the original data row
-                                node_id = p_df.iloc[pt['point_index']]['NodeNum']
-                                
-                                rejection_records.append({
-                                    "NodeNum": node_id,
-                                    "timestamp": scrubbed_ts,
-                                    "reason": "Top-of-Hour Scrub",
-                                    "project": selected_project
-                                })
-            
-                            if rejection_records:
-                                # Convert to DataFrame
-                                rej_df = pd.DataFrame(rejection_records)
-                                
-                                # Upload to BigQuery (Append mode)
-                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                
-                                job = client.load_table_from_dataframe(
-                                    rej_df, 
-                                    f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
-                                    job_config=job_config
-                                )
-                                
-                                # Wait for job to complete
-                                job.result()
-                                
-                                st.success(f"✅ Successfully scrubbed {len(rejection_records)} hours for Project {selected_project}!")
-                                
-                                # 4. CLEAR CACHE: This forces the graphs to reload and hide the points immediately
-                                st.cache_data.clear()
-                                st.rerun()
-                            else:
-                                st.warning("No valid points found in selection.")
-            
-                        except Exception as e:
-                            # This 'except' block fixes the SyntaxError you saw
-                            st.error(f"❌ Error during scrubbing: {str(e)}")
-                            st.write("Ensure the 'manual_rejections' table schema matches: NodeNum (STRING), timestamp (TIMESTAMP), reason (STRING)")
-            
+            if not selected_project:
+                st.warning("👈 Please select a project in the sidebar.")
             else:
-                st.write("💡 *Select points on the graph above to enable the hide button.*")
+                # FETCH RAW DATA (Including unapproved)
+                with st.spinner("Loading interactive scrub window..."):
+                    p_df = get_universal_portal_data(selected_project, only_approved=False)
+
+                if p_df.empty:
+                    st.info("No data available to scrub.")
+                else:
+                    # UI CONTROLS
+                    loc_options = sorted(p_df['Location'].dropna().unique())
+                    sel_loc = st.selectbox("Select Pipe to Scrub", loc_options)
+                    lookback = st.slider("Window (Days)", 1, 30, 7)
+
+                    # TIME CALCULATIONS
+                    now_utc = pd.Timestamp.now(tz='UTC')
+                    start_v, end_v = now_utc - timedelta(days=lookback), now_utc + timedelta(hours=6)
+                    
+                    # FILTER FOR GRAPH
+                    scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy()
+
+                    # RENDER THE GRAPH (Crucial for Lasso to work)
+                    fig_scrub = build_high_speed_graph(
+                        scrub_plot_df, f"Scrubbing: {sel_loc}", 
+                        start_v, end_v, tuple(active_refs), 
+                        unit_mode, unit_label, display_tz=display_tz
+                    )
+
+                    selected_data = st.plotly_chart(
+                        fig_scrub, use_container_width=True, 
+                        on_select="rerun", key=f"scrub_chart_{sel_loc}"
+                    )
+
+                    # PROCESSING SELECTION
+                    if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
+                        points = selected_data["selection"]["points"]
+                        st.write(f"🎯 **{len(points)}** points highlighted.")
+                    
+                        if st.button("🚫 HIDE SELECTED DATA (Hourly)"):
+                            with st.spinner("Writing rejection rules..."):
+                                try:
+                                    rejection_records = []
+                                    for pt in points:
+                                        raw_ts = pd.to_datetime(pt['x'])
+                                        # Convert to UTC and floor to top of hour
+                                        scrubbed_ts = raw_ts.tz_convert('UTC').floor('h')
+                                        node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
+                                        
+                                        rejection_records.append({
+                                            "NodeNum": str(node_id),
+                                            "timestamp": scrubbed_ts,
+                                            "reason": "Admin Surgical Scrub",
+                                            "Project": selected_project
+                                        })
+                                    
+                                    if rejection_records:
+                                        rej_df = pd.DataFrame(rejection_records).drop_duplicates()
+                                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                        client.load_table_from_dataframe(
+                                            rej_df, 
+                                            f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
+                                            job_config=job_config
+                                        ).result()
+                                        
+                                        st.success(f"✅ Hidden {len(rej_df)} unique hourly blocks.")
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error during scrubbing: {e}")
+                    else:
+                        st.info("💡 Use the **Lasso** tool on the graph above to select data.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
