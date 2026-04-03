@@ -16,49 +16,24 @@ import io
 ################################
 # --- GET ALL PROJECT DATA --- #
 ################################
-@st.cache_data(ttl=600)
-def get_all_projects_data(only_approved=True):
-    """
-    ULTRA-FAST & TIMEZONE STABLE: 
-    Unifies hardware, joins metadata, and standardizes all timestamps to UTC.
-    """
-    query = f"""
-        WITH UnifiedRaw AS (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ),
-        JoinedData AS (
-            SELECT 
-                r.NodeNum, r.timestamp, r.temperature,
-                m.Location, m.Bank, m.Depth, m.Project,
-                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
-            FROM UnifiedRaw r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
-            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
-                ON r.NodeNum = rej.NodeNum AND r.timestamp = rej.timestamp
-        )
-        SELECT * FROM JoinedData
-        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-        { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
-        ORDER BY Project ASC, Location ASC, timestamp ASC
-    """
-    try:
-        df = client.query(query).to_dataframe()
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            # Ensure every timestamp is converted to UTC
-            if df['timestamp'].dt.tz is None:
-                df['timestamp'] = df['timestamp'].dt.tz_localize(pytz.UTC)
-            else:
-                df['timestamp'] = df['timestamp'].dt.tz_convert(pytz.UTC)
+lif service == "📉 Node Diagnostics":
+    st.header(f"📉 Node Diagnostics: {selected_project}")
+    
+    if not selected_project:
+        st.warning("Please select a project in the sidebar.")
+    else:
+        try:
+            # CHANGE: Use the new unified function instead of the deleted one
+            # We set only_approved=False so you can see raw data for troubleshooting
+            all_site_data = get_all_projects_data(only_approved=False)
             
-            if 'Bank' not in df.columns:
-                df['Bank'] = ""
-        return df
-    except Exception as e:
-        st.error(f"Batch Query Error: {e}")
-        return pd.DataFrame()
+            # Filter the big dataset down to just your active project
+            all_data = all_site_data[all_site_data['Project'] == selected_project]
+            
+            if all_data.empty:
+                st.warning(f"No data found for project {selected_project}.")
+            else:
+                loc_options = sorted(all_data['Location'].dropna().unique())
 ##############################
 # --- CHECK ADMIN ACCESS --- #
 ##############################
@@ -384,37 +359,38 @@ if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.a
 # --- GLOBAL OVERVIEW --- #
 ###########################
 if service == "🌐 Global Overview":
-    st.header("🌐 Global Site Overview")
+    st.header(f"🌐 Project Overview: {selected_project}")
     
-    all_data_df = get_all_projects_data(only_approved=True)
-
-    if all_data_df.empty:
-        st.warning("No data found.")
+    if not selected_project:
+        st.warning("👈 Please select a Project in the sidebar to begin.")
     else:
-        # Timeframe Controls (UTC Aware)
-        lookback = st.sidebar.slider("Global Lookback (Weeks)", 1, 8, 4)
-        now_utc = pd.Timestamp.now(tz=pytz.UTC)
-        
-        # Calculate window boundaries as UTC
-        end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
-        start_view = end_view - timedelta(weeks=lookback)
+        # 1. Fetch data for just the one selected project
+        with st.spinner(f"Aligning timezones for {selected_project}..."):
+            p_df = get_universal_portal_data(selected_project, only_approved=True)
 
-        for proj in sorted(all_data_df['Project'].unique()):
-            with st.expander(f"🏗️ Project: {proj}", expanded=True):
-                proj_df = all_data_df[all_data_df['Project'] == proj]
-                
-                for loc in sorted(proj_df['Location'].unique()):
-                    loc_df = proj_df[proj_df['Location'] == loc]
+        if p_df.empty:
+            st.info(f"No approved data found for project {selected_project}.")
+        else:
+            # 2. Setup Timeframe (UTC Aware)
+            lookback = st.sidebar.slider("View Lookback (Weeks)", 1, 8, 4)
+            now_utc = pd.Timestamp.now(tz='UTC')
+            end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
+            start_view = end_view - timedelta(weeks=lookback)
+
+            # 3. Minimize by Graph
+            locations = sorted(p_df['Location'].unique())
+            for loc in locations:
+                with st.expander(f"📍 {loc}", expanded=True):
+                    loc_df = p_df[p_df['Location'] == loc]
                     
-                    with st.expander(f"📍 {loc}", expanded=True):
-                        fig = build_high_speed_graph(
-                            loc_df, 
-                            f"📈 {proj} - {loc}", 
-                            start_view, end_view, 
-                            tuple(active_refs), 
-                            unit_mode, unit_label
-                        )
-                        st.plotly_chart(fig, use_container_width=True, key=f"glob_{proj}_{loc}")
+                    fig = build_high_speed_graph(
+                        loc_df, 
+                        f"📈 {selected_project} - {loc}", 
+                        start_view, end_view, 
+                        tuple(active_refs), 
+                        unit_mode, unit_label
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key=f"ov_{selected_project}_{loc}")
 #############################
 # --- Executive Summary --- #
 #############################
@@ -655,6 +631,10 @@ elif service == "📉 Node Diagnostics":
     if not selected_project:
         st.warning("Please select a project in the sidebar.")
     else:
+        # Fetches all raw data (approved + rejected) for troubleshooting
+        all_data = get_universal_portal_data(selected_project, only_approved=False)
+        
+        # ... your existing diagnostics logic (table, node list, etc.) ...
         try:
             # CHANGE: Use the new unified function instead of the deleted one
             # We set only_approved=False so you can see raw data for troubleshooting
