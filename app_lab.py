@@ -94,14 +94,17 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     return fig
 
 def check_admin_access():
-    """Returns True if the user is authenticated, otherwise shows password input."""
     if "admin_authenticated" not in st.session_state:
         st.session_state["admin_authenticated"] = False
 
     if st.session_state["admin_authenticated"]:
         return True
 
-    # Password input UI
+    # Check if the secret even exists before trying to compare it
+    if "admin_password" not in st.secrets:
+        st.error("Developer Error: 'admin_password' is not defined in Streamlit Secrets.")
+        return False
+
     st.warning("🔒 This area is restricted to Engineering Admins.")
     pwd_input = st.text_input("Enter Admin Password", type="password")
     
