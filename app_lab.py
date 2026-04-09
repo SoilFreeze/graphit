@@ -842,8 +842,11 @@ elif service == "📤 Data Intake Lab":
                 
                 # --- DETECT FILE TYPE ---
                 is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
-                is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
-                
+
+                # Updated detection logic to support 'Channel' header
+                is_lord_narrow = ("nodenumber" in raw_content[0].lower() or "channel" in raw_content[0].lower()) and \
+                                 "temperature" in raw_content[0].lower()
+                                
                 # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
                 if is_lord_wide:
                     try:
@@ -1067,17 +1070,16 @@ elif service == "🛠️ Admin Tools":
                         st.error(f"Scrub Error: {e}")
     
         # 4. SURGICAL CLEANER (Lasso Selection)
-        # --- TAB 3: SURGICAL CLEANER ---
+        # --- TAB 3: SURGICAL CLEANER (Updated for Lasso Persistence) ---
 with tab_cleaner:
     st.subheader("🧨 Surgical Data Cleaner")
-    st.info("💡 **Instructions:** Use the **Lasso** or **Box Select** tools on the graph to highlight noisy points. The system will automatically hide the entire hour for those selections.")
+    st.info("💡 **Instructions:** Use the **Lasso** or **Box Select** tools. Selected points will stay highlighted until you click 'Hide'.")
 
     if not selected_project:
         st.warning("👈 Please select a Project in the sidebar.")
     else:
-        # 1. FETCH RAW DATA (Including Rejected/Unapproved)
+        # 1. FETCH RAW DATA
         with st.spinner(f"📥 Loading raw data for {selected_project}..."):
-            # only_approved=False allows us to see the points we want to hide
             p_df = get_universal_portal_data(selected_project, only_approved=False)
 
         if p_df.empty:
@@ -1097,10 +1099,14 @@ with tab_cleaner:
             end_view = now_utc + timedelta(hours=6)
 
             # Filter for the specific location
-            scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy()
+            scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-            # 4. RENDER THE INTERACTIVE GRAPH (MARKERS MODE)
-            # The 'Scrubbing' keyword in the title triggers 'markers' in our graph function
+            # --- PERSISTENCE LOGIC ---
+            # Initialize selection state if not present
+            if "lasso_selection" not in st.session_state:
+                st.session_state.lasso_selection = None
+
+            # 4. RENDER THE INTERACTIVE GRAPH
             fig_scrub = build_high_speed_graph(
                 scrub_plot_df, 
                 f"Scrubbing Interface: {sel_loc}", 
@@ -1112,22 +1118,34 @@ with tab_cleaner:
                 display_tz=display_tz
             )
 
-            # on_select="rerun" captures the Lasso/Box tool selection data
-            selected_data = st.plotly_chart(
+            # FIX: If we have previous selection data, tell Plotly to highlight those points
+            if st.session_state.lasso_selection:
+                selected_indices = [p['point_index'] for p in st.session_state.lasso_selection]
+                fig_scrub.update_traces(selectedpoints=selected_indices, 
+                                       unselected=dict(marker=dict(opacity=0.2)))
+
+            # Capture selection
+            event_data = st.plotly_chart(
                 fig_scrub, 
                 use_container_width=True, 
                 on_select="rerun", 
                 key=f"scrub_chart_{sel_loc}"
             )
 
+            # Update session state with new selection
+            if event_data and "selection" in event_data:
+                st.session_state.lasso_selection = event_data["selection"]["points"]
+
             st.divider()
 
             # 5. EXECUTE THE HOURLY SCRUB
             st.markdown("### 🚫 Execute Rejection")
             
-            if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
-                points = selected_data["selection"]["points"]
-                st.write(f"✅ **{len(points)}** data points highlighted.")
+            # Check the session state instead of the raw event to ensure it "stays"
+            points = st.session_state.lasso_selection
+            
+            if points:
+                st.write(f"✅ **{len(points)}** data points currently highlighted.")
 
                 if st.button("🚨 HIDE SELECTED DATA (Align to Top of Hour)", type="primary"):
                     with st.spinner("Writing hourly rejection rules..."):
@@ -1136,12 +1154,9 @@ with tab_cleaner:
                             for pt in points:
                                 # A. Get the timestamp from the plot click
                                 raw_ts = pd.to_datetime(pt['x'])
-                                
-                                # B. Convert to UTC and FLOOR to the top of the hour
-                                # This ensures the join catches every reading in that 60-min block
                                 scrub_ts = raw_ts.tz_convert('UTC').floor('h')
                                 
-                                # C. Map back to NodeNum using the dataframe index
+                                # B. Use point_index to find the NodeNum in our filtered dataframe
                                 node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
                                 
                                 rejection_records.append({
@@ -1152,10 +1167,7 @@ with tab_cleaner:
                                 })
 
                             if rejection_records:
-                                # Deduplicate (prevents redundant entries for the same hour)
                                 rej_df = pd.DataFrame(rejection_records).drop_duplicates()
-                                
-                                # Upload to 'manual_rejections' table
                                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(
                                     rej_df, 
@@ -1163,16 +1175,17 @@ with tab_cleaner:
                                     job_config=job_config
                                 ).result()
                                 
-                                st.success(f"Successfully hidden {len(rej_df)} hourly blocks for {sel_loc}!")
+                                st.success(f"Successfully hidden {len(rej_df)} hourly blocks!")
                                 
-                                # Clear cache so changes reflect on all pages immediately
+                                # Reset selection after success
+                                st.session_state.lasso_selection = None
                                 st.cache_data.clear()
                                 st.rerun()
 
                         except Exception as e:
                             st.error(f"❌ Scrubbing Failed: {e}")
             else:
-                st.info("💡 **Selection Required:** Use the Lasso or Box Select tool on the graph above to highlight the noise you want to remove.")
+                st.info("💡 **Selection Required:** Use the Lasso tool on the graph above.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
