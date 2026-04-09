@@ -1055,47 +1055,45 @@ elif service == "🛠️ Admin Tools":
                 if p_df.empty:
                     st.warning(f"No data found for project {selected_project}.")
                 else:
-                    # 1. FILTER & RESET INDEX
-                    # reset_index is mandatory so Plotly's point_index matches our DataFrame rows
+                    # Filter and RESET INDEX
                     loc_options = sorted(p_df['Location'].dropna().unique())
                     sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="admin_scrub_loc")
                     lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7)
                     
+                    # mandatory for matching lasso points to index 0...N
                     scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
-
-                    # 2. INITIALIZE SESSION STATE
+        
                     if "lasso_selection" not in st.session_state:
                         st.session_state.lasso_selection = None
-
-                    # 3. BUILD GRAPH
+        
+                    # Build graph
                     fig_scrub = build_high_speed_graph(
                         scrub_plot_df, f"Scrubbing: {sel_loc}", 
                         pd.Timestamp.now(tz='UTC') - timedelta(days=lookback_days), 
                         pd.Timestamp.now(tz='UTC') + timedelta(hours=6), 
                         tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
                     )
-
-                    # 4. APPLY SAVED SELECTION (Persistence Fix)
+        
+                    # Re-apply lasso highlights before drawing
                     if st.session_state.lasso_selection:
                         selected_indices = [p['point_index'] for p in st.session_state.lasso_selection]
                         fig_scrub.update_traces(
                             selectedpoints=selected_indices, 
                             unselected=dict(marker=dict(opacity=0.3))
                         )
-
-                    # RENDER CHART (Reverting to the standard parameter for your version)
+        
+                    # Render the chart with the fixed width parameter
                     event_data = st.plotly_chart(
                         fig_scrub, 
-                        use_container_width=True, # This replaces width="container"
+                        use_container_width=True, 
                         on_select="rerun", 
                         key=f"scrub_{sel_loc}"
                     )
-
-                    # 6. CAPTURE SELECTION
+        
+                    # Update session state with new selection data
                     if event_data and "selection" in event_data:
                         st.session_state.lasso_selection = event_data["selection"]["points"]
-
-                    # 7. EXECUTE REJECTION
+        
                     if st.session_state.lasso_selection:
                         points = st.session_state.lasso_selection
                         st.write(f"✅ **{len(points)}** points currently highlighted.")
@@ -1121,7 +1119,6 @@ elif service == "🛠️ Admin Tools":
                                     f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
                                 ).result()
                                 
-                                # Clear state and refresh
                                 st.session_state.lasso_selection = None
                                 st.cache_data.clear()
                                 st.rerun()
