@@ -1012,39 +1012,53 @@ elif service == "🛠️ Admin Tools":
     if check_admin_access():
         st.header("🛠️ Engineering Admin Tools")
     
-        tab1, tab2, tab3 = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
+        # 1. DEFINE TABS
+        tab_approve, tab_scrub, tab_cleaner = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
     
-        with tab1:
+        # 2. BULK APPROVAL
+        with tab_approve:
             st.subheader("✅ Bulk Approval")
-            # ... (your existing bulk approval code)
-
-        with tab2:
-            st.subheader("🧹 Deep Data Scrub")
-            # ... (your existing scrub code)
-
+            st.info("Sets records to 'TRUE' in raw tables. This does not override 'FALSE' points marked in the Surgical Cleaner.")
+            
+            if st.button("🚀 Approve All Pending Data"):
+                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
+                              f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+                
+                with st.spinner("Processing approvals..."):
+                    for table in raw_tables:
+                        try:
+                            approve_sql = f"""
+                                UPDATE `{table}` 
+                                SET approve = 'TRUE' 
+                                WHERE approve IS NULL 
+                                OR UPPER(CAST(approve AS STRING)) != 'FALSE'
+                            """
+                            client.query(approve_sql).result()
+                        except Exception as e:
+                            st.warning(f"Could not update {table}: {e}")
+                st.success("Bulk approval complete.")
+                st.cache_data.clear()
+    
+        # --- TAB 3: THE PERSISTENT SURGICAL CLEANER ---
         with tab3:
             st.subheader("🧨 Surgical Data Cleaner")
             if not selected_project:
                 st.warning("👈 Please select a Project in the sidebar.")
             else:
-                with st.spinner("Loading..."):
-                    p_df = get_universal_portal_data(selected_project, only_approved=False)
+                p_df = get_universal_portal_data(selected_project, only_approved=False)
         
                 if not p_df.empty:
                     loc_options = sorted(p_df['Location'].dropna().unique())
                     sel_loc = st.selectbox("Select Pipe", loc_options, key="admin_scrub_loc")
                     
-                    # 1. PREPARE DATA
+                    # 1. PREPARE DATA & INDEXING
                     scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-                    # 2. STATE MANAGEMENT
-                    # We use a unique key for the chart based on the location to avoid overlap
-                    chart_key = f"scrub_chart_{sel_loc.replace(' ', '_')}"
-                    
+                    # 2. STATE INITIALIZATION
                     if "lasso_selection" not in st.session_state:
                         st.session_state.lasso_selection = None
 
-                    # 3. BUILD GRAPH
+                    # 3. BUILD THE GRAPH OBJECT
                     fig_scrub = build_high_speed_graph(
                         scrub_plot_df, f"Scrubbing: {sel_loc}", 
                         pd.Timestamp.now(tz='UTC') - timedelta(days=7), 
@@ -1052,60 +1066,58 @@ elif service == "🛠️ Admin Tools":
                         tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
                     )
 
-                    # 4. PERSISTENCE INJECTION
-                    # This tells Plotly to DRAW the selection we have saved
+                    # 4. THE PERSISTENCE "VALVE" (FORCE DRAW)
+                    # This injects our saved selection back into the Plotly object before it renders
                     if st.session_state.lasso_selection:
                         selected_indices = [p['point_index'] for p in st.session_state.lasso_selection]
                         fig_scrub.update_traces(
                             selectedpoints=selected_indices, 
-                            unselected=dict(marker=dict(opacity=0.3))
+                            unselected=dict(marker=dict(opacity=0.3), line=dict(color='lightgray'))
                         )
 
-                    # 5. THE CHART CALL
-                    # Note: use_container_width=True is used to avoid that width error
+                    # 5. RENDER THE CHART (Use use_container_width=True to avoid the crash)
                     event_data = st.plotly_chart(
                         fig_scrub, 
                         use_container_width=True, 
                         on_select="rerun", 
-                        key=chart_key
+                        key=f"scrub_chart_{sel_loc.replace(' ', '_')}" # Dynamic key prevents caching issues
                     )
 
-                    # 6. CAPTURE LOGIC
-                    # Only update session_state if the user actually clicked/lasso'd something new
-                    if event_data and event_data.get("selection") and event_data["selection"]["points"]:
-                        st.session_state.lasso_selection = event_data["selection"]["points"]
-                    
-                    # 7. THE "STAY" UI
+                    # 6. UPDATE LOGIC (THE PROTECTOR)
+                    # We ONLY update the session state if there is a NEW selection.
+                    # If event_data is empty (which happens during the rerun), we KEEP the old state.
+                    if event_data and "selection" in event_data:
+                        new_points = event_data["selection"].get("points", [])
+                        if len(new_points) > 0:
+                            st.session_state.lasso_selection = new_points
+
+                    # 7. ACTION UI
                     if st.session_state.lasso_selection:
                         points = st.session_state.lasso_selection
-                        st.success(f"📍 {len(points)} points 'Lassoed' and held in memory.")
+                        st.success(f"📍 {len(points)} points locked in memory.")
                         
-                        col1, col2 = st.columns(2)
-                        if col1.button("🚨 HIDE SELECTED DATA", type="primary"):
+                        c1, c2 = st.columns(2)
+                        if c1.button("🚨 HIDE SELECTED DATA", type="primary"):
+                            # Execution logic here
                             rejection_records = []
                             for pt in points:
                                 raw_ts = pd.to_datetime(pt['x'])
                                 scrub_ts = raw_ts.tz_convert('UTC').floor('h')
                                 node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
-                                rejection_records.append({
-                                    "NodeNum": str(node_id),
-                                    "timestamp": scrub_ts,
-                                    "reason": "Surgical Scrub",
-                                    "Project": selected_project
-                                })
+                                rejection_records.append({"NodeNum": str(node_id), "timestamp": scrub_ts, "reason": "Surgical Scrub", "Project": selected_project})
                             
                             if rejection_records:
                                 rej_df = pd.DataFrame(rejection_records).drop_duplicates()
                                 client.load_table_from_dataframe(rej_df, f"{PROJECT_ID}.{DATASET_ID}.manual_rejections").result()
-                                st.session_state.lasso_selection = None # Clear after save
+                                st.session_state.lasso_selection = None # Clear after success
                                 st.cache_data.clear()
                                 st.rerun()
 
-                        if col2.button("🧹 Clear Lasso"):
+                        if c2.button("🧹 Clear Selection"):
                             st.session_state.lasso_selection = None
                             st.rerun()
                     else:
-                        st.info("💡 Use the Lasso or Box tool. Points will stay selected until you Clear or Hide them.")
+                        st.info("💡 Use the Lasso tool. Points will stay selected even if the page refreshes.")
                                 
 ###########################
 # --- END ADMIN TOOLS --- #
