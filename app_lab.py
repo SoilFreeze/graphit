@@ -1083,10 +1083,10 @@ elif service == "🛠️ Admin Tools":
                             unselected=dict(marker=dict(opacity=0.3))
                         )
 
-                    # 5. RENDER CHART (Fixed Width Parameter)
+                    # RENDER CHART (Reverting to the standard parameter for your version)
                     event_data = st.plotly_chart(
                         fig_scrub, 
-                        use_container_width=True, # FIXED: Reverted from "container" to True
+                        use_container_width=True, # This replaces width="container"
                         on_select="rerun", 
                         key=f"scrub_{sel_loc}"
                     )
