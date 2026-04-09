@@ -32,7 +32,11 @@ def get_universal_portal_data(project_id, only_approved=True):
                 r.NodeNum, r.timestamp, r.temperature,
                 m.Location, m.Bank, m.Depth, m.Project,
                 # Join logic: Truncate both to the hour so the scrub works
-                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
+                # New Logic: Must be explicitly 'TRUE' in the raw table AND not rejected
+                CASE 
+                    WHEN r.approve = 'TRUE' AND rej.NodeNum IS NULL THEN 'TRUE' 
+                    ELSE 'FALSE' 
+                END as is_currently_approved
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
             LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
