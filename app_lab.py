@@ -915,29 +915,49 @@ elif service == "📤 Data Intake Lab":
                             st.error("Format not recognized. Check CSV headers.")
                     except Exception as e: st.error(f"SensorPush Error: {e}")
 
+       # 3. DEEP DATA SCRUB (Physical Purge) - UPDATED FOR TOP-OF-HOUR SNAP
         with tab2:
-            st.subheader("📡 Cloud-to-Cloud API Sync")
-            c1, c2 = st.columns(2)
-            start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
-            end_date = c2.date_input("End Date", datetime.now())
+            st.subheader("🧹 Deep Data Scrub & Final Purge")
+            st.info("This tool dedups data to 1-hour intervals and snaps all timestamps to the **Top of the Hour**.")
+            st.error("⚠️ WARNING: This permanently modifies data in RAW tables.")
             
-            if st.button("🛰️ FETCH & SYNC"):
-                # Level 3: Date Conversion
-                start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
-                end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
-                
-                with st.spinner("Fetching data..."):
-                    # Level 4: Call the Function
-                    df_api = fetch_sensorpush_data(start_dt, end_dt)
-                    
-                    if not df_api.empty:
-                        # Level 5: Upload to BigQuery
-                        table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                        client.load_table_from_dataframe(df_api, table_path).result()
-                        st.success(f"✅ Integrated {len(df_api)} points successfully!")
-                    else:
-                        # Level 5: Fallback
-                        st.warning("No data found for this range.")
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_radio")
+            
+            # Map columns based on raw table schema
+            if scrub_target == "SensorPush":
+                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                node_col = "sensor_id"
+                temp_col = "temperature"
+            else:
+                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                node_col = "nodenumber"
+                temp_col = "value"
+    
+            if st.button(f"🧨 Permanently Purge & Snap {scrub_target}"):
+                with st.spinner("Executing hard delete and snap-to-hour..."):
+                    # The TIMESTAMP_TRUNC in the first SELECT line snaps the result to :00
+                    scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS 
+                    SELECT 
+                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                        * EXCEPT(timestamp, rn) 
+                    FROM (
+                        SELECT *, 
+                               ROW_NUMBER() OVER(
+                                   PARTITION BY {node_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                                   ORDER BY timestamp DESC
+                               ) as rn
+                        FROM `{target_table}` 
+                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
+                        AND {temp_col} IS NOT NULL
+                    ) WHERE rn = 1
+                    """
+                    try:
+                        client.query(scrub_sql).result()
+                        st.success(f"✅ {scrub_target} purged, deduped, and snapped to top-of-hour.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"Scrub Error: {e}")
                         
         with tab3:
             st.subheader("📥 Export Project Data (SensorConnect Format)")
