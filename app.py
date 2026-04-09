@@ -842,7 +842,10 @@ elif service == "📤 Data Intake Lab":
                 
                 # --- DETECT FILE TYPE ---
                 is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
-                is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
+                
+                # Updated detection logic to support 'Channel' header
+                is_lord_narrow = ("nodenumber" in raw_content[0].lower() or "channel" in raw_content[0].lower()) and \
+                                 "temperature" in raw_content[0].lower()
                 
                 # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
                 if is_lord_wide:
