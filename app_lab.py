@@ -1039,7 +1039,7 @@ elif service == "🛠️ Admin Tools":
                 st.success("Bulk approval complete.")
                 st.cache_data.clear()
     
-        # 3. DEEP DATA SCRUB (Physical Purge)
+        # 3. DEEP DATA SCRUB
         with tab2:
             st.subheader("🧹 Deep Data Scrub & Final Purge")
             st.error("⚠️ WARNING: This permanently deletes data from RAW tables.")
@@ -1083,12 +1083,12 @@ elif service == "🛠️ Admin Tools":
                 if p_df.empty:
                     st.warning(f"No data found for project {selected_project}.")
                 else:
-                    # Filter and RESET INDEX - Mandatory for Plotly selection to work correctly
+                    # Filter and RESET INDEX - Mandatory for Plotly selection to map correctly
                     loc_options = sorted(p_df['Location'].dropna().unique())
                     sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="admin_scrub_loc")
                     lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7, key="admin_scrub_days")
         
-                    # We reset the index so the 'point_index' from Plotly maps correctly to our DataFrame
+                    # Reset index ensures 'point_index' 0 is the first row of this slice
                     scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
                     # Initialize Persistence State
@@ -1107,15 +1107,15 @@ elif service == "🛠️ Admin Tools":
                         display_tz=display_tz
                     )
 
-                    # Persistence Fix: Re-apply highlights if they exist in session state
-                    if st.session_state.get("lasso_selection"):
+                    # Persistence Fix: Re-apply highlights before rendering
+                    if st.session_state.lasso_selection:
                         selected_indices = [p['point_index'] for p in st.session_state.lasso_selection]
                         fig_scrub.update_traces(
                             selectedpoints=selected_indices, 
                             unselected=dict(marker=dict(opacity=0.3))
                         )
 
-                    # Render the Graph - Fixed width parameter to prevent the crash
+                    # RENDER CHART - use_container_width=True clears the crash
                     event_data = st.plotly_chart(
                         fig_scrub, 
                         use_container_width=True, 
@@ -1132,8 +1132,8 @@ elif service == "🛠️ Admin Tools":
                     # 5. EXECUTE THE HOURLY SCRUB
                     st.markdown("### 🚫 Execute Rejection")
                     
-                    # We use session_state so the button can see the selection after the rerun
-                    points = st.session_state.get("lasso_selection")
+                    # Capture the highlighted points from state
+                    points = st.session_state.lasso_selection
                     
                     if points:
                         st.write(f"✅ **{len(points)}** data points highlighted.")
@@ -1146,7 +1146,7 @@ elif service == "🛠️ Admin Tools":
                                         raw_ts = pd.to_datetime(pt['x'])
                                         scrub_ts = raw_ts.tz_convert('UTC').floor('h')
                                         
-                                        # Map point_index back to NodeNum using our reset dataframe
+                                        # Map index back to NodeNum
                                         node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
                                         
                                         rejection_records.append({
@@ -1167,7 +1167,7 @@ elif service == "🛠️ Admin Tools":
                                         
                                         st.success(f"Successfully hidden {len(rej_df)} hourly blocks!")
                                         
-                                        # Reset state after successful save
+                                        # Clear state after success
                                         st.session_state.lasso_selection = None
                                         st.cache_data.clear()
                                         st.rerun()
@@ -1175,7 +1175,7 @@ elif service == "🛠️ Admin Tools":
                                 except Exception as e:
                                     st.error(f"❌ Scrubbing Failed: {e}")
                     else:
-                        st.info("💡 **Selection Required:** Use the Lasso or Box Select tool on the graph above.")
+                        st.info("💡 **Selection Required:** Use the Lasso tool on the graph above.")
                                 
 ###########################
 # --- END ADMIN TOOLS --- #
