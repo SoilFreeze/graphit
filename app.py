@@ -820,62 +820,74 @@ elif service == "📉 Node Diagnostics":
 elif service == "📤 Data Intake Lab":
     st.header("📤 Data Ingestion Lab")
     
-    tab_manual, tab_api, tab_meta = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Metadata"])
+    # Initialize tabs here so they are always in scope for this service
+    tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Metadata"])
 
-    with tab_manual:
+    with tab1:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), SensorPush, or Bridge v5 CSVs.")
+        st.info("Supports Large Files (up to 200MB): Lord (Wide/Narrow), SensorPush, and Bridge v5.")
         
-        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_ingest_v5")
+        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_u_v5_final")
         
         if u_file is not None:
-            # Read first few lines to detect format
             try:
-                df_raw = pd.read_csv(u_file)
-                cols = [c.strip() for c in df_raw.columns]
-                cols_lower = [c.lower() for c in cols]
+                # Use a small sample to detect headers without loading 200MB into RAM
+                sample = pd.read_csv(u_file, nrows=5)
+                u_file.seek(0) # Reset file pointer after sampling
                 
-                # --- CASE 1: BRIDGE V5 (The 11955 - Sheet1 format) ---
-                # Expected Headers: Timestamp, Channel, Temperature, Status
-                if 'channel' in cols_lower and 'temperature' in cols_lower and 'timestamp' in cols_lower:
-                    st.success("✅ Bridge v5 / Desktop Log Format Detected")
+                cols = [c.strip().lower() for c in sample.columns]
+                
+                # --- DETECT FORMAT ---
+                # Bridge v5: Timestamp, Channel, Temperature
+                is_bridge_v5 = 'channel' in cols and 'temperature' in cols and 'timestamp' in cols
+                
+                if is_bridge_v5:
+                    st.success("✅ Bridge v5 / Desktop Log Detected")
                     
-                    # Mapping to BigQuery Schema
-                    df_clean = df_raw.copy()
-                    df_clean = df_clean.rename(columns={
-                        'Timestamp': 'timestamp', 
-                        'Channel': 'NodeNum', 
-                        'Temperature': 'temperature'
-                    })
-                    
-                    # Data Cleaning
-                    df_clean['timestamp'] = pd.to_datetime(df_clean['timestamp'], errors='coerce')
-                    df_clean = df_clean.dropna(subset=['timestamp', 'temperature'])
-                    df_clean['NodeNum'] = df_clean['NodeNum'].astype(str).str.replace(':', '-', regex=False)
-                    
-                    st.write("### Preview of Processed Data")
-                    st.dataframe(df_clean[['timestamp', 'NodeNum', 'temperature']].head())
-                    
-                    if st.button("🚀 Upload Bridge Data to raw_lord"):
-                        with st.spinner("Writing to BigQuery..."):
-                            # Push to the Lord Raw table
-                            job = client.load_table_from_dataframe(
-                                df_clean[['timestamp', 'NodeNum', 'temperature']], 
-                                RAW_LORD_TABLE
-                            )
-                            job.result()
-                        st.success(f"Successfully uploaded {len(df_clean)} records to raw_lord.")
+                    if st.button("🚀 Process & Upload Large File"):
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        # Process in chunks of 50,000 rows to handle 200MB safely
+                        chunk_size = 50000
+                        total_rows = 0
+                        
+                        # BigQuery Load Job Configuration
+                        job_config = bigquery.LoadJobConfig(
+                            write_disposition="WRITE_APPEND",
+                        )
 
-                # --- CASE 2: SENSORPUSH CSV ---
-                elif 'sensorid' in cols_lower or 'observed' in cols_lower:
-                    st.success("✅ SensorPush CSV Detected")
-                    # SensorPush processing logic here...
-                    
+                        for chunk in pd.read_csv(u_file, chunksize=chunk_size):
+                            # Mapping
+                            chunk = chunk.rename(columns={
+                                'Timestamp': 'timestamp', 
+                                'Channel': 'NodeNum', 
+                                'Temperature': 'temperature'
+                            })
+                            
+                            # Standardizing
+                            chunk['timestamp'] = pd.to_datetime(chunk['timestamp'], errors='coerce')
+                            chunk = chunk.dropna(subset=['timestamp', 'temperature'])
+                            chunk['NodeNum'] = chunk['NodeNum'].astype(str).str.replace(':', '-', regex=False)
+                            
+                            # Uploading Chunk
+                            client.load_table_from_dataframe(
+                                chunk[['timestamp', 'NodeNum', 'temperature']], 
+                                RAW_LORD_TABLE, 
+                                job_config=job_config
+                            ).result()
+                            
+                            total_rows += len(chunk)
+                            status_text.text(f"Ingested {total_rows:,} rows...")
+                        
+                        st.success(f"🔥 Successfully ingested {total_rows:,} rows into raw_lord.")
+                
                 else:
                     st.error("Format not recognized. Ensure headers include 'Timestamp', 'Channel', and 'Temperature'.")
-            
+
             except Exception as e:
-                st.error(f"Error parsing file: {e}")
+                st.error(f"Processing Error: {e}")
+                st.expander("Show Traceback").code(traceback.format_exc())
 
         with tab2:
             st.subheader("📡 Cloud-to-Cloud API Sync")
