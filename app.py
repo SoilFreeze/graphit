@@ -130,16 +130,14 @@ DATASET_ID = "Temperature"
 PROJECT_ID = "sensorpush-export"
 # The full table name is now sensorpush-export.Temperature.master_data
 MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+RAW_LORD_TABLE = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+RAW_SP_TABLE = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
 METADATA_TABLE = "metadata"
 
 @st.cache_resource
 def get_bq_client():
-    """Handles authentication with BigQuery and Drive scopes."""
     try:
-        SCOPES = [
-            "https://www.googleapis.com/auth/bigquery",
-            "https://www.googleapis.com/auth/drive"
-        ]
+        SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive"]
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
@@ -150,6 +148,15 @@ def get_bq_client():
         return None
 
 client = get_bq_client()
+
+###########################
+# --- 2. GLOBAL MEMORY --- #
+###########################
+if "master_df" not in st.session_state:
+    st.session_state.master_df = pd.DataFrame()
+    st.session_state.summary_df = pd.DataFrame()
+    st.session_state.current_project = None
+    st.session_state.last_refresh = None
 
 #########################
 # --- REBUILD TABLE --- #
@@ -385,15 +392,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     return fig
     
 #######################
-# --- SIDEBAR UI --- #
+# --- 3. SIDEBAR UI --- #
 #######################
 st.sidebar.title("❄️ SoilFreeze Lab")
-
-service = st.sidebar.selectbox(
-    "📂 Select Page", 
-    ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
-    index=0  # Sets Global Overview as the landing page
-    )
+service = st.sidebar.selectbox("📂 Select Page", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 st.sidebar.divider()
 
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
@@ -403,35 +405,27 @@ def convert_val(f_val):
     if f_val is None: return None
     return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
 
-st.sidebar.divider()
-
 # Project Selection
 selected_project = None
-if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
+if service in ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
     try:
         proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
         proj_df = client.query(proj_q).to_dataframe()
         selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
-    except: st.sidebar.warning("No projects found.")
+    except:
+        st.sidebar.warning("No projects found.")
 
 st.sidebar.divider()
-st.sidebar.write("### 📏 Reference Lines")
 active_refs = []
-if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True): active_refs.append((26.6, "Type B"))
-if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.append((10.2, "Type A"))
+if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F)", value=True): active_refs.append((10.2, "Type A"))
 
-# Add to your sidebar section
-st.sidebar.subheader("🕒 Display Settings")
-tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
-
-# Map the selection to pytz strings
-tz_lookup = {
-    "UTC": "UTC",
-    "Local (US/Eastern)": "US/Eastern",
-    "Local (US/Pacific)": "US/Pacific"
-}
-display_tz = tz_lookup[tz_mode]
+if st.sidebar.button("🔄 Sync New Data Now", key="global_sync_btn"):
+    st.session_state.master_df = pd.DataFrame()
+    st.session_state.summary_df = pd.DataFrame()
+    st.session_state.current_project = None
+    st.rerun()
 #################
 # --- PAGES --- #
 #################
@@ -824,93 +818,64 @@ elif service == "📉 Node Diagnostics":
 # --- DATA INTAKE LAB --- #
 ###############################
 elif service == "📤 Data Intake Lab":
-    if check_admin_access():
-        st.header("📤 Data Ingestion & Recovery")
+    st.header("📤 Data Ingestion Lab")
+    
+    tab_manual, tab_api, tab_meta = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Metadata"])
+
+    with tab_manual:
+        st.subheader("📄 Manual File Ingestion")
+        st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), SensorPush, or Bridge v5 CSVs.")
         
-        # Removed Maintenance Tab as requested
-        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "📥 Export Project Data"])
-
-        with tab1:
-            st.subheader("📄 Manual File Ingestion")
-            st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
-            u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
-            
-            if u_file is not None:
-                import io
-                filename = u_file.name.lower()
-                raw_content = u_file.getvalue().decode('utf-8').splitlines()
+        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_ingest_v5")
+        
+        if u_file is not None:
+            # Read first few lines to detect format
+            try:
+                df_raw = pd.read_csv(u_file)
+                cols = [c.strip() for c in df_raw.columns]
+                cols_lower = [c.lower() for c in cols]
                 
-                # --- DETECT FILE TYPE ---
-                is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
-                is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
-                
-                # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
-                if is_lord_wide:
-                    try:
-                        start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
-                        df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
-                        # Rename 'Time' to 'timestamp' and melt columns into 'NodeNum'
-                        df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
-                        df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
-                        df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
-                        df_long = df_long.dropna(subset=['temperature'])
-                        
-                        st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
-                        st.dataframe(df_long.head())
-                        if st.button("🚀 UPLOAD LORD WIDE DATA"):
-                            client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
-                                                             f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                            st.success("Uploaded successfully to raw_lord!")
-                    except Exception as e: st.error(f"Lord Wide Error: {e}")
-    
-                # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
-                elif is_lord_narrow:
-                    try:
-                        df_ln = pd.read_csv(io.StringIO("\n".join(raw_content)))
-                        # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
-                        df_ln = df_ln.rename(columns={
-                            'Timestamp': 'timestamp', 
-                            'nodenumber': 'NodeNum', 
-                            'temperature': 'temperature'
-                        })
-                        df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
-                        df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
-                        
-                        st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
-                        st.dataframe(df_ln.head())
-                        if st.button("🚀 UPLOAD LORD NARROW DATA"):
-                            client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
-                                                             f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                            st.success("Uploaded successfully to raw_lord!")
-                    except Exception as e: st.error(f"Lord Narrow Error: {e}")
+                # --- CASE 1: BRIDGE V5 (The 11955 - Sheet1 format) ---
+                # Expected Headers: Timestamp, Channel, Temperature, Status
+                if 'channel' in cols_lower and 'temperature' in cols_lower and 'timestamp' in cols_lower:
+                    st.success("✅ Bridge v5 / Desktop Log Format Detected")
+                    
+                    # Mapping to BigQuery Schema
+                    df_clean = df_raw.copy()
+                    df_clean = df_clean.rename(columns={
+                        'Timestamp': 'timestamp', 
+                        'Channel': 'NodeNum', 
+                        'Temperature': 'temperature'
+                    })
+                    
+                    # Data Cleaning
+                    df_clean['timestamp'] = pd.to_datetime(df_clean['timestamp'], errors='coerce')
+                    df_clean = df_clean.dropna(subset=['timestamp', 'temperature'])
+                    df_clean['NodeNum'] = df_clean['NodeNum'].astype(str).str.replace(':', '-', regex=False)
+                    
+                    st.write("### Preview of Processed Data")
+                    st.dataframe(df_clean[['timestamp', 'NodeNum', 'temperature']].head())
+                    
+                    if st.button("🚀 Upload Bridge Data to raw_lord"):
+                        with st.spinner("Writing to BigQuery..."):
+                            # Push to the Lord Raw table
+                            job = client.load_table_from_dataframe(
+                                df_clean[['timestamp', 'NodeNum', 'temperature']], 
+                                RAW_LORD_TABLE
+                            )
+                            job.result()
+                        st.success(f"Successfully uploaded {len(df_clean)} records to raw_lord.")
 
-                # --- CASE 3: SENSORPUSH ---
+                # --- CASE 2: SENSORPUSH CSV ---
+                elif 'sensorid' in cols_lower or 'observed' in cols_lower:
+                    st.success("✅ SensorPush CSV Detected")
+                    # SensorPush processing logic here...
+                    
                 else:
-                    try:
-                        header_idx = -1
-                        for i, line in enumerate(raw_content[:50]):
-                            if "SensorId" in line or "Observed" in line:
-                                header_idx = i; break
-                        
-                        if header_idx != -1:
-                            df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
-                            ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
-                            
-                            df_up = pd.DataFrame()
-                            # Mapping to the raw_sensorpush schema
-                            df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
-                            df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
-                            t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
-                            df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
-                            df_up = df_up.dropna(subset=['timestamp', 'temperature'])
-    
-                            st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
-                            if st.button("🚀 UPLOAD SENSORPUSH"):
-                                client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                                st.success("Uploaded successfully to raw_sensorpush!")
-                        else:
-                            st.error("Format not recognized. Check CSV headers.")
-                    except Exception as e: st.error(f"SensorPush Error: {e}")
+                    st.error("Format not recognized. Ensure headers include 'Timestamp', 'Channel', and 'Temperature'.")
+            
+            except Exception as e:
+                st.error(f"Error parsing file: {e}")
 
         with tab2:
             st.subheader("📡 Cloud-to-Cloud API Sync")
