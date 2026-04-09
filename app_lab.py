@@ -915,27 +915,27 @@ elif service == "📤 Data Intake Lab":
                             st.error("Format not recognized. Check CSV headers.")
                     except Exception as e: st.error(f"SensorPush Error: {e}")
 
-       # 3. DEEP DATA SCRUB (Physical Purge) - UPDATED FOR TOP-OF-HOUR SNAP
+       # 3. DEEP DATA SCRUB (Physical Purge) - SNAP TO HOUR FIX
         with tab2:
             st.subheader("🧹 Deep Data Scrub & Final Purge")
             st.info("This tool dedups data to 1-hour intervals and snaps all timestamps to the **Top of the Hour**.")
             st.error("⚠️ WARNING: This permanently modifies data in RAW tables.")
             
-            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_radio")
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_radio_fixed")
             
-            # Map columns based on raw table schema
+            # Use the exact column names from your ingestion functions
             if scrub_target == "SensorPush":
                 target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                 node_col = "sensor_id"
                 temp_col = "temperature"
             else:
                 target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                node_col = "nodenumber"
-                temp_col = "value"
+                node_col = "NodeNum" # Fixed from nodenumber
+                temp_col = "temperature" # Fixed from value
     
             if st.button(f"🧨 Permanently Purge & Snap {scrub_target}"):
                 with st.spinner("Executing hard delete and snap-to-hour..."):
-                    # The TIMESTAMP_TRUNC in the first SELECT line snaps the result to :00
+                    # This snaps the timestamp to the top of the hour (:00:00)
                     scrub_sql = f"""
                     CREATE OR REPLACE TABLE `{target_table}` AS 
                     SELECT 
@@ -954,7 +954,7 @@ elif service == "📤 Data Intake Lab":
                     """
                     try:
                         client.query(scrub_sql).result()
-                        st.success(f"✅ {scrub_target} purged, deduped, and snapped to top-of-hour.")
+                        st.success(f"✅ {scrub_target} purged and snapped to top-of-hour.")
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"Scrub Error: {e}")
