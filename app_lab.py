@@ -1012,8 +1012,9 @@ elif service == "🛠️ Admin Tools":
     if check_admin_access():
         st.header("🛠️ Engineering Admin Tools")
     
-        # 1. DEFINE TABS
-        tab_approve, tab_scrub, tab_cleaner = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
+        # 1. DEFINE TABS FIRST
+        # This line MUST run before any "with tabX" statements
+        tab1, tab2, tab3 = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
     
         # 2. BULK APPROVAL
         with tab_approve:
