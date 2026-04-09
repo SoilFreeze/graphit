@@ -870,8 +870,8 @@ elif service == "📤 Data Intake Lab":
                         # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
                         df_ln = df_ln.rename(columns={
                             'Timestamp': 'timestamp', 
-                            'nodenumber': 'NodeNum', 
-                            'temperature': 'temperature'
+                            'Channel': 'NodeNum', 
+                            'Temperature': 'temperature'
                         })
                         df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
                         df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
