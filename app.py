@@ -130,14 +130,16 @@ DATASET_ID = "Temperature"
 PROJECT_ID = "sensorpush-export"
 # The full table name is now sensorpush-export.Temperature.master_data
 MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
-RAW_LORD_TABLE = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-RAW_SP_TABLE = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
 METADATA_TABLE = "metadata"
 
 @st.cache_resource
 def get_bq_client():
+    """Handles authentication with BigQuery and Drive scopes."""
     try:
-        SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive"]
+        SCOPES = [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/drive"
+        ]
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
@@ -148,15 +150,6 @@ def get_bq_client():
         return None
 
 client = get_bq_client()
-
-###########################
-# --- 2. GLOBAL MEMORY --- #
-###########################
-if "master_df" not in st.session_state:
-    st.session_state.master_df = pd.DataFrame()
-    st.session_state.summary_df = pd.DataFrame()
-    st.session_state.current_project = None
-    st.session_state.last_refresh = None
 
 #########################
 # --- REBUILD TABLE --- #
@@ -392,10 +385,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     return fig
     
 #######################
-# --- 3. SIDEBAR UI --- #
+# --- SIDEBAR UI --- #
 #######################
 st.sidebar.title("❄️ SoilFreeze Lab")
-service = st.sidebar.selectbox("📂 Select Page", ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+
+service = st.sidebar.selectbox(
+    "📂 Select Page", 
+    ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
+    index=0  # Sets Global Overview as the landing page
+    )
 st.sidebar.divider()
 
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
@@ -405,27 +403,35 @@ def convert_val(f_val):
     if f_val is None: return None
     return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
 
+st.sidebar.divider()
+
 # Project Selection
 selected_project = None
-if service in ["🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
+if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
     try:
         proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
         proj_df = client.query(proj_q).to_dataframe()
         selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
-    except:
-        st.sidebar.warning("No projects found.")
+    except: st.sidebar.warning("No projects found.")
 
 st.sidebar.divider()
+st.sidebar.write("### 📏 Reference Lines")
 active_refs = []
-if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))
-if st.sidebar.checkbox("Type A (10.2°F)", value=True): active_refs.append((10.2, "Type A"))
+if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True): active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True): active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.append((10.2, "Type A"))
 
-if st.sidebar.button("🔄 Sync New Data Now", key="global_sync_btn"):
-    st.session_state.master_df = pd.DataFrame()
-    st.session_state.summary_df = pd.DataFrame()
-    st.session_state.current_project = None
-    st.rerun()
+# Add to your sidebar section
+st.sidebar.subheader("🕒 Display Settings")
+tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
+
+# Map the selection to pytz strings
+tz_lookup = {
+    "UTC": "UTC",
+    "Local (US/Eastern)": "US/Eastern",
+    "Local (US/Pacific)": "US/Pacific"
+}
+display_tz = tz_lookup[tz_mode]
 #################
 # --- PAGES --- #
 #################
@@ -818,76 +824,93 @@ elif service == "📉 Node Diagnostics":
 # --- DATA INTAKE LAB --- #
 ###############################
 elif service == "📤 Data Intake Lab":
-    st.header("📤 Data Ingestion Lab")
+    if check_admin_access():
+        st.header("📤 Data Ingestion & Recovery")
+        
+        # Removed Maintenance Tab as requested
+        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "📥 Export Project Data"])
+
+        with tab1:
+            st.subheader("📄 Manual File Ingestion")
+            st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
+            u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
+            
+            if u_file is not None:
+                import io
+                filename = u_file.name.lower()
+                raw_content = u_file.getvalue().decode('utf-8').splitlines()
+                
+                # --- DETECT FILE TYPE ---
+                is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
+                is_lord_narrow = "nodenumber" in raw_content[0].lower() and "temperature" in raw_content[0].lower()
+                
+                # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
+                if is_lord_wide:
+                    try:
+                        start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
+                        df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
+                        # Rename 'Time' to 'timestamp' and melt columns into 'NodeNum'
+                        df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
+                        df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
+                        df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
+                        df_long = df_long.dropna(subset=['temperature'])
+                        
+                        st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
+                        st.dataframe(df_long.head())
+                        if st.button("🚀 UPLOAD LORD WIDE DATA"):
+                            client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
+                                                             f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                            st.success("Uploaded successfully to raw_lord!")
+                    except Exception as e: st.error(f"Lord Wide Error: {e}")
     
-    # Initialize tabs here so they are always in scope for this service
-    tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "🛠️ Metadata"])
+                # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
+                elif is_lord_narrow:
+                    try:
+                        df_ln = pd.read_csv(io.StringIO("\n".join(raw_content)))
+                        # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
+                        df_ln = df_ln.rename(columns={
+                            'Timestamp': 'timestamp', 
+                            'nodenumber': 'NodeNum', 
+                            'temperature': 'temperature'
+                        })
+                        df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
+                        df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
+                        
+                        st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
+                        st.dataframe(df_ln.head())
+                        if st.button("🚀 UPLOAD LORD NARROW DATA"):
+                            client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
+                                                             f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                            st.success("Uploaded successfully to raw_lord!")
+                    except Exception as e: st.error(f"Lord Narrow Error: {e}")
 
-    with tab1:
-        st.subheader("📄 Manual File Ingestion")
-        st.info("Supports Large Files (up to 200MB): Lord (Wide/Narrow), SensorPush, and Bridge v5.")
-        
-        u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_u_v5_final")
-        
-        if u_file is not None:
-            try:
-                # Use a small sample to detect headers without loading 200MB into RAM
-                sample = pd.read_csv(u_file, nrows=5)
-                u_file.seek(0) # Reset file pointer after sampling
-                
-                cols = [c.strip().lower() for c in sample.columns]
-                
-                # --- DETECT FORMAT ---
-                # Bridge v5: Timestamp, Channel, Temperature
-                is_bridge_v5 = 'channel' in cols and 'temperature' in cols and 'timestamp' in cols
-                
-                if is_bridge_v5:
-                    st.success("✅ Bridge v5 / Desktop Log Detected")
-                    
-                    if st.button("🚀 Process & Upload Large File"):
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        # Process in chunks of 50,000 rows to handle 200MB safely
-                        chunk_size = 50000
-                        total_rows = 0
-                        
-                        # BigQuery Load Job Configuration
-                        job_config = bigquery.LoadJobConfig(
-                            write_disposition="WRITE_APPEND",
-                        )
-
-                        for chunk in pd.read_csv(u_file, chunksize=chunk_size):
-                            # Mapping
-                            chunk = chunk.rename(columns={
-                                'Timestamp': 'timestamp', 
-                                'Channel': 'NodeNum', 
-                                'Temperature': 'temperature'
-                            })
-                            
-                            # Standardizing
-                            chunk['timestamp'] = pd.to_datetime(chunk['timestamp'], errors='coerce')
-                            chunk = chunk.dropna(subset=['timestamp', 'temperature'])
-                            chunk['NodeNum'] = chunk['NodeNum'].astype(str).str.replace(':', '-', regex=False)
-                            
-                            # Uploading Chunk
-                            client.load_table_from_dataframe(
-                                chunk[['timestamp', 'NodeNum', 'temperature']], 
-                                RAW_LORD_TABLE, 
-                                job_config=job_config
-                            ).result()
-                            
-                            total_rows += len(chunk)
-                            status_text.text(f"Ingested {total_rows:,} rows...")
-                        
-                        st.success(f"🔥 Successfully ingested {total_rows:,} rows into raw_lord.")
-                
+                # --- CASE 3: SENSORPUSH ---
                 else:
-                    st.error("Format not recognized. Ensure headers include 'Timestamp', 'Channel', and 'Temperature'.")
-
-            except Exception as e:
-                st.error(f"Processing Error: {e}")
-                st.expander("Show Traceback").code(traceback.format_exc())
+                    try:
+                        header_idx = -1
+                        for i, line in enumerate(raw_content[:50]):
+                            if "SensorId" in line or "Observed" in line:
+                                header_idx = i; break
+                        
+                        if header_idx != -1:
+                            df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
+                            ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
+                            
+                            df_up = pd.DataFrame()
+                            # Mapping to the raw_sensorpush schema
+                            df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
+                            df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
+                            t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
+                            df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
+                            df_up = df_up.dropna(subset=['timestamp', 'temperature'])
+    
+                            st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
+                            if st.button("🚀 UPLOAD SENSORPUSH"):
+                                client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                                st.success("Uploaded successfully to raw_sensorpush!")
+                        else:
+                            st.error("Format not recognized. Check CSV headers.")
+                    except Exception as e: st.error(f"SensorPush Error: {e}")
 
         with tab2:
             st.subheader("📡 Cloud-to-Cloud API Sync")
@@ -1045,111 +1068,111 @@ elif service == "🛠️ Admin Tools":
     
         # 4. SURGICAL CLEANER (Lasso Selection)
         # --- TAB 3: SURGICAL CLEANER ---
-        with tab_cleaner:
-            st.subheader("🧨 Surgical Data Cleaner")
-            st.info("💡 **Instructions:** Use the **Lasso** or **Box Select** tools on the graph to highlight noisy points. The system will automatically hide the entire hour for those selections.")
-        
-            if not selected_project:
-                st.warning("👈 Please select a Project in the sidebar.")
+with tab_cleaner:
+    st.subheader("🧨 Surgical Data Cleaner")
+    st.info("💡 **Instructions:** Use the **Lasso** or **Box Select** tools on the graph to highlight noisy points. The system will automatically hide the entire hour for those selections.")
+
+    if not selected_project:
+        st.warning("👈 Please select a Project in the sidebar.")
+    else:
+        # 1. FETCH RAW DATA (Including Rejected/Unapproved)
+        with st.spinner(f"📥 Loading raw data for {selected_project}..."):
+            # only_approved=False allows us to see the points we want to hide
+            p_df = get_universal_portal_data(selected_project, only_approved=False)
+
+        if p_df.empty:
+            st.warning(f"No data found for project {selected_project}.")
+        else:
+            # 2. SELECTION CONTROLS
+            loc_options = sorted(p_df['Location'].dropna().unique())
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="admin_scrub_loc")
+            with c2:
+                lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7, key="admin_scrub_days")
+
+            # 3. DATE CALCULATIONS
+            now_utc = pd.Timestamp.now(tz='UTC')
+            start_view = now_utc - timedelta(days=lookback_days)
+            end_view = now_utc + timedelta(hours=6)
+
+            # Filter for the specific location
+            scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy()
+
+            # 4. RENDER THE INTERACTIVE GRAPH (MARKERS MODE)
+            # The 'Scrubbing' keyword in the title triggers 'markers' in our graph function
+            fig_scrub = build_high_speed_graph(
+                scrub_plot_df, 
+                f"Scrubbing Interface: {sel_loc}", 
+                start_view, 
+                end_view, 
+                tuple(active_refs), 
+                unit_mode, 
+                unit_label,
+                display_tz=display_tz
+            )
+
+            # on_select="rerun" captures the Lasso/Box tool selection data
+            selected_data = st.plotly_chart(
+                fig_scrub, 
+                use_container_width=True, 
+                on_select="rerun", 
+                key=f"scrub_chart_{sel_loc}"
+            )
+
+            st.divider()
+
+            # 5. EXECUTE THE HOURLY SCRUB
+            st.markdown("### 🚫 Execute Rejection")
+            
+            if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
+                points = selected_data["selection"]["points"]
+                st.write(f"✅ **{len(points)}** data points highlighted.")
+
+                if st.button("🚨 HIDE SELECTED DATA (Align to Top of Hour)", type="primary"):
+                    with st.spinner("Writing hourly rejection rules..."):
+                        try:
+                            rejection_records = []
+                            for pt in points:
+                                # A. Get the timestamp from the plot click
+                                raw_ts = pd.to_datetime(pt['x'])
+                                
+                                # B. Convert to UTC and FLOOR to the top of the hour
+                                # This ensures the join catches every reading in that 60-min block
+                                scrub_ts = raw_ts.tz_convert('UTC').floor('h')
+                                
+                                # C. Map back to NodeNum using the dataframe index
+                                node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
+                                
+                                rejection_records.append({
+                                    "NodeNum": str(node_id),
+                                    "timestamp": scrub_ts,
+                                    "reason": "Top-of-Hour Surgical Scrub",
+                                    "Project": selected_project
+                                })
+
+                            if rejection_records:
+                                # Deduplicate (prevents redundant entries for the same hour)
+                                rej_df = pd.DataFrame(rejection_records).drop_duplicates()
+                                
+                                # Upload to 'manual_rejections' table
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(
+                                    rej_df, 
+                                    f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
+                                    job_config=job_config
+                                ).result()
+                                
+                                st.success(f"Successfully hidden {len(rej_df)} hourly blocks for {sel_loc}!")
+                                
+                                # Clear cache so changes reflect on all pages immediately
+                                st.cache_data.clear()
+                                st.rerun()
+
+                        except Exception as e:
+                            st.error(f"❌ Scrubbing Failed: {e}")
             else:
-                # 1. FETCH RAW DATA (Including Rejected/Unapproved)
-                with st.spinner(f"📥 Loading raw data for {selected_project}..."):
-                    # only_approved=False allows us to see the points we want to hide
-                    p_df = get_universal_portal_data(selected_project, only_approved=False)
-        
-                if p_df.empty:
-                    st.warning(f"No data found for project {selected_project}.")
-                else:
-                    # 2. SELECTION CONTROLS
-                    loc_options = sorted(p_df['Location'].dropna().unique())
-                    c1, c2 = st.columns([2, 1])
-                    with c1:
-                        sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="admin_scrub_loc")
-                    with c2:
-                        lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7, key="admin_scrub_days")
-        
-                    # 3. DATE CALCULATIONS
-                    now_utc = pd.Timestamp.now(tz='UTC')
-                    start_view = now_utc - timedelta(days=lookback_days)
-                    end_view = now_utc + timedelta(hours=6)
-        
-                    # Filter for the specific location
-                    scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy()
-        
-                    # 4. RENDER THE INTERACTIVE GRAPH (MARKERS MODE)
-                    # The 'Scrubbing' keyword in the title triggers 'markers' in our graph function
-                    fig_scrub = build_high_speed_graph(
-                        scrub_plot_df, 
-                        f"Scrubbing Interface: {sel_loc}", 
-                        start_view, 
-                        end_view, 
-                        tuple(active_refs), 
-                        unit_mode, 
-                        unit_label,
-                        display_tz=display_tz
-                    )
-        
-                    # on_select="rerun" captures the Lasso/Box tool selection data
-                    selected_data = st.plotly_chart(
-                        fig_scrub, 
-                        use_container_width=True, 
-                        on_select="rerun", 
-                        key=f"scrub_chart_{sel_loc}"
-                    )
-        
-                    st.divider()
-        
-                    # 5. EXECUTE THE HOURLY SCRUB
-                    st.markdown("### 🚫 Execute Rejection")
-                    
-                    if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
-                        points = selected_data["selection"]["points"]
-                        st.write(f"✅ **{len(points)}** data points highlighted.")
-        
-                        if st.button("🚨 HIDE SELECTED DATA (Align to Top of Hour)", type="primary"):
-                            with st.spinner("Writing hourly rejection rules..."):
-                                try:
-                                    rejection_records = []
-                                    for pt in points:
-                                        # A. Get the timestamp from the plot click
-                                        raw_ts = pd.to_datetime(pt['x'])
-                                        
-                                        # B. Convert to UTC and FLOOR to the top of the hour
-                                        # This ensures the join catches every reading in that 60-min block
-                                        scrub_ts = raw_ts.tz_convert('UTC').floor('h')
-                                        
-                                        # C. Map back to NodeNum using the dataframe index
-                                        node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
-                                        
-                                        rejection_records.append({
-                                            "NodeNum": str(node_id),
-                                            "timestamp": scrub_ts,
-                                            "reason": "Top-of-Hour Surgical Scrub",
-                                            "Project": selected_project
-                                        })
-        
-                                    if rejection_records:
-                                        # Deduplicate (prevents redundant entries for the same hour)
-                                        rej_df = pd.DataFrame(rejection_records).drop_duplicates()
-                                        
-                                        # Upload to 'manual_rejections' table
-                                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                        client.load_table_from_dataframe(
-                                            rej_df, 
-                                            f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
-                                            job_config=job_config
-                                        ).result()
-                                        
-                                        st.success(f"Successfully hidden {len(rej_df)} hourly blocks for {sel_loc}!")
-                                        
-                                        # Clear cache so changes reflect on all pages immediately
-                                        st.cache_data.clear()
-                                        st.rerun()
-        
-                                except Exception as e:
-                                    st.error(f"❌ Scrubbing Failed: {e}")
-                    else:
-                        st.info("💡 **Selection Required:** Use the Lasso or Box Select tool on the graph above to highlight the noise you want to remove.")
+                st.info("💡 **Selection Required:** Use the Lasso or Box Select tool on the graph above to highlight the noise you want to remove.")
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
