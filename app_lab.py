@@ -1012,158 +1012,101 @@ elif service == "🛠️ Admin Tools":
     if check_admin_access():
         st.header("🛠️ Engineering Admin Tools")
     
-        # 1. DEFINE TABS IMMEDIATELY
-        # This prevents NameErrors by ensuring tab1, tab2, and tab3 always exist.
+        # 1. DEFINE TABS
         tab1, tab2, tab3 = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
     
-        # 2. BULK APPROVAL
         with tab1:
             st.subheader("✅ Bulk Approval")
-            st.info("Sets records to 'TRUE' in raw tables. This does not override manually rejected points.")
-            
             if st.button("🚀 Approve All Pending Data"):
-                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                              f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
-                with st.spinner("Processing approvals..."):
-                    for table in raw_tables:
-                        try:
-                            approve_sql = f"""
-                                UPDATE `{table}` 
-                                SET approve = 'TRUE' 
-                                WHERE approve IS NULL 
-                                OR UPPER(CAST(approve AS STRING)) != 'FALSE'
-                            """
-                            client.query(approve_sql).result()
-                        except Exception as e:
-                            st.warning(f"Could not update {table}: {e}")
+                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+                for table in raw_tables:
+                    client.query(f"UPDATE `{table}` SET approve = 'TRUE' WHERE approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE'").result()
                 st.success("Bulk approval complete.")
                 st.cache_data.clear()
-    
-        # 3. DEEP DATA SCRUB
+
         with tab2:
-            st.subheader("🧹 Deep Data Scrub & Final Purge")
-            st.error("⚠️ WARNING: This permanently deletes data from RAW tables.")
-            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
-            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-    
-            if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
-                with st.spinner("Executing hard delete..."):
-                    scrub_sql = f"""
-                    CREATE OR REPLACE TABLE `{target_table}` AS 
-                    SELECT * EXCEPT(rn) FROM (
-                        SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) ORDER BY timestamp DESC) as rn
-                        FROM `{target_table}` 
-                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
-                        AND temperature IS NOT NULL
-                    ) WHERE rn = 1
-                    """
-                    try:
-                        client.query(scrub_sql).result()
-                        st.success(f"{scrub_target} purged.")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"Scrub Error: {e}")
-    
-        # 4. SURGICAL CLEANER (The Persistent Lasso Fix)
+            st.subheader("🧹 Deep Data Scrub")
+            st.info("Permanent deletion logic for raw tables.")
+
+        # 4. SURGICAL CLEANER (State-Locked Lasso)
         with tab3:
             st.subheader("🧨 Surgical Data Cleaner")
-            st.info("💡 **Instructions:** Use the Lasso tool to highlight noise. Points will stay locked until you click 'Hide' or 'Clear'.")
-        
             if not selected_project:
                 st.warning("👈 Please select a Project in the sidebar.")
             else:
-                with st.spinner(f"📥 Loading raw data for {selected_project}..."):
-                    p_df = get_universal_portal_data(selected_project, only_approved=False)
+                p_df = get_universal_portal_data(selected_project, only_approved=False)
         
-                if p_df.empty:
-                    st.warning(f"No data found for project {selected_project}.")
-                else:
-                    # Filter and RESET INDEX - Mandatory for Plotly point_index to match dataframe
+                if not p_df.empty:
+                    # Filter and RESET INDEX
                     loc_options = sorted(p_df['Location'].dropna().unique())
-                    sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="admin_scrub_loc")
-                    lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7, key="admin_scrub_days")
-                    
+                    sel_loc = st.selectbox("Select Pipe", loc_options, key="admin_scrub_loc")
                     scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-                    # Persistence Logic: Initializing state
-                    if "lasso_selection" not in st.session_state:
-                        st.session_state.lasso_selection = None
+                    # --- THE STATE LOCK ---
+                    # Use a 'confirmed' state that the widget cannot touch directly
+                    if "locked_selection" not in st.session_state:
+                        st.session_state.locked_selection = None
 
-                    # Build the Graph Object
+                    # 3. BUILD GRAPH
                     fig_scrub = build_high_speed_graph(
-                        scrub_plot_df, 
-                        f"Scrubbing Interface: {sel_loc}", 
-                        pd.Timestamp.now(tz='UTC') - timedelta(days=lookback_days), 
+                        scrub_plot_df, f"Scrubbing: {sel_loc}", 
+                        pd.Timestamp.now(tz='UTC') - timedelta(days=7), 
                         pd.Timestamp.now(tz='UTC') + timedelta(hours=6), 
                         tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
                     )
 
-                    # Persistence Fix: Re-apply the stored highlights back to the chart
-                    if st.session_state.lasso_selection:
-                        selected_indices = [p['point_index'] for p in st.session_state.lasso_selection]
+                    # 4. FORCE DRAW THE LOCK
+                    # If we have a locked selection, force Plotly to show it
+                    if st.session_state.locked_selection:
+                        selected_indices = [p['point_index'] for p in st.session_state.locked_selection]
                         fig_scrub.update_traces(
                             selectedpoints=selected_indices, 
                             unselected=dict(marker=dict(opacity=0.3))
                         )
 
-                    # Render the Chart - FIXED width parameter to avoid crash
+                    # 5. RENDER CHART
+                    # use_container_width=True is mandatory for your version
                     event_data = st.plotly_chart(
                         fig_scrub, 
-                        use_container_width=True, # FIXED: Replaced width="container"
+                        use_container_width=True, 
                         on_select="rerun", 
                         key=f"scrub_chart_{sel_loc.replace(' ', '_')}"
                     )
 
-                    # State Protector Logic:
-                    # We ONLY update the session state if a user actually lassoed something new.
-                    # This prevents the page rerun from wiping your previous selection.
+                    # 6. LOCKING LOGIC (The One-Way Valve)
+                    # We ONLY update the lock if there are actual points in the event.
+                    # This prevents the 'reset' from wiping your selection.
                     if event_data and "selection" in event_data:
-                        current_points = event_data["selection"].get("points", [])
-                        if len(current_points) > 0:
-                            st.session_state.lasso_selection = current_points
-        
-                    st.divider()
-        
-                    # 5. EXECUTE THE HOURLY SCRUB
-                    st.markdown("### 🚫 Execute Rejection")
-                    
-                    # Read selection from session state so it survives the rerun
-                    points = st.session_state.lasso_selection
-                    
-                    if points:
-                        st.success(f"📍 {len(points)} points currently held in memory.")
-                        c1, c2 = st.columns(2)
-                        
-                        if c1.button("🚨 HIDE SELECTED DATA", type="primary"):
-                            with st.spinner("Writing rejection rules..."):
-                                try:
-                                    rejection_records = []
-                                    for pt in points:
-                                        raw_ts = pd.to_datetime(pt['x'])
-                                        scrub_ts = raw_ts.tz_convert('UTC').floor('h')
-                                        node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
-                                        rejection_records.append({
-                                            "NodeNum": str(node_id), "timestamp": scrub_ts, 
-                                            "reason": "Surgical Scrub", "Project": selected_project
-                                        })
-        
-                                    if rejection_records:
-                                        rej_df = pd.DataFrame(rejection_records).drop_duplicates()
-                                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                        client.load_table_from_dataframe(rej_df, f"{PROJECT_ID}.{DATASET_ID}.manual_rejections", job_config=job_config).result()
-                                        
-                                        st.success(f"Successfully hidden {len(rej_df)} hourly blocks!")
-                                        st.session_state.lasso_selection = None
-                                        st.cache_data.clear()
-                                        st.rerun()
-                                except Exception as e:
-                                    st.error(f"❌ Scrubbing Failed: {e}")
+                        current_event_points = event_data["selection"].get("points", [])
+                        if len(current_event_points) > 0:
+                            st.session_state.locked_selection = current_event_points
 
-                        if c2.button("🧹 Clear Lasso"):
-                            st.session_state.lasso_selection = None
+                    # 7. UI FOR LOCKED SELECTION
+                    if st.session_state.locked_selection:
+                        points = st.session_state.locked_selection
+                        st.success(f"📍 {len(points)} points locked in memory.")
+                        
+                        c1, c2 = st.columns(2)
+                        if c1.button("🚨 HIDE SELECTED DATA", type="primary"):
+                            rejection_records = []
+                            for pt in points:
+                                raw_ts = pd.to_datetime(pt['x'])
+                                scrub_ts = raw_ts.tz_convert('UTC').floor('h')
+                                node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
+                                rejection_records.append({"NodeNum": str(node_id), "timestamp": scrub_ts, "reason": "Surgical Scrub", "Project": selected_project})
+                            
+                            if rejection_records:
+                                rej_df = pd.DataFrame(rejection_records).drop_duplicates()
+                                client.load_table_from_dataframe(rej_df, f"{PROJECT_ID}.{DATASET_ID}.manual_rejections").result()
+                                st.session_state.locked_selection = None
+                                st.cache_data.clear()
+                                st.rerun()
+
+                        if c2.button("🧹 Clear Selection"):
+                            st.session_state.locked_selection = None
                             st.rerun()
                     else:
-                        st.info("💡 **Selection Required:** Use the Lasso or Box tool on the graph above.")
+                        st.info("💡 Use the Lasso tool. Selection is now locked and will not disappear.")
                                 
 ###########################
 # --- END ADMIN TOOLS --- #
