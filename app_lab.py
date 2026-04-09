@@ -1071,7 +1071,7 @@ elif service == "🛠️ Admin Tools":
     
         # 4. SURGICAL CLEANER (Lasso Selection)
         # --- TAB 3: SURGICAL CLEANER (Updated for Lasso Persistence) ---
-with tab_cleaner:
+with tab3:
     st.subheader("🧨 Surgical Data Cleaner")
     st.info("💡 **Instructions:** Use the **Lasso** or **Box Select** tools. Selected points will stay highlighted until you click 'Hide'.")
 
