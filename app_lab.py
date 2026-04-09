@@ -1034,8 +1034,34 @@ elif service == "🛠️ Admin Tools":
                 st.cache_data.clear()
 
         with tab2:
-            st.subheader("🧹 Deep Data Scrub")
-            st.info("Permanent deletion logic for raw tables.")
+            st.subheader("🧹 Deep Data Scrub & Final Purge")
+            st.error("⚠️ WARNING: This permanently deletes data from RAW tables.")
+            
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+    
+            if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
+                with st.spinner("Executing hard delete and dedup..."):
+                    scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS 
+                    SELECT * EXCEPT(rn) FROM (
+                        SELECT *, 
+                               ROW_NUMBER() OVER(
+                                   PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                                   ORDER BY timestamp DESC
+                               ) as rn
+                        FROM `{target_table}` 
+                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
+                        AND temperature IS NOT NULL
+                    ) WHERE rn = 1
+                    """
+                    try:
+                        client.query(scrub_sql).result()
+                        st.success(f"{scrub_target} purged and deduped to 1-hour intervals.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"Scrub Error: {e}")
+            
 
         # 4. SURGICAL CLEANER (State-Locked Lasso)
         with tab3:
