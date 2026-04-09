@@ -962,9 +962,9 @@ elif service == "📤 Data Intake Lab":
         with tab3:
             st.subheader("📥 Export Project Data (SensorConnect Format)")
             
+            # Project Selection
             all_projects_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
             all_projs = client.query(all_projects_q).to_dataframe()['Project'].tolist()
-            
             default_ix = all_projs.index(selected_project) if selected_project in all_projs else 0
             target_project = st.selectbox("1️⃣ Select Project to Export", sorted(all_projs), index=default_ix)
         
@@ -972,55 +972,48 @@ elif service == "📤 Data Intake Lab":
                 with st.spinner(f"Loading data for {target_project}..."):
                     export_df = get_universal_portal_data(target_project, only_approved=False)
         
-                if export_df.empty:
-                    st.warning(f"No data found for {target_project}.")
-                else:
+                if not export_df.empty:
                     c1, c2 = st.columns(2)
                     with c1:
                         pipes = sorted(export_df['Location'].dropna().unique().tolist())
                         sel_pipe = st.selectbox("2️⃣ Select Pipe / Location", pipes)
                     with c2:
-                        min_ts = export_df['timestamp'].min().date()
-                        max_ts = export_df['timestamp'].max().date()
+                        min_ts, max_ts = export_df['timestamp'].min().date(), export_df['timestamp'].max().date()
                         export_range = st.date_input("3️⃣ Select Date Range", value=(min_ts, max_ts))
         
-                    # --- TRANSFORMATION LOGIC ---
-                    df_final = export_df.copy()
+                    # --- TRANSFORMATION TO WIDE FORMAT ---
+                    df_final = export_df[export_df['Location'] == sel_pipe].copy()
                     
-                    # 1. Filter by Pipe and Date
-                    df_final = df_final[df_final['Location'] == sel_pipe]
                     if isinstance(export_range, tuple) and len(export_range) == 2:
                         start, end = export_range
                         df_final = df_final[(df_final['timestamp'].dt.date >= start) & (df_final['timestamp'].dt.date <= end)]
         
                     if not df_final.empty:
-                        # 2. Convert Units
+                        # 1. Standardize Units
                         if unit_mode == "Celsius":
                             df_final['temperature'] = (df_final['temperature'] - 32) * 5/9
                         
-                        # 3. Create Depth Labels (e.g., "5ft")
+                        # 2. Create Column Labels (e.g., "5ft")
                         df_final['Depth_Col'] = df_final['Depth'].astype(str) + "ft"
                         
-                        # 4. PIVOT: Turn Depth into Columns
-                        # index = Time, columns = Depth, values = Temp
+                        # 3. PIVOT: Turns Depths into Columns
                         df_wide = df_final.pivot_table(
                             index='timestamp', 
                             columns='Depth_Col', 
                             values='temperature',
-                            aggfunc='first' # Ensures one value per slot
+                            aggfunc='first' 
                         ).reset_index()
 
-                        # 5. SORT COLUMNS (Ensures 5ft comes before 10ft)
-                        # Natural sort for depth strings
-                        def sort_key(col):
+                        # 4. NATURAL SORT: Ensures 5ft < 10ft < 20ft
+                        def depth_sort_key(col):
                             if col == 'timestamp': return -1
                             nums = re.findall(r'\d+', col)
                             return int(nums[0]) if nums else 999
                         
-                        df_wide = df_wide.reindex(columns=sorted(df_wide.columns, key=sort_key))
+                        df_wide = df_wide.reindex(columns=sorted(df_wide.columns, key=depth_sort_key))
 
                         st.divider()
-                        st.write(f"📊 **Preview:** {sel_pipe} ({len(df_wide)} timestamps)")
+                        st.write(f"📊 **Preview:** {sel_pipe} ({len(df_wide)} rows)")
                         st.dataframe(df_wide.head(10), use_container_width=True)
                         
                         csv_bytes = df_wide.to_csv(index=False).encode('utf-8')
