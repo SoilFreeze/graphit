@@ -323,7 +323,86 @@ def apply_report_frame(fig, project_name, title, fig_num, date_str):
     )
     return fig
 
+def build_depth_report_graph(df, loc_name, unit_label):
+    """
+    Restored Depth Profile Engine.
+    Matches the original vertical logic with updated report formatting.
+    """
+    fig = go.Figure()
+    if df.empty: return fig
+    
+    # 1. SETUP DIMENSIONS & RANGES
+    # Use 22ft as default range or dynamic based on data
+    max_d = df['Depth_Num'].max() if not df['Depth_Num'].empty else 20
+    y_limit = int(((max_d // 5) + 1) * 5)
+    x_range = [-20, 80] if unit_label == "°F" else [(-20-32)*5/9, (80-32)*5/9]
 
+    # 2. WEEKLY SNAPSHOT LOGIC (Monday 6AM)
+    # This finds the state of the ground every Monday to show progress
+    now = df['timestamp'].max()
+    start_view = now - pd.Timedelta(weeks=4)
+    mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
+    
+    for m_date in mondays:
+        target_ts = m_date.replace(hour=6, minute=0, second=0)
+        # Search window to catch sensors that report at different times
+        window = df[(df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                    (df['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+        
+        if not window.empty:
+            window = window.copy()
+            window['diff'] = (window['timestamp'] - target_ts).abs()
+            snap_df = window.sort_values('diff').groupby('NodeNum').head(1).sort_values('Depth_Num')
+            
+            fig.add_trace(go.Scatter(
+                x=snap_df['temperature'], 
+                y=snap_df['Depth_Num'], 
+                mode='lines+markers', 
+                name=target_ts.strftime('%m/%d/%y'),
+                line=dict(width=3),
+                marker=dict(size=8)
+            ))
+
+    # 3. REFERENCE LINES (Default to Freezing Only)
+    ref_val = 32 if unit_label == "°F" else 0
+    fig.add_vline(x=ref_val, line_dash="dot", line_color="DeepSkyBlue", 
+                  line_width=3, annotation_text="Freezing", annotation_position="top right")
+
+    # 4. FINAL LAYOUT & GRID
+    fig.update_layout(
+        plot_bgcolor='white',
+        height=850, # Matches 11x8.5 ratio
+        xaxis=dict(
+            title=f"Temperature ({unit_label})", 
+            range=x_range, 
+            showgrid=True, 
+            gridcolor='Gainsboro',
+            showline=True,
+            linecolor='black',
+            mirror=True
+        ),
+        yaxis=dict(
+            title="Depth (ft)", 
+            range=[y_limit, 0], 
+            dtick=2, # Detailed 2ft increments
+            showgrid=True, 
+            gridcolor='Silver',
+            showline=True,
+            linecolor='black',
+            mirror=True
+        ),
+        legend=dict(
+            title="Weekly Snapshots (6AM)", 
+            orientation="h", 
+            y=-0.15, 
+            x=0.5, 
+            xanchor="center",
+            bordercolor="black",
+            borderwidth=1
+        )
+    )
+    
+    return fig
 
 #######################
 # --- SIDEBAR UI --- #
