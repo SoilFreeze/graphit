@@ -5,3 +5,4 @@ google-cloud-bigquery
 pandas-gbq
 requests
 pytz
+kaleido==0.2.1
