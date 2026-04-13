@@ -920,15 +920,15 @@ elif service == "📉 Node Diagnostics":
 ###############################
 # --- END NODE DIAGNOSTIC --- #
 ###############################
-###############################
-# --- DATA INTAKE LAB --- #
-###############################
+# ############################################################
+# # --- DATA INTAKE LAB PAGE --- #
+# ############################################################
 elif service == "📤 Data Intake Lab":
     if check_admin_access():
         st.header("📤 Data Ingestion & Recovery")
         
-        # Removed Maintenance Tab as requested
-        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 Professional Report", "📥 Export Project Data"])
+        # --- THE FIX: Define the tab variables here! ---
+        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "🖼️ Professional Report Export", "📥 Export Raw Data"])
 
         with tab1:
             st.subheader("📄 Manual File Ingestion")
