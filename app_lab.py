@@ -157,38 +157,72 @@ client = get_bq_client()
 #################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", is_report=False):
     """
-    Unified engine that restores Dashboard formatting while supporting Report framing.
+    Unified Plotly engine. 
+    Restores Dashboard grid hierarchy, Now line, and tooltips while supporting Report Mode.
     """
-    if df.empty: return go.Figure()
-    
+    if df.empty:
+        return go.Figure()
+
     plot_df = df.copy()
     
-    # 1. TIMEZONE & LABELS
+    # 1. TIMEZONE CONVERSION
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
+    # Adjust windows and 'Now' line to match local zone
+    start_local = start_view.astimezone(pytz.timezone(display_tz))
+    end_local = end_view.astimezone(pytz.timezone(display_tz))
+    now_local = pd.Timestamp.now(tz=display_tz)
+
+    # 2. UNIT CONVERSION
+    if unit_mode == "Celsius":
+        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
+        y_range, dt_minor = [-30, 30], 2
+    else:
+        y_range, dt_minor = [-20, 80], 5
+
+    # 3. LABELING LOGIC (The Fix: Ensures 'label' column exists)
     if 'label' not in plot_df.columns:
         plot_df['label'] = plot_df.apply(
             lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
             else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
         )
+    
+    # 4. PLOT MODE
+    is_admin = "Scrubbing" in title or "Diag" in title
+    plot_mode = 'markers' if is_admin else 'lines'
+    marker_size = 7 if is_admin else 3
 
     fig = go.Figure()
-
-    # 2. ADD TRACES
+    
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         hover_name = lbl.split('(')[0].strip()
-        
+
+        # 5. GAP DETECTION (Dashboard Only)
+        if not is_admin and not is_report:
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            gap_mask = s_df['gap_hrs'] > 6.0
+            if gap_mask.any():
+                gaps = s_df[gap_mask].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
+        # 6. ADD TRACE WITH CLEAN HOVER
         fig.add_trace(go.Scattergl(
-            x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines',
-            line=dict(width=2 if is_report else 1.5),
-            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>",
-            customdata=[hover_name] * len(s_df)
+            x=s_df['timestamp'], 
+            y=s_df['temperature'], 
+            name=lbl, 
+            mode=plot_mode,
+            marker=dict(size=marker_size, opacity=0.8 if is_admin else 1.0),
+            line=dict(width=2.5 if is_report else 1.5), # Slightly thicker for PDF
+            connectgaps=False,
+            customdata=[hover_name] * len(s_df),
+            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 3. GRID HIERARCHY (Monday=Black, Midnight=Gray)
-    grid_times = pd.date_range(start=start_view, end=end_view, freq='6h', tz=display_tz)
+    # 7. GRID HIERARCHY (Monday=Black, Midnight=Gray, 6h=LightGray)
+    grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
     for ts in grid_times:
         if ts.weekday() == 0 and ts.hour == 0:
             color, width = "Black", 1.2 
@@ -198,46 +232,56 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             color, width = "LightGray", 0.3
         fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    # 4. REFERENCE LINES
+    # 8. REFERENCE LINES & RED "NOW" LINE
     if is_report:
-        # Report Mode: Default to 32°F / 0°C [cite: 542, 585]
+        # Report Mode: Default to 32°F / 0°C
         ref_val = 32 if unit_label == "°F" else 0
         fig.add_hline(y=ref_val, line_dash="dash", line_color="DeepSkyBlue", 
                       annotation_text="Freezing", annotation_position="top right")
     else:
-        # Dashboard Mode: Show all selected references
+        # Dashboard Mode: Standard active_refs + Red "Now" Line
         for val, ref_label in active_refs:
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
             fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in ref_label else "RoyalBlue", 
                           annotation_text=ref_label, annotation_position="top right")
         
-        # Red "Now" Line (Dashboard Only)
-        now_local = pd.Timestamp.now(tz=display_tz)
         fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 5. LAYOUT
+    # 9. FINAL LAYOUT
     fig.update_layout(
-        title=None if is_report else title,
+        title=None if is_report else {'text': f"{title} ({display_tz})", 'x': 0},
         plot_bgcolor='white',
         hovermode="x unified",
+        height=850 if is_report else 600,
+        margin=dict(t=80, l=50, r=180, b=50),
         xaxis=dict(
-            range=[start_view, end_view],
-            showline=True, linecolor='black', mirror=True,
+            range=[start_local, end_local],
+            showline=True, 
+            linecolor='black', 
+            mirror=True,
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})",
-            gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True
+            range=y_range,
+            dtick=dt_minor,
+            gridcolor='Gainsboro',
+            showline=True,
+            linecolor='black',
+            mirror=True
         ),
         legend=dict(
-            title="Sensors", orientation="v", 
-            x=1.02, y=1, xanchor="left", 
-            bordercolor="Black", borderwidth=1
+            title="Sensors",
+            orientation="v",
+            x=1.02,
+            y=1,
+            xanchor="left",
+            bordercolor="Black",
+            borderwidth=1
         )
     )
     
     return fig
-
 ################
 # Print graphs #
 ################
