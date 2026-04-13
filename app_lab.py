@@ -404,59 +404,73 @@ def build_depth_report_graph(df, loc_name, unit_label):
     
     return fig
 
-#######################
-# --- SIDEBAR UI --- #
-#######################
-st.sidebar.title("❄️ SoilFreeze Lab")
+# ############################################################
+# # --- SIDEBAR: GLOBAL CONTROLS & NAVIGATION --- #
+# ############################################################
 
-service = st.sidebar.selectbox(
-    "📂 Select Page", 
-    ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
-    index=0  # Sets Global Overview as the landing page
+with st.sidebar:
+    st.image("https://your-logo-url.com/logo.png", width=200) # Optional: SoilFreeze Logo
+    st.title("❄️ SoilFreeze Lab")
+    st.markdown("---")
+
+    # 1. NAVIGATION: Service Selection
+    service = st.radio(
+        "🛠️ Select Service",
+        ["📊 Project Dashboard", "📤 Data Intake Lab", "🛠️ Admin Tools"]
     )
-st.sidebar.divider()
+    st.markdown("---")
 
-unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
-unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+    # 2. DATA SOURCE: Project Selection
+    # Assuming 'project_list' is retrieved from your BigQuery/API metadata
+    selected_project = st.selectbox(
+        "📁 Select Project",
+        options=project_list if 'project_list' in locals() else ["None Available"],
+        index=0
+    )
 
-def convert_val(f_val):
-    if f_val is None: return None
-    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
+    # 3. UNIT CONTROLS: Imperial vs Metric
+    unit_mode = st.toggle("🌡️ Display Celsius", value=False)
+    unit_label = "°C" if unit_mode else "°F"
 
-st.sidebar.divider()
+    st.markdown("---")
 
-# --- UPDATED PROJECT SELECTION ---
-selected_project = None
-try:
-    # This now runs for every page, including Global Overview
-    proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
-    proj_df = client.query(proj_q).to_dataframe()
+    # 4. REFERENCE LINES: Hardcoded Default to Freezing
+    st.markdown("### 📏 Reference Lines")
     
-    # We add an index or a "Select Project" placeholder if you don't want a default
-    project_list = sorted(proj_df['Project'].dropna().unique())
-    selected_project = st.sidebar.selectbox("🎯 Active Project", project_list)
-except Exception as e: 
-    st.sidebar.warning(f"Project fetch failed: {e}")
+    # We define the options here. 
+    # The default is set to ONLY include the Freezing line.
+    ref_options = {
+        f"Freezing ({'0' if unit_mode else '32'}{unit_label})": (32, "Freezing"),
+        f"Type A ({'-11.1' if unit_mode else '12'}{unit_label})": (12, "Type A"),
+        f"Type B ({-1.1 if unit_mode else '30'}{unit_label})": (30, "Type B")
+    }
 
-st.sidebar.divider()
-st.sidebar.write("### 📏 Reference Lines")
-active_refs = []
-if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True): active_refs.append((26.6, "Type B"))
-if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.append((10.2, "Type A"))
+    selected_ref_labels = st.multiselect(
+        "Active References",
+        options=list(ref_options.keys()),
+        default=[list(ref_options.keys())[0]], # Defaults to 'Freezing'
+        help="Freezing is selected by default for all dashboard and report views."
+    )
 
-# Add to your sidebar section
-st.sidebar.subheader("🕒 Display Settings")
-tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
+    # Convert the user selection into the (value, name) tuples expected by build_high_speed_graph
+    active_refs = [ref_options[label] for label in selected_ref_labels]
 
-# Map the selection to pytz strings
-tz_lookup = {
-    "UTC": "UTC",
-    "Local (US/Eastern)": "US/Eastern",
-    "Local (US/Pacific)": "US/Pacific"
-}
-display_tz = tz_lookup[tz_mode]
+    st.markdown("---")
 
+    # 5. TIMEZONE & DIAGNOSTICS
+    with st.expander("⚙️ Advanced Settings"):
+        display_tz = st.selectbox(
+            "Timezone",
+            ["UTC", "US/Pacific", "US/Mountain", "US/Central", "US/Eastern"],
+            index=1 # Defaults to US/Pacific
+        )
+        
+        show_diagnostics = st.checkbox("Show Sensor Metadata", value=False)
+
+    # 6. APP FOOTER
+    st.markdown(f"**Status:** 🟢 Connected")
+    st.caption(f"Last Refresh: {datetime.now().strftime('%H:%M:%S')}")
+    
 #################
 # --- PAGES --- #
 #################
