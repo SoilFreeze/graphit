@@ -430,17 +430,16 @@ with st.sidebar:
 
     # 1. RESTORED NAVIGATION
     # Ensure these labels EXACTLY match the 'if service ==' lines in your main code
-    service = st.radio(
-        "🛠️ Select Service",
-        [
-            "🏠 Global Overview", 
-            "📊 Client Dashboard", 
-            "🔍 Node Analysis", 
-            "📤 Data Intake Lab", 
-            "🛠️ Admin Tools"
-        ]
-    )
-    st.markdown("---")
+    with st.sidebar:
+        st.title("❄️ SoilFreeze Lab")
+        
+        # 1. RESTORED NAVIGATION (Matching your previous labels)
+        service = st.selectbox(
+            "📂 Select Page", 
+            ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
+            index=0  
+        )
+        st.divider()
     
     # 2. DATA SOURCE: Automatic Project Selection
     # This will now populate with your real project names
