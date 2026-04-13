@@ -250,41 +250,6 @@ def apply_report_frame(fig, project_name, title, fig_num, date_str):
     )
     return fig
 
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", is_report=False):
-    """
-    Modified engine: If is_report=True, it suppresses internal titles 
-    and applies specific formatting for the 11x8.5 PDF.
-    """
-    if df.empty: return go.Figure()
-    plot_df = df.copy()
-    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
-
-    fig = go.Figure()
-    
-    # Standard Plotly coloring
-    for lbl in sorted(plot_df['label'].unique()):
-        s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
-        fig.add_trace(go.Scattergl(
-            x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', line=dict(width=2)
-        ))
-
-    # --- THE FIX: REFERENCE LINES ---
-    # Default to 32°F (Freezing) for reports
-    ref_val = 32 if unit_label == "°F" else 0
-    fig.add_hline(y=ref_val, line_dash="dash", line_color="DeepSkyBlue", 
-                  annotation_text="Freezing", annotation_position="top right")
-
-    fig.update_layout(
-        plot_bgcolor='white',
-        xaxis=dict(range=[start_view, end_view], gridcolor='Gainsboro', showline=True, linecolor='black'),
-        yaxis=dict(title=f"Temperature ({unit_label})", gridcolor='Gainsboro', showline=True, linecolor='black'),
-        # Legend styling for the side panel
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1, xanchor="left", bordercolor="Black", borderwidth=1)
-    )
-    
-    return fig
-
 
 
 #######################
