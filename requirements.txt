@@ -8,3 +8,4 @@ pytz
 db-dtypes
 google-cloud-secret-manager
 tzdata
+kaleido==0.2.1
