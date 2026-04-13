@@ -823,7 +823,7 @@ elif service == "📉 Node Diagnostics":
                 
                 # SECTION A: TIMELINE ANALYSIS
                 st.subheader("📈 Timeline Analysis")
-                st.caption(f"Viewing historical trends in **{tz_mode}**.")
+                st.caption(f"Viewing historical trends in {display_tz}.")
                 fig_time = build_high_speed_graph(
                     df_diag, sel_loc, start_view, end_view, 
                     tuple(active_refs), unit_mode, unit_label, 
