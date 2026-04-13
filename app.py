@@ -915,93 +915,115 @@ elif service == "📤 Data Intake Lab":
                             st.error("Format not recognized. Check CSV headers.")
                     except Exception as e: st.error(f"SensorPush Error: {e}")
 
+       # 3. DEEP DATA SCRUB (Physical Purge) - SNAP TO HOUR FIX
         with tab2:
-            st.subheader("📡 Cloud-to-Cloud API Sync")
-            c1, c2 = st.columns(2)
-            start_date = c1.date_input("Start Date", datetime.now() - timedelta(days=1))
-            end_date = c2.date_input("End Date", datetime.now())
+            st.subheader("🧹 Deep Data Scrub & Final Purge")
+            st.info("This tool dedups data to 1-hour intervals and snaps all timestamps to the **Top of the Hour**.")
+            st.error("⚠️ WARNING: This permanently modifies data in RAW tables.")
             
-            if st.button("🛰️ FETCH & SYNC"):
-                # Level 3: Date Conversion
-                start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=pytz.UTC)
-                end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=pytz.UTC)
-                
-                with st.spinner("Fetching data..."):
-                    # Level 4: Call the Function
-                    df_api = fetch_sensorpush_data(start_dt, end_dt)
-                    
-                    if not df_api.empty:
-                        # Level 5: Upload to BigQuery
-                        table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                        client.load_table_from_dataframe(df_api, table_path).result()
-                        st.success(f"✅ Integrated {len(df_api)} points successfully!")
-                    else:
-                        # Level 5: Fallback
-                        st.warning("No data found for this range.")
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_radio_fixed")
+            
+            # Use the exact column names from your ingestion functions
+            if scrub_target == "SensorPush":
+                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                node_col = "sensor_id"
+                temp_col = "temperature"
+            else:
+                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                node_col = "NodeNum" # Fixed from nodenumber
+                temp_col = "temperature" # Fixed from value
+    
+            if st.button(f"🧨 Permanently Purge & Snap {scrub_target}"):
+                with st.spinner("Executing hard delete and snap-to-hour..."):
+                    # This snaps the timestamp to the top of the hour (:00:00)
+                    scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS 
+                    SELECT 
+                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                        * EXCEPT(timestamp, rn) 
+                    FROM (
+                        SELECT *, 
+                               ROW_NUMBER() OVER(
+                                   PARTITION BY {node_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                                   ORDER BY timestamp DESC
+                               ) as rn
+                        FROM `{target_table}` 
+                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
+                        AND {temp_col} IS NOT NULL
+                    ) WHERE rn = 1
+                    """
+                    try:
+                        client.query(scrub_sql).result()
+                        st.success(f"✅ {scrub_target} purged and snapped to top-of-hour.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"Scrub Error: {e}")
                         
-        # Add this to your "📤 Data Intake Lab" tabs or a new section
         with tab3:
-            st.subheader("📥 Export Project Data")
+            st.subheader("📥 Export Project Data (SensorConnect Format)")
             
-            # 1. PROJECT SELECTION (In case it's not set in the sidebar)
-            # We fetch the list of unique projects from the metadata table
+            # Project Selection
             all_projects_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
             all_projs = client.query(all_projects_q).to_dataframe()['Project'].tolist()
-            
-            # If a project is selected in sidebar, use it as default; otherwise, let user pick
             default_ix = all_projs.index(selected_project) if selected_project in all_projs else 0
             target_project = st.selectbox("1️⃣ Select Project to Export", sorted(all_projs), index=default_ix)
         
             if target_project:
-                # 2. FETCH DATA FOR FILTERS
                 with st.spinner(f"Loading data for {target_project}..."):
-                    # Fetch ALL data (unapproved included) for THIS project
                     export_df = get_universal_portal_data(target_project, only_approved=False)
         
-                if export_df.empty:
-                    st.warning(f"No data found for {target_project}.")
-                else:
-                    # 3. PIPE & DATE FILTERS
+                if not export_df.empty:
                     c1, c2 = st.columns(2)
-                    
                     with c1:
-                        # Pipe Selection
-                        pipes = ["All Pipes"] + sorted(export_df['Location'].dropna().unique().tolist())
+                        pipes = sorted(export_df['Location'].dropna().unique().tolist())
                         sel_pipe = st.selectbox("2️⃣ Select Pipe / Location", pipes)
-                    
                     with c2:
-                        # Date Range Selection
-                        min_ts = export_df['timestamp'].min().date()
-                        max_ts = export_df['timestamp'].max().date()
-                        # We use a key to ensure this widget doesn't reset unexpectedly
-                        export_range = st.date_input("3️⃣ Select Date Range", value=(min_ts, max_ts), key="export_range_picker")
+                        min_ts, max_ts = export_df['timestamp'].min().date(), export_df['timestamp'].max().date()
+                        export_range = st.date_input("3️⃣ Select Date Range", value=(min_ts, max_ts))
         
-                    # 4. APPLY FILTERS
-                    df_final = export_df.copy()
-                    
-                    if sel_pipe != "All Pipes":
-                        df_final = df_final[df_final['Location'] == sel_pipe]
+                    # --- TRANSFORMATION TO WIDE FORMAT ---
+                    df_final = export_df[export_df['Location'] == sel_pipe].copy()
                     
                     if isinstance(export_range, tuple) and len(export_range) == 2:
                         start, end = export_range
                         df_final = df_final[(df_final['timestamp'].dt.date >= start) & (df_final['timestamp'].dt.date <= end)]
         
-                    # 5. DOWNLOAD BUTTON
-                    st.divider()
-                    st.write(f"📊 **Result:** Found {len(df_final)} rows for export.")
-                    
                     if not df_final.empty:
-                        # Standardize units if needed
+                        # 1. Standardize Units
                         if unit_mode == "Celsius":
                             df_final['temperature'] = (df_final['temperature'] - 32) * 5/9
                         
-                        csv_bytes = df_final.to_csv(index=False).encode('utf-8')
+                        # 2. Create Column Labels (e.g., "5ft")
+                        df_final['Depth_Col'] = df_final['Depth'].astype(str) + "ft"
+                        
+                        # 3. PIVOT: Turns Depths into Columns
+                        df_wide = df_final.pivot_table(
+                            index='timestamp', 
+                            columns='Depth_Col', 
+                            values='temperature',
+                            aggfunc='first' 
+                        ).reset_index()
+
+                        # 4. NATURAL SORT: Ensures 5ft < 10ft < 20ft
+                        def depth_sort_key(col):
+                            if col == 'timestamp': return -1
+                            nums = re.findall(r'\d+', col)
+                            return int(nums[0]) if nums else 999
+                        
+                        df_wide = df_wide.reindex(columns=sorted(df_wide.columns, key=depth_sort_key))
+
+                        st.divider()
+                        st.write(f"📊 **Preview:** {sel_pipe} ({len(df_wide)} rows)")
+                        st.dataframe(df_wide.head(10), use_container_width=True)
+                        
+                        csv_bytes = df_wide.to_csv(index=False).encode('utf-8')
                         st.download_button(
-                            label="💾 Download CSV",
+                            label=f"💾 Download {sel_pipe} Wide CSV",
                             data=csv_bytes,
-                            file_name=f"Export_{target_project}_{sel_pipe}.csv",
+                            file_name=f"SensorConnect_{target_project}_{sel_pipe}.csv",
                             mime='text/csv'
                         )
+                        
 ###############################
 # --- END DATA INTAKE LAB --- #
 ###############################
@@ -1013,34 +1035,18 @@ elif service == "🛠️ Admin Tools":
         st.header("🛠️ Engineering Admin Tools")
     
         # 1. DEFINE TABS
-        tab_approve, tab_scrub, tab_cleaner = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
+        tab1, tab2, tab3 = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
     
-        # 2. BULK APPROVAL
-        with tab_approve:
+        with tab1:
             st.subheader("✅ Bulk Approval")
-            st.info("Sets records to 'TRUE' in raw tables. This does not override 'FALSE' points marked in the Surgical Cleaner.")
-            
             if st.button("🚀 Approve All Pending Data"):
-                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", 
-                              f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
-                
-                with st.spinner("Processing approvals..."):
-                    for table in raw_tables:
-                        try:
-                            approve_sql = f"""
-                                UPDATE `{table}` 
-                                SET approve = 'TRUE' 
-                                WHERE approve IS NULL 
-                                OR UPPER(CAST(approve AS STRING)) != 'FALSE'
-                            """
-                            client.query(approve_sql).result()
-                        except Exception as e:
-                            st.warning(f"Could not update {table}: {e}")
+                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
+                for table in raw_tables:
+                    client.query(f"UPDATE `{table}` SET approve = 'TRUE' WHERE approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE'").result()
                 st.success("Bulk approval complete.")
                 st.cache_data.clear()
-    
-        # 3. DEEP DATA SCRUB (Physical Purge)
-        with tab_scrub:
+
+        with tab2:
             st.subheader("🧹 Deep Data Scrub & Final Purge")
             st.error("⚠️ WARNING: This permanently deletes data from RAW tables.")
             
@@ -1068,114 +1074,88 @@ elif service == "🛠️ Admin Tools":
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"Scrub Error: {e}")
-    
-        # 4. SURGICAL CLEANER (Lasso Selection)
-        # --- TAB 3: SURGICAL CLEANER ---
-        with tab_cleaner:
+            
+
+        # 4. SURGICAL CLEANER (State-Locked Lasso)
+        with tab3:
             st.subheader("🧨 Surgical Data Cleaner")
-            st.info("💡 **Instructions:** Use the **Lasso** or **Box Select** tools on the graph to highlight noisy points. The system will automatically hide the entire hour for those selections.")
-        
             if not selected_project:
                 st.warning("👈 Please select a Project in the sidebar.")
             else:
-                # 1. FETCH RAW DATA (Including Rejected/Unapproved)
-                with st.spinner(f"📥 Loading raw data for {selected_project}..."):
-                    # only_approved=False allows us to see the points we want to hide
-                    p_df = get_universal_portal_data(selected_project, only_approved=False)
+                p_df = get_universal_portal_data(selected_project, only_approved=False)
         
-                if p_df.empty:
-                    st.warning(f"No data found for project {selected_project}.")
-                else:
-                    # 2. SELECTION CONTROLS
+                if not p_df.empty:
+                    # Filter and RESET INDEX
                     loc_options = sorted(p_df['Location'].dropna().unique())
-                    c1, c2 = st.columns([2, 1])
-                    with c1:
-                        sel_loc = st.selectbox("Select Pipe / Bank to Scrub", loc_options, key="admin_scrub_loc")
-                    with c2:
-                        lookback_days = st.slider("Scrub Window (Days)", 1, 30, 7, key="admin_scrub_days")
-        
-                    # 3. DATE CALCULATIONS
-                    now_utc = pd.Timestamp.now(tz='UTC')
-                    start_view = now_utc - timedelta(days=lookback_days)
-                    end_view = now_utc + timedelta(hours=6)
-        
-                    # Filter for the specific location
-                    scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy()
-        
-                    # 4. RENDER THE INTERACTIVE GRAPH (MARKERS MODE)
-                    # The 'Scrubbing' keyword in the title triggers 'markers' in our graph function
+                    sel_loc = st.selectbox("Select Pipe", loc_options, key="admin_scrub_loc")
+                    scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
+
+                    # --- THE STATE LOCK ---
+                    # Use a 'confirmed' state that the widget cannot touch directly
+                    if "locked_selection" not in st.session_state:
+                        st.session_state.locked_selection = None
+
+                    # 3. BUILD GRAPH
                     fig_scrub = build_high_speed_graph(
-                        scrub_plot_df, 
-                        f"Scrubbing Interface: {sel_loc}", 
-                        start_view, 
-                        end_view, 
-                        tuple(active_refs), 
-                        unit_mode, 
-                        unit_label,
-                        display_tz=display_tz
+                        scrub_plot_df, f"Scrubbing: {sel_loc}", 
+                        pd.Timestamp.now(tz='UTC') - timedelta(days=7), 
+                        pd.Timestamp.now(tz='UTC') + timedelta(hours=6), 
+                        tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
                     )
-        
-                    # on_select="rerun" captures the Lasso/Box tool selection data
-                    selected_data = st.plotly_chart(
+
+                    # 4. FORCE DRAW THE LOCK
+                    # If we have a locked selection, force Plotly to show it
+                    if st.session_state.locked_selection:
+                        selected_indices = [p['point_index'] for p in st.session_state.locked_selection]
+                        fig_scrub.update_traces(
+                            selectedpoints=selected_indices, 
+                            unselected=dict(marker=dict(opacity=0.3))
+                        )
+
+                    # 5. RENDER CHART
+                    # use_container_width=True is mandatory for your version
+                    event_data = st.plotly_chart(
                         fig_scrub, 
                         use_container_width=True, 
                         on_select="rerun", 
-                        key=f"scrub_chart_{sel_loc}"
+                        key=f"scrub_chart_{sel_loc.replace(' ', '_')}"
                     )
-        
-                    st.divider()
-        
-                    # 5. EXECUTE THE HOURLY SCRUB
-                    st.markdown("### 🚫 Execute Rejection")
-                    
-                    if selected_data and "selection" in selected_data and selected_data["selection"]["points"]:
-                        points = selected_data["selection"]["points"]
-                        st.write(f"✅ **{len(points)}** data points highlighted.")
-        
-                        if st.button("🚨 HIDE SELECTED DATA (Align to Top of Hour)", type="primary"):
-                            with st.spinner("Writing hourly rejection rules..."):
-                                try:
-                                    rejection_records = []
-                                    for pt in points:
-                                        # A. Get the timestamp from the plot click
-                                        raw_ts = pd.to_datetime(pt['x'])
-                                        
-                                        # B. Convert to UTC and FLOOR to the top of the hour
-                                        # This ensures the join catches every reading in that 60-min block
-                                        scrub_ts = raw_ts.tz_convert('UTC').floor('h')
-                                        
-                                        # C. Map back to NodeNum using the dataframe index
-                                        node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
-                                        
-                                        rejection_records.append({
-                                            "NodeNum": str(node_id),
-                                            "timestamp": scrub_ts,
-                                            "reason": "Top-of-Hour Surgical Scrub",
-                                            "Project": selected_project
-                                        })
-        
-                                    if rejection_records:
-                                        # Deduplicate (prevents redundant entries for the same hour)
-                                        rej_df = pd.DataFrame(rejection_records).drop_duplicates()
-                                        
-                                        # Upload to 'manual_rejections' table
-                                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                        client.load_table_from_dataframe(
-                                            rej_df, 
-                                            f"{PROJECT_ID}.{DATASET_ID}.manual_rejections",
-                                            job_config=job_config
-                                        ).result()
-                                        
-                                        st.success(f"Successfully hidden {len(rej_df)} hourly blocks for {sel_loc}!")
-                                        
-                                        # Clear cache so changes reflect on all pages immediately
-                                        st.cache_data.clear()
-                                        st.rerun()
-        
-                                except Exception as e:
-                                    st.error(f"❌ Scrubbing Failed: {e}")
+
+                    # 6. LOCKING LOGIC (The One-Way Valve)
+                    # We ONLY update the lock if there are actual points in the event.
+                    # This prevents the 'reset' from wiping your selection.
+                    if event_data and "selection" in event_data:
+                        current_event_points = event_data["selection"].get("points", [])
+                        if len(current_event_points) > 0:
+                            st.session_state.locked_selection = current_event_points
+
+                    # 7. UI FOR LOCKED SELECTION
+                    if st.session_state.locked_selection:
+                        points = st.session_state.locked_selection
+                        st.success(f"📍 {len(points)} points locked in memory.")
+                        
+                        c1, c2 = st.columns(2)
+                        if c1.button("🚨 HIDE SELECTED DATA", type="primary"):
+                            rejection_records = []
+                            for pt in points:
+                                raw_ts = pd.to_datetime(pt['x'])
+                                scrub_ts = raw_ts.tz_convert('UTC').floor('h')
+                                node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
+                                rejection_records.append({"NodeNum": str(node_id), "timestamp": scrub_ts, "reason": "Surgical Scrub", "Project": selected_project})
+                            
+                            if rejection_records:
+                                rej_df = pd.DataFrame(rejection_records).drop_duplicates()
+                                client.load_table_from_dataframe(rej_df, f"{PROJECT_ID}.{DATASET_ID}.manual_rejections").result()
+                                st.session_state.locked_selection = None
+                                st.cache_data.clear()
+                                st.rerun()
+
+                        if c2.button("🧹 Clear Selection"):
+                            st.session_state.locked_selection = None
+                            st.rerun()
                     else:
-                        st.info("💡 **Selection Required:** Use the Lasso or Box Select tool on the graph above to highlight the noise you want to remove.")
+                        st.info("💡 Use the Lasso tool. Selection is now locked and will not disappear.")
+                                
 ###########################
 # --- END ADMIN TOOLS --- #
 ###########################
