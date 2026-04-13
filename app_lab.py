@@ -389,38 +389,59 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 # Print graphs #
 ################
 def apply_report_frame(fig, project_name, title, fig_num, date_str):
-    """Creates the 11x8.5 landscape frame with a centered title box for the Project Name."""
+    """
+    Creates an 11x8.5 landscape frame with:
+    - Centered Title Box for the Pipe Name
+    - Left-justified Project Name
+    - Right-justified Branding
+    - No overlapping elements
+    """
     fig.update_layout(
         width=1100,
         height=850,
-        margin=dict(t=160, l=80, r=80, b=100),
+        # Increased top margin (t=200) to prevent text overlap
+        margin=dict(t=200, l=80, r=220, b=100), 
         paper_bgcolor='white',
         plot_bgcolor='white',
         shapes=[
             # OUTER BORDER
             dict(type="rect", xref="paper", yref="paper", x0=-0.05, y0=-0.1, x1=1.05, y1=1.1, line=dict(color="black", width=2)),
-            # CENTER PROJECT BOX
-            dict(type="rect", xref="paper", yref="paper", x0=0.20, y0=1.02, x1=0.80, y1=1.12, fillcolor="#F2F4F4", line=dict(color="black", width=1.5)),
+            # HEADER LINE (Separates titles from graph)
+            dict(type="line", xref="paper", yref="paper", x0=-0.05, y0=1.0, x1=1.05, y1=1.0, line=dict(color="black", width=1)),
+            # CENTER TITLE BOX (Reduced width to stay centered)
+            dict(type="rect", xref="paper", yref="paper", x0=0.30, y0=1.04, x1=0.70, y1=1.12, fillcolor="#F2F4F4", line=dict(color="black", width=1)),
         ],
         annotations=[
-            # PROJECT TITLE (Centered in the Box)
-            dict(text=f"<b>{project_name.upper()}</b>", x=0.5, y=1.07, xref="paper", yref="paper", 
-                 showarrow=False, font=dict(size=20), xanchor="center"),
+            # 1. PROJECT NAME / NUMBER (Left Justified)
+            dict(text=f"<b>PROJECT:</b><br>{project_name.upper()}", 
+                 x=-0.03, y=1.08, xref="paper", yref="paper", showarrow=False, align="left", xanchor="left", font=dict(size=14)),
             
-            # PIPE / FIGURE TITLE (Centered below the box)
-            dict(text=f"<b>{title.upper()}</b>", x=0.5, y=0.98, xref="paper", yref="paper", 
-                 showarrow=False, font=dict(size=24, color="#003366"), xanchor="center"),
+            # 2. PIPE NAME (Centered in the Box)
+            dict(text=f"<b>{title.upper()}</b>", 
+                 x=0.5, y=1.08, xref="paper", yref="paper", showarrow=False, xanchor="center", font=dict(size=18, color="#003366")),
             
-            # LOGO SECTION (Top Right)
-            dict(text="<b>SoilFreeze</b><br><small>SOLID GROUND</small>", x=1.02, y=1.07, xref="paper", yref="paper", 
-                 showarrow=False, align="right", font=dict(color="#003366")),
+            # 3. LOGO / BRANDING (Right Justified)
+            dict(text="<b>SoilFreeze</b><br><small>SOLID GROUND</small>", 
+                 x=1.03, y=1.08, xref="paper", yref="paper", showarrow=False, align="right", xanchor="right", font=dict(color="#003366")),
             
-            # FOOTER: FIG NUMBER
+            # 4. FOOTER: FIG NUMBER
             dict(text=f"<b>FIGURE {fig_num}</b>", x=0, y=-0.07, xref="paper", yref="paper", showarrow=False, font=dict(size=14)),
             
-            # FOOTER: DATE
+            # 5. FOOTER: DATE
             dict(text=f"<b>DATE:</b> {date_str}", x=1, y=-0.07, xref="paper", yref="paper", showarrow=False, font=dict(size=12)),
-        ]
+        ],
+        # Move Legend to the right to avoid overlapping graph lines
+        legend=dict(
+            title="<b>Sensors</b>",
+            orientation="v",
+            x=1.02,
+            y=1,
+            xanchor="left",
+            font=dict(size=10),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="Black",
+            borderwidth=1
+        )
     )
     return fig
 
