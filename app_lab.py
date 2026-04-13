@@ -165,19 +165,28 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df = df.copy()
     
     # 1. TIMEZONE CONVERSION
+    # Standardize data to the preferred display zone
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
     # 2. THE FIX: Generate 'label' column if missing
-    # This logic checks for a Bank name, otherwise defaults to Depth
+    # This logic matches your original metadata structure
     if 'label' not in plot_df.columns:
-        plot_df['label'] = plot_df.apply(
-            lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
-            else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
-        )
+        def create_label(r):
+            bank = str(r.get('Bank', '')).strip().lower()
+            node = r.get('NodeNum', 'Unknown')
+            depth = r.get('Depth', '??')
+            
+            if bank not in ["", "none", "nan", "null"]:
+                return f"Bank {r['Bank']} ({node})"
+            else:
+                return f"{depth}ft ({node})"
+        
+        plot_df['label'] = plot_df.apply(create_label, axis=1)
 
     fig = go.Figure()
     
     # 3. PLOTTING LOOP
+    # Group by the newly created label
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         
@@ -191,14 +200,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         ))
 
     # 4. REFERENCE LINE: Default to Freezing for reports
-    # Only show the 32°F / 0°C line as requested for the default export
+    # This satisfies your requirement to default to only the 32°F/0°C line in PDFs
     ref_val = 32 if unit_label == "°F" else 0
     fig.add_hline(y=ref_val, line_dash="dash", line_color="DeepSkyBlue", 
                   annotation_text="Freezing", annotation_position="top right")
 
     # 5. FINAL LAYOUT
     fig.update_layout(
-        # Suppress internal title for reports so apply_report_frame can center it
+        # Suppress internal title for reports so apply_report_frame can center the text
         title=None if is_report else title,
         plot_bgcolor='white',
         xaxis=dict(
