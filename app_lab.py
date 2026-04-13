@@ -405,6 +405,22 @@ def build_depth_report_graph(df, loc_name, unit_label):
     return fig
 
 # ############################################################
+# # --- DATA INITIALIZATION (Automated) ---                  #
+# ############################################################
+
+# 1. Fetch the project list automatically as you did before
+try:
+    # This calls your existing function that queries BigQuery/API
+    project_list = get_project_list() 
+    
+    if not project_list:
+        project_list = ["No Active Projects"]
+except Exception as e:
+    # Fallback to prevent the sidebar from disappearing if the API is down
+    project_list = ["Error Fetching Projects"]
+    st.error(f"Connection Error: {e}")
+
+# ############################################################
 # # --- SIDEBAR: GLOBAL CONTROLS & NAVIGATION ---           #
 # ############################################################
 
@@ -419,11 +435,11 @@ with st.sidebar:
     )
     st.markdown("---")
 
-    # 2. DATA SOURCE: Project Selection
-    # Ensure project_list is defined earlier in your code
+    # 2. DATA SOURCE: Automatic Project Selection
+    # This will now populate with your real project names
     selected_project = st.selectbox(
         "📁 Select Project",
-        options=project_list if 'project_list' in locals() else ["None Available"],
+        options=project_list,
         index=0
     )
 
@@ -433,29 +449,23 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # 4. REFERENCE LINES: Individual Checkboxes
+    # 4. REFERENCE LINES: Checkboxes (Freezing = Default)
     st.markdown("### 📏 Reference Lines")
     
-    # Define current display values based on unit toggle
+    # Values update dynamically based on Celsius/Fahrenheit toggle
     freeze_val = 0 if unit_mode else 32
     type_a_val = -11.1 if unit_mode else 12
     type_b_val = -1.1 if unit_mode else 30
 
-    # Create the checkboxes
-    # value=True makes Freezing selected by default
     show_freeze = st.checkbox(f"Freezing ({freeze_val}{unit_label})", value=True)
     show_type_a = st.checkbox(f"Type A ({type_a_val}{unit_label})", value=False)
     show_type_b = st.checkbox(f"Type B ({type_b_val}{unit_label})", value=False)
 
-    # Build the active_refs list based on check states
-    # This list is what the build_high_speed_graph function reads
+    # Build the active_refs list for your graphing functions
     active_refs = []
-    if show_freeze:
-        active_refs.append((32, "Freezing")) # Internal logic always uses 32/12/30
-    if show_type_a:
-        active_refs.append((12, "Type A"))
-    if show_type_b:
-        active_refs.append((30, "Type B"))
+    if show_freeze: active_refs.append((32, "Freezing"))
+    if show_type_a: active_refs.append((12, "Type A"))
+    if show_type_b: active_refs.append((30, "Type B"))
 
     st.markdown("---")
 
@@ -464,12 +474,9 @@ with st.sidebar:
         display_tz = st.selectbox(
             "Timezone",
             ["UTC", "US/Pacific", "US/Mountain", "US/Central", "US/Eastern"],
-            index=1 # Defaults to US/Pacific
+            index=1 
         )
-        
         show_diagnostics = st.checkbox("Show Sensor Metadata", value=False)
-
-    st.markdown(f"**Status:** 🟢 Connected")
     
 #################
 # --- PAGES --- #
