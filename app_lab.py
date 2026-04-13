@@ -432,6 +432,15 @@ tz_lookup = {
     "Local (US/Pacific)": "US/Pacific"
 }
 display_tz = tz_lookup[tz_mode]
+
+# Project Selection
+selected_project = None
+if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
+    try:
+        proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
+        proj_df = client.query(proj_q).to_dataframe()
+        selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
+    except: st.sidebar.warning("No projects found.")
 #################
 # --- PAGES --- #
 #################
