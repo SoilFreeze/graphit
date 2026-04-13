@@ -166,105 +166,114 @@ def convert_val(x):
 #################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", is_report=False):
     """
-    Unified engine with a safety check for timezones.
+    Unified High-Speed Engine:
+    - Restores Monday/Midnight Grid Hierarchy
+    - Fixes ZoneInfoNotFoundError with strict localization
+    - Defaults to Freezing reference line
+    - Supports clean hover tooltips (customdata)
     """
-    if df.empty: return go.Figure()
+    if df.empty:
+        return go.Figure()
+
+    # 1. TIMEZONE SAFETY & LOCALIZATION
+    # Ensure display_tz is a valid IANA string
+    valid_tz = display_tz if (display_tz and str(display_tz) != "None") else "UTC"
     
-    # --- SAFETY CHECK ---
-    # If display_tz is invalid or missing, force it to UTC
-    if not display_tz or str(display_tz).strip() == "" or display_tz == "None":
-        display_tz = "UTC"
-        
     plot_df = df.copy()
     
-    # 1. TIMEZONE CONVERSION
-    # This is line 178 where it was crashing
     try:
-        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
-    except Exception:
-        # Final fallback to UTC if the string is still unrecognized
-        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert("UTC")
+        # Standardize Data Timestamps
+        if plot_df['timestamp'].dt.tz is None:
+            plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(valid_tz)
+        else:
+            plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(valid_tz)
+        
+        # Localize View Windows for Grid Logic
+        tz_obj = pytz.timezone(valid_tz)
+        start_local = start_view.astimezone(tz_obj) if start_view.tzinfo else tz_obj.localize(start_view)
+        end_local = end_view.astimezone(tz_obj) if end_view.tzinfo else tz_obj.localize(end_view)
+        now_local = pd.Timestamp.now(tz=valid_tz)
+    except Exception as e:
+        # Emergency Fallback to prevent crash
+        start_local, end_local = start_view, end_view
+        now_local = pd.Timestamp.now()
+        valid_tz = "UTC"
 
     # 2. UNIT CONVERSION
-    if unit_mode == "Celsius":
+    if unit_mode: # Celsius Toggle
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range, dt_minor = [-30, 30], 2
-    else:
-        y_range, dt_minor = [-20, 80], 5
+        y_range, dtick = [-30, 30], 2
+    else: # Fahrenheit
+        y_range, dtick = [-20, 80], 5
 
-    # 3. LABELING LOGIC (The Fix: Ensures 'label' column exists)
+    # 3. ROBUST LABELING (Prevents KeyError: 'label')
     if 'label' not in plot_df.columns:
-        plot_df['label'] = plot_df.apply(
-            lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
-            else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
-        )
-    
-    # 4. PLOT MODE
-    is_admin = "Scrubbing" in title or "Diag" in title
-    plot_mode = 'markers' if is_admin else 'lines'
-    marker_size = 7 if is_admin else 3
+        def generate_label(row):
+            bank = str(row.get('Bank', '')).strip().lower()
+            depth = str(row.get('Depth', '??'))
+            node = str(row.get('NodeNum', 'Unknown'))
+            if bank not in ["", "none", "nan", "null"]:
+                return f"Bank {row.get('Bank')} ({node})"
+            return f"{depth}ft ({node})"
+        plot_df['label'] = plot_df.apply(generate_label, axis=1)
 
     fig = go.Figure()
-    
+
+    # 4. ADD TRACES WITH CLEAN HOVERS
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         hover_name = lbl.split('(')[0].strip()
-
-        # 5. GAP DETECTION (Dashboard Only)
-        if not is_admin and not is_report:
-            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 6.0
-            if gap_mask.any():
-                gaps = s_df[gap_mask].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-
-        # 6. ADD TRACE WITH CLEAN HOVER
+        
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], 
             y=s_df['temperature'], 
             name=lbl, 
-            mode=plot_mode,
-            marker=dict(size=marker_size, opacity=0.8 if is_admin else 1.0),
-            line=dict(width=2.5 if is_report else 1.5), # Slightly thicker for PDF
+            mode='lines',
+            line=dict(width=2.5 if is_report else 1.5),
             connectgaps=False,
             customdata=[hover_name] * len(s_df),
             hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 7. GRID HIERARCHY (Monday=Black, Midnight=Gray, 6h=LightGray)
-    grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
-    for ts in grid_times:
-        if ts.weekday() == 0 and ts.hour == 0:
-            color, width = "Black", 1.2 
-        elif ts.hour == 0:
-            color, width = "Gray", 0.8  
-        else:
-            color, width = "LightGray", 0.3
-        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+    # 5. GRID HIERARCHY (Monday=Black, Midnight=Gray)
+    try:
+        grid_times = pd.date_range(start=start_local, end=end_local, freq='6h')
+        for ts in grid_times:
+            if ts.weekday() == 0 and ts.hour == 0:
+                color, width = "Black", 1.2  # Monday Midnight
+            elif ts.hour == 0:
+                color, width = "Gray", 0.8   # Daily Midnight
+            else:
+                color, width = "LightGray", 0.3 # 6-Hour intervals
+            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+    except:
+        pass # Ensure grid failure doesn't kill the graph
 
-    # 8. REFERENCE LINES & RED "NOW" LINE
-    if is_report:
-        # Report Mode: Default to 32°F / 0°C
-        ref_val = 32 if unit_label == "°F" else 0
-        fig.add_hline(y=ref_val, line_dash="dash", line_color="DeepSkyBlue", 
-                      annotation_text="Freezing", annotation_position="top right")
-    else:
-        # Dashboard Mode: Standard active_refs + Red "Now" Line
-        for val, ref_label in active_refs:
-            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in ref_label else "RoyalBlue", 
-                          annotation_text=ref_label, annotation_position="top right")
-        
-        fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
+    # 6. REFERENCE LINES
+    # We default to Freezing if active_refs is empty (standardized for SoilFreeze)
+    if not active_refs:
+        active_refs = [(32, "Freezing")]
 
-    # 9. FINAL LAYOUT
+    for val, name in active_refs:
+        # Convert the reference value to current unit
+        c_val = (val - 32) * 5/9 if unit_mode else val
+        fig.add_hline(
+            y=c_val, 
+            line_dash="dash", 
+            line_color="DeepSkyBlue" if "Freez" in name else "maroon",
+            annotation_text=name, 
+            annotation_position="top right"
+        )
+    
+    # 7. RED "NOW" LINE (Dashboard Only)
+    if not is_report:
+        fig.add_vline(x=now_local, line_width=2, line_color="Red", line_dash="dash", layer='above')
+
+    # 8. LAYOUT
     fig.update_layout(
-        title=None if is_report else {'text': f"{title} ({display_tz})", 'x': 0},
+        title=None if is_report else {'text': f"{title} ({valid_tz})", 'x': 0},
         plot_bgcolor='white',
         hovermode="x unified",
-        height=850 if is_report else 600,
         margin=dict(t=80, l=50, r=180, b=50),
         xaxis=dict(
             range=[start_local, end_local],
@@ -276,7 +285,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         yaxis=dict(
             title=f"Temperature ({unit_label})",
             range=y_range,
-            dtick=dt_minor,
+            dtick=dtick,
             gridcolor='Gainsboro',
             showline=True,
             linecolor='black',
