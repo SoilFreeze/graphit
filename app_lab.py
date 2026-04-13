@@ -157,56 +157,85 @@ client = get_bq_client()
 #################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", is_report=False):
     """
-    Unified engine for both Dashboard and PDF Reports.
-    Handles automatic 'label' creation to prevent KeyErrors.
+    Unified engine that restores Dashboard formatting while supporting Report framing.
     """
-    if df.empty:
-        return go.Figure()
-
+    if df.empty: return go.Figure()
+    
     plot_df = df.copy()
     
-    # 1. Timezone Alignment
+    # 1. TIMEZONE & LABELS
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # 2. THE FIX: Robust Label Creation
-    # This ensures 'label' exists even if the source data is missing metadata
     if 'label' not in plot_df.columns:
-        def generate_label(row):
-            # Check for Bank
-            bank = str(row.get('Bank', '')).strip().lower()
-            depth = str(row.get('Depth', '??'))
-            node = str(row.get('NodeNum', 'Unknown'))
-            
-            if bank not in ["", "none", "nan", "null"]:
-                return f"Bank {row['Bank']} ({node})"
-            return f"{depth}ft ({node})"
-        
-        plot_df['label'] = plot_df.apply(generate_label, axis=1)
+        plot_df['label'] = plot_df.apply(
+            lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
+            else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
+        )
 
     fig = go.Figure()
-    
-    # 3. Plotting Traces
+
+    # 2. ADD TRACES
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
+        hover_name = lbl.split('(')[0].strip()
+        
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', line=dict(width=2),
-            connectgaps=False
+            name=lbl, mode='lines',
+            line=dict(width=2 if is_report else 1.5),
+            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>",
+            customdata=[hover_name] * len(s_df)
         ))
 
-    # 4. Reference Lines: Default to 32°F for reports
-    ref_val = 32 if unit_label == "°F" else 0
-    fig.add_hline(y=ref_val, line_dash="dash", line_color="DeepSkyBlue", 
-                  annotation_text="Freezing", annotation_position="top right")
+    # 3. GRID HIERARCHY (Monday=Black, Midnight=Gray)
+    grid_times = pd.date_range(start=start_view, end=end_view, freq='6h', tz=display_tz)
+    for ts in grid_times:
+        if ts.weekday() == 0 and ts.hour == 0:
+            color, width = "Black", 1.2 
+        elif ts.hour == 0:
+            color, width = "Gray", 0.8  
+        else:
+            color, width = "LightGray", 0.3
+        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    # 5. Layout Alignment
+    # 4. REFERENCE LINES
+    if is_report:
+        # Report Mode: Default to 32°F / 0°C [cite: 542, 585]
+        ref_val = 32 if unit_label == "°F" else 0
+        fig.add_hline(y=ref_val, line_dash="dash", line_color="DeepSkyBlue", 
+                      annotation_text="Freezing", annotation_position="top right")
+    else:
+        # Dashboard Mode: Show all selected references
+        for val, ref_label in active_refs:
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in ref_label else "RoyalBlue", 
+                          annotation_text=ref_label, annotation_position="top right")
+        
+        # Red "Now" Line (Dashboard Only)
+        now_local = pd.Timestamp.now(tz=display_tz)
+        fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
+
+    # 5. LAYOUT
     fig.update_layout(
-        title=None if is_report else title, # Clear title for framed reports
+        title=None if is_report else title,
         plot_bgcolor='white',
-        xaxis=dict(range=[start_view, end_view], gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True),
-        yaxis=dict(title=f"Temperature ({unit_label})", gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1, xanchor="left", bordercolor="Black", borderwidth=1)
+        hovermode="x unified",
+        xaxis=dict(
+            range=[start_view, end_view],
+            showline=True, linecolor='black', mirror=True,
+            tickformat='%b %d\n%H:%M'
+        ),
+        yaxis=dict(
+            title=f"Temperature ({unit_label})",
+            gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True
+        ),
+        legend=dict(
+            title="Sensors", orientation="v", 
+            x=1.02, y=1, xanchor="left", 
+            bordercolor="Black", borderwidth=1
+        )
     )
+    
     return fig
 
 ################
