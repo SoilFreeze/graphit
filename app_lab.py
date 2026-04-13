@@ -153,6 +153,15 @@ def get_bq_client():
 client = get_bq_client()
 
 #################
+# - Supporting- #
+#################
+def convert_val(x):
+    """Helper to convert temperature based on the sidebar unit_mode."""
+    if unit_mode:  # If Celsius toggle is True
+        return (x - 32) * 5/9
+    return x
+
+#################
 # --- Graph --- #
 #################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", is_report=False):
