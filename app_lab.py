@@ -915,49 +915,76 @@ elif service == "📤 Data Intake Lab":
                             st.error("Format not recognized. Check CSV headers.")
                     except Exception as e: st.error(f"SensorPush Error: {e}")
 
-       # 3. DEEP DATA SCRUB (Physical Purge) - SNAP TO HOUR FIX
+       # --- NEW: GRAPH EXPORT LAB ---
         with tab2:
-            st.subheader("🧹 Deep Data Scrub & Final Purge")
-            st.info("This tool dedups data to 1-hour intervals and snaps all timestamps to the **Top of the Hour**.")
-            st.error("⚠️ WARNING: This permanently modifies data in RAW tables.")
-            
-            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_radio_fixed")
-            
-            # Use the exact column names from your ingestion functions
-            if scrub_target == "SensorPush":
-                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                node_col = "sensor_id"
-                temp_col = "temperature"
+            st.subheader("🖼️ Export Project Graphs")
+            st.info("Generate high-resolution images of project timelines for reports.")
+
+            if not selected_project:
+                st.warning("Please select a project in the sidebar first.")
             else:
-                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                node_col = "NodeNum" # Fixed from nodenumber
-                temp_col = "temperature" # Fixed from value
-    
-            if st.button(f"🧨 Permanently Purge & Snap {scrub_target}"):
-                with st.spinner("Executing hard delete and snap-to-hour..."):
-                    # This snaps the timestamp to the top of the hour (:00:00)
-                    scrub_sql = f"""
-                    CREATE OR REPLACE TABLE `{target_table}` AS 
-                    SELECT 
-                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
-                        * EXCEPT(timestamp, rn) 
-                    FROM (
-                        SELECT *, 
-                               ROW_NUMBER() OVER(
-                                   PARTITION BY {node_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                                   ORDER BY timestamp DESC
-                               ) as rn
-                        FROM `{target_table}` 
-                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
-                        AND {temp_col} IS NOT NULL
-                    ) WHERE rn = 1
-                    """
-                    try:
-                        client.query(scrub_sql).result()
-                        st.success(f"✅ {scrub_target} purged and snapped to top-of-hour.")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"Scrub Error: {e}")
+                # 1. Selection Controls
+                with st.spinner(f"Loading locations for {selected_project}..."):
+                    # We reuse your existing universal fetcher
+                    export_df = get_universal_portal_data(selected_project, only_approved=True)
+                
+                if export_df.empty:
+                    st.error("No data available to graph.")
+                else:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        # Allow "All" or specific pipe selection
+                        all_locs = sorted(export_df['Location'].unique().tolist())
+                        target_loc = st.selectbox("Select Pipe / Location", ["All Pipes"] + all_locs)
+                    
+                    with col_b:
+                        file_format = st.selectbox("Export Format", ["png", "pdf", "svg"])
+
+                    # 2. Filtering Logic
+                    if target_loc == "All Pipes":
+                        locs_to_process = all_locs
+                    else:
+                        locs_to_process = [target_loc]
+
+                    # 3. Export Action
+                    if st.button(f"🚀 Generate {len(locs_to_process)} Graph(s)"):
+                        # Define view window based on current sidebar settings or fixed lookback
+                        now_utc = pd.Timestamp.now(tz='UTC')
+                        end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
+                        start_view = end_view - timedelta(weeks=4)
+
+                        for loc in locs_to_process:
+                            loc_df = export_df[export_df['Location'] == loc]
+                            
+                            if not loc_df.empty:
+                                # Build the figure using your existing engine
+                                fig = build_high_speed_graph(
+                                    loc_df, 
+                                    f"{selected_project} - {loc}", 
+                                    start_view, 
+                                    end_view, 
+                                    tuple(active_refs), 
+                                    unit_mode, 
+                                    unit_label, 
+                                    display_tz=display_tz
+                                )
+                                
+                                # Convert Plotly Figure to Image Bytes
+                                # Note: This requires the 'kaleido' python package
+                                try:
+                                    img_bytes = fig.to_image(format=file_format, width=1200, height=600)
+                                    
+                                    st.download_button(
+                                        label=f"📥 Download {loc} ({file_format.upper()})",
+                                        data=img_bytes,
+                                        file_name=f"{selected_project}_{loc}.{file_format}",
+                                        mime=f"image/{file_format}" if file_format != "pdf" else "application/pdf",
+                                        key=f"dl_{loc}"
+                                    )
+                                except Exception as img_err:
+                                    st.error(f"Error generating image for {loc}: {img_err}")
+                            else:
+                                st.warning(f"No data for location: {loc}")
                         
         with tab3:
             st.subheader("📥 Export Project Data (SensorConnect Format)")
