@@ -388,77 +388,73 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 # Print graphs #
 ################
 def apply_report_frame(fig, project_name, title, fig_num, date_str):
-    """Adds the SoilFreeze border, logo, and engineering metadata footer."""
+    """Creates the 11x8.5 landscape frame with a centered title box."""
     fig.update_layout(
-        margin=dict(t=120, l=80, r=80, b=100),
-        # DRAW OUTER BORDER & HEADER LINE
+        width=1100,
+        height=850,
+        margin=dict(t=150, l=80, r=80, b=100),
+        paper_bgcolor='white',
+        plot_bgcolor='white',
         shapes=[
-            dict(type="rect", xref="paper", yref="paper", x0=-0.08, y0=-0.15, x1=1.08, y1=1.15, line=dict(color="black", width=2)),
-            dict(type="line", xref="paper", yref="paper", x0=-0.08, y0=1.03, x1=1.08, y1=1.03, line=dict(color="black", width=1))
+            # OUTER BORDER
+            dict(type="rect", xref="paper", yref="paper", x0=-0.05, y0=-0.1, x1=1.05, y1=1.1, line=dict(color="black", width=2)),
+            # CENTER TITLE BOX (The Project Box)
+            dict(type="rect", xref="paper", yref="paper", x0=0.25, y0=1.02, x1=0.75, y1=1.12, fillcolor="#F8F9F9", line=dict(color="black", width=1)),
         ],
         annotations=[
-            # TOP LEFT: Project Details
-            dict(text=f"<b>PROJECT:</b> {project_name}<br><i>Lake Stevens, WA</i>", 
-                 x=-0.05, y=1.11, xref="paper", yref="paper", showarrow=False, align="left", font=dict(size=12)),
-            
-            # TOP CENTER: Graph Title
-            dict(text=f"<b>{title.upper()}</b>", 
-                 x=0.5, y=1.12, xref="paper", yref="paper", showarrow=False, font=dict(size=18)),
-            
-            # TOP RIGHT: SoilFreeze Logo
-            dict(text="<span style='color:#003366; font-size:20px;'><b>SoilFreeze</b></span><br><small>ENGINEERING SOLID GROUND</small>", 
-                 x=1.05, y=1.11, xref="paper", yref="paper", showarrow=False, align="right"),
-            
-            # BOTTOM LEFT: Figure Number
-            dict(text=f"<b>FIGURE {fig_num}</b>", 
-                 x=-0.05, y=-0.12, xref="paper", yref="paper", showarrow=False, font=dict(size=14)),
-            
-            # BOTTOM RIGHT: Date
-            dict(text=f"<b>DATE:</b> {date_str}", 
-                 x=1.05, y=-0.12, xref="paper", yref="paper", showarrow=False, font=dict(size=12)),
+            # PROJECT TITLE (Inside the Box)
+            dict(text=f"<b>{project_name.upper()}</b>", x=0.5, y=1.07, xref="paper", yref="paper", showarrow=False, font=dict(size=16)),
+            # PIPE / FIGURE TITLE (Centered below box)
+            dict(text=f"<b>{title}</b>", x=0.5, y=0.98, xref="paper", yref="paper", showarrow=False, font=dict(size=20, color="#003366")),
+            # LOGO SECTION (Top Right)
+            dict(text="<b>SoilFreeze</b><br><small>SOLID GROUND</small>", x=1.02, y=1.07, xref="paper", yref="paper", showarrow=False, align="right", font=dict(color="#003366")),
+            # FOOTER: FIG NUMBER
+            dict(text=f"<b>FIGURE {fig_num}</b>", x=0, y=-0.07, xref="paper", yref="paper", showarrow=False, font=dict(size=14)),
+            # FOOTER: DATE
+            dict(text=f"<b>DATE:</b> {date_str}", x=1, y=-0.07, xref="paper", yref="paper", showarrow=False, font=dict(size=12)),
         ]
     )
     return fig
 
+# Define the SoilFreeze Color Palette to match the PDF 
+SOILFREEZE_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", 
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+]
+
 def build_depth_report_graph(df, loc_name, unit_label):
-    """Fixed Vertical Profile Logic: Finds closest readings within a 6h window of snapshots."""
+    """Updated with specific line colors to match your existing PDF reports."""
     fig = go.Figure()
     if df.empty: return fig
     
-    # Snapshot Times: Most recent and exactly 7 days ago
     latest_ts = df['timestamp'].max()
+    # Snapshots for Fig 4.x
     times_to_plot = [
         (latest_ts - pd.Timedelta(days=7), "Previous Week", "dash", "gray"),
-        (latest_ts, "Current Profile", "solid", "#8B0000") # Dark Red
+        (latest_ts, "Current Profile", "solid", "red")
     ]
     
     for target_ts, label, dash_style, color in times_to_plot:
-        # Search window to handle inconsistent sensor reporting
-        window_mask = (df['timestamp'] >= target_ts - pd.Timedelta(hours=6)) & \
-                      (df['timestamp'] <= target_ts + pd.Timedelta(hours=6))
+        window_mask = (df['timestamp'] >= target_ts - pd.Timedelta(hours=6)) & (df['timestamp'] <= target_ts + pd.Timedelta(hours=6))
         snap_data = df[window_mask].copy()
-        
         if not snap_data.empty:
-            # Find the single reading closest to the target time for each depth/node
             snap_data['time_diff'] = (snap_data['timestamp'] - target_ts).abs()
             snap_df = snap_data.sort_values('time_diff').groupby('NodeNum').head(1).sort_values('Depth_Num')
             
             fig.add_trace(go.Scatter(
                 x=snap_df['temperature'], y=snap_df['Depth_Num'],
-                name=f"{label} ({target_ts.strftime('%m/%d %H:%M')})",
-                line=dict(width=3, dash=dash_style, color=color),
-                mode='lines+markers', marker=dict(size=8)
+                name=f"{label} ({target_ts.strftime('%m/%d')})",
+                line=dict(width=4, dash=dash_style, color=color),
+                mode='lines+markers', marker=dict(size=10, line=dict(width=1, color='black'))
             ))
 
-    # Match the axes to the engineering PDF style
     fig.update_layout(
-        xaxis=dict(title=f"Temperature ({unit_label})", gridcolor='Gainsboro', zeroline=True, zerolinecolor='black'),
-        yaxis=dict(title="Depth [ft]", range=[df['Depth_Num'].max() + 2, 0], dtick=2, gridcolor='Gainsboro'),
-        plot_bgcolor='white',
-        legend=dict(orientation="h", y=-0.2, x=0.5, xanchor="center")
+        xaxis=dict(title=f"Temperature ({unit_label})", gridcolor='#D5D8DC', zeroline=True, zerolinecolor='black', range=[-10, 80]),
+        yaxis=dict(title="Depth [ft]", range=[22, 0], dtick=2, gridcolor='#D5D8DC', showline=True, linecolor='black'),
+        legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center", bordercolor="black", borderwidth=1)
     )
-    # Add Blue Freezing Reference Line
-    fig.add_vline(x=32 if unit_label == "°F" else 0, line_dash="dot", line_color="DeepSkyBlue", line_width=2)
+    # Reference Line for Freezing 
+    fig.add_vline(x=32 if unit_label == "°F" else 0, line_dash="dot", line_color="blue", line_width=2)
     return fig
    
 #######################
@@ -1021,40 +1017,38 @@ elif service == "📤 Data Intake Lab":
                         export_format = st.selectbox("Format", ["png", "pdf"])
 
                     if st.button("🚀 Generate Numbered Report Bundle"):
-                        # Define constants for this report run
                         date_str = datetime.now().strftime("%m/%d/%Y")
                         now_utc = pd.Timestamp.now(tz='UTC')
                         end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
                         start_view = end_view - timedelta(weeks=4)
                         pipes = sorted(export_df['Location'].dropna().unique().tolist())
                         
-                        # --- FIGURE 2: BANKS ---
-                        if "Bank Trends (Fig 2)" in report_types:
-                            bank_df = export_df[export_df['Bank'].notna() & (export_df['Bank'].astype(str) != "")]
-                            if not bank_df.empty:
-                                fig2 = build_high_speed_graph(bank_df, "Bank Temperatures", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
-                                fig2 = apply_report_frame(fig2, selected_project, "Bank Temperatures", "2", date_str)
-                                st.plotly_chart(fig2, use_container_width=True)
-                                st.download_button("📥 Download Fig 2", fig2.to_image(format=export_format, width=1200, height=800), f"Fig2_Banks.{export_format}", key="dl_f2")
+                        # Set Plotly color sequence to your app's palette
+                        import plotly.io as pio
+                        pio.templates.default.layout.colorway = SOILFREEZE_COLORS
 
-                        # --- FIGURES 3 & 4: PIPES ---
                         for i, loc in enumerate(pipes, start=1):
                             loc_df = export_df[export_df['Location'] == loc]
                             
-                            # Fig 3.x: Time Trends
+                            # FIG 3.X (Time vs Temp)
                             if "Time vs Temp (Fig 3)" in report_types:
                                 fig3 = build_high_speed_graph(loc_df, f"Temperature {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
+                                # The 'title' here is centered via apply_report_frame
                                 fig3 = apply_report_frame(fig3, selected_project, f"Temperature {loc}", f"3.{i}", date_str)
-                                st.plotly_chart(fig3, use_container_width=True)
-                                st.download_button(f"📥 Download Fig 3.{i}", fig3.to_image(format=export_format, width=1200, height=800), f"Fig3.{i}_{loc}.{export_format}", key=f"dl_3_{i}")
+                                st.plotly_chart(fig3)
+                                
+                                # Export with 11 x 8.5 ratio (1100px x 850px)
+                                img3 = fig3.to_image(format=export_format, width=1100, height=850)
+                                st.download_button(f"📥 Download Fig 3.{i}", img3, f"Fig3.{i}_{loc}.{export_format}", key=f"dl_3_{i}")
 
-                            # Fig 4.x: Vertical Profiles
+                            # FIG 4.X (Depth vs Temp)
                             if "Depth vs Temp (Fig 4)" in report_types:
                                 fig4 = build_depth_report_graph(loc_df, loc, unit_label)
                                 fig4 = apply_report_frame(fig4, selected_project, f"Temperature vs Depth: {loc}", f"4.{i}", date_str)
-                                st.plotly_chart(fig4, use_container_width=True)
-                                st.download_button(f"📥 Download Fig 4.{i}", fig4.to_image(format=export_format, width=1200, height=800), f"Fig4.{i}_{loc}.{export_format}", key=f"dl_4_{i}")
-
+                                st.plotly_chart(fig4)
+                                
+                                img4 = fig4.to_image(format=export_format, width=1100, height=850)
+                                st.download_button(f"📥 Download Fig 4.{i}", img4, f"Fig4.{i}_{loc}.{export_format}", key=f"dl_4_{i}")
         
         with tab3:
             st.subheader("📥 Export Project Data (SensorConnect Format)")
