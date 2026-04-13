@@ -166,21 +166,24 @@ def convert_val(x):
 #################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", is_report=False):
     """
-    Unified Plotly engine. 
-    Restores Dashboard grid hierarchy, Now line, and tooltips while supporting Report Mode.
+    Unified engine with a safety check for timezones.
     """
-    if df.empty:
-        return go.Figure()
-
+    if df.empty: return go.Figure()
+    
+    # --- SAFETY CHECK ---
+    # If display_tz is invalid or missing, force it to UTC
+    if not display_tz or str(display_tz).strip() == "" or display_tz == "None":
+        display_tz = "UTC"
+        
     plot_df = df.copy()
     
     # 1. TIMEZONE CONVERSION
-    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
-    
-    # Adjust windows and 'Now' line to match local zone
-    start_local = start_view.astimezone(pytz.timezone(display_tz))
-    end_local = end_view.astimezone(pytz.timezone(display_tz))
-    now_local = pd.Timestamp.now(tz=display_tz)
+    # This is line 178 where it was crashing
+    try:
+        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
+    except Exception:
+        # Final fallback to UTC if the string is still unrecognized
+        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert("UTC")
 
     # 2. UNIT CONVERSION
     if unit_mode == "Celsius":
@@ -478,26 +481,25 @@ with st.sidebar:
     st.divider()
 
     # 5. ADVANCED SETTINGS
-with st.expander("⚙️ Advanced Settings"):
-    # Map friendly names to IANA keys that Pandas/ZoneInfo recognize
-    tz_map = {
+# --- SIDEBAR: ADVANCED SETTINGS ---
+with st.sidebar.expander("⚙️ Advanced Settings"):
+    # The 'keys' are what the user sees, the 'values' are what the code gets
+    tz_lookup = {
         "UTC": "UTC",
-        "Pacific (PST/PDT)": "US/Pacific",
-        "Mountain (MST/MDT)": "US/Mountain",
-        "Central (CST/CDT)": "US/Central",
-        "Eastern (EST/EDT)": "US/Eastern"
+        "Pacific": "US/Pacific",
+        "Mountain": "US/Mountain",
+        "Central": "US/Central",
+        "Eastern": "US/Eastern"
     }
     
-    selected_tz_name = st.selectbox(
+    selected_tz = st.selectbox(
         "Timezone",
-        options=list(tz_map.keys()),
-        index=1  # Defaults to Pacific
+        options=list(tz_lookup.keys()),
+        index=1  # Default to Pacific
     )
     
-    # This is the variable passed to your functions
-    display_tz = tz_map[selected_tz_name]
-    
-    show_diagnostics = st.checkbox("Show Sensor Metadata", value=False)
+    # This is the variable that gets passed to build_high_speed_graph
+    display_tz = tz_lookup[selected_tz]
     
 #################
 # --- PAGES --- #
