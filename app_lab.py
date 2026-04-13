@@ -405,14 +405,18 @@ def convert_val(f_val):
 
 st.sidebar.divider()
 
-# Project Selection
+# --- UPDATED PROJECT SELECTION ---
 selected_project = None
-if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
-    try:
-        proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
-        proj_df = client.query(proj_q).to_dataframe()
-        selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
-    except: st.sidebar.warning("No projects found.")
+try:
+    # This now runs for every page, including Global Overview
+    proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
+    proj_df = client.query(proj_q).to_dataframe()
+    
+    # We add an index or a "Select Project" placeholder if you don't want a default
+    project_list = sorted(proj_df['Project'].dropna().unique())
+    selected_project = st.sidebar.selectbox("🎯 Active Project", project_list)
+except Exception as e: 
+    st.sidebar.warning(f"Project fetch failed: {e}")
 
 st.sidebar.divider()
 st.sidebar.write("### 📏 Reference Lines")
@@ -433,14 +437,6 @@ tz_lookup = {
 }
 display_tz = tz_lookup[tz_mode]
 
-# Project Selection
-selected_project = None
-if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
-    try:
-        proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
-        proj_df = client.query(proj_q).to_dataframe()
-        selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
-    except: st.sidebar.warning("No projects found.")
 #################
 # --- PAGES --- #
 #################
