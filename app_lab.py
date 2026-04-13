@@ -969,46 +969,46 @@ elif service == "📤 Data Intake Lab":
 
        # --- NEW: GRAPH EXPORT LAB ---
         with tab2:
-    st.subheader("📤 Professional Client Report Export")
-    
-    if not selected_project:
-        st.warning("Please select a project in the sidebar.")
-    else:
-        # Fetch Data
-        export_df = get_universal_portal_data(selected_project, only_approved=True)
-        export_df['Depth_Num'] = pd.to_numeric(export_df['Depth'], errors='coerce')
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            report_type = st.multiselect("Select Report Types", ["Bank Trends (Fig 2)", "Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"], default=["Time vs Temp (Fig 3)"])
-        with col2:
-            export_format = st.selectbox("Format", ["png", "pdf"])
-
-        if st.button("🚀 Generate Numbered Report Bundle"):
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            pipes = sorted(export_df['Location'].unique().tolist())
+            st.subheader("📤 Professional Client Report Export")
             
-            # --- FIGURE 2: BANKS ---
-            if "Bank Trends (Fig 2)" in report_type:
-                bank_df = export_df[export_df['Bank'].notna()]
-                if not bank_df.empty:
-                    fig = build_high_speed_graph(bank_df, "Bank Temperatures", start_view, end_view, tuple(active_refs), unit_mode, unit_label)
-                    fig = apply_report_frame(fig, selected_project, "Bank Temperatures", "2", date_str)
-                    st.plotly_chart(fig) # You can add download buttons here for each
-
-            # --- FIGURE 3 & 4: PIPE DATA ---
-            for i, loc in enumerate(pipes, start=1):
-                loc_df = export_df[export_df['Location'] == loc]
+            if not selected_project:
+                st.warning("Please select a project in the sidebar.")
+            else:
+                # Fetch Data
+                export_df = get_universal_portal_data(selected_project, only_approved=True)
+                export_df['Depth_Num'] = pd.to_numeric(export_df['Depth'], errors='coerce')
                 
-                if "Time vs Temp (Fig 3)" in report_type:
-                    fig3 = build_high_speed_graph(loc_df, f"Temperature {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label)
-                    fig3 = apply_report_frame(fig3, selected_project, f"Temperature {loc}", f"3.{i}", date_str)
-                    st.plotly_chart(fig3)
-
-                if "Depth vs Temp (Fig 4)" in report_type:
-                    fig4 = build_depth_report_graph(loc_df, loc, unit_label)
-                    fig4 = apply_report_frame(fig4, selected_project, f"Temperature vs Depth: {loc}", f"4.{i}", date_str)
-                    st.plotly_chart(fig4)
+                col1, col2 = st.columns(2)
+                with col1:
+                    report_type = st.multiselect("Select Report Types", ["Bank Trends (Fig 2)", "Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"], default=["Time vs Temp (Fig 3)"])
+                with col2:
+                    export_format = st.selectbox("Format", ["png", "pdf"])
+        
+                if st.button("🚀 Generate Numbered Report Bundle"):
+                    date_str = datetime.now().strftime("%Y-%m-%d")
+                    pipes = sorted(export_df['Location'].unique().tolist())
+                    
+                    # --- FIGURE 2: BANKS ---
+                    if "Bank Trends (Fig 2)" in report_type:
+                        bank_df = export_df[export_df['Bank'].notna()]
+                        if not bank_df.empty:
+                            fig = build_high_speed_graph(bank_df, "Bank Temperatures", start_view, end_view, tuple(active_refs), unit_mode, unit_label)
+                            fig = apply_report_frame(fig, selected_project, "Bank Temperatures", "2", date_str)
+                            st.plotly_chart(fig) # You can add download buttons here for each
+        
+                    # --- FIGURE 3 & 4: PIPE DATA ---
+                    for i, loc in enumerate(pipes, start=1):
+                        loc_df = export_df[export_df['Location'] == loc]
+                        
+                        if "Time vs Temp (Fig 3)" in report_type:
+                            fig3 = build_high_speed_graph(loc_df, f"Temperature {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label)
+                            fig3 = apply_report_frame(fig3, selected_project, f"Temperature {loc}", f"3.{i}", date_str)
+                            st.plotly_chart(fig3)
+        
+                        if "Depth vs Temp (Fig 4)" in report_type:
+                            fig4 = build_depth_report_graph(loc_df, loc, unit_label)
+                            fig4 = apply_report_frame(fig4, selected_project, f"Temperature vs Depth: {loc}", f"4.{i}", date_str)
+                            st.plotly_chart(fig4)
                         
         with tab3:
             st.subheader("📥 Export Project Data (SensorConnect Format)")
