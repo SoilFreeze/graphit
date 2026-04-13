@@ -478,13 +478,26 @@ with st.sidebar:
     st.divider()
 
     # 5. ADVANCED SETTINGS
-    with st.expander("⚙️ Advanced Settings"):
-        display_tz = st.selectbox(
-            "Timezone",
-            ["UTC", "US/Pacific", "US/Mountain", "US/Central", "US/Eastern"],
-            index=1 
-        )
-        show_diagnostics = st.checkbox("Show Sensor Metadata", value=False)
+with st.expander("⚙️ Advanced Settings"):
+    # Map friendly names to IANA keys that Pandas/ZoneInfo recognize
+    tz_map = {
+        "UTC": "UTC",
+        "Pacific (PST/PDT)": "US/Pacific",
+        "Mountain (MST/MDT)": "US/Mountain",
+        "Central (CST/CDT)": "US/Central",
+        "Eastern (EST/EDT)": "US/Eastern"
+    }
+    
+    selected_tz_name = st.selectbox(
+        "Timezone",
+        options=list(tz_map.keys()),
+        index=1  # Defaults to Pacific
+    )
+    
+    # This is the variable passed to your functions
+    display_tz = tz_map[selected_tz_name]
+    
+    show_diagnostics = st.checkbox("Show Sensor Metadata", value=False)
     
 #################
 # --- PAGES --- #
