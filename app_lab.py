@@ -168,7 +168,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
     # 2. THE FIX: Generate 'label' column if missing
-    # This logic checks for a Bank name, otherwise defaults to Depth 
+    # This logic checks for a Bank name, otherwise defaults to Depth
     if 'label' not in plot_df.columns:
         plot_df['label'] = plot_df.apply(
             lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
@@ -191,14 +191,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         ))
 
     # 4. REFERENCE LINE: Default to Freezing for reports
-    # Only show the 32°F / 0°C line as requested for the default export 
+    # Only show the 32°F / 0°C line as requested for the default export
     ref_val = 32 if unit_label == "°F" else 0
     fig.add_hline(y=ref_val, line_dash="dash", line_color="DeepSkyBlue", 
                   annotation_text="Freezing", annotation_position="top right")
 
     # 5. FINAL LAYOUT
     fig.update_layout(
-        # Suppress internal title for reports so apply_report_frame can center it 
+        # Suppress internal title for reports so apply_report_frame can center it
         title=None if is_report else title,
         plot_bgcolor='white',
         xaxis=dict(
