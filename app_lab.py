@@ -219,18 +219,31 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     fig = go.Figure()
 
-    # 4. ADD TRACES WITH CLEAN HOVERS
+    # 4. ADD TRACES WITH GAP DETECTION
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         hover_name = lbl.split('(')[0].strip()
         
+        # --- GAP DETECTION LOGIC ---
+        # If is_report is True, we usually want clean lines, 
+        # but for accuracy, we break the line if the gap > 6 hours.
+        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gap_mask = s_df['gap_hrs'] > 6.0
+        
+        if gap_mask.any():
+            # Create "None" entries 1 minute after the gap starts to force the break
+            gaps = s_df[gap_mask].copy()
+            gaps['temperature'] = None
+            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], 
             y=s_df['temperature'], 
             name=lbl, 
             mode='lines',
             line=dict(width=2.5 if is_report else 1.5),
-            connectgaps=False,
+            connectgaps=False, # This is the critical setting
             customdata=[hover_name] * len(s_df),
             hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
