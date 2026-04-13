@@ -405,15 +405,14 @@ def build_depth_report_graph(df, loc_name, unit_label):
     return fig
 
 # ############################################################
-# # --- SIDEBAR: GLOBAL CONTROLS & NAVIGATION --- #
+# # --- SIDEBAR: GLOBAL CONTROLS & NAVIGATION ---           #
 # ############################################################
 
 with st.sidebar:
-    st.image("https://your-logo-url.com/logo.png", width=200) # Optional: SoilFreeze Logo
     st.title("❄️ SoilFreeze Lab")
     st.markdown("---")
 
-    # 1. NAVIGATION: Service Selection
+    # 1. NAVIGATION
     service = st.radio(
         "🛠️ Select Service",
         ["📊 Project Dashboard", "📤 Data Intake Lab", "🛠️ Admin Tools"]
@@ -421,43 +420,46 @@ with st.sidebar:
     st.markdown("---")
 
     # 2. DATA SOURCE: Project Selection
-    # Assuming 'project_list' is retrieved from your BigQuery/API metadata
+    # Ensure project_list is defined earlier in your code
     selected_project = st.selectbox(
         "📁 Select Project",
         options=project_list if 'project_list' in locals() else ["None Available"],
         index=0
     )
 
-    # 3. UNIT CONTROLS: Imperial vs Metric
+    # 3. UNIT CONTROLS
     unit_mode = st.toggle("🌡️ Display Celsius", value=False)
     unit_label = "°C" if unit_mode else "°F"
 
     st.markdown("---")
 
-    # 4. REFERENCE LINES: Hardcoded Default to Freezing
+    # 4. REFERENCE LINES: Individual Checkboxes
     st.markdown("### 📏 Reference Lines")
     
-    # We define the options here. 
-    # The default is set to ONLY include the Freezing line.
-    ref_options = {
-        f"Freezing ({'0' if unit_mode else '32'}{unit_label})": (32, "Freezing"),
-        f"Type A ({'-11.1' if unit_mode else '12'}{unit_label})": (12, "Type A"),
-        f"Type B ({-1.1 if unit_mode else '30'}{unit_label})": (30, "Type B")
-    }
+    # Define current display values based on unit toggle
+    freeze_val = 0 if unit_mode else 32
+    type_a_val = -11.1 if unit_mode else 12
+    type_b_val = -1.1 if unit_mode else 30
 
-    selected_ref_labels = st.multiselect(
-        "Active References",
-        options=list(ref_options.keys()),
-        default=[list(ref_options.keys())[0]], # Defaults to 'Freezing'
-        help="Freezing is selected by default for all dashboard and report views."
-    )
+    # Create the checkboxes
+    # value=True makes Freezing selected by default
+    show_freeze = st.checkbox(f"Freezing ({freeze_val}{unit_label})", value=True)
+    show_type_a = st.checkbox(f"Type A ({type_a_val}{unit_label})", value=False)
+    show_type_b = st.checkbox(f"Type B ({type_b_val}{unit_label})", value=False)
 
-    # Convert the user selection into the (value, name) tuples expected by build_high_speed_graph
-    active_refs = [ref_options[label] for label in selected_ref_labels]
+    # Build the active_refs list based on check states
+    # This list is what the build_high_speed_graph function reads
+    active_refs = []
+    if show_freeze:
+        active_refs.append((32, "Freezing")) # Internal logic always uses 32/12/30
+    if show_type_a:
+        active_refs.append((12, "Type A"))
+    if show_type_b:
+        active_refs.append((30, "Type B"))
 
     st.markdown("---")
 
-    # 5. TIMEZONE & DIAGNOSTICS
+    # 5. ADVANCED SETTINGS
     with st.expander("⚙️ Advanced Settings"):
         display_tz = st.selectbox(
             "Timezone",
@@ -467,9 +469,7 @@ with st.sidebar:
         
         show_diagnostics = st.checkbox("Show Sensor Metadata", value=False)
 
-    # 6. APP FOOTER
     st.markdown(f"**Status:** 🟢 Connected")
-    st.caption(f"Last Refresh: {datetime.now().strftime('%H:%M:%S')}")
     
 #################
 # --- PAGES --- #
