@@ -152,80 +152,23 @@ def get_bq_client():
 
 client = get_bq_client()
 
-#########################
-# --- REBUILD TABLE --- #
-#########################
-def rebuild_master_table(mode="preserve"):
-    """
-    Failsafe Rebuild: Strips all non-numeric characters to ensure 
-    a match between CSV IDs and Google Sheet IDs.
-    """
-    table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
-    
-    # Check if table exists to handle the 'ex' alias error
-    exists = True
-    try:
-        client.get_table(table_id)
-    except Exception:
-        exists = False
-
-    status_logic = "TRUE" if mode == "approve_all" else ("COALESCE(ex.is_approved, FALSE)" if exists else "FALSE")
-    join_clause = f"LEFT JOIN `{table_id}` ex ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id" if (exists and mode == "preserve") else ""
-
-    scrub_sql = f"""
-        CREATE OR REPLACE TABLE `{table_id}` AS 
-        WITH RawUnified AS (
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
-                   -- Clean the ID: Remove colons, spaces, and non-digits
-                   REGEXP_REPLACE(CAST(sensor_id AS STRING), r'[^0-9]', '') as clean_node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
-            UNION ALL
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, 
-                   REGEXP_REPLACE(REPLACE(nodenumber, ':', '-'), r'[^0-9]', '') as clean_node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
-        ),
-        HourlyDedupped AS (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY clean_node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
-            FROM RawUnified
-        )
-        SELECT 
-            h.ts as timestamp, 
-            h.temp as temperature, 
-            m.NodeNum as sensor_id,
-            m.NodeNum as sensor_name,
-            m.Project as project, 
-            m.Location as location, 
-            m.Depth as depth, 
-            {status_logic} as is_approved
-        FROM HourlyDedupped h 
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
-            -- Match by stripping the Google Sheet PhysicalID of all non-digits too
-            ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
-        {join_clause}
-        WHERE h.rank = 1
-    """
-    try:
-        client.query(scrub_sql).result()
-        return True
-    except Exception as e:
-        st.error(f"Rebuild Error: {e}")
-        return False
-
 #################
 # --- Graph --- #
 #################
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", is_report=False):
     """
-    High-speed engine with automatic label generation and Freezing reference line.
+    High-speed engine with automatic label generation and report-specific formatting.
     """
-    if df.empty: return go.Figure()
-    
+    if df.empty:
+        return go.Figure()
+
     plot_df = df.copy()
+    
     # 1. TIMEZONE CONVERSION
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
-
-    # 2. THE FIX: Create the 'label' column if it doesn't exist
-    # This matches the naming logic in your original dashboard 
+    
+    # 2. THE FIX: Generate 'label' column if missing
+    # This logic checks for a Bank name, otherwise defaults to Depth 
     if 'label' not in plot_df.columns:
         plot_df['label'] = plot_df.apply(
             lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
@@ -237,43 +180,48 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. PLOTTING LOOP
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
+        
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], 
             y=s_df['temperature'], 
             name=lbl, 
             mode='lines',
-            line=dict(width=2)
+            line=dict(width=2),
+            connectgaps=False
         ))
 
-    # 4. REFERENCE LINE: Default to 32°F for reports
+    # 4. REFERENCE LINE: Default to Freezing for reports
+    # Only show the 32°F / 0°C line as requested for the default export 
     ref_val = 32 if unit_label == "°F" else 0
     fig.add_hline(y=ref_val, line_dash="dash", line_color="DeepSkyBlue", 
                   annotation_text="Freezing", annotation_position="top right")
 
-    # 5. LAYOUT
+    # 5. FINAL LAYOUT
     fig.update_layout(
+        # Suppress internal title for reports so apply_report_frame can center it 
+        title=None if is_report else title,
         plot_bgcolor='white',
         xaxis=dict(
-            range=[start_view, end_view], 
-            gridcolor='Gainsboro', 
+            range=[start_view, end_view],
+            gridcolor='Gainsboro',
             showline=True, 
-            linecolor='black',
+            linecolor='black', 
             mirror=True
         ),
         yaxis=dict(
-            title=f"Temperature ({unit_label})", 
-            gridcolor='Gainsboro', 
-            showline=True, 
+            title=f"Temperature ({unit_label})",
+            gridcolor='Gainsboro',
+            showline=True,
             linecolor='black',
             mirror=True
         ),
         legend=dict(
-            title="Sensors", 
-            orientation="v", 
-            x=1.02, 
-            y=1, 
-            xanchor="left", 
-            bordercolor="Black", 
+            title="Sensors",
+            orientation="v",
+            x=1.02,
+            y=1,
+            xanchor="left",
+            bordercolor="Black",
             borderwidth=1
         )
     )
