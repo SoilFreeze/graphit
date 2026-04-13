@@ -1004,7 +1004,6 @@ elif service == "📤 Data Intake Lab":
             st.warning("👈 Please select a project in the sidebar first.")
         else:
             # 1. SET PROJECT REPORT TITLE
-            # This allows you to set "Lake Stevens LS2C" once for all graphs
             report_project_title = st.text_input("📝 Report Project Name (Displayed in Title Box)", value=selected_project)
             
             with st.spinner(f"Preparing project data..."):
@@ -1021,7 +1020,7 @@ elif service == "📤 Data Intake Lab":
                         ["Bank Trends (Fig 2)", "Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"], 
                         default=["Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"])
                 with c2:
-                    # Set PDF as the default index (index=1)
+                    # Set PDF as the default (index 1)
                     export_format = st.selectbox("Format", ["png", "pdf"], index=1)
     
                 if st.button("Generate Numbered Report Bundle"):
@@ -1040,21 +1039,21 @@ elif service == "📤 Data Intake Lab":
                     for i, loc in enumerate(pipes, start=1):
                         loc_df = export_df[export_df['Location'] == loc]
                         
-                        # Figure 3.x
+                        # Figure 3.x: Time vs Temp
                         if "Time vs Temp (Fig 3)" in report_types:
                             fig3 = build_high_speed_graph(loc_df, f"Temperature {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
-                            # We use report_project_title from the text input here
-                            fig3 = apply_report_frame(fig3, report_project_title, f"Temperature {loc}", f[cite: 3].{i}, date_str)
+                            # FIXED: string formatting for fig_num
+                            fig3 = apply_report_frame(fig3, report_project_title, f"Temperature {loc}", f"3.{i}", date_str)
                             st.plotly_chart(fig3)
                             
                             img3 = fig3.to_image(format=export_format, width=1100, height=850)
                             st.download_button(f"📥 Download Fig 3.{i}", img3, f"Fig3.{i}_{loc}.{export_format}", key=f"dl_3_{i}")
     
-                        # Figure 4.x
+                        # Figure 4.x: Depth vs Temp
                         if "Depth vs Temp (Fig 4)" in report_types:
                             fig4 = build_depth_report_graph(loc_df, loc, unit_label)
-                            # We use report_project_title from the text input here
-                            fig4 = apply_report_frame(fig4, report_project_title, f"Temperature vs Depth: {loc}", f[cite: 4].{i}, date_str)
+                            # FIXED: string formatting for fig_num
+                            fig4 = apply_report_frame(fig4, report_project_title, f"Temperature vs Depth: {loc}", f"4.{i}", date_str)
                             st.plotly_chart(fig4)
                             
                             img4 = fig4.to_image(format=export_format, width=1100, height=850)
