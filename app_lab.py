@@ -399,14 +399,14 @@ def apply_report_frame(fig, project_name, title, fig_num, date_str):
         shapes=[
             # OUTER BORDER
             dict(type="rect", xref="paper", yref="paper", x0=-0.05, y0=-0.1, x1=1.05, y1=1.1, line=dict(color="black", width=2)),
-            # CENTER PROJECT BOX
+            # CENTER PROJECT BOX (Centered at x=0.5)
             dict(type="rect", xref="paper", yref="paper", x0=0.25, y0=1.02, x1=0.75, y1=1.12, fillcolor="#F2F4F4", line=dict(color="black", width=1.5)),
         ],
         annotations=[
             # PROJECT TITLE (Centered in the Box)
-            dict(text=f"<b>{project_name.upper()}</b>", x=0.5, y=1.07, xref="paper", yref="paper", showarrow=False, font=dict(size=18)),
+            dict(text=f"<b>{project_name.upper()}</b>", x=0.5, y=1.07, xref="paper", yref="paper", showarrow=False, font=dict(size=18), xanchor="center"),
             # PIPE TITLE (Centered below the box)
-            dict(text=f"<b>{title.upper()}</b>", x=0.5, y=0.98, xref="paper", yref="paper", showarrow=False, font=dict(size=22, color="#003366")),
+            dict(text=f"<b>{title.upper()}</b>", x=0.5, y=0.98, xref="paper", yref="paper", showarrow=False, font=dict(size=22, color="#003366"), xanchor="center"),
             # LOGO SECTION (Top Right)
             dict(text="<b>SoilFreeze</b><br><small>SOLID GROUND</small>", x=1.02, y=1.07, xref="paper", yref="paper", showarrow=False, align="right", font=dict(color="#003366")),
             # FOOTER: FIG NUMBER
@@ -417,11 +417,11 @@ def apply_report_frame(fig, project_name, title, fig_num, date_str):
     )
     return fig
 
-# SoilFreeze Official Palette
+# Official SoilFreeze Color Palette
 SOILFREEZE_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
 
 def build_depth_report_graph(df, loc_name, unit_label):
-    """Refined Depth Profile for 11x8.5 Export."""
+    """Vertical Profile for 11x8.5 Export with fixed coloring."""
     fig = go.Figure()
     if df.empty: return fig
     
@@ -432,6 +432,7 @@ def build_depth_report_graph(df, loc_name, unit_label):
     ]
     
     for target_ts, label, dash_style, color in times_to_plot:
+        # Search window for sensor data
         window = df[(df['timestamp'] >= target_ts - pd.Timedelta(hours=6)) & (df['timestamp'] <= target_ts + pd.Timedelta(hours=6))].copy()
         if not window.empty:
             window['time_diff'] = (window['timestamp'] - target_ts).abs()
@@ -449,45 +450,7 @@ def build_depth_report_graph(df, loc_name, unit_label):
         yaxis=dict(title="Depth [ft]", range=[22, 0], dtick=2, gridcolor='#D5D8DC', showline=True, linecolor='black'),
         legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center", bordercolor="black", borderwidth=1)
     )
-    return fig
-🚀 Updated Export Block (Data Intake Lab)
-This version fixes the AttributeError by correctly accessing the template layout and ensures the Project Name is passed correctly into the center box.
-
-Python
-                    if st.button("🚀 Generate Numbered Report Bundle"):
-                        date_str = datetime.now().strftime("%m/%d/%Y")
-                        now_utc = pd.Timestamp.now(tz='UTC')
-                        end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-                        start_view = end_view - timedelta(weeks=4)
-                        pipes = sorted(export_df['Location'].dropna().unique().tolist())
-                        
-                        # --- THE FIX FOR COLORWAY ---
-                        # Access the layout property of the currently active template
-                        current_template = pio.templates[pio.templates.default]
-                        current_template.layout.colorway = SOILFREEZE_COLORS
-
-                        for i, loc in enumerate(pipes, start=1):
-                            loc_df = export_df[export_df['Location'] == loc]
-                            
-                            # FIG 3.X (Time vs Temp)
-                            if "Time vs Temp (Fig 3)" in report_types:
-                                fig3 = build_high_speed_graph(loc_df, f"Temperature {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
-                                # Centered pipe name passed as the 'title' parameter
-                                fig3 = apply_report_frame(fig3, selected_project, f"Temperature {loc}", f"3.{i}", date_str)
-                                st.plotly_chart(fig3)
-                                
-                                img3 = fig3.to_image(format=export_format, width=1100, height=850)
-                                st.download_button(f"📥 Download Fig 3.{i}", img3, f"Fig3.{i}_{loc}.{export_format}", key=f"dl_3_{i}")
-
-                            # FIG 4.X (Depth vs Temp)
-                            if "Depth vs Temp (Fig 4)" in report_types:
-                                fig4 = build_depth_report_graph(loc_df, loc, unit_label)
-                                fig4 = apply_report_frame(fig4, selected_project, f"Temperature vs Depth: {loc}", f"4.{i}", date_str)
-                                st.plotly_chart(fig4)
-                                
-                                img4 = fig4.to_image(format=export_format, width=1100, height=850)
-                                st.download_button(f"📥 Download Fig 4.{i}", img4, f"Fig4.{i}_{loc}.{export_format}", key=f"dl_4_{i}")
-   
+    return fig   
 #######################
 # --- SIDEBAR UI --- #
 #######################
@@ -1027,68 +990,62 @@ elif service == "📤 Data Intake Lab":
        # ############################################################
 # # --- TAB 2: Professional Client Report Export (11x8.5) --- #
 # ############################################################
-with tab2:
-    st.subheader("📤 Professional Client Report Export")
-    
-    if not selected_project:
-        st.warning("👈 Please select a project in the sidebar first.")
-    else:
-        # Fetching project data [cite: 1]
-        with st.spinner(f"Preparing project data..."):
-            export_df = get_universal_portal_data(selected_project, only_approved=True)
+    with tab2:
+        st.subheader("📤 Professional Client Report Export")
         
-        if export_df.empty:
-            st.info("No data available for this project.")
+        if not selected_project:
+            st.warning("👈 Please select a project in the sidebar first.")
         else:
-            # Preparing numerical depth for Figure 4 [cite: 2, 4]
-            export_df['Depth_Num'] = pd.to_numeric(export_df['Depth'], errors='coerce')
+            with st.spinner(f"Preparing project data..."):
+                export_df = get_universal_portal_data(selected_project, only_approved=True)
             
-            c1, c2 = st.columns(2)
-            with c1:
-                report_types = st.multiselect("Select Figure Types", 
-                    ["Bank Trends (Fig 2)", "Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"], 
-                    default=["Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"])
-            with c2:
-                export_format = st.selectbox("Format", ["png", "pdf"])
-
-            # --- GENERATION LOGIC ---
-            if st.button("Generate Numbered Report Bundle"):
-                date_str = datetime.now().strftime("%m/%d/%Y")
-                now_utc = pd.Timestamp.now(tz='UTC')
+            if export_df.empty:
+                st.info("No data available for this project.")
+            else:
+                export_df['Depth_Num'] = pd.to_numeric(export_df['Depth'], errors='coerce')
                 
-                # Standardizing the report time window [cite: 1, 2]
-                end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-                start_view = end_view - timedelta(weeks=4)
-                pipes = sorted(export_df['Location'].dropna().unique().tolist())
-                
-                # Correcting the Plotly color sequence for the SoilFreeze palette [cite: 1]
-                try:
-                    current_template = pio.templates[pio.templates.default]
-                    current_template.layout.colorway = SOILFREEZE_COLORS
-                except Exception:
-                    pass # Fallback if template is not accessible
-
-                for i, loc in enumerate(pipes, start=1):
-                    loc_df = export_df[export_df['Location'] == loc]
+                c1, c2 = st.columns(2)
+                with c1:
+                    report_types = st.multiselect("Select Figure Types", 
+                        ["Bank Trends (Fig 2)", "Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"], 
+                        default=["Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"])
+                with c2:
+                    export_format = st.selectbox("Format", ["png", "pdf"])
+    
+                if st.button("Generate Numbered Report Bundle"):
+                    date_str = datetime.now().strftime("%m/%d/%Y")
+                    now_utc = pd.Timestamp.now(tz='UTC')
+                    end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+                    start_view = end_view - timedelta(weeks=4)
+                    pipes = sorted(export_df['Location'].dropna().unique().tolist())
                     
-                    # FIG 3.X (Time vs Temp - Centered Title) [cite: 2, 4]
-                    if "Time vs Temp (Fig 3)" in report_types:
-                        fig3 = build_high_speed_graph(loc_df, f"Temperature {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
-                        fig3 = apply_report_frame(fig3, selected_project, f"Temperature {loc}", f"3.{i}", date_str)
-                        st.plotly_chart(fig3)
+                    # --- FIX: Accessing the template object correctly ---
+                    try:
+                        active_template_name = pio.templates.default
+                        pio.templates[active_template_name].layout.colorway = SOILFREEZE_COLORS
+                    except:
+                        pass # Safety fallback
+    
+                    for i, loc in enumerate(pipes, start=1):
+                        loc_df = export_df[export_df['Location'] == loc]
                         
-                        # Export with 11 x 8.5 ratio [cite: 4]
-                        img3 = fig3.to_image(format=export_format, width=1100, height=850)
-                        st.download_button(f"📥 Download Fig 3.{i}", img3, f"Fig3.{i}_{loc}.{export_format}", key=f"dl_3_{i}")
-
-                    # FIG 4.X (Depth vs Temp - Centered Title) [cite: 4]
-                    if "Depth vs Temp (Fig 4)" in report_types:
-                        fig4 = build_depth_report_graph(loc_df, loc, unit_label)
-                        fig4 = apply_report_frame(fig4, selected_project, f"Temperature vs Depth: {loc}", f"4.{i}", date_str)
-                        st.plotly_chart(fig4)
-                        
-                        img4 = fig4.to_image(format=export_format, width=1100, height=850)
-                        st.download_button(f"📥 Download Fig 4.{i}", img4, f"Fig4.{i}_{loc}.{export_format}", key=f"dl_4_{i}")
+                        # Fig 3.x
+                        if "Time vs Temp (Fig 3)" in report_types:
+                            fig3 = build_high_speed_graph(loc_df, f"Temperature {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
+                            fig3 = apply_report_frame(fig3, selected_project, f"Temperature {loc}", f"3.{i}", date_str)
+                            st.plotly_chart(fig3)
+                            
+                            img3 = fig3.to_image(format=export_format, width=1100, height=850)
+                            st.download_button(f"📥 Download Fig 3.{i}", img3, f"Fig3.{i}_{loc}.{export_format}", key=f"dl_3_{i}")
+    
+                        # Fig 4.x
+                        if "Depth vs Temp (Fig 4)" in report_types:
+                            fig4 = build_depth_report_graph(loc_df, loc, unit_label)
+                            fig4 = apply_report_frame(fig4, selected_project, f"Temperature vs Depth: {loc}", f"4.{i}", date_str)
+                            st.plotly_chart(fig4)
+                            
+                            img4 = fig4.to_image(format=export_format, width=1100, height=850)
+                            st.download_button(f"📥 Download Fig 4.{i}", img4, f"Fig4.{i}_{loc}.{export_format}", key=f"dl_4_{i}")
         
         with tab3:
             st.subheader("📥 Export Project Data (SensorConnect Format)")
