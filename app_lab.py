@@ -441,31 +441,24 @@ with st.sidebar:
         )
         st.divider()
     
-    # 2. DATA SOURCE: Automatic Project Selection
-    # This will now populate with your real project names
-    selected_project = st.selectbox(
-        "📁 Select Project",
-        options=project_list,
-        index=0
-    )
+   # 2. DATA SOURCE: Automatic Project Selection
+    selected_project = st.selectbox("📁 Select Project", options=project_list, index=0)
 
     # 3. UNIT CONTROLS
     unit_mode = st.toggle("🌡️ Display Celsius", value=False)
     unit_label = "°C" if unit_mode else "°F"
 
-    st.markdown("---")
+    st.divider()
 
     # 4. REFERENCE LINES: Checkboxes (Freezing = Default)
     st.markdown("### 📏 Reference Lines")
     
     # Values update dynamically based on Celsius/Fahrenheit toggle
     freeze_val = 0 if unit_mode else 32
-    type_a_val = -11.1 if unit_mode else 12
-    type_b_val = -1.1 if unit_mode else 30
-
+    
     show_freeze = st.checkbox(f"Freezing ({freeze_val}{unit_label})", value=True)
-    show_type_a = st.checkbox(f"Type A ({type_a_val}{unit_label})", value=False)
-    show_type_b = st.checkbox(f"Type B ({type_b_val}{unit_label})", value=False)
+    show_type_a = st.checkbox("Type A", value=False)
+    show_type_b = st.checkbox("Type B", value=False)
 
     # Build the active_refs list for your graphing functions
     active_refs = []
@@ -473,7 +466,7 @@ with st.sidebar:
     if show_type_a: active_refs.append((12, "Type A"))
     if show_type_b: active_refs.append((30, "Type B"))
 
-    st.markdown("---")
+    st.divider()
 
     # 5. ADVANCED SETTINGS
     with st.expander("⚙️ Advanced Settings"):
