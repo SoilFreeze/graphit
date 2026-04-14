@@ -20,7 +20,7 @@ import openpyxl
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
     """
-    Standardizes NY and Pacific data to UTC and handles hourly scrubbing joins.
+    Standardizes data to UTC and handles rounded hourly scrubbing joins.
     """
     query = f"""
         WITH UnifiedRaw AS (
@@ -32,13 +32,14 @@ def get_universal_portal_data(project_id, only_approved=True):
             SELECT 
                 r.NodeNum, r.timestamp, r.temperature,
                 m.Location, m.Bank, m.Depth, m.Project,
-                # Join logic: Truncate both to the hour so the scrub works
+                # Join logic: Snap both to nearest hour so the scrub/rejection works
                 CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
             LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
                 ON r.NodeNum = rej.NodeNum 
-                AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = TIMESTAMP_TRUNC(rej.timestamp, HOUR)
+                AND TIMESTAMP_TRUNC(TIMESTAMP_ADD(r.timestamp, INTERVAL 30 MINUTE), HOUR) = 
+                    TIMESTAMP_TRUNC(TIMESTAMP_ADD(rej.timestamp, INTERVAL 30 MINUTE), HOUR)
         )
         SELECT * FROM JoinedData
         WHERE Project = '{project_id}'
@@ -49,7 +50,6 @@ def get_universal_portal_data(project_id, only_approved=True):
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
-            # Force UTC alignment for all incoming data
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
             if 'Bank' not in df.columns:
                 df['Bank'] = ""
@@ -152,6 +152,65 @@ def get_bq_client():
 
 client = get_bq_client()
 
+#########################
+# --- REBUILD TABLE --- #
+#########################
+def rebuild_master_table(mode="preserve"):
+    """
+    Failsafe Rebuild: Snaps all timestamps to the NEAREST hour to ensure
+    one measurement per hour per sensor.
+    """
+    table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+    
+    exists = True
+    try:
+        client.get_table(table_id)
+    except Exception:
+        exists = False
+
+    status_logic = "TRUE" if mode == "approve_all" else ("COALESCE(ex.is_approved, FALSE)" if exists else "FALSE")
+    join_clause = f"LEFT JOIN `{table_id}` ex ON TIMESTAMP_TRUNC(TIMESTAMP_ADD(h.ts, INTERVAL 30 MINUTE), HOUR) = ex.timestamp AND m.NodeNum = ex.sensor_id" if (exists and mode == "preserve") else ""
+
+    scrub_sql = f"""
+        CREATE OR REPLACE TABLE `{table_id}` AS 
+        WITH RawUnified AS (
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
+                   REGEXP_REPLACE(CAST(sensor_id AS STRING), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            UNION ALL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
+                   REGEXP_REPLACE(REPLACE(NodeNum, ':', '-'), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE temperature IS NOT NULL
+        ),
+        HourlyDedupped AS (
+            SELECT *, ROW_NUMBER() OVER(
+                PARTITION BY clean_node, TIMESTAMP_TRUNC(TIMESTAMP_ADD(ts, INTERVAL 30 MINUTE), HOUR) 
+                ORDER BY ts DESC
+            ) as rank 
+            FROM RawUnified
+        )
+        SELECT 
+            TIMESTAMP_TRUNC(TIMESTAMP_ADD(h.ts, INTERVAL 30 MINUTE), HOUR) as timestamp, 
+            h.temp as temperature, 
+            m.NodeNum as sensor_id,
+            m.NodeNum as sensor_name,
+            m.Project as project, 
+            m.Location as location, 
+            m.Depth as depth, 
+            {status_logic} as is_approved
+        FROM HourlyDedupped h 
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
+            ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
+        {join_clause}
+        WHERE h.rank = 1
+    """
+    try:
+        client.query(scrub_sql).result()
+        return True
+    except Exception as e:
+        st.error(f"Rebuild Error: {e}")
+        return False
+        
 #################
 # --- Graph --- #
 #################
@@ -860,19 +919,19 @@ elif service == "📤 Data Intake Lab":
                     scrub_sql = f"""
                     CREATE OR REPLACE TABLE `{target_table}` AS 
                     SELECT 
-                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                        TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
                         * EXCEPT(timestamp, rn) 
                     FROM (
                         SELECT *, 
                                ROW_NUMBER() OVER(
-                                   PARTITION BY {node_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                                   PARTITION BY {node_col}, TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) 
                                    ORDER BY timestamp DESC
                                ) as rn
                         FROM `{target_table}` 
                         WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
                         AND {temp_col} IS NOT NULL
                     ) WHERE rn = 1
-                    """
+"""
                     try:
                         client.query(scrub_sql).result()
                         st.success(f"✅ {scrub_target} purged and snapped to top-of-hour.")
