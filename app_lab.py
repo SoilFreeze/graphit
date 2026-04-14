@@ -863,13 +863,12 @@ elif service == "📤 Data Intake Lab":
                 if not is_lord_wide:
                     first_line = str(raw_content[0]).lower() if raw_content else ""
                     is_lord_narrow = ("nodenumber" in first_line or "channel" in first_line) and "temperature" in first_line
-                                
-                # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
+
+                # --- CASE 1: LORD SENSORCONNECT (WIDE - CSV ONLY) ---
                 if is_lord_wide:
                     try:
                         start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
                         df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
-                        # Rename 'Time' to 'timestamp' and melt columns into 'NodeNum'
                         df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
                         df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
                         df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
@@ -881,20 +880,20 @@ elif service == "📤 Data Intake Lab":
                             client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
                                                              f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
                             st.success("Uploaded successfully to raw_lord!")
+                            st.cache_data.clear()
                     except Exception as e: st.error(f"Lord Wide Error: {e}")
     
                 # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
                 elif is_lord_narrow:
                     try:
-                        df_ln = pd.read_csv(io.StringIO("\n".join(raw_content)))
-                        # MAP TO BIGQUERY SCHEMA: Case-sensitive NodeNum and timestamp
+                        df_ln = pd.read_excel(u_file) if is_excel else pd.read_csv(io.StringIO("\n".join(raw_content)))
                         df_ln = df_ln.rename(columns={
-                            'Timestamp': 'timestamp', 
-                            'Channel': 'NodeNum', 
-                            'Temperature': 'temperature'
+                            'Timestamp': 'timestamp', 'timestamp': 'timestamp',
+                            'Channel': 'NodeNum', 'nodenumber': 'NodeNum',
+                            'Temperature': 'temperature', 'temperature': 'temperature'
                         })
                         df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
-                        df_ln['NodeNum'] = df_ln['NodeNum'].str.replace(':', '-', regex=False)
+                        df_ln['NodeNum'] = df_ln['NodeNum'].astype(str).str.replace(':', '-', regex=False)
                         
                         st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
                         st.dataframe(df_ln.head())
@@ -902,37 +901,10 @@ elif service == "📤 Data Intake Lab":
                             client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
                                                              f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
                             st.success("Uploaded successfully to raw_lord!")
+                            st.cache_data.clear()
                     except Exception as e: st.error(f"Lord Narrow Error: {e}")
 
-                # --- CASE 3: SENSORPUSH ---
-                else:
-                    try:
-                        header_idx = -1
-                        for i, line in enumerate(raw_content[:50]):
-                            if "SensorId" in line or "Observed" in line:
-                                header_idx = i; break
-                        
-                        if header_idx != -1:
-                            df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
-                            ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
-                            
-                            df_up = pd.DataFrame()
-                            # Mapping to the raw_sensorpush schema
-                            df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
-                            df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
-                            t_cols = [c for c in df_sp.columns if "Temperature" in c or "Thermocouple" in c]
-                            df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
-                            df_up = df_up.dropna(subset=['timestamp', 'temperature'])
-    
-                            st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
-                            if st.button("🚀 UPLOAD SENSORPUSH"):
-                                client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                                st.success("Uploaded successfully to raw_sensorpush!")
-                        else:
-                            st.error("Format not recognized. Check CSV headers.")
-                    except Exception as e: st.error(f"SensorPush Error: {e}")
-
-        # --- CASE 3: SENSORPUSH (CSV or EXCEL) ---
+                # --- CASE 3: SENSORPUSH (CSV or EXCEL) ---
                 else:
                     try:
                         if is_excel:
