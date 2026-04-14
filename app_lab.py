@@ -12,7 +12,6 @@ import json
 import traceback
 import re
 import io
-import plotly.io as pio
 
 ################################
 # --- GET ALL PROJECT DATA --- #
@@ -152,141 +151,211 @@ def get_bq_client():
 
 client = get_bq_client()
 
-#################
-# - Supporting- #
-#################
-def convert_val(x):
-    """Helper to convert temperature based on the sidebar unit_mode."""
-    if unit_mode:  # If Celsius toggle is True
-        return (x - 32) * 5/9
-    return x
+#########################
+# --- REBUILD TABLE --- #
+#########################
+def rebuild_master_table(mode="preserve"):
+    """
+    Failsafe Rebuild: Strips all non-numeric characters to ensure 
+    a match between CSV IDs and Google Sheet IDs.
+    """
+    table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+    
+    # Check if table exists to handle the 'ex' alias error
+    exists = True
+    try:
+        client.get_table(table_id)
+    except Exception:
+        exists = False
+
+    status_logic = "TRUE" if mode == "approve_all" else ("COALESCE(ex.is_approved, FALSE)" if exists else "FALSE")
+    join_clause = f"LEFT JOIN `{table_id}` ex ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id" if (exists and mode == "preserve") else ""
+
+    scrub_sql = f"""
+        CREATE OR REPLACE TABLE `{table_id}` AS 
+        WITH RawUnified AS (
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
+                   -- Clean the ID: Remove colons, spaces, and non-digits
+                   REGEXP_REPLACE(CAST(sensor_id AS STRING), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            UNION ALL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, 
+                   REGEXP_REPLACE(REPLACE(nodenumber, ':', '-'), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
+        ),
+        HourlyDedupped AS (
+            SELECT *, ROW_NUMBER() OVER(PARTITION BY clean_node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
+            FROM RawUnified
+        )
+        SELECT 
+            h.ts as timestamp, 
+            h.temp as temperature, 
+            m.NodeNum as sensor_id,
+            m.NodeNum as sensor_name,
+            m.Project as project, 
+            m.Location as location, 
+            m.Depth as depth, 
+            {status_logic} as is_approved
+        FROM HourlyDedupped h 
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
+            -- Match by stripping the Google Sheet PhysicalID of all non-digits too
+            ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
+        {join_clause}
+        WHERE h.rank = 1
+    """
+    try:
+        client.query(scrub_sql).result()
+        return True
+    except Exception as e:
+        st.error(f"Rebuild Error: {e}")
+        return False
+
+############################
+# --- FETCH SENSORPUSH --- #
+############################
+def fetch_sensorpush_data(start_dt, end_dt):
+    """
+    Handles API connection to SensorPush.
+    Note: Requires 'sensorpush_creds' in st.secrets.
+    """
+    try:
+        # 1. AUTHENTICATE
+        auth_url = "https://api.sensorpush.com/v1/oauth/authorize"
+        creds = st.secrets["sensorpush_creds"]
+        auth_payload = {"email": creds["email"], "password": creds["password"]}
+        
+        auth_res = requests.post(auth_url, json=auth_payload).json()
+        token = auth_res.get("accesstoken")
+        
+        if not token:
+            st.error("API Auth Failed: Check credentials.")
+            return pd.DataFrame()
+
+        # 2. FETCH DATA
+        data_url = "https://api.sensorpush.com/v1/samples"
+        headers = {"accept": "application/json", "Authorization": token}
+        # API expects ISO format strings
+        payload = {
+            "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
+        
+        res = requests.post(data_url, headers=headers, json=payload).json()
+        
+        # 3. TRANSFORM TO BIGQUERY SCHEMA
+        records = []
+        for sensor_id, samples in res.get("sensors", {}).items():
+            for s in samples:
+                records.append({
+                    "sensor_id": sensor_id,
+                    "timestamp": s["observed"],
+                    "temperature": s["temperature"]
+                })
+        
+        return pd.DataFrame(records)
+    except Exception as e:
+        st.error(f"API Sync Error: {e}")
+        return pd.DataFrame()
+
 
 #################
 # --- Graph --- #
 #################
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", is_report=False):
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Unified High-Speed Engine:
-    - Restores Monday/Midnight Grid Hierarchy
-    - Fixes ZoneInfoNotFoundError with strict localization
-    - Defaults to Freezing reference line
-    - Supports clean hover tooltips (customdata)
+    High-speed Plotly engine with Local Time support and Clean Hover Tooltips.
     """
     if df.empty:
         return go.Figure()
 
-    # 1. TIMEZONE SAFETY & LOCALIZATION
-    # Ensure display_tz is a valid IANA string
-    valid_tz = display_tz if (display_tz and str(display_tz) != "None") else "UTC"
-    
     plot_df = df.copy()
     
-    try:
-        # Standardize Data Timestamps
-        if plot_df['timestamp'].dt.tz is None:
-            plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(valid_tz)
-        else:
-            plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(valid_tz)
-        
-        # Localize View Windows for Grid Logic
-        tz_obj = pytz.timezone(valid_tz)
-        start_local = start_view.astimezone(tz_obj) if start_view.tzinfo else tz_obj.localize(start_view)
-        end_local = end_view.astimezone(tz_obj) if end_view.tzinfo else tz_obj.localize(end_view)
-        now_local = pd.Timestamp.now(tz=valid_tz)
-    except Exception as e:
-        # Emergency Fallback to prevent crash
-        start_local, end_local = start_view, end_view
-        now_local = pd.Timestamp.now()
-        valid_tz = "UTC"
+    # 1. TIMEZONE CONVERSION
+    # Standardize data to the user's preferred local display zone
+    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
+    
+    # Adjust the 'Camera' window and the 'Red Now Line' to match the local zone
+    start_local = start_view.astimezone(pytz.timezone(display_tz))
+    end_local = end_view.astimezone(pytz.timezone(display_tz))
+    now_local = pd.Timestamp.now(tz=display_tz)
 
     # 2. UNIT CONVERSION
-    if unit_mode: # Celsius Toggle
+    if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range, dtick = [-30, 30], 2
-    else: # Fahrenheit
-        y_range, dtick = [-20, 80], 5
+        y_range, dt_minor = [-30, 30], 2
+    else:
+        y_range, dt_minor = [-20, 80], 5
 
-    # 3. ROBUST LABELING (Prevents KeyError: 'label')
-    if 'label' not in plot_df.columns:
-        def generate_label(row):
-            bank = str(row.get('Bank', '')).strip().lower()
-            depth = str(row.get('Depth', '??'))
-            node = str(row.get('NodeNum', 'Unknown'))
-            if bank not in ["", "none", "nan", "null"]:
-                return f"Bank {row.get('Bank')} ({node})"
-            return f"{depth}ft ({node})"
-        plot_df['label'] = plot_df.apply(generate_label, axis=1)
+    # 3. LABELING LOGIC
+    plot_df['label'] = plot_df.apply(
+        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
+        else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
+    )
+    
+    # 4. PLOT MODE (Lines vs Points)
+    # Admin and Diag views use markers for precise Lasso selection
+    is_admin = "Scrubbing" in title or "Diag" in title
+    plot_mode = 'markers' if is_admin else 'lines'
+    marker_size = 7 if is_admin else 3
 
     fig = go.Figure()
-
-    # 4. ADD TRACES WITH GAP DETECTION
+    
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
+        # This is the name shown in the hover box (e.g., 'Bank R1')
         hover_name = lbl.split('(')[0].strip()
-        
-        # --- GAP DETECTION LOGIC ---
-        # If is_report is True, we usually want clean lines, 
-        # but for accuracy, we break the line if the gap > 6 hours.
-        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gap_mask = s_df['gap_hrs'] > 6.0
-        
-        if gap_mask.any():
-            # Create "None" entries 1 minute after the gap starts to force the break
-            gaps = s_df[gap_mask].copy()
-            gaps['temperature'] = None
-            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
+        # 5. GAP DETECTION (Only for Line mode)
+        if not is_admin:
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            gap_mask = s_df['gap_hrs'] > 6.0
+            if gap_mask.any():
+                gaps = s_df[gap_mask].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
+        # 6. ADD TRACE WITH CLEAN HOVER
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], 
             y=s_df['temperature'], 
             name=lbl, 
-            mode='lines',
-            line=dict(width=2.5 if is_report else 1.5),
-            connectgaps=False, # This is the critical setting
+            mode=plot_mode,
+            marker=dict(size=marker_size, opacity=0.8 if is_admin else 1.0),
+            connectgaps=False,
             customdata=[hover_name] * len(s_df),
+            # THE FIX: Removed time/date from individual lines. Only shows Name + Temp.
+            # <extra></extra> removes the secondary trace name box.
             hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 5. GRID HIERARCHY (Monday=Black, Midnight=Gray)
-    try:
-        grid_times = pd.date_range(start=start_local, end=end_local, freq='6h')
-        for ts in grid_times:
-            if ts.weekday() == 0 and ts.hour == 0:
-                color, width = "Black", 1.2  # Monday Midnight
-            elif ts.hour == 0:
-                color, width = "Gray", 0.8   # Daily Midnight
-            else:
-                color, width = "LightGray", 0.3 # 6-Hour intervals
-            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-    except:
-        pass # Ensure grid failure doesn't kill the graph
+    # 7. GRID HIERARCHY (Monday=Black, Midnight=Gray)
+    grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
+    for ts in grid_times:
+        if ts.weekday() == 0 and ts.hour == 0:
+            color, width = "Black", 1.2 
+        elif ts.hour == 0:
+            color, width = "Gray", 0.8  
+        else:
+            color, width = "LightGray", 0.3
+        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    # 6. REFERENCE LINES
-    # We default to Freezing if active_refs is empty (standardized for SoilFreeze)
-    if not active_refs:
-        active_refs = [(32, "Freezing")]
+    # 8. REFERENCE LINES
+    for val, ref_label in active_refs:
+        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+        fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in ref_label else "RoyalBlue", 
+                      annotation_text=ref_label, annotation_position="top right")
 
-    for val, name in active_refs:
-        # Convert the reference value to current unit
-        c_val = (val - 32) * 5/9 if unit_mode else val
-        fig.add_hline(
-            y=c_val, 
-            line_dash="dash", 
-            line_color="DeepSkyBlue" if "Freez" in name else "maroon",
-            annotation_text=name, 
-            annotation_position="top right"
-        )
-    
-    # 7. RED "NOW" LINE (Dashboard Only)
-    if not is_report:
-        fig.add_vline(x=now_local, line_width=2, line_color="Red", line_dash="dash", layer='above')
+    # 9. RED "NOW" LINE
+    fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 8. LAYOUT
+    # 10. FINAL LAYOUT
     fig.update_layout(
-        title=None if is_report else {'text': f"{title} ({valid_tz})", 'x': 0},
+        title={'text': f"{title} ({display_tz})", 'x': 0},
         plot_bgcolor='white',
+        # 'x unified' puts the time/date ONLY at the top of the box
         hovermode="x unified",
+        height=600,
         margin=dict(t=80, l=50, r=180, b=50),
         xaxis=dict(
             range=[start_local, end_local],
@@ -298,7 +367,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         yaxis=dict(
             title=f"Temperature ({unit_label})",
             range=y_range,
-            dtick=dtick,
+            dtick=dt_minor,
             gridcolor='Gainsboro',
             showline=True,
             linecolor='black',
@@ -309,220 +378,60 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             orientation="v",
             x=1.02,
             y=1,
-            xanchor="left",
-            bordercolor="Black",
-            borderwidth=1
+            xanchor="left"
         )
     )
     
     return fig
-################
-# Print graphs #
-################
-# Official SoilFreeze Color Palette
-SOILFREEZE_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+    
+#######################
+# --- SIDEBAR UI --- #
+#######################
+st.sidebar.title("❄️ SoilFreeze Lab")
 
-def apply_report_frame(fig, project_name, title, fig_num, date_str):
-    """
-    Standardizes the 11x8.5 frame. 
-    Ensures Pipe Name is centered and Project Name is left-justified.
-    """
-    fig.update_layout(
-        width=1100,
-        height=850,
-        margin=dict(t=200, l=80, r=220, b=100), 
-        paper_bgcolor='white',
-        plot_bgcolor='white',
-        # Clear any existing title from the internal plotly engine
-        title=None,
-        shapes=[
-            dict(type="rect", xref="paper", yref="paper", x0=-0.05, y0=-0.1, x1=1.05, y1=1.1, line=dict(color="black", width=2)),
-            dict(type="line", xref="paper", yref="paper", x0=-0.05, y0=1.0, x1=1.05, y1=1.0, line=dict(color="black", width=1)),
-            dict(type="rect", xref="paper", yref="paper", x0=0.25, y0=1.04, x1=0.75, y1=1.12, fillcolor="#F2F4F4", line=dict(color="black", width=1)),
-        ],
-        annotations=[
-            # Left: Project Name
-            dict(text=f"<b>PROJECT:</b><br>{project_name.upper()}", 
-                 x=-0.03, y=1.08, xref="paper", yref="paper", showarrow=False, align="left", xanchor="left", font=dict(size=14)),
-            # Center: Pipe Title (e.g. Temperature TP33-N)
-            dict(text=f"<b>{title.upper()}</b>", 
-                 x=0.5, y=1.08, xref="paper", yref="paper", showarrow=False, xanchor="center", font=dict(size=20, color="#003366")),
-            # Right: Logo
-            dict(text="<b>SoilFreeze</b><br><small>SOLID GROUND</small>", 
-                 x=1.03, y=1.08, xref="paper", yref="paper", showarrow=False, align="right", xanchor="right", font=dict(color="#003366")),
-            # Footer
-            dict(text=f"<b>FIGURE {fig_num}</b>", x=0, y=-0.07, xref="paper", yref="paper", showarrow=False, font=dict(size=14)),
-            dict(text=f"<b>DATE:</b> {date_str}", x=1, y=-0.07, xref="paper", yref="paper", showarrow=False, font=dict(size=12)),
-        ]
+service = st.sidebar.selectbox(
+    "📂 Select Page", 
+    ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
+    index=0  # Sets Global Overview as the landing page
     )
-    return fig
+st.sidebar.divider()
 
-def build_depth_report_graph(df, loc_name, unit_label):
-    """
-    Restored Depth Profile Engine.
-    Matches the original vertical logic with updated report formatting.
-    """
-    fig = go.Figure()
-    if df.empty: return fig
-    
-    # 1. SETUP DIMENSIONS & RANGES
-    # Use 22ft as default range or dynamic based on data
-    max_d = df['Depth_Num'].max() if not df['Depth_Num'].empty else 20
-    y_limit = int(((max_d // 5) + 1) * 5)
-    x_range = [-20, 80] if unit_label == "°F" else [(-20-32)*5/9, (80-32)*5/9]
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-    # 2. WEEKLY SNAPSHOT LOGIC (Monday 6AM)
-    # This finds the state of the ground every Monday to show progress
-    now = df['timestamp'].max()
-    start_view = now - pd.Timedelta(weeks=4)
-    mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
-    
-    for m_date in mondays:
-        target_ts = m_date.replace(hour=6, minute=0, second=0)
-        # Search window to catch sensors that report at different times
-        window = df[(df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                    (df['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-        
-        if not window.empty:
-            window = window.copy()
-            window['diff'] = (window['timestamp'] - target_ts).abs()
-            snap_df = window.sort_values('diff').groupby('NodeNum').head(1).sort_values('Depth_Num')
-            
-            fig.add_trace(go.Scatter(
-                x=snap_df['temperature'], 
-                y=snap_df['Depth_Num'], 
-                mode='lines+markers', 
-                name=target_ts.strftime('%m/%d/%y'),
-                line=dict(width=3),
-                marker=dict(size=8)
-            ))
+def convert_val(f_val):
+    if f_val is None: return None
+    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
 
-    # 3. REFERENCE LINES (Default to Freezing Only)
-    ref_val = 32 if unit_label == "°F" else 0
-    fig.add_vline(x=ref_val, line_dash="dot", line_color="DeepSkyBlue", 
-                  line_width=3, annotation_text="Freezing", annotation_position="top right")
+st.sidebar.divider()
 
-    # 4. FINAL LAYOUT & GRID
-    fig.update_layout(
-        plot_bgcolor='white',
-        height=850, # Matches 11x8.5 ratio
-        xaxis=dict(
-            title=f"Temperature ({unit_label})", 
-            range=x_range, 
-            showgrid=True, 
-            gridcolor='Gainsboro',
-            showline=True,
-            linecolor='black',
-            mirror=True
-        ),
-        yaxis=dict(
-            title="Depth (ft)", 
-            range=[y_limit, 0], 
-            dtick=2, # Detailed 2ft increments
-            showgrid=True, 
-            gridcolor='Silver',
-            showline=True,
-            linecolor='black',
-            mirror=True
-        ),
-        legend=dict(
-            title="Weekly Snapshots (6AM)", 
-            orientation="h", 
-            y=-0.15, 
-            x=0.5, 
-            xanchor="center",
-            bordercolor="black",
-            borderwidth=1
-        )
-    )
-    
-    return fig
+# Project Selection
+selected_project = None
+if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
+    try:
+        proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
+        proj_df = client.query(proj_q).to_dataframe()
+        selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
+    except: st.sidebar.warning("No projects found.")
 
-# ############################################################
-# # --- DATA INITIALIZATION (Automated) ---                  #
-# ############################################################
+st.sidebar.divider()
+st.sidebar.write("### 📏 Reference Lines")
+active_refs = []
+if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True): active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True): active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.append((10.2, "Type A"))
 
-# 1. Fetch the project list automatically as you did before
-try:
-    # This calls your existing function that queries BigQuery/API
-    project_list = get_project_list() 
-    
-    if not project_list:
-        project_list = ["No Active Projects"]
-except Exception as e:
-    # Fallback to prevent the sidebar from disappearing if the API is down
-    project_list = ["Error Fetching Projects"]
-    st.error(f"Connection Error: {e}")
+# Add to your sidebar section
+st.sidebar.subheader("🕒 Display Settings")
+tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
 
-# ############################################################
-# # --- SIDEBAR: GLOBAL CONTROLS & NAVIGATION ---           #
-# ############################################################
-
-with st.sidebar:
-    st.title("❄️ SoilFreeze Lab")
-    st.markdown("---")
-
-    # 1. RESTORED NAVIGATION
-    # Ensure these labels EXACTLY match the 'if service ==' lines in your main code
-    with st.sidebar:
-        st.title("❄️ SoilFreeze Lab")
-        
-        # 1. RESTORED NAVIGATION (Matching your previous labels)
-        service = st.selectbox(
-            "📂 Select Page", 
-            ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
-            index=0  
-        )
-        st.divider()
-    
-   # 2. DATA SOURCE: Automatic Project Selection
-    selected_project = st.selectbox("📁 Select Project", options=project_list, index=0)
-
-    # 3. UNIT CONTROLS
-    unit_mode = st.toggle("🌡️ Display Celsius", value=False)
-    unit_label = "°C" if unit_mode else "°F"
-
-    st.divider()
-
-    # 4. REFERENCE LINES: Checkboxes (Freezing = Default)
-    st.markdown("### 📏 Reference Lines")
-    
-    # Values update dynamically based on Celsius/Fahrenheit toggle
-    freeze_val = 0 if unit_mode else 32
-    
-    show_freeze = st.checkbox(f"Freezing ({freeze_val}{unit_label})", value=True)
-    show_type_a = st.checkbox("Type A", value=False)
-    show_type_b = st.checkbox("Type B", value=False)
-
-    # Build the active_refs list for your graphing functions
-    active_refs = []
-    if show_freeze: active_refs.append((32, "Freezing"))
-    if show_type_a: active_refs.append((12, "Type A"))
-    if show_type_b: active_refs.append((30, "Type B"))
-
-    st.divider()
-
-    # 5. ADVANCED SETTINGS
-# --- SIDEBAR: ADVANCED SETTINGS ---
-with st.sidebar.expander("⚙️ Advanced Settings"):
-    # The 'keys' are what the user sees, the 'values' are what the code gets
-    tz_lookup = {
-        "UTC": "UTC",
-        "Pacific": "US/Pacific",
-        "Mountain": "US/Mountain",
-        "Central": "US/Central",
-        "Eastern": "US/Eastern"
-    }
-    
-    selected_tz = st.selectbox(
-        "Timezone",
-        options=list(tz_lookup.keys()),
-        index=1  # Default to Pacific
-    )
-    
-    # This is the variable that gets passed to build_high_speed_graph
-    display_tz = tz_lookup[selected_tz]
-    
+# Map the selection to pytz strings
+tz_lookup = {
+    "UTC": "UTC",
+    "Local (US/Eastern)": "US/Eastern",
+    "Local (US/Pacific)": "US/Pacific"
+}
+display_tz = tz_lookup[tz_mode]
 #################
 # --- PAGES --- #
 #################
@@ -823,7 +732,7 @@ elif service == "📉 Node Diagnostics":
                 
                 # SECTION A: TIMELINE ANALYSIS
                 st.subheader("📈 Timeline Analysis")
-                st.caption(f"Viewing historical trends in {display_tz}.")
+                st.caption(f"Viewing historical trends in **{tz_mode}**.")
                 fig_time = build_high_speed_graph(
                     df_diag, sel_loc, start_view, end_view, 
                     tuple(active_refs), unit_mode, unit_label, 
@@ -912,31 +821,48 @@ elif service == "📉 Node Diagnostics":
 # --- END NODE DIAGNOSTIC --- #
 ###############################
 ###############################
-# --- DATA INTAKE LAB ---     #
+# --- DATA INTAKE LAB --- #
 ###############################
 elif service == "📤 Data Intake Lab":
     if check_admin_access():
         st.header("📤 Data Ingestion & Recovery")
         
-        # 1. Define the tabs
-        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "🖼️ Professional Report Export", "📥 Export Raw Data"])
-        
+        # Removed Maintenance Tab as requested
+        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "📥 Export Project Data"])
+
         with tab1:
             st.subheader("📄 Manual File Ingestion")
-            st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush CSVs.")
-            u_file = st.file_uploader("Upload CSV", type=['csv'], key="manual_upload_unified_fixed")
+            st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush (CSV/Excel).")
+            
+            # Updated to allow Excel extensions
+            u_file = st.file_uploader("Upload CSV or Excel File", type=['csv', 'xlsx', 'xls'], key="manual_upload_unified_fixed")
             
             if u_file is not None:
-                import io
                 filename = u_file.name.lower()
-                raw_content = u_file.getvalue().decode('utf-8').splitlines()
+                is_excel = filename.endswith(('.xlsx', '.xls'))
                 
-                # --- DETECT FILE TYPE ---
-                is_lord_wide = any("DATA_START" in line for line in raw_content[:100])
+                # --- PRE-PROCESSING: Convert to DataFrame or List ---
+                try:
+                    if is_excel:
+                        # For Excel, we read the whole sheet first
+                        df_preview = pd.read_excel(u_file)
+                        # Convert to string list for header detection logic similar to your CSV flow
+                        raw_content = df_preview.astype(str).columns.tolist() 
+                    else:
+                        raw_content = u_file.getvalue().decode('utf-8').splitlines()
+                except Exception as e:
+                    st.error(f"File Read Error: {e}")
+                    raw_content = []
 
-                # Updated detection logic to support 'Channel' header
-                is_lord_narrow = ("nodenumber" in raw_content[0].lower() or "channel" in raw_content[0].lower()) and \
-                                 "temperature" in raw_content[0].lower()
+                # --- DETECT FILE TYPE ---
+                # 1. Lord Wide (SensorConnect)
+                is_lord_wide = any("DATA_START" in str(line) for line in raw_content[:100]) if not is_excel else False
+
+                # 2. Lord Narrow (Desktop Log)
+                is_lord_narrow = False
+                if not is_lord_wide:
+                    first_line = str(raw_content[0]).lower() if raw_content else ""
+                    is_lord_narrow = ("nodenumber" in first_line or "channel" in first_line) and "temperature" in first_line
                                 
                 # --- CASE 1: LORD SENSORCONNECT (WIDE) ---
                 if is_lord_wide:
@@ -1006,71 +932,85 @@ elif service == "📤 Data Intake Lab":
                             st.error("Format not recognized. Check CSV headers.")
                     except Exception as e: st.error(f"SensorPush Error: {e}")
 
-# ############################################################
-# # --- TAB 2: PROFESSIONAL CLIENT REPORT EXPORT (11x8.5) --- #
-# ############################################################
-        with tab2:
-            st.subheader("📤 Professional Client Report Export")
-            
-            if not selected_project:
-                st.warning("👈 Please select a project in the sidebar first.")
-            else:
-                # Project Title Input for the Header Box
-                report_project_title = st.text_input("📝 Report Project Name / Number", value=selected_project)
-                
-                with st.spinner(f"Fetching approved data..."):
-                    export_df = get_universal_portal_data(selected_project, only_approved=True)
-                
-                if export_df.empty:
-                    st.info("No approved data found for this project.")
+        # --- CASE 3: SENSORPUSH (CSV or EXCEL) ---
                 else:
-                    export_df['Depth_Num'] = pd.to_numeric(export_df['Depth'], errors='coerce')
-                    
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        report_types = st.multiselect("Select Figure Types", 
-                            ["Bank Trends (Fig 2)", "Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"], 
-                            default=["Time vs Temp (Fig 3)", "Depth vs Temp (Fig 4)"])
-                    with c2:
-                        export_format = st.selectbox("Export Format", ["png", "pdf"], index=1)
-        
-                    if st.button("🚀 Generate Numbered Report Bundle"):
-                        date_str = datetime.now().strftime("%m/%d/%Y")
-                        now_utc = pd.Timestamp.now(tz='UTC')
-                        
-                        # Standard 4-week window ending next Monday
-                        end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-                        start_view = end_view - timedelta(weeks=4)
-                        
-                        pipes = sorted(export_df['Location'].dropna().unique().tolist())
-                        
-                        # Set Global Color Template
-                        try:
-                            pio.templates[pio.templates.default].layout.colorway = SOILFREEZE_COLORS
-                        except: pass
-        
-                        for i, loc in enumerate(pipes, start=1):
-                            loc_df = export_df[export_df['Location'] == loc]
+                    try:
+                        if is_excel:
+                            df_sp = pd.read_excel(u_file)
+                        else:
+                            header_idx = -1
+                            for i, line in enumerate(raw_content[:50]):
+                                if "SensorId" in line or "Observed" in line:
+                                    header_idx = i; break
+                            if header_idx != -1:
+                                df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
+                            else:
+                                df_sp = pd.DataFrame()
+
+                        if not df_sp.empty:
+                            ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
+                            df_up = pd.DataFrame()
+                            df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
+                            df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
                             
-                            # FIGURE 3.X: Time vs Temp
-                            if "Time vs Temp (Fig 3)" in report_types:
-                                fig3 = build_high_speed_graph(loc_df, f"Temperature {loc}", start_view, end_view, [], unit_mode, unit_label, display_tz=display_tz, is_report=True)
-                                # Center the Pipe Name in the box, Project Name on the left
-                                fig3 = apply_report_frame(fig3, report_project_title, f"Temperature {loc}", f"3.{i}", date_str)
-                                st.plotly_chart(fig3, use_container_width=True)
-                                
-                                img3 = fig3.to_image(format=export_format, width=1100, height=850)
-                                st.download_button(f"📥 Download Fig 3.{i} ({loc})", img3, f"Fig3.{i}_{loc}.{export_format}", key=f"dl_3_{i}")
-        
-                            # FIGURE 4.X: Depth vs Temp
-                            if "Depth vs Temp (Fig 4)" in report_types:
-                                fig4 = build_depth_report_graph(loc_df, loc, unit_label)
-                                fig4 = apply_report_frame(fig4, report_project_title, f"Temperature vs Depth: {loc}", f"4.{i}", date_str)
-                                st.plotly_chart(fig4, use_container_width=True)
-                                
-                                img4 = fig4.to_image(format=export_format, width=1100, height=850)
-                                st.download_button(f"📥 Download Fig 4.{i} ({loc})", img4, f"Fig4.{i}_{loc}.{export_format}", key=f"dl_4_{i}")
-        
+                            t_cols = [c for c in df_sp.columns if "Temperature" in str(c) or "Thermocouple" in str(c)]
+                            df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
+                            df_up = df_up.dropna(subset=['timestamp', 'temperature'])
+    
+                            st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
+                            st.dataframe(df_up.head())
+                            if st.button("🚀 UPLOAD SENSORPUSH"):
+                                client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                                st.success("Uploaded successfully to raw_sensorpush!")
+                                st.cache_data.clear()
+                        else:
+                            st.error("Format not recognized. Check file headers.")
+                    except Exception as e: st.error(f"SensorPush Error: {e}")
+
+       # 3. DEEP DATA SCRUB (Physical Purge) - SNAP TO HOUR FIX
+        with tab2:
+            st.subheader("🧹 Deep Data Scrub & Final Purge")
+            st.info("This tool dedups data to 1-hour intervals and snaps all timestamps to the **Top of the Hour**.")
+            st.error("⚠️ WARNING: This permanently modifies data in RAW tables.")
+            
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_radio_fixed")
+            
+            # Use the exact column names from your ingestion functions
+            if scrub_target == "SensorPush":
+                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                node_col = "sensor_id"
+                temp_col = "temperature"
+            else:
+                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                node_col = "NodeNum" # Fixed from nodenumber
+                temp_col = "temperature" # Fixed from value
+    
+            if st.button(f"🧨 Permanently Purge & Snap {scrub_target}"):
+                with st.spinner("Executing hard delete and snap-to-hour..."):
+                    # This snaps the timestamp to the top of the hour (:00:00)
+                    scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS 
+                    SELECT 
+                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                        * EXCEPT(timestamp, rn) 
+                    FROM (
+                        SELECT *, 
+                               ROW_NUMBER() OVER(
+                                   PARTITION BY {node_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
+                                   ORDER BY timestamp DESC
+                               ) as rn
+                        FROM `{target_table}` 
+                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
+                        AND {temp_col} IS NOT NULL
+                    ) WHERE rn = 1
+                    """
+                    try:
+                        client.query(scrub_sql).result()
+                        st.success(f"✅ {scrub_target} purged and snapped to top-of-hour.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"Scrub Error: {e}")
+                        
         with tab3:
             st.subheader("📥 Export Project Data (SensorConnect Format)")
             
