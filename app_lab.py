@@ -152,113 +152,6 @@ def get_bq_client():
 
 client = get_bq_client()
 
-#########################
-# --- REBUILD TABLE --- #
-#########################
-def rebuild_master_table(mode="preserve"):
-    """
-    Failsafe Rebuild: Strips all non-numeric characters to ensure 
-    a match between CSV IDs and Google Sheet IDs.
-    """
-    table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
-    
-    # Check if table exists to handle the 'ex' alias error
-    exists = True
-    try:
-        client.get_table(table_id)
-    except Exception:
-        exists = False
-
-    status_logic = "TRUE" if mode == "approve_all" else ("COALESCE(ex.is_approved, FALSE)" if exists else "FALSE")
-    join_clause = f"LEFT JOIN `{table_id}` ex ON h.ts = ex.timestamp AND m.NodeNum = ex.sensor_id" if (exists and mode == "preserve") else ""
-
-    scrub_sql = f"""
-        CREATE OR REPLACE TABLE `{table_id}` AS 
-        WITH RawUnified AS (
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
-                   -- Clean the ID: Remove colons, spaces, and non-digits
-                   REGEXP_REPLACE(CAST(sensor_id AS STRING), r'[^0-9]', '') as clean_node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
-            UNION ALL
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, value as temp, 
-                   REGEXP_REPLACE(REPLACE(nodenumber, ':', '-'), r'[^0-9]', '') as clean_node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE value IS NOT NULL
-        ),
-        HourlyDedupped AS (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY clean_node, TIMESTAMP_TRUNC(ts, HOUR) ORDER BY ts DESC) as rank 
-            FROM RawUnified
-        )
-        SELECT 
-            h.ts as timestamp, 
-            h.temp as temperature, 
-            m.NodeNum as sensor_id,
-            m.NodeNum as sensor_name,
-            m.Project as project, 
-            m.Location as location, 
-            m.Depth as depth, 
-            {status_logic} as is_approved
-        FROM HourlyDedupped h 
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
-            -- Match by stripping the Google Sheet PhysicalID of all non-digits too
-            ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
-        {join_clause}
-        WHERE h.rank = 1
-    """
-    try:
-        client.query(scrub_sql).result()
-        return True
-    except Exception as e:
-        st.error(f"Rebuild Error: {e}")
-        return False
-
-############################
-# --- FETCH SENSORPUSH --- #
-############################
-def fetch_sensorpush_data(start_dt, end_dt):
-    """
-    Handles API connection to SensorPush.
-    Note: Requires 'sensorpush_creds' in st.secrets.
-    """
-    try:
-        # 1. AUTHENTICATE
-        auth_url = "https://api.sensorpush.com/v1/oauth/authorize"
-        creds = st.secrets["sensorpush_creds"]
-        auth_payload = {"email": creds["email"], "password": creds["password"]}
-        
-        auth_res = requests.post(auth_url, json=auth_payload).json()
-        token = auth_res.get("accesstoken")
-        
-        if not token:
-            st.error("API Auth Failed: Check credentials.")
-            return pd.DataFrame()
-
-        # 2. FETCH DATA
-        data_url = "https://api.sensorpush.com/v1/samples"
-        headers = {"accept": "application/json", "Authorization": token}
-        # API expects ISO format strings
-        payload = {
-            "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        }
-        
-        res = requests.post(data_url, headers=headers, json=payload).json()
-        
-        # 3. TRANSFORM TO BIGQUERY SCHEMA
-        records = []
-        for sensor_id, samples in res.get("sensors", {}).items():
-            for s in samples:
-                records.append({
-                    "sensor_id": sensor_id,
-                    "timestamp": s["observed"],
-                    "temperature": s["temperature"]
-                })
-        
-        return pd.DataFrame(records)
-    except Exception as e:
-        st.error(f"API Sync Error: {e}")
-        return pd.DataFrame()
-
-
 #################
 # --- Graph --- #
 #################
@@ -835,110 +728,113 @@ elif service == "📤 Data Intake Lab":
             st.subheader("📄 Manual File Ingestion")
             st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush (CSV/Excel).")
             
-            # Updated to allow Excel extensions
+            # File uploader (Allows CSV and Excel)
             u_file = st.file_uploader("Upload CSV or Excel File", type=['csv', 'xlsx', 'xls'], key="manual_upload_unified_fixed")
             
             if u_file is not None:
                 filename = u_file.name.lower()
                 is_excel = filename.endswith(('.xlsx', '.xls'))
                 
-                # --- PRE-PROCESSING: Convert to DataFrame or List ---
                 try:
+                    # 1. READ FILE INTO DATAFRAME
                     if is_excel:
-                        # For Excel, we read the whole sheet first
-                        df_preview = pd.read_excel(u_file)
-                        # Convert to string list for header detection logic similar to your CSV flow
-                        raw_content = df_preview.astype(str).columns.tolist() 
+                        try:
+                            import openpyxl
+                            df_raw = pd.read_excel(u_file)
+                        except ImportError:
+                            st.error("🚨 Missing `openpyxl`. Please install it or upload a CSV version.")
+                            st.stop()
                     else:
-                        raw_content = u_file.getvalue().decode('utf-8').splitlines()
-                except Exception as e:
-                    st.error(f"File Read Error: {e}")
-                    raw_content = []
+                        # CSV Header Detection: Skip metadata rows if present (like in Lord Wide)
+                        raw_bytes = u_file.getvalue().decode('utf-8').splitlines()
+                        header_idx = 0
+                        for i, line in enumerate(raw_bytes[:100]):
+                            # Look for common header keywords
+                            if any(k in line for k in ["Timestamp", "Channel", "nodenumber", "SensorId", "Observed"]):
+                                header_idx = i
+                                break
+                        df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])))
 
-                # --- DETECT FILE TYPE ---
-                # 1. Lord Wide (SensorConnect)
-                is_lord_wide = any("DATA_START" in str(line) for line in raw_content[:100]) if not is_excel else False
+                    # Clean headers: Strip whitespace and identify columns case-insensitively
+                    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+                    cols_lower = [c.lower() for c in df_raw.columns]
 
-                # 2. Lord Narrow (Desktop Log)
-                is_lord_narrow = False
-                if not is_lord_wide:
-                    first_line = str(raw_content[0]).lower() if raw_content else ""
-                    is_lord_narrow = ("nodenumber" in first_line or "channel" in first_line) and "temperature" in first_line
+                    # 2. IDENTIFY FORMAT
+                    # A. Lord Wide (SensorConnect) - Usually has "DATA_START" in the preamble
+                    is_lord_wide = not is_excel and any("DATA_START" in line for line in raw_bytes[:100])
+                    
+                    # B. Lord Narrow (Your current file: Timestamp, Channel, Temperature)
+                    is_lord_narrow = "channel" in cols_lower or "nodenumber" in cols_lower
+                    
+                    # C. SensorPush
+                    is_sensorpush = "sensorid" in cols_lower or "observed" in cols_lower
 
-                # --- CASE 1: LORD SENSORCONNECT (WIDE - CSV ONLY) ---
-                if is_lord_wide:
-                    try:
-                        start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
-                        df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
+                    # --- CASE 1: LORD WIDE ---
+                    if is_lord_wide:
+                        start_idx = next(i for i, line in enumerate(raw_bytes) if "DATA_START" in line)
+                        df_wide = pd.read_csv(io.StringIO("\n".join(raw_bytes[start_idx+1:])))
                         df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
                         df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
                         df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
-                        df_long = df_long.dropna(subset=['temperature'])
                         
                         st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
                         st.dataframe(df_long.head())
                         if st.button("🚀 UPLOAD LORD WIDE DATA"):
-                            client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], 
-                                                             f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                            st.success("Uploaded successfully to raw_lord!")
+                            client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                            st.success("Uploaded to raw_lord!")
                             st.cache_data.clear()
-                    except Exception as e: st.error(f"Lord Wide Error: {e}")
-    
-                # --- CASE 2: LORD DESKTOP LOG (NARROW) ---
-                elif is_lord_narrow:
-                    try:
-                        df_ln = pd.read_excel(u_file) if is_excel else pd.read_csv(io.StringIO("\n".join(raw_content)))
-                        df_ln = df_ln.rename(columns={
-                            'Timestamp': 'timestamp', 'timestamp': 'timestamp',
-                            'Channel': 'NodeNum', 'nodenumber': 'NodeNum',
-                            'Temperature': 'temperature', 'temperature': 'temperature'
-                        })
+
+                    # --- CASE 2: LORD NARROW (Matches 62260.xlsx) ---
+                    elif is_lord_narrow:
+                        # Map your specific columns to the standard schema
+                        mapping = {}
+                        for c in df_raw.columns:
+                            cl = c.lower()
+                            if "timestamp" in cl: mapping[c] = "timestamp"
+                            elif "channel" in cl or "nodenumber" in cl: mapping[c] = "NodeNum"
+                            elif "temperature" in cl: mapping[c] = "temperature"
+                        
+                        df_ln = df_raw.rename(columns=mapping)
                         df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
                         df_ln['NodeNum'] = df_ln['NodeNum'].astype(str).str.replace(':', '-', regex=False)
-                        
+                        df_ln = df_ln.dropna(subset=['timestamp', 'temperature', 'NodeNum'])
+
                         st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
-                        st.dataframe(df_ln.head())
+                        st.dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']].head())
                         if st.button("🚀 UPLOAD LORD NARROW DATA"):
-                            client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], 
-                                                             f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                            st.success("Uploaded successfully to raw_lord!")
+                            client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
+                            st.success("Uploaded to raw_lord!")
                             st.cache_data.clear()
-                    except Exception as e: st.error(f"Lord Narrow Error: {e}")
 
-                # --- CASE 3: SENSORPUSH (CSV or EXCEL) ---
-                else:
-                    try:
-                        if is_excel:
-                            df_sp = pd.read_excel(u_file)
-                        else:
-                            header_idx = -1
-                            for i, line in enumerate(raw_content[:50]):
-                                if "SensorId" in line or "Observed" in line:
-                                    header_idx = i; break
-                            if header_idx != -1:
-                                df_sp = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])), dtype=str)
-                            else:
-                                df_sp = pd.DataFrame()
+                    # --- CASE 3: SENSORPUSH ---
+                    elif is_sensorpush:
+                        id_col = next((c for c in df_raw.columns if "sensorid" in c.lower()), None)
+                        ts_col = next((c for c in df_raw.columns if "observed" in c.lower()), None)
+                        temp_col = next((c for c in df_raw.columns if any(k in c.lower() for k in ["temperature", "thermocouple"])), None)
+                        
+                        if id_col and ts_col and temp_col:
+                            df_sp = pd.DataFrame()
+                            df_sp['sensor_id'] = df_raw[id_col].astype(str).str.strip()
+                            df_sp['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed')
+                            df_sp['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
+                            df_sp = df_sp.dropna(subset=['timestamp', 'temperature'])
 
-                        if not df_sp.empty:
-                            ts_col = "Observed" if "Observed" in df_sp.columns else df_sp.columns[1]
-                            df_up = pd.DataFrame()
-                            df_up['sensor_id'] = df_sp['SensorId'].astype(str).str.strip()
-                            df_up['timestamp'] = pd.to_datetime(df_sp[ts_col], format='mixed')
-                            
-                            t_cols = [c for c in df_sp.columns if "Temperature" in str(c) or "Thermocouple" in str(c)]
-                            df_up['temperature'] = pd.to_numeric(df_sp[t_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
-                            df_up = df_up.dropna(subset=['timestamp', 'temperature'])
-    
-                            st.success(f"✅ SensorPush Parsed: {len(df_up)} readings.")
-                            st.dataframe(df_up.head())
-                            if st.button("🚀 UPLOAD SENSORPUSH"):
-                                client.load_table_from_dataframe(df_up, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                                st.success("Uploaded successfully to raw_sensorpush!")
+                            st.success(f"✅ SensorPush Format Parsed: {len(df_sp)} readings.")
+                            st.dataframe(df_sp.head())
+                            if st.button("🚀 UPLOAD SENSORPUSH DATA"):
+                                client.load_table_from_dataframe(df_sp, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                                st.success("Uploaded to raw_sensorpush!")
                                 st.cache_data.clear()
                         else:
-                            st.error("Format not recognized. Check file headers.")
-                    except Exception as e: st.error(f"SensorPush Error: {e}")
+                            st.error("Required columns (SensorId/Observed) not found for SensorPush.")
+
+                    else:
+                        st.error("Unrecognized format. File must contain 'Channel' (Lord) or 'SensorId' (SensorPush).")
+                        st.write("Columns found:", list(df_raw.columns))
+
+                except Exception as e:
+                    st.error(f"Upload Error: {e}")
+                    st.exception(e)
 
        # 3. DEEP DATA SCRUB (Physical Purge) - SNAP TO HOUR FIX
         with tab2:
