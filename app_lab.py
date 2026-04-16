@@ -126,23 +126,20 @@ if client is not None:
     except Exception as e:
         st.sidebar.error(f"Sidebar Sync Error: {e}")
 
-# 4. Reference Lines (Type A added, B & A defaulted to False)
+# 4. Reference Lines (Ensuring active_refs is always defined)
 st.sidebar.subheader("📏 Reference Lines")
-active_refs = []
+active_refs = [] 
 
-# Freezing remains True by default as it is the primary benchmark
 if st.sidebar.checkbox("Freezing (32°F)", value=True): 
     active_refs.append((32.0, "Freezing"))
 
-# Type B: Now False (Unchecked) by default
 if st.sidebar.checkbox("Type B (26.6°F)", value=False): 
     active_refs.append((26.6, "Type B"))
 
-# Type A: New entry, False (Unchecked) by default
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
 
-# 5. Timezone Display
+# 5. Timezone Display (Ensuring display_tz is always defined)
 tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
 display_tz = {
     "UTC": "UTC", 
@@ -865,7 +862,7 @@ def update_records(pts, df, val):
 # - 12. MAIN ROUTER - #
 ###########
 
-# We moved Executive Summary to the top so it is the default landing page
+# This is the bottom of your script
 if service == "🏠 Executive Summary":
     render_executive_summary(client, selected_project, unit_label)
 
@@ -873,6 +870,7 @@ elif service == "🌐 Global Overview":
     render_global_overview()
 
 elif service == "📊 Client Portal":
+    # These 6 variables must have been defined in Section 3
     render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif service == "📉 Node Diagnostics":
