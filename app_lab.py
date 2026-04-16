@@ -780,222 +780,154 @@ elif service == "📉 Node Diagnostics":
 ###############################
 # --- DATA INTAKE LAB --- #
 ###############################
+###############################
+# --- DATA INTAKE LAB --- #
+###############################
 elif service == "📤 Data Intake Lab":
     if check_admin_access():
-        st.header("📤 Data Ingestion & Export")
+        st.header("📤 Data Ingestion & Recovery")
         
-        # Removed API Recovery Tab
+        # Define Tabs: API Recovery has been removed
         tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "🧹 Deep Data Scrub", "📥 Export Project Data"])
 
+        # --- TAB 1: MANUAL UPLOAD ---
         with tab1:
             st.subheader("📄 Manual File Ingestion")
-            st.info("Upload Lord SensorConnect, Lord Desktop Log, or SensorPush files.")
+            st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush (CSV/Excel).")
+            
             u_file = st.file_uploader("Upload CSV or Excel File", type=['csv', 'xlsx', 'xls'], key="manual_upload_unified_fixed")
             
             if u_file is not None:
                 filename = u_file.name.lower()
                 is_excel = filename.endswith(('.xlsx', '.xls'))
-                pass
                 
                 try:
-                    # 1. READ FILE INTO DATAFRAME
+                    # 1. READ FILE
                     if is_excel:
-                        try:
-                            import openpyxl
-                            df_raw = pd.read_excel(u_file)
-                        except ImportError:
-                            st.error("🚨 Missing `openpyxl`. Please install it or upload a CSV version.")
-                            st.stop()
+                        df_raw = pd.read_excel(u_file)
                     else:
-                        # CSV Header Detection: Skip metadata rows if present (like in Lord Wide)
-                        raw_bytes = u_file.getvalue().decode('utf-8').splitlines()
+                        # Detect header for Lord Wide vs Standard
+                        raw_content = u_file.getvalue().decode('utf-8', errors='ignore').splitlines()
                         header_idx = 0
-                        for i, line in enumerate(raw_bytes[:100]):
-                            # Look for common header keywords
+                        for i, line in enumerate(raw_content[:100]):
                             if any(k in line for k in ["Timestamp", "Channel", "nodenumber", "SensorId", "Observed"]):
                                 header_idx = i
                                 break
-                        df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])))
+                        df_raw = pd.read_csv(io.StringIO("\n".join(raw_content[header_idx:])))
 
-                    # Clean headers: Strip whitespace and identify columns case-insensitively
                     df_raw.columns = [str(c).strip() for c in df_raw.columns]
                     cols_lower = [c.lower() for c in df_raw.columns]
 
-                    # 2. IDENTIFY FORMAT
-                    # A. Lord Wide (SensorConnect) - Usually has "DATA_START" in the preamble
-                    is_lord_wide = not is_excel and any("DATA_START" in line for line in raw_bytes[:100])
-                    
-                    # B. Lord Narrow (Your current file: Timestamp, Channel, Temperature)
+                    # 2. IDENTIFY FORMATS
+                    is_lord_wide = not is_excel and any("DATA_START" in str(line) for line in raw_content[:100])
                     is_lord_narrow = "channel" in cols_lower or "nodenumber" in cols_lower
-                    
-                    # C. SensorPush
                     is_sensorpush = "sensorid" in cols_lower or "observed" in cols_lower
 
-                    # --- CASE 1: LORD WIDE ---
+                    # --- PROCESSING LOGIC ---
                     if is_lord_wide:
-                        start_idx = next(i for i, line in enumerate(raw_bytes) if "DATA_START" in line)
-                        df_wide = pd.read_csv(io.StringIO("\n".join(raw_bytes[start_idx+1:])))
+                        start_idx = next(i for i, line in enumerate(raw_content) if "DATA_START" in line)
+                        df_wide = pd.read_csv(io.StringIO("\n".join(raw_content[start_idx+1:])))
                         df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
                         df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
                         df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
                         
-                        st.success(f"✅ Lord Wide Format Parsed: {len(df_long)} readings.")
-                        st.dataframe(df_long.head())
-                        if st.button("🚀 UPLOAD LORD WIDE DATA"):
+                        st.success(f"✅ Lord Wide Parsed: {len(df_long)} rows")
+                        if st.button("🚀 UPLOAD LORD WIDE"):
                             client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                            st.success("Uploaded to raw_lord!")
-                            st.cache_data.clear()
+                            st.success("Uploaded!")
 
-                    # --- CASE 2: LORD NARROW (Matches 62260.xlsx) ---
                     elif is_lord_narrow:
-                        # Map your specific columns to the standard schema
-                        mapping = {}
-                        for c in df_raw.columns:
-                            cl = c.lower()
-                            if "timestamp" in cl: mapping[c] = "timestamp"
-                            elif "channel" in cl or "nodenumber" in cl: mapping[c] = "NodeNum"
-                            elif "temperature" in cl: mapping[c] = "temperature"
-                        
+                        mapping = {c: ("timestamp" if "timestamp" in c.lower() else "NodeNum" if any(k in c.lower() for k in ["channel", "node"]) else "temperature" if "temp" in c.lower() else c) for c in df_raw.columns}
                         df_ln = df_raw.rename(columns=mapping)
                         df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
                         df_ln['NodeNum'] = df_ln['NodeNum'].astype(str).str.replace(':', '-', regex=False)
-                        df_ln = df_ln.dropna(subset=['timestamp', 'temperature', 'NodeNum'])
-
-                        st.success(f"✅ Lord Narrow Format Parsed: {len(df_ln)} readings.")
-                        st.dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']].head())
-                        if st.button("🚀 UPLOAD LORD NARROW DATA"):
+                        
+                        st.success(f"✅ Lord Narrow Parsed: {len(df_ln)} rows")
+                        if st.button("🚀 UPLOAD LORD NARROW"):
                             client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                            st.success("Uploaded to raw_lord!")
-                            st.cache_data.clear()
+                            st.success("Uploaded!")
 
-                    # --- CASE 3: SENSORPUSH ---
                     elif is_sensorpush:
                         id_col = next((c for c in df_raw.columns if "sensorid" in c.lower()), None)
                         ts_col = next((c for c in df_raw.columns if "observed" in c.lower()), None)
-                        temp_col = next((c for c in df_raw.columns if any(k in c.lower() for k in ["temperature", "thermocouple"])), None)
+                        temp_col = next((c for c in df_raw.columns if "temp" in c.lower()), None)
                         
-                        if id_col and ts_col and temp_col:
-                            df_sp = pd.DataFrame()
-                            df_sp['sensor_id'] = df_raw[id_col].astype(str).str.strip()
-                            df_sp['timestamp'] = pd.to_datetime(df_raw[ts_col], format='mixed')
-                            df_sp['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
-                            df_sp = df_sp.dropna(subset=['timestamp', 'temperature'])
+                        df_sp = pd.DataFrame({
+                            'sensor_id': df_raw[id_col].astype(str).str.strip(),
+                            'timestamp': pd.to_datetime(df_raw[ts_col], format='mixed'),
+                            'temperature': pd.to_numeric(df_raw[temp_col], errors='coerce')
+                        }).dropna()
 
-                            st.success(f"✅ SensorPush Format Parsed: {len(df_sp)} readings.")
-                            st.dataframe(df_sp.head())
-                            if st.button("🚀 UPLOAD SENSORPUSH DATA"):
-                                client.load_table_from_dataframe(df_sp, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                                st.success("Uploaded to raw_sensorpush!")
-                                st.cache_data.clear()
-                        else:
-                            st.error("Required columns (SensorId/Observed) not found for SensorPush.")
-
-                    else:
-                        st.error("Unrecognized format. File must contain 'Channel' (Lord) or 'SensorId' (SensorPush).")
-                        st.write("Columns found:", list(df_raw.columns))
+                        st.success(f"✅ SensorPush Parsed: {len(df_sp)} rows")
+                        if st.button("🚀 UPLOAD SENSORPUSH"):
+                            client.load_table_from_dataframe(df_sp, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
+                            st.success("Uploaded!")
 
                 except Exception as e:
                     st.error(f"Upload Error: {e}")
-                    st.exception(e)
 
-       with tab2:
-            st.subheader("🧹 Deep Data Scrub (Averaging Mode)")
-            st.info("This tool reduces data to 1-hour intervals. If multiple readings exist in an hour, they are **averaged**.")
-            st.error("⚠️ WARNING: This permanently modifies data in RAW tables.")
+        # --- TAB 2: DEEP DATA SCRUB (AVERAGING LOGIC) ---
+        with tab2:
+            st.subheader("🧹 Deep Data Scrub & Averaging")
+            st.info("Snaps timestamps to the **top of the hour** and **averages** multiple readings.")
+            st.error("⚠️ WARNING: This permanently modifies the RAW database.")
             
-            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_radio_fixed")
-            
-            if scrub_target == "SensorPush":
-                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                node_col = "sensor_id"
-            else:
-                target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                node_col = "NodeNum"
-    
-            if st.button(f"🧨 Purge, Snap & Average {scrub_target}"):
-                with st.spinner("Calculating hourly averages..."):
-                    # This SQL rounds to nearest hour and averages the temperature
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+            t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+            node_col = "sensor_id" if scrub_target == "SensorPush" else "NodeNum"
+
+            if st.button(f"🧨 Purge & Average {scrub_target}"):
+                with st.spinner("Executing SQL Grouping & Averaging..."):
                     scrub_sql = f"""
-                    CREATE OR REPLACE TABLE `{target_table}` AS 
+                    CREATE OR REPLACE TABLE `{t_table}` AS 
                     SELECT 
                         TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
-                        {node_col},
+                        {node_col}, 
                         AVG(temperature) as temperature,
-                        'TRUE' as approve  -- Re-approving processed data
-                    FROM `{target_table}` 
+                        'TRUE' as approve
+                    FROM `{t_table}`
                     WHERE temperature IS NOT NULL
                     GROUP BY timestamp, {node_col}
                     """
                     try:
                         client.query(scrub_sql).result()
-                        st.success(f"✅ {scrub_target} data averaged and snapped to top-of-hour.")
+                        st.success(f"✅ {scrub_target} scrubbed: Data is now 1 reading per hour (Average).")
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"Scrub Error: {e}")
-                        
+
+        # --- TAB 3: EXPORT ---
         with tab3:
-            st.subheader("📥 Export Project Data (SensorConnect Format)")
-            
-            # Project Selection
-            all_projects_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-            all_projs = client.query(all_projects_q).to_dataframe()['Project'].tolist()
-            default_ix = all_projs.index(selected_project) if selected_project in all_projs else 0
-            target_project = st.selectbox("1️⃣ Select Project to Export", sorted(all_projs), index=default_ix)
+            st.subheader("📥 Export Project Data")
+            # Select Project
+            all_projs_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+            all_projs = sorted(client.query(all_projs_q).to_dataframe()['Project'].tolist())
+            t_proj = st.selectbox("1️⃣ Select Project", all_projs)
         
-            if target_project:
-                with st.spinner(f"Loading data for {target_project}..."):
-                    export_df = get_universal_portal_data(target_project, only_approved=False)
+            if t_proj:
+                with st.spinner("Fetching data..."):
+                    exp_df = get_universal_portal_data(t_proj, only_approved=False)
         
-                if not export_df.empty:
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        pipes = sorted(export_df['Location'].dropna().unique().tolist())
-                        sel_pipe = st.selectbox("2️⃣ Select Pipe / Location", pipes)
-                    with c2:
-                        min_ts, max_ts = export_df['timestamp'].min().date(), export_df['timestamp'].max().date()
-                        export_range = st.date_input("3️⃣ Select Date Range", value=(min_ts, max_ts))
-        
-                    # --- TRANSFORMATION TO WIDE FORMAT ---
-                    df_final = export_df[export_df['Location'] == sel_pipe].copy()
+                if not exp_df.empty:
+                    pipes = sorted(exp_df['Location'].dropna().unique().tolist())
+                    sel_pipe = st.selectbox("2️⃣ Select Location", pipes)
                     
-                    if isinstance(export_range, tuple) and len(export_range) == 2:
-                        start, end = export_range
-                        df_final = df_final[(df_final['timestamp'].dt.date >= start) & (df_final['timestamp'].dt.date <= end)]
-        
+                    df_final = exp_df[exp_df['Location'] == sel_pipe].copy()
+                    
                     if not df_final.empty:
-                        # 1. Standardize Units
-                        if unit_mode == "Celsius":
-                            df_final['temperature'] = (df_final['temperature'] - 32) * 5/9
-                        
-                        # 2. Create Column Labels (e.g., "5ft")
+                        # Pivot to SensorConnect Wide Format
                         df_final['Depth_Col'] = df_final['Depth'].astype(str) + "ft"
-                        
-                        # 3. PIVOT: Turns Depths into Columns
                         df_wide = df_final.pivot_table(
-                            index='timestamp', 
-                            columns='Depth_Col', 
-                            values='temperature',
-                            aggfunc='first' 
+                            index='timestamp', columns='Depth_Col', 
+                            values='temperature', aggfunc='mean'
                         ).reset_index()
 
-                        # 4. NATURAL SORT: Ensures 5ft < 10ft < 20ft
-                        def depth_sort_key(col):
-                            if col == 'timestamp': return -1
-                            nums = re.findall(r'\d+', col)
-                            return int(nums[0]) if nums else 999
-                        
-                        df_wide = df_wide.reindex(columns=sorted(df_wide.columns, key=depth_sort_key))
-
-                        st.divider()
-                        st.write(f"📊 **Preview:** {sel_pipe} ({len(df_wide)} rows)")
-                        st.dataframe(df_wide.head(10), use_container_width=True)
-                        
-                        csv_bytes = df_wide.to_csv(index=False).encode('utf-8')
+                        st.dataframe(df_wide.head())
                         st.download_button(
-                            label=f"💾 Download {sel_pipe} Wide CSV",
-                            data=csv_bytes,
-                            file_name=f"SensorConnect_{target_project}_{sel_pipe}.csv",
-                            mime='text/csv'
+                            "💾 Download CSV",
+                            df_wide.to_csv(index=False).encode('utf-8'),
+                            f"{t_proj}_{sel_pipe}_Export.csv",
+                            "text/csv"
                         )
                         
 ###############################
