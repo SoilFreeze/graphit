@@ -53,14 +53,16 @@ client = get_bq_client()
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
     Fetches data and joins with the manual_rejections table.
-    Engineering view: Shows Approved + Pending + Masked. Hides 'FALSE'.
-    Client view: Shows ONLY 'TRUE'.
+    - Engineering view: Shows everything except 'FALSE' (Deleted).
+    - Client view: Shows ONLY 'TRUE' (Approved).
     """
-    # Fix: Matching the column name 'approve' from your BQ schema
+    
+    # We use 'reason' for filtering because that is the column name in manual_rejections
     if view_mode == "client":
-        approval_filter = "AND rej.approve = 'TRUE'"
+        approval_filter = "AND rej.reason = 'TRUE'"
     else:
-        approval_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
+        # Engineering sees everything NOT explicitly deleted
+        approval_filter = "AND (rej.reason IS NULL OR rej.reason != 'FALSE')"
 
     query = f"""
         WITH UnifiedRaw AS (
@@ -72,7 +74,8 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             SELECT 
                 r.NodeNum, r.timestamp, r.temperature,
                 m.Location, m.Bank, m.Depth, m.Project,
-                rej.approve as is_approved 
+                # Mapping the 'reason' column from the schema to our is_approved status
+                rej.reason as is_approved 
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
             LEFT JOIN `{OVERRIDE_TABLE}` rej 
@@ -90,7 +93,8 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         df = client.query(query).to_dataframe()
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            if 'Bank' not in df.columns: df['Bank'] = ""
+            if 'Bank' not in df.columns:
+                df['Bank'] = ""
         return df
     except Exception as e:
         st.error(f"BigQuery Error in Data Engine: {e}")
