@@ -424,136 +424,48 @@ def render_executive_summary(client, selected_project, unit_label):
     except Exception as e:
         st.error(f"Executive Summary Error: {traceback.format_exc()}")
 ###########
-# - 8. PAGE: NODE DIAGNOSTICS - #
+# - 12. MAIN ROUTER - #
 ###########
-def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Client-facing view. We've added explicit internal checks to prevent
-    the function from crashing if a global variable flickers.
-    """
-    # Defensive check: if any required arg is missing/None, stop here
-    if any(v is None for v in [client, display_tz, unit_mode, active_refs]):
-        st.error("Connection data is temporarily unavailable. Please refresh the page.")
-        return
 
-    st.header(f"📊 Client Portal: {selected_project}")
+# 1. Page Mapping Dictionary
+# This mapping ensures the router knows exactly which function to call
+PAGES = {
+    "🏠 Executive Summary": render_executive_summary,
+    "🌐 Global Overview": render_global_overview,
+    "📊 Client Portal": render_client_portal,
+    "📉 Node Diagnostics": render_node_diagnostics,
+    "📤 Data Intake Lab": render_data_intake_page,
+    "🛠️ Admin Tools": render_admin_page
+}
 
-    if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar.")
-        return
-
-    # Rest of your tab and graph logic...
-    st.write("### 🕒 View Period")
-    weeks = st.slider("Weeks back:", 1, 12, 2, key="client_slider")
+# 2. Execution Logic
+if service in PAGES:
+    func = PAGES[service]
     
-def render_node_diagnostics(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Engineering view: High-detail time series + Temperature vs. Depth vertical profiles.
-    """
-    st.header(f"📉 Node Diagnostics: {selected_project}")
-
-    if not selected_project or selected_project == "All Projects":
-        st.info("💡 Select a specific project in the sidebar to view diagnostic profiles.")
-        return
-
-    # 1. Diagnostic Controls
-    st.write("### 🛠️ Diagnostic View Options")
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        lookback = st.slider("Lookback Period (Days):", 1, 84, 14, key="diag_lookback")
-    with c2:
-        view_type = st.radio("Graph Style", ["Lines", "Dots (Scrubbing)"])
-    with c3:
-        show_profile = st.checkbox("Show Depth Profile", value=True)
-
-    # Calculate Time window
-    now_utc = pd.Timestamp.now(tz='UTC')
-    start_view = now_utc - timedelta(days=lookback)
-
-    # 2. Fetch Data (Engineering view shows all un-deleted data)
-    with st.spinner("Loading high-resolution diagnostic data..."):
-        df = get_universal_portal_data(selected_project, view_mode="engineering")
-
-    if df.empty:
-        st.warning(f"No diagnostic data found for {selected_project}.")
-    else:
-        # Filter for the slider window
-        mask = (df['timestamp'] >= start_view) & (df['timestamp'] <= now_utc)
-        diag_df = df.loc[mask].copy()
-
-        if diag_df.empty:
-            st.warning("No data matches the current lookback window.")
-        else:
-            # --- GRAPH 1: TIME SERIES ---
-            st.subheader("🕒 Temperature Over Time")
+    try:
+        if service == "🏠 Executive Summary":
+            func(client, selected_project, unit_label)
             
-            # Use 'Scrubbing' in title to trigger dot mode if selected
-            title_tag = " [Scrubbing Mode]" if view_type == "Dots (Scrubbing)" else ""
+        elif service == "🌐 Global Overview":
+            func()
             
-            fig_time = build_high_speed_graph(
-                df=diag_df,
-                title=f"Diagnostic History: {selected_project}{title_tag}",
-                start_view=start_view,
-                end_view=now_utc,
-                active_refs=active_refs,
-                unit_mode=unit_mode,
-                unit_label=unit_label,
-                display_tz=display_tz
-            )
-            st.plotly_chart(fig_time, use_container_width=True)
-
-            # --- GRAPH 2: TEMPERATURE VS DEPTH (THE RESTORED PROFILE) ---
-            if show_profile:
-                st.divider()
-                st.subheader("📏 Vertical Temperature Profile")
+        elif service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
+            # Admin tools requires auth check first
+            if service == "🛠️ Admin Tools":
+                if check_admin_access(service):
+                    func(selected_project, display_tz, unit_mode, unit_label, active_refs)
+            else:
+                func(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
                 
-                # Filter for nodes that actually have depth data
-                profile_df = diag_df[pd.to_numeric(diag_df['Depth'], errors='coerce').notnull()].copy()
-                profile_df['Depth'] = pd.to_numeric(profile_df['Depth'])
-
-                if profile_df.empty:
-                    st.info("No depth-based metadata found for this project to generate vertical profiles.")
-                else:
-                    # Get the most recent reading for each depth to build the profile
-                    latest_profile = profile_df.sort_values('timestamp').groupby(['Location', 'Depth']).last().reset_index()
-                    
-                    # Convert temps if Celsius
-                    if unit_mode == "Celsius":
-                        latest_profile['temperature'] = (latest_profile['temperature'] - 32) * 5/9
-
-                    fig_depth = go.Figure()
-
-                    for loc in latest_profile['Location'].unique():
-                        loc_data = latest_profile[latest_profile['Location'] == loc].sort_values('Depth')
-                        
-                        fig_depth.add_trace(go.Scatter(
-                            x=loc_data['temperature'],
-                            y=loc_data['Depth'],
-                            name=f"Pipe: {loc}",
-                            mode='lines+markers',
-                            line=dict(shape='spline', smoothing=0.3),
-                            marker=dict(size=8),
-                            hovertemplate=f"<b>{loc}</b><br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
-                        ))
-
-                    fig_depth.update_layout(
-                        title=f"Current Vertical Profile (Latest Snapshot)",
-                        xaxis_title=f"Temperature ({unit_label})",
-                        yaxis_title="Depth (Feet Below Surface)",
-                        yaxis=dict(autorange="reversed", gridcolor='Gainsboro'), # Surface at top
-                        xaxis=dict(gridcolor='Gainsboro'),
-                        plot_bgcolor='white',
-                        height=700,
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                    )
-                    
-                    # Add reference lines to the depth profile as well
-                    for val, ref_label in active_refs:
-                        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                        fig_depth.add_vline(x=c_val, line_dash="dash", line_color="RoyalBlue", 
-                                          annotation_text=ref_label)
-
-                    st.plotly_chart(fig_depth, use_container_width=True)
+        elif service == "📤 Data Intake Lab":
+            if check_admin_access(service):
+                func(selected_project)
+                
+    except NameError as e:
+        st.error(f"Execution Error: {e}")
+        st.info("The app detected a missing reference. Trying a hard refresh usually fixes this.")
+        if st.button("Hard Refresh App"):
+            st.rerun()
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
