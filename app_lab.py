@@ -156,14 +156,28 @@ def convert_val(f_val):
     return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
 
 # 3. Project Selection (Sidebar)
-selected_project = None
-if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools", "🏠 Executive Summary"]:
+target_pages = [
+    "📊 Client Portal", 
+    "📉 Node Diagnostics", 
+    "🛠️ Admin Tools", 
+    "🏠 Executive Summary",
+    "📤 Data Intake Lab"  # <-- Make sure this matches your selectbox string exactly
+]
+
+if service in target_pages:
     try:
+        # Fetching project list directly from metadata for the sidebar
         proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-        proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].dropna().unique())
-        selected_project = st.sidebar.selectbox("🎯 Active Project", proj_list)
-    except:
-        st.sidebar.warning("Could not load project list.")
+        proj_df = client.query(proj_q).to_dataframe()
+        
+        # This creates the dropdown in the sidebar
+        selected_project = st.sidebar.selectbox(
+            "🎯 Active Project", 
+            sorted(proj_df['Project'].dropna().unique()),
+            key="sidebar_project_picker"
+        )
+    except Exception as e:
+        st.sidebar.warning("Could not load project list from BigQuery.")
 
 # 4. Reference Lines
 st.sidebar.subheader("📏 Reference Lines")
