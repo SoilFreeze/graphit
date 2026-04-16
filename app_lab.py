@@ -427,9 +427,6 @@ def render_executive_summary(client, selected_project, unit_label):
 ###########
 
 def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Client view: Forces explicit formatting variables into the graphing engine.
-    """
     st.header(f"📊 Project Status: {selected_project}")
     global client
 
@@ -447,13 +444,16 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 
         with tab_time:
             weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
+            
+            # 1. SETUP TIME WINDOW
             end_view = pd.Timestamp.now(tz='UTC')
             start_view = end_view - timedelta(weeks=weeks_view)
             
             for loc in sorted(p_df['Location'].dropna().unique()):
                 with st.expander(f"📈 {loc}", expanded=True):
                     loc_data = p_df[p_df['Location'] == loc]
-                    # CRITICAL: Passing all formatting variables here
+                    
+                    # 2. CALL ENGINE WITH FULL FORMATTING
                     fig = build_high_speed_graph(
                         df=loc_data, 
                         title=loc, 
@@ -462,7 +462,7 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                         active_refs=tuple(active_refs), 
                         unit_mode=unit_mode, 
                         unit_label=unit_label, 
-                        display_tz=display_tz
+                        display_tz=display_tz # <--- This triggers the grid lines
                     )
                     st.plotly_chart(fig, use_container_width=True, key=f"client_time_{loc}")
 
@@ -521,6 +521,7 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
             )
             latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r.get('Depth', '??')} ft", axis=1)
             st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
+            
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
 ###########
