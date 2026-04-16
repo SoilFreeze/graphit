@@ -646,16 +646,6 @@ elif service == "🛠️ Admin Tools":
 
         with tab_surgical:
             ###########
-            # - Tab: Surgical Cleaner - #
-            ###########
-            if not selected_project:
-                st.warning("Please select a project in the sidebar.")
-            else:
-                # This function should be defined in your script to handle the Lasso logic
-                render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
-
-        with tab_surgical:
-            ###########
             # - Tab: Surgical Cleaner -#
             ###########
             if not selected_project:
@@ -689,11 +679,15 @@ elif service == "🛠️ Admin Tools":
                                 st.rerun()
 
 def update_records(pts, df, val, proj):
+    """
+    Writes status updates into the 'reason' column of manual_rejections.
+    """
     recs = []
     for p in pts:
+        # Floor to the hour to match scrubbed data intervals
         ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
         node = df.iloc[p['point_index']]['NodeNum']
-        # Removed Project from here as well to match your BQ schema
+        # Per your schema: NodeNum, timestamp, reason
         recs.append({"NodeNum": str(node), "timestamp": ts, "reason": val})
     
     if recs:
@@ -708,42 +702,63 @@ def update_records(pts, df, val, proj):
 ###################################
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    Independent function to handle the Lasso tool and manual status overrides.
+    """
+    # 1. FETCH DATA (Engineering View - Shows everything except 'FALSE')
     p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+
     if p_df.empty:
-        st.info("No data available to scrub.")
+        st.info("No data available to scrub for this project.")
         return
 
+    # 2. SELECTION UI
     loc_options = sorted(p_df['Location'].dropna().unique())
     sel_loc = st.selectbox("Select Pipe to Clean", loc_options, key="surgical_loc_select")
+    
+    # We reset the index so the Plotly 'point_index' aligns with our dataframe rows
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
+    # 3. STATE LOCK (Ensures lasso selection persists during button clicks)
     if "locked_selection" not in st.session_state:
         st.session_state.locked_selection = None
 
-    fig_scrub = build_high_speed_graph(scrub_df, f"Surgical Scrubbing: {sel_loc}", pd.Timestamp.now(tz='UTC') - timedelta(days=14), pd.Timestamp.now(tz='UTC') + timedelta(hours=6), tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
+    # 4. BUILD THE GRAPH (Using markers for selection)
+    # View window set to last 14 days for high detail
+    fig_scrub = build_high_speed_graph(
+        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
+        pd.Timestamp.now(tz='UTC') - timedelta(days=14), 
+        pd.Timestamp.now(tz='UTC') + timedelta(hours=6), 
+        tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
+    )
 
+    # Highlight locked points if they exist
     if st.session_state.locked_selection:
         indices = [p['point_index'] for p in st.session_state.locked_selection]
         fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
 
+    # 5. RENDER & CAPTURE
     event_data = st.plotly_chart(fig_scrub, use_container_width=True, on_select="rerun", key=f"scrub_{sel_loc}")
 
     if event_data and "selection" in event_data:
         pts = event_data["selection"].get("points", [])
-        if len(pts) > 0: st.session_state.locked_selection = pts
+        if len(pts) > 0:
+            st.session_state.locked_selection = pts
 
+    # 6. ACTION CONTROLS
     if st.session_state.locked_selection:
         st.success(f"📍 {len(st.session_state.locked_selection)} points selected.")
         c1, c2, c3, c4 = st.columns(4)
+        
         with c1:
             if st.button("✅ APPROVE (Client)", use_container_width=True):
-                process_status_update(st.session_state.locked_selection, scrub_df, "TRUE", selected_project)
+                update_records(st.session_state.locked_selection, scrub_df, "TRUE", selected_project)
         with c2:
             if st.button("🚫 MASK (Client)", use_container_width=True):
-                process_status_update(st.session_state.locked_selection, scrub_df, "MASKED", selected_project)
+                update_records(st.session_state.locked_selection, scrub_df, "MASKED", selected_project)
         with c3:
             if st.button("🗑️ DELETE", type="primary", use_container_width=True):
-                process_status_update(st.session_state.locked_selection, scrub_df, "FALSE", selected_project)
+                update_records(st.session_state.locked_selection, scrub_df, "FALSE", selected_project)
         with c4:
             if st.button("Clear Selection", use_container_width=True):
                 st.session_state.locked_selection = None
@@ -764,3 +779,27 @@ def process_status_update(points, df, status_val, project_id):
         st.session_state.locked_selection = None
         st.cache_data.clear()
         st.rerun()
+
+###########
+#- 12. FINAL APP ROUTING -
+###########
+# This section should go at the very bottom of your script
+if service == "🌐 Global Overview":
+    render_global_overview() # Defined in section 5
+
+elif service == "🏠 Executive Summary":
+    render_executive_summary(selected_project, unit_label) # Defined in section 6
+
+elif service == "📊 Client Portal":
+    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs) # Defined in section 7
+
+elif service == "📉 Node Diagnostics":
+    render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs) # Defined in section 8
+
+elif service == "📤 Data Intake Lab":
+    if check_admin_access():
+        render_data_intake_page(selected_project) # Defined in section 9
+
+elif service == "🛠️ Admin Tools":
+    if check_admin_access():
+        render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs) # Defined in section 10
