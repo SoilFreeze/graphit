@@ -305,16 +305,10 @@ def render_global_overview():
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-###########
-# - 6. PAGE: EXECUTIVE SUMMARY - #
-###########
-
-###########
-# - 6. PAGE: EXECUTIVE SUMMARY - #
-###########
-
 def render_executive_summary(selected_project, unit_label):
-    # Ensure this st.header is indented exactly 4 spaces (one tab)
+    """
+    Command Center view: Shows 24-hour health, min/max temps, and delta magnitude.
+    """
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
     st.write("### ↕️ Sorting & View Options")
@@ -324,7 +318,7 @@ def render_executive_summary(selected_project, unit_label):
     with c2:
         sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True, key="summary_order")
     
-    # The SQL query must also be indented to stay inside the function
+    # 1. SQL Query Construction
     summary_q = f"""
         WITH RecentData AS (
             SELECT 
@@ -351,35 +345,45 @@ def render_executive_summary(selected_project, unit_label):
     """
     
     try:
-        # 'client' must be defined globally at the top of your script
-        raw_summary_df = client.query(summary_q).to_dataframe()
+        with st.spinner("⚡ Fetching Command Center Snapshot..."):
+            raw_summary_df = client.query(summary_q).to_dataframe()
         
         if raw_summary_df.empty:
             st.warning("📡 No active sensors seen in the last 24 hours.")
         else:
-            # Table processing logic goes here...
-            st.dataframe(raw_summary_df, use_container_width=True)
-            
-    except Exception as e:
-        st.error(f"Executive Summary Error: {e}")
-        st.warning("📡 No active sensors seen in the last 24 hours.")
-        else:
             now_utc = pd.Timestamp.now(tz=pytz.UTC)
             
-            # 2. Process dataframe for display
+            # 2. Row Processing Function
             def process_summary_row(row):
+                # Ensure timestamp is UTC localized
                 ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
                 hrs_ago = int((now_utc - ts).total_seconds() / 3600)
-                status_icon = "🟢" if hrs_ago < 6 else ("🟡" if hrs_ago < 12 else "🟠" if hrs_ago < 24 else "🔴")
                 
-                # Delta is always calculated in Fahrenheit for magnitude consistency
+                # Logic Chain for Health Icons
+                if hrs_ago < 6:
+                    status_icon = "🟢"
+                elif hrs_ago < 12:
+                    status_icon = "🟡"
+                elif hrs_ago < 24:
+                    status_icon = "🟠"
+                else:
+                    status_icon = "🔴"
+                
+                # Temperature Delta calculation
                 raw_delta = row['temperature'] - row['first_temp_24h']
+                
+                # Formatting Position Label
+                bank_val = str(row.get('Bank', '')).strip().lower()
+                if bank_val in ["", "none", "nan", "null"]:
+                    pos_label = f"{row.get('Depth', '??')} ft"
+                else:
+                    pos_label = f"Bank {row['Bank']}"
                 
                 return pd.Series({
                     "Project": row['Project'],
                     "Node": row['NodeNum'],
                     "Location": row['Location'],
-                    "Position": f"Bank {row['Bank']}" if str(row['Bank']).strip() not in ["", "None", "nan", "NaN"] else f"{row['Depth']} ft",
+                    "Position": pos_label,
                     "Min": f"{round(convert_val(row['min_24h']), 1)}{unit_label}",
                     "Max": f"{round(convert_val(row['max_24h']), 1)}{unit_label}",
                     "Delta_Val": raw_delta, 
@@ -388,23 +392,25 @@ def render_executive_summary(selected_project, unit_label):
                     "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
                 })
 
+            # 3. Apply processing and sorting
             summary_df = raw_summary_df.apply(process_summary_row, axis=1)
 
-            # 3. Sorting Logic
-            asc = (sort_order == "Ascending")
+            is_asc = (sort_order == "Ascending")
             if sort_choice == "Hours Since Last Seen":
-                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=asc)
+                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=is_asc)
             elif sort_choice == "Delta Magnitude":
-                summary_df = summary_df.sort_values(by="Delta_Val", key=abs, ascending=asc)
+                # Sorts by absolute value of change
+                summary_df = summary_df.sort_values(by="Delta_Val", key=abs, ascending=is_asc)
 
-            # 4. Display
+            # 4. Final Display
             st.dataframe(
                 summary_df[["Project", "Node", "Location", "Position", "Min", "Max", "Delta", "Last Seen"]],
-                use_container_width=True, hide_index=True
+                use_container_width=True, 
+                hide_index=True
             )
             
     except Exception as e:
-        st.error(f"Executive Summary Error: {e}")
+        st.error(f"Executive Summary Error: {traceback.format_exc()}")
 
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
