@@ -523,62 +523,98 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
     Engineering-level view. Shows everything (Pending, Masked, Approved).
-    Used for troubleshooting sensor health and communication gaps.
+    Includes Time Series and restored Vertical Depth Profiles.
     """
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
-    with st.spinner("🔍 Syncing diagnostic streams (Engineering View)..."):
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Select a specific project in the sidebar to view diagnostic profiles.")
+        return
+
+    # 1. Diagnostic Controls
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        weeks_view = st.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
+    with c2:
+        view_type = st.radio("Graph Style", ["Lines", "Dots (Scrubbing)"])
+    with c3:
+        show_profile = st.checkbox("Show Vertical Profile", value=True)
+
+    # 2. Fetch Data
+    with st.spinner("🔍 Syncing diagnostic streams..."):
         all_data = get_universal_portal_data(selected_project, view_mode="engineering")
     
     if all_data.empty:
-        st.warning(f"No diagnostic data found for project {selected_project}.")
-    else:
-        loc_options = sorted(all_data['Location'].dropna().unique())
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options, key="diag_loc_select")
-        with c2:
-            weeks_view = st.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
-            
-        df_diag = all_data[all_data['Location'] == sel_loc].copy()
+        st.warning(f"No diagnostic data found for {selected_project}.")
+        return
 
-        # 1. Engineering Timeline (Markers enabled for gap detection)
-        st.subheader("📈 Engineering Timeline")
-        fig_time = build_high_speed_graph(
-            df_diag, f"Diagnostic Stream: {sel_loc}", 
-            pd.Timestamp.now(tz='UTC') - timedelta(weeks=weeks_view), 
-            pd.Timestamp.now(tz='UTC') + timedelta(hours=2), 
-            tuple(active_refs), unit_mode, unit_label, display_tz
-        )
-        st.plotly_chart(fig_time, use_container_width=True, key=f"diag_chart_{sel_loc}")
+    # Calculate Time window
+    now_utc = pd.Timestamp.now(tz='UTC')
+    start_view = now_utc - timedelta(weeks=weeks_view)
+    mask = (all_data['timestamp'] >= start_view) & (all_data['timestamp'] <= now_utc)
+    diag_df = all_data.loc[mask].copy()
 
-        # 2. Communication Health Table
-        st.subheader("📋 Sensor Communication Health")
-        now_utc = pd.Timestamp.now(tz=pytz.UTC)
-        latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+    # --- GRAPH 1: TIME SERIES ---
+    st.subheader("🕒 Temperature Over Time")
+    title_tag = " [Scrubbing Mode]" if view_type == "Dots (Scrubbing)" else ""
+    
+    fig_time = build_high_speed_graph(
+        diag_df, f"Diagnostic History: {selected_project}{title_tag}", 
+        start_view, now_utc, 
+        tuple(active_refs), unit_mode, unit_label, display_tz
+    )
+    st.plotly_chart(fig_time, use_container_width=True)
+
+    # --- GRAPH 2: TEMPERATURE VS DEPTH (RESTORED) ---
+    if show_profile:
+        st.divider()
+        st.subheader("📏 Vertical Temperature Profile")
         
-        summary_rows = []
-        for _, row in latest_nodes.iterrows():
-            # Calculate hours since last reporting
-            ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-            hrs_ago = int((now_utc - ts).total_seconds() / 3600)
-            
-            # Status Logic: Green < 6h, Yellow < 24h, Red > 24h
-            status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-            
-            # Map database 'reason' column to human-readable status
-            db_status = row['is_approved']
-            status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
+        # Force Depth to Numeric for graphing
+        diag_df['Depth_Num'] = pd.to_numeric(diag_df['Depth'], errors='coerce')
+        profile_df = diag_df.dropna(subset=['Depth_Num', 'Location']).copy()
 
-            summary_rows.append({
-                "Node": row['NodeNum'],
-                "Last Value": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
-                "Last Seen": f"{hrs_ago}h ago {status_icon}",
-                "Admin Status": status_label
-            })
-        
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        if profile_df.empty:
+            st.info("No numeric depth data found in metadata to generate vertical profiles.")
+        else:
+            # Get the most recent reading for each depth to build the profile
+            latest_profile = profile_df.sort_values('timestamp').groupby(['Location', 'Depth_Num']).last().reset_index()
+            
+            fig_depth = go.Figure()
 
+            for loc in sorted(latest_profile['Location'].unique()):
+                loc_data = latest_profile[latest_profile['Location'] == loc].sort_values('Depth_Num')
+                
+                fig_depth.add_trace(go.Scattergl(
+                    x=loc_data['temperature'].apply(convert_val),
+                    y=loc_data['Depth_Num'],
+                    name=f"Pipe: {loc}",
+                    mode='lines+markers',
+                    line=dict(shape='spline', smoothing=0.5),
+                    marker=dict(size=8),
+                    hovertemplate=f"<b>{loc}</b><br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                ))
+
+            # Format Layout: Surface (0ft) at the top
+            y_limit = int(((profile_df['Depth_Num'].max() // 10) + 1) * 10) if not profile_df.empty else 50
+            fig_depth.update_layout(
+                title=f"Latest Vertical Snapshot ({selected_project})",
+                xaxis_title=f"Temperature ({unit_label})",
+                yaxis_title="Depth (Feet)",
+                yaxis=dict(range=[y_limit, 0], gridcolor='Gainsboro'), # Reversed
+                xaxis=dict(gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True),
+                plot_bgcolor='white',
+                height=700,
+                legend=dict(title="Locations", orientation="h", y=-0.15)
+            )
+            
+            # Add Reference Lines (Freezing, Type A, Type B)
+            for val, ref_label in active_refs:
+                c_val = convert_val(val)
+                fig_depth.add_vline(x=c_val, line_dash="dash", line_color="RoyalBlue", 
+                                  annotation_text=ref_label)
+
+            st.plotly_chart(fig_depth, use_container_width=True)
 
 ###########
 # - 9. PAGE: DATA INTAKE LAB - #
