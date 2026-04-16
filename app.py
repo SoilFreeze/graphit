@@ -2,145 +2,34 @@ import streamlit as st
 import pandas as pd
 import time
 import plotly.express as px
-import plotly.graph_objects as go
+import plotly.graph_objects as go  # This defines 'go'
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
-import requests
-import json
 import traceback
-import re
 import io
-import openpyxl
 
-################################
-# --- GET ALL PROJECT DATA --- #
-################################
-@st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, only_approved=True):
-    """
-    Standardizes data to UTC and handles rounded hourly scrubbing joins.
-    """
-    query = f"""
-        WITH UnifiedRaw AS (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ),
-        JoinedData AS (
-            SELECT 
-                r.NodeNum, r.timestamp, r.temperature,
-                m.Location, m.Bank, m.Depth, m.Project,
-                # Join logic: Snap both to nearest hour so the scrub/rejection works
-                CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
-            FROM UnifiedRaw r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
-            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
-                ON r.NodeNum = rej.NodeNum 
-                AND TIMESTAMP_TRUNC(TIMESTAMP_ADD(r.timestamp, INTERVAL 30 MINUTE), HOUR) = 
-                    TIMESTAMP_TRUNC(TIMESTAMP_ADD(rej.timestamp, INTERVAL 30 MINUTE), HOUR)
-        )
-        SELECT * FROM JoinedData
-        WHERE Project = '{project_id}'
-        { "AND is_currently_approved = 'TRUE'" if only_approved else "" }
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-        ORDER BY Location ASC, timestamp ASC
-    """
-    try:
-        df = client.query(query).to_dataframe()
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            if 'Bank' not in df.columns:
-                df['Bank'] = ""
-        return df
-    except Exception as e:
-        st.error(f"BigQuery Error: {e}")
-        return pd.DataFrame()
-##############################
-# --- CHECK ADMIN ACCESS --- #
-##############################
-def check_admin_access():
-    if "admin_authenticated" not in st.session_state:
-        st.session_state["admin_authenticated"] = False
-
-    if st.session_state["admin_authenticated"]:
-        return True
-
-    # Check if the secret even exists before trying to compare it
-    if "admin_password" not in st.secrets:
-        st.error("Developer Error: 'admin_password' is not defined in Streamlit Secrets.")
-        return False
-
-    st.warning("🔒 This area is restricted to Engineering Admins.")
-    pwd_input = st.text_input("Enter Admin Password", type="password")
-    
-    if st.button("Unlock Tools"):
-        if pwd_input == st.secrets["admin_password"]:
-            st.session_state["admin_authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-    return False
-###################################
-# --- GET CASHED PROJECT DATA --- #
-###################################
-@st.cache_data(ttl=600) # Cache data for 10 minutes
-def get_cached_project_data(project_id, days=84):
-    """
-    Centralized data fetcher. 
-    Returns all approved data for a project in one batch.
-    """
-    query = f"""
-        SELECT timestamp, temperature, Depth, Location, Bank, NodeNum
-        FROM `{MASTER_TABLE}`
-        WHERE Project = '{project_id}' 
-        AND (approve = 'TRUE' OR approve = 'true')
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        ORDER BY timestamp ASC
-    """
-    return client.query(query).to_dataframe()
-
-@st.cache_data(ttl=3600)
-def get_project_list():
-    """Caches the project list to speed up sidebar loading."""
-    proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
-    return client.query(proj_q).to_dataframe()['Project'].dropna().unique()
-
-def style_delta(val):
-    """Global styling for temperature deltas."""
-    if val is None or pd.isna(val): return ""
-    bg, color = "", "black"
-    if val >= 5: bg, color = "#FF0000", "white"     # Critical Rise
-    elif val >= 2: bg = "#FFA500"                   # Warning Rise
-    elif val >= 0.5: bg = "#FFFF00"                 # Slight Rise
-    elif -0.5 <= val <= 0.5: bg, color = "#008000", "white" # Stable
-    elif -2 < val < -0.5: bg = "#ADD8E6"            # Slight Cooling
-    elif -5 < val <= -2: bg, color = "#4169E1", "white" # Strong Cooling
-    elif val <= -5: bg, color = "#00008B", "white"  # Deep Freeze
-    return f'background-color: {bg}; color: {color}'
-
-#########################
-# --- CONFIGURATION --- #
-#########################
-# --- 1. CONFIGURATION & STYLING ---
+##################################
+# - 1. CONFIGURATION & STYLING - #
+##################################
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
-# UPDATED: Pointing to the new 'Temperature' dataset
+# Database Constants
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
-# The full table name is now sensorpush-export.Temperature.master_data
-MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
-METADATA_TABLE = "metadata"
+OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+
+# MASTER VISIBILITY SWITCHES
+PROJECT_VISIBILITY_MASKS = {
+    "Office": "2026-03-03 15:00:00", 
+    "Main_Site": "2026-01-01 00:00:00"
+}
 
 @st.cache_resource
 def get_bq_client():
-    """Handles authentication with BigQuery and Drive scopes."""
     try:
-        SCOPES = [
-            "https://www.googleapis.com/auth/bigquery",
-            "https://www.googleapis.com/auth/drive"
-        ]
+        SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive"]
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
@@ -152,118 +41,169 @@ def get_bq_client():
 
 client = get_bq_client()
 
-#########################
-# --- REBUILD TABLE --- #
-#########################
-#########################
-# --- REBUILD TABLE --- #
-#########################
-def rebuild_master_table(mode="preserve"):
+############################
+# - 2. DATA ENGINE LOGIC - #
+############################
+
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Failsafe Rebuild: Snaps all timestamps to the hour and AVERAGES
-    multiple readings within that hour window.
+    Updated Data Engine: Ensures 'MASKED' status overrides 'TRUE' status.
     """
-    table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+    cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    exists = True
-    try:
-        client.get_table(table_id)
-    except Exception:
-        exists = False
+    if view_mode == "client":
+        # Logic: Must be marked 'TRUE' AND must NOT be marked 'MASKED'
+        query_filter = f"""
+            AND r.timestamp >= '{cutoff}'
+            AND rej.reason = 'TRUE'
+            AND NOT EXISTS (
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.reason = 'MASKED'
+            )
+        """
+    else:
+        # Engineering sees everything except explicit deletions ('FALSE')
+        query_filter = "AND (rej.reason IS NULL OR rej.reason != 'FALSE')"
 
-    # Logic to preserve previous approval status if table exists
-    status_logic = "TRUE" if mode == "approve_all" else ("COALESCE(ex.is_approved, FALSE)" if exists else "FALSE")
-    join_clause = f"LEFT JOIN `{table_id}` ex ON TIMESTAMP_TRUNC(TIMESTAMP_ADD(h.ts, INTERVAL 30 MINUTE), HOUR) = ex.timestamp AND m.NodeNum = ex.sensor_id" if (exists and mode == "preserve") else ""
-
-    scrub_sql = f"""
-        CREATE OR REPLACE TABLE `{table_id}` AS 
-        WITH RawUnified AS (
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
-                   REGEXP_REPLACE(CAST(sensor_id AS STRING), r'[^0-9]', '') as clean_node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
-            UNION ALL
-            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
-                   REGEXP_REPLACE(REPLACE(NodeNum, ':', '-'), r'[^0-9]', '') as clean_node 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE temperature IS NOT NULL
-        ),
-        HourlyAveraged AS (
-            SELECT 
-                clean_node,
-                TIMESTAMP_TRUNC(TIMESTAMP_ADD(ts, INTERVAL 30 MINUTE), HOUR) as hour_ts,
-                AVG(temp) as avg_temp
-            FROM RawUnified
-            GROUP BY clean_node, hour_ts
-        )
+    query = f"""
         SELECT 
-            h.hour_ts as timestamp, 
-            h.avg_temp as temperature, 
-            m.NodeNum as sensor_id,
-            m.NodeNum as sensor_name,
-            m.Project as project, 
-            m.Location as location, 
-            m.Depth as depth, 
-            {status_logic} as is_approved
-        FROM HourlyAveraged h 
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
-            ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
-        {join_clause}
+            r.NodeNum, r.timestamp, r.temperature,
+            m.Location, m.Bank, m.Depth, m.Project,
+            rej.reason as is_approved 
+        FROM (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ) AS r
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+            ON r.NodeNum = rej.NodeNum 
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+        WHERE m.Project = '{project_id}'
+        {query_filter}
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        ORDER BY m.Location ASC, r.timestamp ASC
     """
     try:
-        client.query(scrub_sql).result()
-        return True
+        df = client.query(query).to_dataframe()
+        return df
     except Exception as e:
-        st.error(f"Rebuild Error: {e}")
-        return False
-        
-#################
-# --- Graph --- #
-#################
+        st.error(f"BQ Error: {e}")
+        return pd.DataFrame()
+
+def check_admin_access(service_name):
+    if st.session_state.get("admin_authenticated"): return True
+    st.warning("🔒 Admin Access Required")
+    pwd = st.text_input("Password", type="password", key=f"gate_{service_name}")
+    if st.button("Unlock", key=f"btn_{service_name}"):
+        if pwd == st.secrets["admin_password"]:
+            st.session_state["admin_authenticated"] = True
+            st.rerun()
+    return False
+
+###########################
+#- 3. SIDEBAR UI & STATE -#
+###########################
+st.sidebar.title("❄️ SoilFreeze Lab")
+
+# --- 1. INITIALIZE FALLBACKS (Prevents NameError) ---
+# These ensure the variables exist even if a query fails
+service = "🏠 Executive Summary"
+unit_mode = "Fahrenheit"
+unit_label = "°F"
+selected_project = "All Projects"
+display_tz = "UTC"
+active_refs = [(32.0, "Freezing")]
+
+# --- 2. SIDEBAR WIDGETS ---
+service = st.sidebar.selectbox(
+    "📂 Page", 
+    ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
+)
+
+unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+# Robust Project Selection
+if client is not None:
+    try:
+        proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+        proj_df = client.query(proj_q).to_dataframe()
+        proj_list = sorted(proj_df['Project'].dropna().unique())
+        options = ["All Projects"] + proj_list
+        selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_final")
+    except Exception as e:
+        st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
+        selected_project = "All Projects"
+
+# Reference Lines
+st.sidebar.subheader("📏 Reference Lines")
+active_refs = [] # Reset and rebuild based on checkboxes
+if st.sidebar.checkbox("Freezing (32°F)", value=True): 
+    active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F)", value=False): 
+    active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
+    active_refs.append((10.2, "Type A"))
+
+# Timezone Display
+tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
+display_tz = {
+    "UTC": "UTC", 
+    "Local (US/Eastern)": "US/Eastern", 
+    "Local (US/Pacific)": "US/Pacific"
+}[tz_mode]
+
+########################
+#- 4. GRAPHING ENGINE -#
+########################
+
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    High-speed Plotly engine with Local Time support and Clean Hover Tooltips.
+    Standard Plotly engine.
+    REMOVED: 6-hour lines.
+    KEEP: Black Monday lines and Gray Midnight lines.
     """
     if df.empty:
-        return go.Figure()
+        return go.Figure().update_layout(title="No data available for the selected period.")
 
     plot_df = df.copy()
     
     # 1. TIMEZONE CONVERSION
-    # Standardize data to the user's preferred local display zone
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Adjust the 'Camera' window and the 'Red Now Line' to match the local zone
-    start_local = start_view.astimezone(pytz.timezone(display_tz))
-    end_local = end_view.astimezone(pytz.timezone(display_tz))
+    # Localize window boundaries
+    tz = pytz.timezone(display_tz)
+    start_local = start_view.astimezone(tz) if hasattr(start_view, 'astimezone') else start_view
+    end_local = end_view.astimezone(tz) if hasattr(end_view, 'astimezone') else end_view
     now_local = pd.Timestamp.now(tz=display_tz)
 
     # 2. UNIT CONVERSION
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range, dt_minor = [-30, 30], 2
+        y_range, dt_major = [-30, 30], 5
     else:
-        y_range, dt_minor = [-20, 80], 5
+        y_range, dt_major = [-20, 80], 10
 
-    # 3. LABELING LOGIC
+    # 3. LABELING
     plot_df['label'] = plot_df.apply(
         lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
         else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
     )
     
-    # 4. PLOT MODE (Lines vs Points)
-    # Admin and Diag views use markers for precise Lasso selection
-    is_admin = "Scrubbing" in title or "Diag" in title
-    plot_mode = 'markers' if is_admin else 'lines'
-    marker_size = 7 if is_admin else 3
+    is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
+    plot_mode = 'markers' if is_surgical else 'lines'
 
     fig = go.Figure()
     
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
-        # This is the name shown in the hover box (e.g., 'Bank R1')
-        hover_name = lbl.split('(')[0].strip()
-
-        # 5. GAP DETECTION (Only for Line mode)
-        if not is_admin:
+        
+        # Gap Detection
+        if not is_surgical:
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             gap_mask = s_df['gap_hrs'] > 6.0
             if gap_mask.any():
@@ -272,823 +212,798 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # 6. ADD TRACE WITH CLEAN HOVER
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], 
             y=s_df['temperature'], 
             name=lbl, 
             mode=plot_mode,
-            marker=dict(size=marker_size, opacity=0.8 if is_admin else 1.0),
             connectgaps=False,
-            customdata=[hover_name] * len(s_df),
-            # THE FIX: Removed time/date from individual lines. Only shows Name + Temp.
-            # <extra></extra> removes the secondary trace name box.
-            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
+            hovertemplate=f"<b>{lbl.split('(')[0]}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 7. GRID HIERARCHY (Monday=Black, Midnight=Gray)
-    grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
-    for ts in grid_times:
-        if ts.weekday() == 0 and ts.hour == 0:
-            color, width = "Black", 1.2 
-        elif ts.hour == 0:
-            color, width = "Gray", 0.8  
-        else:
-            color, width = "LightGray", 0.3
-        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+    # 4. SIMPLIFIED GRID HIERARCHY (Mondays and Midnights Only)
+    # Generate daily markers instead of 6-hour markers
+    grid_days = pd.date_range(start=start_local.floor('D'), end=end_local.ceil('D'), freq='D', tz=display_tz)
+    
+    for ts in grid_days:
+        if ts.weekday() == 0:  # Monday
+            color, width, dash = "rgba(0,0,0,1)", 1.5, "solid" # Strong Black
+        else:  # Other Midnights
+            color, width, dash = "rgba(128,128,128,0.6)", 1.0, "dot" # Gray Dotted
+            
+        fig.add_vline(x=ts, line_width=width, line_color=color, line_dash=dash, layer='below')
 
-    # 8. REFERENCE LINES
+    # 5. REFERENCE LINES & NOW MARKER
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-        fig.add_hline(y=c_val, line_dash="dash", line_color="maroon" if "Type A" in ref_label else "RoyalBlue", 
+        fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right")
 
-    # 9. RED "NOW" LINE
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 10. FINAL LAYOUT
+    # 6. FINAL LAYOUT
     fig.update_layout(
         title={'text': f"{title} ({display_tz})", 'x': 0},
         plot_bgcolor='white',
-        # 'x unified' puts the time/date ONLY at the top of the box
         hovermode="x unified",
         height=600,
         margin=dict(t=80, l=50, r=180, b=50),
         xaxis=dict(
-            range=[start_local, end_local],
+            range=[start_local, end_local], 
+            gridcolor='rgba(0,0,0,0)', # Hide default grid
             showline=True, 
             linecolor='black', 
-            mirror=True,
+            mirror=True, 
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
-            title=f"Temperature ({unit_label})",
-            range=y_range,
-            dtick=dt_minor,
-            gridcolor='Gainsboro',
-            showline=True,
-            linecolor='black',
+            title=f"Temperature ({unit_label})", 
+            range=y_range, 
+            dtick=dt_major, 
+            gridcolor='Gainsboro', 
+            showline=True, 
+            linecolor='black', 
             mirror=True
         ),
-        legend=dict(
-            title="Sensors",
-            orientation="v",
-            x=1.02,
-            y=1,
-            xanchor="left"
-        )
+        legend=dict(title="Sensors", orientation="v", x=1.02, y=1, xanchor="left")
     )
     
     return fig
+##################
+# Page Functions #
+##################
+
+###########
+# - 5. PAGE: GLOBAL OVERVIEW - #
+###########
+
+def render_global_overview():
+    """
+    Shows all pipes/banks for a selected project in one scrolling view.
+    Engineering view: shows everything except 'FALSE'.
+    """
+    st.header("🌐 Global Project Overview")
     
-#######################
-# --- SIDEBAR UI --- #
-#######################
-st.sidebar.title("❄️ SoilFreeze Lab")
-
-service = st.sidebar.selectbox(
-    "📂 Select Page", 
-    ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"],
-    index=0  # Sets Global Overview as the landing page
-    )
-st.sidebar.divider()
-
-unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], index=0)
-unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
-
-def convert_val(f_val):
-    if f_val is None: return None
-    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
-
-st.sidebar.divider()
-
-# Project Selection
-selected_project = None
-if service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
+    # 1. Project Selection from Metadata
+    proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
     try:
-        proj_q = f"SELECT DISTINCT Project FROM `{MASTER_TABLE}` WHERE Project IS NOT NULL"
-        proj_df = client.query(proj_q).to_dataframe()
-        selected_project = st.sidebar.selectbox("🎯 Active Project", sorted(proj_df['Project'].dropna().unique()))
-    except: st.sidebar.warning("No projects found.")
-
-st.sidebar.divider()
-st.sidebar.write("### 📏 Reference Lines")
-active_refs = []
-if st.sidebar.checkbox("Freezing (32°F / 0°C)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F / -3°C)", value=True): active_refs.append((26.6, "Type B"))
-if st.sidebar.checkbox("Type A (10.2°F / -12.1°C)", value=True): active_refs.append((10.2, "Type A"))
-
-# Add to your sidebar section
-st.sidebar.subheader("🕒 Display Settings")
-tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
-
-# Map the selection to pytz strings
-tz_lookup = {
-    "UTC": "UTC",
-    "Local (US/Eastern)": "US/Eastern",
-    "Local (US/Pacific)": "US/Pacific"
-}
-display_tz = tz_lookup[tz_mode]
-#################
-# --- PAGES --- #
-#################
-###########################
-# --- GLOBAL OVERVIEW --- #
-###########################
-if service == "🌐 Global Overview":
-    st.header("🌐 Project Overview")
-    
-    # 1. Project Selector
-    project_list_query = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-    available_projects = sorted(client.query(project_list_query).to_dataframe()['Project'].astype(str).tolist())
-    
-    target_project = st.selectbox("🏗️ Select a Project", available_projects, key="global_proj_picker")
+        available_projects = sorted(client.query(proj_list_q).to_dataframe()['Project'].tolist())
+        target_project = st.selectbox("🏗️ Select a Project to Review", available_projects, key="global_proj_picker")
+    except Exception as e:
+        st.error(f"Metadata Error: {e}")
+        return
 
     if target_project:
-        with st.spinner("Loading site timeline..."):
-            p_df = get_universal_portal_data(target_project, only_approved=True)
+        with st.spinner(f"Syncing {target_project} (Engineering View)..."):
+            # Engineering view shows all data not explicitly rejected ('FALSE') in 'reason' column
+            p_df = get_universal_portal_data(target_project, view_mode="engineering")
 
         if not p_df.empty:
-            lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4)
+            # 2. View Constraints
+            lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
             now_utc = pd.Timestamp.now(tz='UTC')
-            end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
+            # Snap end view to the upcoming Monday for consistent weekly alignment
+            end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
             start_view = end_view - timedelta(weeks=lookback)
 
+            # 3. Render a graph for every physical location (Pipe/Bank) in the project
             for loc in sorted(p_df['Location'].unique()):
-                with st.expander(f"📍 {loc}", expanded=True):
+                with st.expander(f"📍 Location: {loc}", expanded=True):
                     loc_df = p_df[p_df['Location'] == loc]
-                    fig = build_high_speed_graph(loc_df, f"📈 {target_project} - {loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
+                    fig = build_high_speed_graph(
+                        loc_df, f"📈 {target_project} - {loc}", 
+                        start_view, end_view, tuple(active_refs), 
+                        unit_mode, unit_label, display_tz=display_tz
+                    )
                     st.plotly_chart(fig, use_container_width=True, key=f"ov_{target_project}_{loc}")
-#############################
-# --- Executive Summary --- #
-#############################
-if service == "🏠 Executive Summary":
-    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+        else:
+            st.info(f"No engineering data found for {target_project} in the last 84 days.")
+###########
+# - 6. PAGE: EXECUTIVE SUMMARY - #
+###########
+
+def render_executive_summary(client, selected_project, unit_label):
+    st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # 1. SORTING & CONTROLS
-    st.write("### ↕️ Sorting & View Options")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        sort_choice = st.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"])
-    with c2:
-        sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
-    
-    # 2. BATCH DATA QUERY (Optimized to 1 Query instead of N queries)
-    # Fetch all data for the last 24H for the entire project at once
+    # 1. Fuzzy Filter Logic
+    proj_filter = ""
+    if selected_project and selected_project != "All Projects":
+        proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
+
     summary_q = f"""
-        WITH RecentData AS (
-            SELECT *,
-                FIRST_VALUE(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp ASC) as first_temp_24h,
-                ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) as latest_rank
-            FROM `{MASTER_TABLE}`
-            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-            {"AND Project = '" + selected_project + "'" if selected_project else ""}
+        WITH MappedNodes AS (
+            SELECT TRIM(Project) as Project, NodeNum, Location
+            FROM `{PROJECT_ID}.{DATASET_ID}.metadata`
+            WHERE Project IS NOT NULL {proj_filter}
+        ),
+        RecentReporting AS (
+            SELECT r.NodeNum, MAX(r.timestamp) as last_ping
+            FROM (
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                UNION ALL
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            GROUP BY NodeNum
+        ),
+        HistoricalPings AS (
+            SELECT NodeNum, MAX(timestamp) as ever_ping
+            FROM (
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                UNION ALL
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) GROUP BY NodeNum
+        ),
+        JoinedData AS (
+            SELECT 
+                m.Project, m.Location, m.NodeNum,
+                CASE WHEN r.NodeNum IS NOT NULL THEN 1 ELSE 0 END as is_active,
+                h.ever_ping
+            FROM MappedNodes m
+            LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
+            LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
+        ),
+        LocationStats AS (
+            SELECT Project, Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
+            FROM JoinedData GROUP BY Project, Location
+        ),
+        ProjectTotals AS (
+            SELECT Project, '--- PROJECT TOTAL ---' as Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
+            FROM JoinedData GROUP BY Project
         )
-        SELECT 
-            NodeNum, Project, Location, Bank, Depth, timestamp, temperature,
-            first_temp_24h,
-            MIN(temperature) OVER(PARTITION BY NodeNum) as min_24h,
-            MAX(temperature) OVER(PARTITION BY NodeNum) as max_24h
-        FROM RecentData
-        WHERE latest_rank = 1
+        SELECT * FROM ProjectTotals
+        UNION ALL
+        SELECT * FROM LocationStats
+        ORDER BY Project ASC, (Location = '--- PROJECT TOTAL ---') DESC, Location ASC
     """
     
     try:
-        with st.spinner("⚡ Syncing Command Center (Batch Processing)..."):
-            raw_summary_df = client.query(summary_q).to_dataframe()
+        with st.spinner("⚡ Auditing connectivity for all projects..."):
+            df = client.query(summary_q).to_dataframe()
         
-        if raw_summary_df.empty:
-            st.warning("📡 No active sensors seen in the last 24 hours.")
-        else:
-            now = pd.Timestamp.now(tz=pytz.UTC)
+        if df.empty:
+            st.warning("⚠️ No data found. Check if your Metadata table is populated.")
+            return
+
+        now_utc = pd.Timestamp.now(tz=pytz.UTC)
+
+        def process_health_row(row):
+            is_total = row['Location'] == '--- PROJECT TOTAL ---'
+            last_ts = row['last_up']
             
-            # 3. PROCESSING LOGIC (Pandas is faster than SQL for these calculations)
-            def process_row(row):
-                # Time handling
-                ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-                hrs_ago = int((now - ts).total_seconds() / 3600)
-                
-                # Delta Calculation
-                raw_delta = row['temperature'] - row['first_temp_24h']
-                
-                # Status Icon Logic
-                if hrs_ago > 24:
-                    status_icon, delta_text, delta_val = "🔴", "-", None
-                else:
-                    status_icon = "🟢" if hrs_ago < 6 else ("🟡" if hrs_ago < 12 else "🟠")
-                    delta_text = f"{round(raw_delta, 1)}°F"
-                    delta_val = raw_delta
+            if pd.notnull(last_ts):
+                last_ts = last_ts.tz_convert(pytz.UTC)
+                gap = round((now_utc - last_ts).total_seconds() / 3600, 1)
+                icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
+                time_str = f"{gap}h ago {icon}"
+            else:
+                time_str = "Never Seen ⚪"
 
-                # Position Labeling
-                pos_label = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
+            return pd.Series({
+                "Project": f"⭐ {row['Project']}" if is_total else row['Project'],
+                "Location": row['Location'],
+                "Mapped": row['total'],
+                "Active": row['active'],
+                "Ratio": f"{row['active']}/{row['total']}",
+                "Status": "✅ Healthy" if row['total'] == row['active'] else f"⚠️ {row['total'] - row['active']} Offline",
+                "Last Activity": time_str
+            })
 
-                return pd.Series({
-                    "Project": row['Project'],
-                    "Node": row['NodeNum'],
-                    "Pipe/Bank": row['Location'],
-                    "Pos/Depth": pos_label,
-                    "Min": f"{round(convert_val(row['min_24h']), 1)}{unit_label}",
-                    "Max": f"{round(convert_val(row['max_24h']), 1)}{unit_label}",
-                    "Delta_Val": delta_val, 
-                    "Delta": delta_text,
-                    "Hours_Ago": hrs_ago,
-                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
-                })
+        health_df = df.apply(process_health_row, axis=1)
 
-            summary_df = raw_summary_df.apply(process_row, axis=1)
+        # Metrics based on Project Totals rows only
+        totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
+        m1, m2, m3 = st.columns(3)
+        m1.metric("System Nodes", f"{totals_df['total'].sum()}")
+        m2.metric("System Active", f"{totals_df['active'].sum()}")
+        m3.metric("Uptime", f"{round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0}%")
 
-            # 4. APPLY SORTING
-            asc = (sort_order == "Ascending")
-            if sort_choice == "Hours Since Last Seen":
-                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=asc)
-            elif sort_choice == "Delta Magnitude":
-                summary_df['abs_d'] = summary_df['Delta_Val'].abs().fillna(-1)
-                summary_df = summary_df.sort_values(by="abs_d", ascending=asc).drop(columns=['abs_d'])
+        st.divider()
+        st.dataframe(health_df, use_container_width=True, hide_index=True)
 
-            # 5. STYLING FUNCTION
-            def style_delta(val):
-                if val is None or pd.isna(val): return ""
-                bg, color = "", "black"
-                if val >= 5: bg, color = "#FF0000", "white"     # Critical Heat
-                elif val >= 2: bg = "#FFA500"                   # Warning Heat
-                elif val >= 0.5: bg = "#FFFF00"                 # Slight Rise
-                elif -0.5 <= val <= 0.5: bg, color = "#008000", "white" # Stable
-                elif -2 < val < -0.5: bg = "#ADD8E6"            # Slight Cooling
-                elif -5 < val <= -2: bg, color = "#4169E1", "white" # Strong Cooling
-                elif val <= -5: bg, color = "#00008B", "white"  # Deep Freeze
-                return f'background-color: {bg}; color: {color}'
+    except Exception as e:
+        st.error(f"Executive Summary Error: {traceback.format_exc()}")
 
-            # 6. DISPLAY
-            st.subheader(f"📡 Engineering Command Center ({len(summary_df)} sensors)")
-            
-            st.dataframe(
-                summary_df[["Project", "Node", "Pipe/Bank", "Pos/Depth", "Min", "Max", "Delta", "Last Seen"]].style.apply(
-                    lambda x: [style_delta(rv) for rv in summary_df['Delta_Val']], axis=0, subset=['Delta']
-                ),
-                use_container_width=True,
-                hide_index=True,
-                height=600
-            )
-            
-    except Exception as e: 
-        st.error(f"Summary Error: {traceback.format_exc()}")
-#################################
-# --- END EXECUTIVE SUMMARY --- #
-#################################
-#########################
-# --- CLIENT PORTAL --- #
-#########################
-elif service == "📊 Client Portal":
-    if not selected_project:
-        st.sidebar.warning("Please select a project.")
-    else:
-        st.header(f"📊 Project Status: {selected_project}")
+###########
+# - 7. PAGE: CLIENT PORTAL - #
+###########
+
+def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    st.header(f"📊 Project Status: {selected_project}")
+    global client
+
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar.")
+        return
+    
+    with st.spinner("Loading approved data..."):
+        p_df = get_universal_portal_data(selected_project, view_mode="client")
+    
+    if p_df.empty:
+        st.info(f"No approved data available for {selected_project}.")
+        return
+
+    tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
+
+    with tab_time:
+        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
+        end_view = pd.Timestamp.now(tz='UTC')
+        start_view = end_view - timedelta(weeks=weeks_view)
         
-        # 1. FETCH DATA (Uses cached function)
-        p_df = get_universal_portal_data(selected_project)
+        # Performance: Pre-sort locations
+        locations = sorted(p_df['Location'].dropna().unique())
         
-        if p_df.empty:
-            st.info(f"No approved data found for {selected_project}.")
-        else:
-            tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
-
-            with tab_time:
-                weeks_view = st.slider("Weeks to View", 1, 12, 6, key="cp_weeks")
-                now = pd.Timestamp.now(tz=pytz.UTC)
-                end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-                start_view = end_view - timedelta(weeks=weeks_view)
+        for loc in locations:
+            # We use the expander to keep the page fast
+            with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
+                loc_data = p_df[p_df['Location'] == loc]
                 
-                for loc in sorted(p_df['Location'].dropna().unique()):
-                    with st.expander(f"📈 {loc}", expanded=True):
-                        loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
-                        # Uses the High-Speed Engine (ensure build_high_speed_graph is updated)
-                        fig = build_high_speed_graph(loc_data, loc, start_view, end_view, tuple(active_refs), unit_mode, unit_label)
-                        st.plotly_chart(fig, use_container_width=True, key=f"cht_{loc}", config={'displayModeBar': False})
+                # CALLING THE ENGINE WITH THE GRID LOGIC
+                fig = build_high_speed_graph(
+                    df=loc_data, 
+                    title=f"{loc} Approved Data", 
+                    start_view=start_view, 
+                    end_view=end_view, 
+                    active_refs=tuple(active_refs), 
+                    unit_mode=unit_mode, 
+                    unit_label=unit_label, 
+                    display_tz=display_tz # <--- This calculates the Black/Gray lines
+                )
+                st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
-            with tab_depth:
-                p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-                depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
+    with tab_depth:
+        st.subheader("📏 Vertical Temperature Profile")
+        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
+        
+        for loc in sorted(depth_only['Location'].unique()):
+            with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
+                loc_data = depth_only[depth_only['Location'] == loc].copy()
+                fig_d = go.Figure()
                 
-                for loc in sorted(depth_only['Location'].unique()):
-                    with st.expander(f"📏 {loc} Depth Profile", expanded=True):
-                        loc_data = depth_only[depth_only['Location'] == loc].copy()
-                        fig_d = go.Figure()
-                        
-                        # Monday Snapshots logic
-                        mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
-                        
-                        for m_date in mondays:
-                            target_ts = m_date.replace(hour=6, minute=0, second=0).tz_localize(pytz.UTC) if m_date.tzinfo is None else m_date.replace(hour=6)
-                            window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                            
-                            if not window.empty:
-                                snap_list = []
-                                for node in window['NodeNum'].unique():
-                                    node_data = window[window['NodeNum'] == node].copy()
-                                    node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
-                                    snap_list.append(node_data.sort_values('diff').iloc[0])
-                                
-                                snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
-                                fig_d.add_trace(go.Scattergl(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
-
-                        # --- DYNAMIC GRID LOGIC ---
-                        if unit_mode == "Celsius":
-                            x_range = [( -20 - 32) * 5/9, (80 - 32) * 5/9]
-                            x_major, x_minor = 10, 2
-                        else:
-                            x_range = [-20, 80]
-                            x_major, x_minor = 20, 5
-
-                        y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5) if not loc_data.empty else 50
-                        
-                        fig_d.update_layout(
-                            plot_bgcolor='white', height=700,
-                            # X-AXIS: Configured for Minor 5° grid
-                            xaxis=dict(
-                                title=f"Temp ({unit_label})", 
-                                range=x_range, 
-                                dtick=x_minor,           # Set minor interval (5°)
-                                showgrid=True,           # Explicitly show minor grid
-                                gridcolor='Gainsboro',   # Light gray for minor lines
-                                gridwidth=0.5,
-                                showline=True, 
-                                linecolor='black', 
-                                mirror=True
-                            ),
-                            # Y-AXIS: 10ft grid
-                            yaxis=dict(
-                                title="Depth (ft)", 
-                                range=[y_limit, 0], 
-                                dtick=10, 
-                                showgrid=True,
-                                gridcolor='Silver',      # Slightly darker for depth lines
-                                showline=True, 
-                                linecolor='black', 
-                                mirror=True
-                            ),
-                            legend=dict(title="Weekly Snapshots (6AM)", orientation="h", y=-0.2)
+                # Snapshot processing (Performance: Pre-calculated range)
+                mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
+                
+                for m_date in mondays:
+                    target_ts = m_date.replace(hour=6, minute=0, second=0)
+                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                      (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                    
+                    if not window.empty:
+                        # Find nearest reading per NodeNum
+                        snap_df = (
+                            window.assign(diff=(window['timestamp'] - target_ts).abs())
+                            .sort_values(['NodeNum', 'diff'])
+                            .drop_duplicates('NodeNum')
+                            .sort_values('Depth_Num')
                         )
+                        
+                        conv_temps = snap_df['temperature'].apply(
+                            lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
+                        )
+                        
+                        fig_d.add_trace(go.Scatter(
+                            x=conv_temps, 
+                            y=snap_df['Depth_Num'], 
+                            mode='lines+markers', 
+                            name=target_ts.strftime('%m/%d/%y'),
+                            line=dict(shape='spline', smoothing=0.5)
+                        ))
 
-                        # ADD MAJOR TEMPERATURE LINES (Every 20°)
-                        # We iterate through the range to add bold vertical markers
-                        for x_v in range(-40, 101, x_major):
-                            if x_range[0] <= x_v <= x_range[1]:
-                                fig_d.add_vline(x=x_v, line_width=1.5, line_color="DimGray", layer='below')
+                y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
+                fig_d.update_layout(
+                    plot_bgcolor='white', height=600,
+                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
+                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver'),
+                    legend=dict(orientation="h", y=-0.2)
+                )
+                st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
 
-                        # ADD REFERENCE THRESHOLDS (Freezing, Type A, Type B)
-                        for val, label in active_refs:
-                            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                            fig_d.add_vline(x=c_val, line_dash="dash", line_color="maroon" if "Type A" in label else "RoyalBlue", line_width=2.5, opacity=0.8)
-                            
-                        st.plotly_chart(fig_d, use_container_width=True, key=f"dep_{loc}", config={'displayModeBar': False})
+    with tab_table:
+        # Latest Snapshot Table (Fastest way to group latest data)
+        latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        
+        # Efficient vector conversion
+        latest['Current Temp'] = latest['temperature'].apply(
+            lambda x: f"{round((x - 32) * 5/9 if unit_mode == 'Celsius' else x, 1)}{unit_label}"
+        )
+        
+        latest['Position'] = latest.apply(
+            lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" 
+            else f"{r.get('Depth', '??')} ft", axis=1
+        )
+        
+        st.dataframe(
+            latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), 
+            use_container_width=True, 
+            hide_index=True
+        )
+            
+###########
+# - 8. PAGE: NODE DIAGNOSTICS - #
+###########
 
-            with tab_table:
-                latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-                latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
-                latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r.get('Depth', '??')} ft", axis=1)
-                st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
-#############################
-# --- END CLIENT PORTAL --- #
-#############################  
-###########################
-# --- NODE DIAGNOSTIC --- #
-###########################  
-elif service == "📉 Node Diagnostics":
+def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    Engineering-level view. Shows everything (Pending, Masked, Approved).
+    Restored: Time Series, Vertical Profile, and Communication Health Table.
+    """
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
-    if not selected_project:
-        st.warning("👈 Please select a project in the sidebar to begin analysis.")
-    else:
-        try:
-            # 1. DATA ACCESS & TIMEFRAME
-            # Fetch all data (including unapproved) for full engineering visibility
-            with st.spinner("🔍 Syncing diagnostic streams..."):
-                all_data = get_universal_portal_data(selected_project, only_approved=False)
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Select a specific project in the sidebar.")
+        return
+
+    with st.spinner("🔍 Syncing diagnostic streams..."):
+        all_data = get_universal_portal_data(selected_project, view_mode="engineering")
+    
+    if all_data.empty:
+        st.warning(f"No diagnostic data found for project {selected_project}.")
+        return
+
+    # 1. Selection Controls
+    loc_options = sorted(all_data['Location'].dropna().unique())
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options, key="diag_loc_select")
+    with c2:
+        weeks_view = st.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
+    with c3:
+        show_profile = st.checkbox("Show Vertical Profile", value=True)
             
-            if all_data.empty:
-                st.warning(f"No data found for project {selected_project}.")
-            else:
-                # Layout for Top Controls
-                loc_options = sorted(all_data['Location'].dropna().unique())
-                c1, c2 = st.columns([2, 1])
-                with c1: 
-                    sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options)
-                with c2: 
-                    weeks_view = st.slider("Lookback (Weeks)", 1, 12, 4, key="diag_lookback")
+    # Filter data for the selected Location and Timeframe
+    now_utc = pd.Timestamp.now(tz='UTC')
+    start_view = now_utc - timedelta(weeks=weeks_view)
+    df_diag = all_data[all_data['Location'] == sel_loc].copy()
+    df_filtered = df_diag[(df_diag['timestamp'] >= start_view) & (df_diag['timestamp'] <= now_utc)]
 
-                # Date Calculations (Standardized UTC)
-                now_utc = pd.Timestamp.now(tz=pytz.UTC)
-                days_until_monday = (7 - now_utc.weekday()) % 7 or 7
-                end_view = (now_utc + pd.Timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
-                start_view = end_view - timedelta(weeks=weeks_view)
+    # --- 1. ENGINEERING TIMELINE ---
+    st.subheader("🕒 Engineering Timeline")
+    fig_time = build_high_speed_graph(
+        df_filtered, f"Diagnostic Stream: {sel_loc}", 
+        start_view, now_utc + timedelta(hours=2), 
+        tuple(active_refs), unit_mode, unit_label, display_tz
+    )
+    st.plotly_chart(fig_time, use_container_width=True)
 
-                # Filter data for the specific location
-                df_diag = all_data[all_data['Location'] == sel_loc].copy()
+    # --- 2. VERTICAL PROFILE (Depth vs Temp) ---
+    if show_profile:
+        st.divider()
+        st.subheader("📏 Vertical Temperature Profile")
+        df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
+        profile_df = df_diag.dropna(subset=['Depth_Num']).copy()
 
-                # --- 2. THE THREE ANALYSIS SECTIONS ---
-                
-                # SECTION A: TIMELINE ANALYSIS
-                st.subheader("📈 Timeline Analysis")
-                st.caption(f"Viewing historical trends in **{tz_mode}**.")
-                fig_time = build_high_speed_graph(
-                    df_diag, sel_loc, start_view, end_view, 
-                    tuple(active_refs), unit_mode, unit_label, 
-                    display_tz=display_tz
-                )
-                st.plotly_chart(fig_time, use_container_width=True, config={'displayModeBar': True}, key=f"diag_time_{sel_loc}")
+        if profile_df.empty:
+            st.info("No numeric depth data found for this location.")
+        else:
+            latest_snap = profile_df.sort_values('timestamp').groupby('Depth_Num').last().reset_index()
+            
+            # Using Lambda to avoid convert_val NameError
+            latest_snap['conv_temp'] = latest_snap['temperature'].apply(
+                lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
+            )
 
-                st.divider()
+            fig_d = go.Figure()
+            fig_d.add_trace(go.Scatter(
+                x=latest_snap['conv_temp'], 
+                y=latest_snap['Depth_Num'], 
+                mode='lines+markers',
+                name="Current State",
+                line=dict(shape='spline', smoothing=0.5, width=3, color='RoyalBlue'),
+                marker=dict(size=10, symbol='diamond')
+            ))
 
-                # SECTION B: DEPTH PROFILE ANALYSIS
-                st.subheader("📏 Depth Profile Analysis")
-                df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
-                depth_only_df = df_diag.dropna(subset=['Depth_Num', 'NodeNum']).copy()
-                
-                if depth_only_df.empty:
-                    st.info("No depth-based sensors (ground sticks/strings) found for this location.")
-                else:
-                    fig_depth = go.Figure()
-                    # Generate snapshots for Monday mornings at 6:00 AM UTC
-                    mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
-                    
-                    for m_date in mondays:
-                        target_ts = m_date.replace(hour=6, minute=0, second=0, tzinfo=pytz.UTC)
-                        
-                        # Grab closest points within a 12-hour window of the target
-                        window = depth_only_df[
-                            (depth_only_df['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                            (depth_only_df['timestamp'] <= target_ts + pd.Timedelta(hours=12))
-                        ]
-                        
-                        if not window.empty:
-                            snap_list = []
-                            for node in window['NodeNum'].unique():
-                                node_data = window[window['NodeNum'] == node].copy()
-                                node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
-                                snap_list.append(node_data.sort_values('diff').iloc[0])
-                            
-                            snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
-                            fig_depth.add_trace(go.Scattergl(
-                                x=snap_df['temperature'], y=snap_df['Depth_Num'],
-                                mode='lines+markers', name=target_ts.strftime('%m/%d/%y')
-                            ))
+            y_limit = int(((profile_df['Depth_Num'].max() // 10) + 1) * 10)
+            fig_d.update_layout(
+                plot_bgcolor='white', height=600,
+                xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
+                yaxis=dict(title="Depth (ft)", range=[y_limit, 0], gridcolor='Silver')
+            )
+            st.plotly_chart(fig_d, use_container_width=True)
 
-                    # Formatting the Vertical Profile
-                    y_limit = int(((depth_only_df['Depth_Num'].max() // 5) + 1) * 5)
-                    x_range = [-20, 80] if unit_mode == "Fahrenheit" else [(-20-32)*5/9, (80-32)*5/9]
-                    
-                    fig_depth.update_layout(
-                        plot_bgcolor='white', height=700,
-                        xaxis=dict(title=f"Temp ({unit_label})", range=x_range, showgrid=True, gridcolor='Gainsboro'),
-                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='Gray'),
-                        legend=dict(title="Weekly Snapshots (6AM UTC)", x=1.02, y=1)
-                    )
-                    st.plotly_chart(fig_depth, use_container_width=True)
-
-                st.divider()
-
-                # SECTION C: ENGINEERING STATUS TABLE
-                st.subheader(f"📋 Engineering Summary: {sel_loc}")
-                latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-                summary_rows = []
-                
-                for _, row in latest_nodes.iterrows():
-                    node_id = row['NodeNum']
-                    # Calculate how long since the last packet in UTC
-                    hrs_ago = int((now_utc - row['timestamp']).total_seconds() / 3600)
-                    status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-                    
-                    # Position Labeling
-                    pos_display = f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none","nan","null"] else f"{row['Depth']} ft"
-
-                    summary_rows.append({
-                        "Node": node_id,
-                        "Position": pos_display,
-                        "Last Reading": f"{round(row['temperature'], 1)}{unit_label}",
-                        "Last Seen (UTC)": f"{row['timestamp'].strftime('%m/%d %H:%M')} ({hrs_ago}h ago)",
-                        "Health": status_icon,
-                        "Approval": "✅ Approved" if row['is_currently_approved'] == 'TRUE' else "❌ Rejected"
-                    })
-                
-                st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-
-        except Exception as e:
-            st.error(f"Diagnostics Rendering Error: {traceback.format_exc()}")
-###############################
-# --- END NODE DIAGNOSTIC --- #
-###############################
-###################################
-# --- PAGE: DATA INTAKE LAB  --- #
-###################################
-if service == "📤 Data Intake Lab":
-    if check_admin_access():
-        st.header("📤 Data Ingestion & Recovery")
+    # --- 3. COMMUNICATION HEALTH TABLE (Restored) ---
+    st.divider()
+    st.subheader("📋 Sensor Communication Health")
+    
+    # We use the raw df_diag to check the latest overall reporting time
+    latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+    
+    summary_rows = []
+    for _, row in latest_nodes.iterrows():
+        # Handle timestamp localization safely
+        ts = row['timestamp'].tz_localize('UTC') if row['timestamp'].tzinfo is None else row['timestamp']
+        hrs_ago = int((now_utc - ts).total_seconds() / 3600)
         
-        # Define Tabs: API synchronization has been removed per your request
-        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "🧹 Deep Data Scrub", "📥 Export Project Data"])
+        # Status Logic: Green < 6h, Yellow < 24h, Red > 24h
+        status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
+        
+        # Map database 'is_approved' column to human-readable status
+        db_status = str(row['is_approved']).upper()
+        status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
 
-        # --- TAB 1: UNIVERSAL MANUAL UPLOAD ---
-        with tab1:
-            st.subheader("📄 Manual File Ingestion")
-            st.info("Supported: Lord SensorConnect (Wide), Lord Desktop (Narrow), and SensorPush (CSV/Excel).")
+        # Temperature Conversion Lambda for table display
+        f_temp = row['temperature']
+        conv_temp = (f_temp - 32) * 5/9 if unit_mode == "Celsius" else f_temp
+
+        summary_rows.append({
+            "Node": row['NodeNum'],
+            "Last Value": f"{round(conv_temp, 1)}{unit_label}",
+            "Last Seen": f"{hrs_ago}h ago {status_icon}",
+            "Admin Status": status_label
+        })
+    
+    if summary_rows:
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No communication logs available for this selection.")
+###########
+# - 9. PAGE: DATA INTAKE LAB - #
+###########
+
+def render_data_intake_page(selected_project):
+    st.header("📤 Data Ingestion Lab")
+    tab_upload, tab_export = st.tabs(["📄 Upload", "📥 Export"])
+    
+    with tab_upload:
+        # ... (keep your existing upload logic here) ...
+        st.subheader("📄 Manual File Ingestion")
+        st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), or SensorPush (CSV/Excel).")
+        
+        u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx', 'xls'], key="manual_upload_main")
+        
+        if u_file is not None:
+            # [Your existing parsing logic from the provided file]
+            pass
+
+    with tab_export:
+        st.subheader("📥 Export Project Data")
+        if not selected_project or selected_project == "All Projects":
+            st.warning("⚠️ Please select a specific project in the sidebar to perform an export.")
+        else:
+            # 1. Date Selection
+            c1, c2 = st.columns(2)
+            with c1:
+                e_start = st.date_input("Start Date", value=datetime.now() - timedelta(days=30), key="exp_start")
+            with c2:
+                e_end = st.date_input("End Date", value=datetime.now(), key="exp_end")
             
-            u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx', 'xls'], key="manual_upload_main")
+            # 2. Scope Selection (Whole Project vs Single Pipe)
+            st.write("---")
+            export_scope = st.radio("Export Scope", ["Whole Project", "Specific Pipe / Bank"], horizontal=True)
             
-            if u_file is not None:
-                filename = u_file.name.lower()
-                is_excel = filename.endswith(('.xlsx', '.xls'))
-                
+            # Fetch data once to populate location options and for filtering
+            with st.spinner("Preparing export options..."):
+                full_df = get_universal_portal_data(selected_project, view_mode="engineering")
+            
+            target_loc = None
+            if export_scope == "Specific Pipe / Bank" and not full_df.empty:
+                loc_list = sorted(full_df['Location'].dropna().unique())
+                target_loc = st.selectbox("Select Pipe/Bank to Export", loc_list)
+
+            # 3. Export Action
+            if st.button("📦 Prepare Data for Download"):
+                if full_df.empty:
+                    st.error("No data found for this project in the engineering database.")
+                else:
+                    # Filter by Date
+                    mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
+                    export_df = full_df.loc[mask].copy()
+
+                    # Filter by Scope
+                    filename_suffix = "Whole_Project"
+                    if export_scope == "Specific Pipe / Bank" and target_loc:
+                        export_df = export_df[export_df['Location'] == target_loc]
+                        filename_suffix = target_loc.replace(" ", "_")
+
+                    if export_df.empty:
+                        st.warning("No data found matching the combined date and scope filters.")
+                    else:
+                        # Success Message & Download
+                        st.success(f"✅ Prepared {len(export_df)} rows for {filename_suffix}.")
+                        
+                        # Clean up timestamps for the CSV
+                        export_df['timestamp'] = export_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        csv = export_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label=f"💾 Download {filename_suffix} CSV",
+                            data=csv,
+                            file_name=f"{selected_project}_{filename_suffix}_Export.csv",
+                            mime="text/csv"
+                        )
+###########
+# - 10. PAGE: ADMIN TOOLS - #
+###########
+
+def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    st.header("🛠️ Admin Tools")
+    
+    # Define all administrative tabs
+    tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
+        "✅ Bulk Approval", 
+        "🚫 Mask Data", 
+        "🧹 Scrub", 
+        "🧨 Surgical"
+    ])
+
+    # --- TAB 1: BULK APPROVAL ---
+    with tab_bulk:
+        st.subheader("✅ Range-Based Bulk Approval")
+        st.write("Approve all data within this specific window for the client portal.")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            b_start = st.date_input("Approval Start", value=datetime.now() - timedelta(days=7), key="bulk_start")
+        with c2:
+            b_end = st.date_input("Approval End", value=datetime.now(), key="bulk_end")
+
+        if st.button(f"🚀 Approve {selected_project} Range", use_container_width=True):
+            with st.spinner("Writing approvals to master override..."):
+                bulk_sql = f"""
+                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
+                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
+                    FROM (
+                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                        UNION ALL 
+                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                    ) AS r
+                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                    WHERE m.Project = '{selected_project}'
+                    AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM `{OVERRIDE_TABLE}` x 
+                        WHERE x.NodeNum = r.NodeNum 
+                        AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                    )
+                """
                 try:
-                    # 1. INITIAL DATA READ
-                    if is_excel:
-                        import openpyxl
-                        df_raw = pd.read_excel(u_file)
-                        raw_content = [] # Excel doesn't need line-by-line header detection
-                    else:
-                        # Detect header index for Lord Wide formats which have preambles
-                        raw_bytes = u_file.getvalue().decode('utf-8', errors='ignore').splitlines()
-                        header_idx = 0
-                        for i, line in enumerate(raw_bytes[:100]):
-                            if any(k in line for k in ["Timestamp", "Channel", "nodenumber", "SensorId", "Observed"]):
-                                header_idx = i
-                                break
-                        df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])))
-
-                    # Clean headers for consistency
-                    df_raw.columns = [str(c).strip() for c in df_raw.columns]
-                    cols_lower = [c.lower() for c in df_raw.columns]
-
-                    # 2. IDENTIFY FORMAT TYPE
-                    is_lord_wide = not is_excel and any("DATA_START" in str(line) for line in raw_bytes[:100])
-                    is_lord_narrow = "channel" in cols_lower or "nodenumber" in cols_lower
-                    is_sensorpush = "sensorid" in cols_lower or "observed" in cols_lower or "sample time" in cols_lower
-
-                    # --- CASE A: LORD WIDE (SensorConnect) ---
-                    if is_lord_wide:
-                        start_idx = next(i for i, line in enumerate(raw_bytes) if "DATA_START" in line)
-                        df_wide = pd.read_csv(io.StringIO("\n".join(raw_bytes[start_idx+1:])))
-                        df_long = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
-                        df_long['NodeNum'] = df_long['NodeNum'].str.replace(':', '-', regex=False)
-                        df_long['timestamp'] = pd.to_datetime(df_long['Time'], format='mixed')
-                        
-                        st.success(f"✅ Lord Wide Format Parsed ({len(df_long)} rows)")
-                        if st.button("🚀 UPLOAD TO RAW_LORD"):
-                            client.load_table_from_dataframe(df_long[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                            st.success("Data committed to raw_lord table.")
-                            st.cache_data.clear()
-
-                    # --- CASE B: LORD NARROW (Excel or CSV Logs) ---
-                    elif is_lord_narrow:
-                        mapping = {}
-                        for c in df_raw.columns:
-                            cl = c.lower()
-                            if "timestamp" in cl: mapping[c] = "timestamp"
-                            elif any(k in cl for k in ["channel", "nodenumber", "node"]): mapping[c] = "NodeNum"
-                            elif "temp" in cl: mapping[c] = "temperature"
-                        
-                        df_ln = df_raw.rename(columns=mapping)
-                        df_ln['timestamp'] = pd.to_datetime(df_ln['timestamp'], format='mixed')
-                        df_ln['NodeNum'] = df_ln['NodeNum'].astype(str).str.replace(':', '-', regex=False)
-                        
-                        st.success(f"✅ Lord Narrow Format Parsed ({len(df_ln)} rows)")
-                        if st.button("🚀 UPLOAD TO RAW_LORD"):
-                            client.load_table_from_dataframe(df_ln[['timestamp', 'NodeNum', 'temperature']], f"{PROJECT_ID}.{DATASET_ID}.raw_lord").result()
-                            st.success("Data committed to raw_lord table.")
-                            st.cache_data.clear()
-
-                    # --- CASE C: SENSORPUSH (Cloud Exports) ---
-                    elif is_sensorpush:
-                        id_col = next((c for c in df_raw.columns if "sensorid" in c.lower()), None)
-                        ts_col = next((c for c in df_raw.columns if any(k in c.lower() for k in ["observed", "sample time"])), None)
-                        temp_col = next((c for c in df_raw.columns if "temp" in c.lower()), None)
-                        
-                        df_sp = pd.DataFrame({
-                            'NodeNum': df_raw[id_col].astype(str).str.strip(),
-                            'timestamp': pd.to_datetime(df_raw[ts_col], format='mixed'),
-                            'temperature': pd.to_numeric(df_raw[temp_col], errors='coerce')
-                        }).dropna()
-
-                        st.success(f"✅ SensorPush Format Parsed ({len(df_sp)} rows)")
-                        if st.button("🚀 UPLOAD TO RAW_SENSORPUSH"):
-                            client.load_table_from_dataframe(df_sp, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush").result()
-                            st.success("Data committed to raw_sensorpush table.")
-                            st.cache_data.clear()
-
-                    else:
-                        st.error("Unrecognized File Format. Please ensure column headers include 'NodeNum', 'Channel', or 'SensorId'.")
-
+                    client.query(bulk_sql).result()
+                    st.success(f"✅ Data for {selected_project} successfully approved.")
+                    st.cache_data.clear()
                 except Exception as e:
-                    st.error(f"Processing Error: {traceback.format_exc()}")
+                    st.error(f"Bulk Approval Error: {e}")
 
-        # --- TAB 2: DEEP DATA SCRUB (AVERAGING LOGIC) ---
-        with tab2:
-            st.subheader("🧹 Deep Data Scrub & Averaging")
-            st.info("Snaps timestamps to the **top of the hour** and **averages** multiple readings within that hour.")
-            st.error("⚠️ WARNING: This operation permanently modifies the RAW database.")
+    # --- TAB 2: MASK DATA (Updated: Clear Masks Only) ---
+    with tab_mask:
+        st.subheader("🚫 Temporal Data Masking")
+        
+        if not selected_project or selected_project == "All Projects":
+            st.warning("Please select a specific project in the sidebar.")
+        else:
+            # Mask Mode Toggle
+            mask_mode = st.radio("Masking Mode", ["Specific Time Range", "All data before end date"], horizontal=True)
             
-            scrub_target = st.radio("Target Table to Scrub", ["SensorPush", "Lord"], horizontal=True)
-            t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+            m_col1, m_col2 = st.columns(2)
+            with m_col1:
+                m_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="m_sd", disabled=(mask_mode == "All data before end date"))
+                m_start_time = st.time_input("Start Time", value=datetime.time(datetime.now()), key="m_st", disabled=(mask_mode == "All data before end date"))
+            with m_col2:
+                m_end_date = st.date_input("End Date", value=datetime.now(), key="m_ed")
+                m_end_time = st.time_input("End Time", value=datetime.time(datetime.now()), key="m_et")
+
+            # Formatting logic
+            end_dt = datetime.combine(m_end_date, m_end_time)
+            if mask_mode == "All data before end date":
+                start_dt_str = "2000-01-01 00:00:00" 
+                action_desc = f"Hiding EVERYTHING before `{end_dt}`"
+            else:
+                start_dt = datetime.combine(m_start_date, m_start_time)
+                start_dt_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+                action_desc = f"Hiding data from `{start_dt}` to `{end_dt}`"
+
+            st.write(f"**Action:** {action_desc}")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
+                    with st.spinner("Applying masks..."):
+                        mask_sql = f"""
+                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
+                            SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
+                            FROM (
+                                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                                UNION ALL 
+                                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                            ) AS r
+                            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                            WHERE m.Project = '{selected_project}'
+                            AND r.timestamp >= '{start_dt_str}' 
+                            AND r.timestamp <= '{end_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+                            AND NOT EXISTS (
+                                SELECT 1 FROM `{OVERRIDE_TABLE}` x 
+                                WHERE x.NodeNum = r.NodeNum 
+                                AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                            )
+                        """
+                        client.query(mask_sql).result()
+                        st.success("✅ Mask applied successfully.")
+                        st.cache_data.clear()
             
-            if st.button(f"🧨 Purge & Average {scrub_target} Data"):
-                with st.spinner(f"Grouping and averaging {scrub_target} data..."):
-                    # SQL logic to round to the nearest hour and average the temperature
-                    # We use NodeNum as the identifier for both tables to maintain consistency
-                    scrub_sql = f"""
+            with c2:
+                # UPDATED: Now strictly deletes MASKED rows for this project
+                if st.button(f"🗑️ Clear Project Masks", use_container_width=True):
+                    with st.spinner("Clearing project masks..."):
+                        clear_mask_sql = f"""
+                            DELETE FROM `{OVERRIDE_TABLE}`
+                            WHERE reason = 'MASKED'
+                            AND NodeNum IN (
+                                SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` 
+                                WHERE Project = '{selected_project}'
+                            )
+                        """
+                        client.query(clear_mask_sql).result()
+                        st.warning(f"🧹 All masks cleared for {selected_project}. Approved data remains.")
+                        st.cache_data.clear()
+
+    # --- TAB 3: DEEP DATA SCRUB ---
+    with tab_scrub:
+        st.subheader("🧹 Deep Data Scrub")
+        st.warning("Averages raw data to 1-hour intervals. This is IRREVERSIBLE.")
+        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_select")
+        t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
+        
+        if st.button(f"🧨 Purge & Average {scrub_target}", use_container_width=True):
+            with st.spinner(f"Reducing {scrub_target} to hourly means..."):
+                scrub_sql = f"""
                     CREATE OR REPLACE TABLE `{t_table}` AS 
                     SELECT 
                         TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
                         NodeNum, 
-                        AVG(temperature) as temperature,
-                        'TRUE' as approve
+                        AVG(temperature) as temperature
                     FROM `{t_table}`
                     WHERE temperature IS NOT NULL
                     GROUP BY 1, 2
-                    """
-                    try:
-                        client.query(scrub_sql).result()
-                        st.success(f"✅ Cleanup Complete: {scrub_target} table now has 1 averaged reading per hour.")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"SQL Error: {e}")
-
-        # --- TAB 3: EXPORT PROJECT DATA ---
-        with tab3:
-            st.subheader("📥 Export Project Data (Wide Format)")
-            
-            # Fetch project list for selection
-            try:
-                proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-                all_projs = sorted(client.query(proj_q).to_dataframe()['Project'].tolist())
-                target_proj = st.selectbox("1️⃣ Select Project to Export", all_projs)
-            
-                if target_proj:
-                    with st.spinner("Preparing export..."):
-                        export_df = get_universal_portal_data(target_proj, only_approved=False)
-            
-                    if not export_df.empty:
-                        pipes = sorted(export_df['Location'].dropna().unique().tolist())
-                        sel_pipe = st.selectbox("2️⃣ Select Pipe / Location", pipes)
-                        
-                        df_final = export_df[export_df['Location'] == sel_pipe].copy()
-                        
-                        if not df_final.empty:
-                            # Standardize units if UI is in Celsius
-                            if unit_mode == "Celsius":
-                                df_final['temperature'] = (df_final['temperature'] - 32) * 5/9
-                            
-                            # Pivot to Wide Format (Depths as Columns)
-                            df_final['Depth_Col'] = df_final['Depth'].astype(str) + "ft"
-                            df_wide = df_final.pivot_table(
-                                index='timestamp', 
-                                columns='Depth_Col', 
-                                values='temperature',
-                                aggfunc='mean' 
-                            ).reset_index()
-
-                            st.write(f"📊 **Preview:** {sel_pipe} ({len(df_wide)} rows)")
-                            st.dataframe(df_wide.head(10))
-                            
-                            st.download_button(
-                                label="💾 Download Wide CSV",
-                                data=df_wide.to_csv(index=False).encode('utf-8'),
-                                file_name=f"SoilFreeze_{target_proj}_{sel_pipe}.csv",
-                                mime='text/csv'
-                            )
-            except Exception as e:
-                st.warning(f"Export Error: {e}")
-                        
-###############################
-# --- END DATA INTAKE LAB --- #
-###############################
-#######################
-# --- ADMIN TOOLS --- #
-#######################             
-elif service == "🛠️ Admin Tools":
-    if check_admin_access():
-        st.header("🛠️ Engineering Admin Tools")
-    
-        # 1. DEFINE TABS
-        tab1, tab2, tab3 = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
-    
-        with tab1:
-            st.subheader("✅ Bulk Approval")
-            if st.button("🚀 Approve All Pending Data"):
-                raw_tables = [f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", f"{PROJECT_ID}.{DATASET_ID}.raw_lord"]
-                for table in raw_tables:
-                    client.query(f"UPDATE `{table}` SET approve = 'TRUE' WHERE approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE'").result()
-                st.success("Bulk approval complete.")
+                """
+                client.query(scrub_sql).result()
+                st.success(f"✅ {scrub_target} table successfully averaged.")
                 st.cache_data.clear()
 
-        with tab2:
-            st.subheader("🧹 Deep Data Scrub & Final Purge")
-            st.error("⚠️ WARNING: This permanently deletes data from RAW tables.")
-            
-            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
-            target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" if scrub_target == "SensorPush" else f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+    # --- TAB 4: SURGICAL CLEANER ---
+    with tab_surgical:
+        st.subheader("🧨 Surgical Point Cleaner")
+        if not selected_project or selected_project == "All Projects":
+            st.warning("Please select a specific project in the sidebar.")
+        else:
+            render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
+
+###########
+# - 11. SURGICAL CLEANER FUNCTIONS - #
+###########
+
+def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    Handles the Plotly Lasso tool to Approve, Mask, or Delete specific data points.
+    """
+    # 1. Fetch Engineering-level data
+    p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+    if p_df.empty:
+        st.info("No data available to scrub.")
+        return
+
+    # 2. Location Selection
+    loc_options = sorted(p_df['Location'].dropna().unique())
+    sel_loc = st.selectbox("Select Pipe to Clean", loc_options, key="surgical_loc_select")
     
-            if st.button(f"🧨 Permanently Purge & Dedup {scrub_target}"):
-                with st.spinner("Executing hard delete and dedup..."):
-                    scrub_sql = f"""
-                    CREATE OR REPLACE TABLE `{target_table}` AS 
-                    SELECT * EXCEPT(rn) FROM (
-                        SELECT *, 
-                               ROW_NUMBER() OVER(
-                                   PARTITION BY NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                                   ORDER BY timestamp DESC
-                               ) as rn
-                        FROM `{target_table}` 
-                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
-                        AND temperature IS NOT NULL
-                    ) WHERE rn = 1
-                    """
-                    try:
-                        client.query(scrub_sql).result()
-                        st.success(f"{scrub_target} purged and deduped to 1-hour intervals.")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"Scrub Error: {e}")
-            
+    # Reset index so 'point_index' from Plotly aligns with the dataframe rows
+    scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-        # 4. SURGICAL CLEANER (State-Locked Lasso)
-        with tab3:
-            st.subheader("🧨 Surgical Data Cleaner")
-            if not selected_project:
-                st.warning("👈 Please select a Project in the sidebar.")
-            else:
-                p_df = get_universal_portal_data(selected_project, only_approved=False)
+    # 3. Persistent State for Selection
+    if "locked_selection" not in st.session_state:
+        st.session_state.locked_selection = None
+
+    # 4. Build Marker Graph for Selection
+    fig_scrub = build_high_speed_graph(
+        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
+        pd.Timestamp.now(tz='UTC') - timedelta(days=14), 
+        pd.Timestamp.now(tz='UTC') + timedelta(hours=6), 
+        tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
+    )
+
+    # Highlight previously selected points
+    if st.session_state.locked_selection:
+        indices = [p['point_index'] for p in st.session_state.locked_selection]
+        fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
+
+    # 5. Render Plot and Capture Selection Event
+    event_data = st.plotly_chart(fig_scrub, use_container_width=True, on_select="rerun", key=f"scrub_{sel_loc}")
+
+    if event_data and "selection" in event_data:
+        pts = event_data["selection"].get("points", [])
+        if len(pts) > 0:
+            st.session_state.locked_selection = pts
+
+    # 6. Action Buttons
+    if st.session_state.locked_selection:
+        st.success(f"📍 {len(st.session_state.locked_selection)} points selected.")
+        c1, c2, c3, c4 = st.columns(4)
         
-                if not p_df.empty:
-                    # Filter and RESET INDEX
-                    loc_options = sorted(p_df['Location'].dropna().unique())
-                    sel_loc = st.selectbox("Select Pipe", loc_options, key="admin_scrub_loc")
-                    scrub_plot_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
+        with c1:
+            if st.button("✅ APPROVE (Client)", use_container_width=True):
+                update_records(st.session_state.locked_selection, scrub_df, "TRUE")
+        with c2:
+            if st.button("🚫 MASK (Internal)", use_container_width=True):
+                update_records(st.session_state.locked_selection, scrub_df, "MASKED")
+        with c3:
+            if st.button("🗑️ DELETE (Full Reject)", type="primary", use_container_width=True):
+                update_records(st.session_state.locked_selection, scrub_df, "FALSE")
+        with c4:
+            if st.button("Clear Selection", use_container_width=True):
+                st.session_state.locked_selection = None
+                st.rerun()
 
-                    # --- THE STATE LOCK ---
-                    # Use a 'confirmed' state that the widget cannot touch directly
-                    if "locked_selection" not in st.session_state:
-                        st.session_state.locked_selection = None
+###########
+# - 11. SURGICAL CLEANER HELPERS - #
+###########
 
-                    # 3. BUILD GRAPH
-                    fig_scrub = build_high_speed_graph(
-                        scrub_plot_df, f"Scrubbing: {sel_loc}", 
-                        pd.Timestamp.now(tz='UTC') - timedelta(days=7), 
-                        pd.Timestamp.now(tz='UTC') + timedelta(hours=6), 
-                        tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
-                    )
+def update_records(pts, df, val):
+    """
+    Final corrected version: Writes status updates into the 'reason' column.
+    Matches schema: NodeNum (STRING), timestamp (TIMESTAMP), reason (STRING).
+    """
+    recs = []
+    for p in pts:
+        # Snap timestamp to the hour to match master/raw intervals
+        ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
+        node = df.iloc[p['point_index']]['NodeNum']
+        
+        recs.append({
+            "NodeNum": str(node), 
+            "timestamp": ts, 
+            "reason": val
+        })
+    
+    if recs:
+        status_df = pd.DataFrame(recs).drop_duplicates(subset=['NodeNum', 'timestamp'])
+        try:
+            job = client.load_table_from_dataframe(status_df, OVERRIDE_TABLE)
+            job.result() 
+            st.session_state.locked_selection = None
+            st.cache_data.clear()
+            st.success(f"Successfully marked {len(recs)} points as {val}")
+            time.sleep(1) 
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to update records: {e}")
 
-                    # 4. FORCE DRAW THE LOCK
-                    # If we have a locked selection, force Plotly to show it
-                    if st.session_state.locked_selection:
-                        selected_indices = [p['point_index'] for p in st.session_state.locked_selection]
-                        fig_scrub.update_traces(
-                            selectedpoints=selected_indices, 
-                            unselected=dict(marker=dict(opacity=0.3))
-                        )
+###########
+# - 12. MAIN ROUTER - #
+###########
 
-                    # 5. RENDER CHART
-                    # use_container_width=True is mandatory for your version
-                    event_data = st.plotly_chart(
-                        fig_scrub, 
-                        use_container_width=True, 
-                        on_select="rerun", 
-                        key=f"scrub_chart_{sel_loc.replace(' ', '_')}"
-                    )
+if service == "🌐 Global Overview":
+    render_global_overview()
 
-                    # 6. LOCKING LOGIC (The One-Way Valve)
-                    # We ONLY update the lock if there are actual points in the event.
-                    # This prevents the 'reset' from wiping your selection.
-                    if event_data and "selection" in event_data:
-                        current_event_points = event_data["selection"].get("points", [])
-                        if len(current_event_points) > 0:
-                            st.session_state.locked_selection = current_event_points
+elif service == "🏠 Executive Summary":
+    # Pass 'client' into the function call here
+    render_executive_summary(client, selected_project, unit_label) 
 
-                    # 7. UI FOR LOCKED SELECTION
-                    if st.session_state.locked_selection:
-                        points = st.session_state.locked_selection
-                        st.success(f"📍 {len(points)} points locked in memory.")
-                        
-                        c1, c2 = st.columns(2)
-                        if c1.button("🚨 HIDE SELECTED DATA", type="primary"):
-                            rejection_records = []
-                            for pt in points:
-                                raw_ts = pd.to_datetime(pt['x'])
-                                scrub_ts = raw_ts.tz_convert('UTC').floor('h')
-                                node_id = scrub_plot_df.iloc[pt['point_index']]['NodeNum']
-                                rejection_records.append({"NodeNum": str(node_id), "timestamp": scrub_ts, "reason": "Surgical Scrub", "Project": selected_project})
-                            
-                            if rejection_records:
-                                rej_df = pd.DataFrame(rejection_records).drop_duplicates()
-                                client.load_table_from_dataframe(rej_df, f"{PROJECT_ID}.{DATASET_ID}.manual_rejections").result()
-                                st.session_state.locked_selection = None
-                                st.cache_data.clear()
-                                st.rerun()
-
-                        if c2.button("🧹 Clear Selection"):
-                            st.session_state.locked_selection = None
-                            st.rerun()
-                    else:
-                        st.info("💡 Use the Lasso tool. Selection is now locked and will not disappear.")
-                                
-###########################
-# --- END ADMIN TOOLS --- #
-###########################
+elif service == "📊 Client Portal":
+    # Ensure there are exactly 5 variables here to match the 5 in the definition above
+    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
+elif service == "📉 Node Diagnostics":
+    render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
+elif service == "📤 Data Intake Lab":
+    if check_admin_access(service):
+        render_data_intake_page(selected_project)
+elif service == "🛠️ Admin Tools":
+    if check_admin_access(service):
+        render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
