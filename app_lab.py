@@ -530,7 +530,7 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
     Engineering-level view. Shows everything (Pending, Masked, Approved).
-    Restored Vertical Profile with fix for Scattergl ValueError.
+    Restored: Time Series, Vertical Profile, and Communication Health Table.
     """
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
@@ -543,103 +543,103 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
     
     if all_data.empty:
         st.warning(f"No diagnostic data found for project {selected_project}.")
-    else:
-        loc_options = sorted(all_data['Location'].dropna().unique())
-        c1, c2, c3 = st.columns([2, 1, 1])
-        with c1:
-            sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options, key="diag_loc_select")
-        with c2:
-            weeks_view = st.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
-        with c3:
-            show_profile = st.checkbox("Show Vertical Profile", value=True)
+        return
+
+    # 1. Selection Controls
+    loc_options = sorted(all_data['Location'].dropna().unique())
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options, key="diag_loc_select")
+    with c2:
+        weeks_view = st.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
+    with c3:
+        show_profile = st.checkbox("Show Vertical Profile", value=True)
             
-        df_diag = all_data[all_data['Location'] == sel_loc].copy()
+    # Filter data for the selected Location and Timeframe
+    now_utc = pd.Timestamp.now(tz='UTC')
+    start_view = now_utc - timedelta(weeks=weeks_view)
+    df_diag = all_data[all_data['Location'] == sel_loc].copy()
+    df_filtered = df_diag[(df_diag['timestamp'] >= start_view) & (df_diag['timestamp'] <= now_utc)]
 
-        # 1. Engineering Timeline (Keep Scattergl for performance here)
-        st.subheader("🕒 Engineering Timeline")
-        fig_time = build_high_speed_graph(
-            df_diag, f"Diagnostic Stream: {sel_loc}", 
-            pd.Timestamp.now(tz='UTC') - timedelta(weeks=weeks_view), 
-            pd.Timestamp.now(tz='UTC') + timedelta(hours=2), 
-            tuple(active_refs), unit_mode, unit_label, display_tz
-        )
-        st.plotly_chart(fig_time, use_container_width=True)
+    # --- 1. ENGINEERING TIMELINE ---
+    st.subheader("🕒 Engineering Timeline")
+    fig_time = build_high_speed_graph(
+        df_filtered, f"Diagnostic Stream: {sel_loc}", 
+        start_view, now_utc + timedelta(hours=2), 
+        tuple(active_refs), unit_mode, unit_label, display_tz
+    )
+    st.plotly_chart(fig_time, use_container_width=True)
 
-        # 2. RESTORED Vertical Profile
-        if show_profile:
-            st.divider()
-            st.subheader("📏 Vertical Temperature Profile")
+    # --- 2. VERTICAL PROFILE (Depth vs Temp) ---
+    if show_profile:
+        st.divider()
+        st.subheader("📏 Vertical Temperature Profile")
+        df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
+        profile_df = df_diag.dropna(subset=['Depth_Num']).copy()
+
+        if profile_df.empty:
+            st.info("No numeric depth data found for this location.")
+        else:
+            latest_snap = profile_df.sort_values('timestamp').groupby('Depth_Num').last().reset_index()
             
-            # Ensure Depth is numeric
-            df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
-            profile_df = df_diag.dropna(subset=['Depth_Num']).copy()
+            # Using Lambda to avoid convert_val NameError
+            latest_snap['conv_temp'] = latest_snap['temperature'].apply(
+                lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
+            )
 
-            if profile_df.empty:
-                st.info("No numeric depth data found for this location.")
-            else:
-                # Get the absolute latest reading for each depth sensor
-                latest_snap = profile_df.sort_values('timestamp').groupby('Depth_Num').last().reset_index()
-                
-                # Lambda fix for NameError: convert_val
-                latest_snap['conv_temp'] = latest_snap['temperature'].apply(
-                    lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
-                )
+            fig_d = go.Figure()
+            fig_d.add_trace(go.Scatter(
+                x=latest_snap['conv_temp'], 
+                y=latest_snap['Depth_Num'], 
+                mode='lines+markers',
+                name="Current State",
+                line=dict(shape='spline', smoothing=0.5, width=3, color='RoyalBlue'),
+                marker=dict(size=10, symbol='diamond')
+            ))
 
-                # Using standard go.Scatter to allow for smooth 'spline' curves
-                fig_d = go.Figure()
-                fig_d.add_trace(go.Scatter(
-                    x=latest_snap['conv_temp'], 
-                    y=latest_snap['Depth_Num'], 
-                    mode='lines+markers',
-                    name="Current Profile",
-                    line=dict(shape='spline', smoothing=0.5, width=3, color='RoyalBlue'),
-                    marker=dict(size=10, symbol='diamond')
-                ))
+            y_limit = int(((profile_df['Depth_Num'].max() // 10) + 1) * 10)
+            fig_d.update_layout(
+                plot_bgcolor='white', height=600,
+                xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
+                yaxis=dict(title="Depth (ft)", range=[y_limit, 0], gridcolor='Silver')
+            )
+            st.plotly_chart(fig_d, use_container_width=True)
 
-                # Set Y-axis so 0 (surface) is at the top
-                y_limit = int(((profile_df['Depth_Num'].max() // 10) + 1) * 10)
-                fig_d.update_layout(
-                    title=f"Latest Vertical Snapshot: {sel_loc}",
-                    plot_bgcolor='white', 
-                    height=700,
-                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro', showline=True, linecolor='black'),
-                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver', showline=True, linecolor='black')
-                )
-                
-                # Add reference lines to vertical profile
-                for val, ref_label in active_refs:
-                    # Convert ref line value if needed
-                    c_ref = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                    fig_d.add_vline(x=c_ref, line_dash="dash", line_color="Red", annotation_text=ref_label)
-
-                st.plotly_chart(fig_d, use_container_width=True)
-
-# 2. Communication Health Table
-        st.subheader("📋 Sensor Communication Health")
-        now_utc = pd.Timestamp.now(tz=pytz.UTC)
-        latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+    # --- 3. COMMUNICATION HEALTH TABLE (Restored) ---
+    st.divider()
+    st.subheader("📋 Sensor Communication Health")
+    
+    # We use the raw df_diag to check the latest overall reporting time
+    latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+    
+    summary_rows = []
+    for _, row in latest_nodes.iterrows():
+        # Handle timestamp localization safely
+        ts = row['timestamp'].tz_localize('UTC') if row['timestamp'].tzinfo is None else row['timestamp']
+        hrs_ago = int((now_utc - ts).total_seconds() / 3600)
         
-        summary_rows = []
-        for _, row in latest_nodes.iterrows():
-            # Calculate hours since last reporting
-            ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-            hrs_ago = int((now_utc - ts).total_seconds() / 3600)
-            
-            # Status Logic: Green < 6h, Yellow < 24h, Red > 24h
-            status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-            
-            # Map database 'reason' column to human-readable status
-            db_status = row['is_approved']
-            status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
-
-            summary_rows.append({
-                "Node": row['NodeNum'],
-                "Last Value": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
-                "Last Seen": f"{hrs_ago}h ago {status_icon}",
-                "Admin Status": status_label
-            })
+        # Status Logic: Green < 6h, Yellow < 24h, Red > 24h
+        status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
         
+        # Map database 'is_approved' column to human-readable status
+        db_status = str(row['is_approved']).upper()
+        status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
+
+        # Temperature Conversion Lambda for table display
+        f_temp = row['temperature']
+        conv_temp = (f_temp - 32) * 5/9 if unit_mode == "Celsius" else f_temp
+
+        summary_rows.append({
+            "Node": row['NodeNum'],
+            "Last Value": f"{round(conv_temp, 1)}{unit_label}",
+            "Last Seen": f"{hrs_ago}h ago {status_icon}",
+            "Admin Status": status_label
+        })
+    
+    if summary_rows:
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No communication logs available for this selection.")
 ###########
 # - 9. PAGE: DATA INTAKE LAB - #
 ###########
