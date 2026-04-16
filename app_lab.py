@@ -99,13 +99,12 @@ def check_admin_access(service_name):
             st.rerun()
     return False
 
-
 ###########################
 #- 3. SIDEBAR UI & STATE -#
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# 1. Navigation
+# 1. Page Navigation
 service = st.sidebar.selectbox(
     "📂 Page", 
     ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
@@ -115,51 +114,41 @@ service = st.sidebar.selectbox(
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# 3. Global Project Selection (Ensuring only ONE dropdown exists)
+# 3. Global Project Selection
 selected_project = "All Projects"
+if client is not None:
+    try:
+        proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+        proj_df = client.query(proj_q).to_dataframe()
+        proj_list = sorted(proj_df['Project'].dropna().unique())
+        options = ["All Projects"] + proj_list
+        selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_final")
+    except Exception as e:
+        st.sidebar.error(f"Sidebar Sync Error: {e}")
 
-# Global overview doesn't need a specific project picker usually, 
-# but we show it for all other pages.
-if service != "🌐 Global Overview":
-    if client is not None:
-        try:
-            # Query unique projects from metadata
-            proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-            proj_df = client.query(proj_q).to_dataframe()
-            proj_list = sorted(proj_df['Project'].dropna().unique())
-            
-            # Combine 'All Projects' with the list from the database
-            options = ["All Projects"] + proj_list
-            
-            # This is the ONLY project picker code that should be in your sidebar section
-            selected_project = st.sidebar.selectbox(
-                "🎯 Active Project", 
-                options, 
-                index=0, 
-                key="sidebar_proj_picker_unified"
-            )
-        except Exception as e:
-            st.sidebar.error(f"Sidebar Sync Error: {e}")
-    else:
-        st.sidebar.warning("Connecting to BigQuery...")
-
-# 4. Reference Lines
+# 4. Reference Lines (Type A added, B & A defaulted to False)
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = []
-if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type A (10.2°F)", value=False): active_refs.append((10.2, "Type A"))
-if st.sidebar.checkbox("Type B (26.6°F)", value=False): active_refs.append((26.6, "Type B"))    
 
-# 5. Timezone
+# Freezing remains True by default as it is the primary benchmark
+if st.sidebar.checkbox("Freezing (32°F)", value=True): 
+    active_refs.append((32.0, "Freezing"))
+
+# Type B: Now False (Unchecked) by default
+if st.sidebar.checkbox("Type B (26.6°F)", value=False): 
+    active_refs.append((26.6, "Type B"))
+
+# Type A: New entry, False (Unchecked) by default
+if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
+    active_refs.append((10.2, "Type A"))
+
+# 5. Timezone Display
 tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
-display_tz = {"UTC": "UTC", "Local (US/Eastern)": "US/Eastern", "Local (US/Pacific)": "US/Pacific"}[tz_mode]
-
-def convert_val(f_val):
-    """Converts Fahrenheit from DB to selected unit."""
-    if f_val is None or pd.isna(f_val): return None
-    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
-
-
+display_tz = {
+    "UTC": "UTC", 
+    "Local (US/Eastern)": "US/Eastern", 
+    "Local (US/Pacific)": "US/Pacific"
+}[tz_mode]
 
 ########################
 #- 4. GRAPHING ENGINE -#
