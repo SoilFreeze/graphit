@@ -782,9 +782,9 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
                 st.session_state.locked_selection = None
                 st.rerun()
 
-#######################################
-# - 11.5 SURGICAL UPDATE HELPER - #
-#######################################
+###########
+# - 11. SURGICAL CLEANER HELPERS - #
+###########
 
 def update_records(pts, df, val):
     """
@@ -794,11 +794,9 @@ def update_records(pts, df, val):
     recs = []
     for p in pts:
         # Snap timestamp to the hour to match master/raw intervals
-        # Ensure it is UTC before flooring to match BigQuery storage
         ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
         node = df.iloc[p['point_index']]['NodeNum']
         
-        # We use 'reason' as the column name to store TRUE/FALSE/MASKED
         recs.append({
             "NodeNum": str(node), 
             "timestamp": ts, 
@@ -806,44 +804,33 @@ def update_records(pts, df, val):
         })
     
     if recs:
-        # Deduplicate to prevent primary key bloat in BigQuery
         status_df = pd.DataFrame(recs).drop_duplicates(subset=['NodeNum', 'timestamp'])
-        
         try:
-            # Upload the dataframe to the override table
             job = client.load_table_from_dataframe(status_df, OVERRIDE_TABLE)
-            job.result() # Wait for table upload to finish
-            
-            # Reset UI state
+            job.result() 
             st.session_state.locked_selection = None
             st.cache_data.clear()
             st.success(f"Successfully marked {len(recs)} points as {val}")
-            time.sleep(1) # Brief pause so user sees success
+            time.sleep(1) 
             st.rerun()
         except Exception as e:
             st.error(f"Failed to update records: {e}")
-            
+
 ###########
 # - 12. MAIN ROUTER - #
 ###########
 
-# Execute page based on sidebar 'service' selection
 if service == "🌐 Global Overview":
     render_global_overview()
-
 elif service == "🏠 Executive Summary":
     render_executive_summary(selected_project, unit_label)
-
 elif service == "📊 Client Portal":
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
-
 elif service == "📉 Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
-
 elif service == "📤 Data Intake Lab":
     if check_admin_access(service):
         render_data_intake_page(selected_project)
-
 elif service == "🛠️ Admin Tools":
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
