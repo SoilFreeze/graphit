@@ -13,34 +13,61 @@ import io
 ##################################
 # - 1. CONFIGURATION & STYLING - #
 ##################################
-st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
-# Database Constants
+# 1. Initialize Page Config
+st.set_page_config(
+    page_title="SoilFreeze Data Lab", 
+    layout="wide", 
+    initial_sidebar_state="expanded"
+)
+
+# 2. Database Constants
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
-# manual_rejections is our override table for status flags
+# The Override table stores our Approve/Mask/Delete statuses
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-
-client = get_bq_client()
 
 @st.cache_resource
 def get_bq_client():
-    
+    """
+    Handles authentication with BigQuery and Google Drive scopes.
+    Drive scope is required to access metadata stored in Google Sheets.
+    """
     try:
-        # These scopes must be requested during credential initialization
+        # These scopes allow the service account to bridge BQ and Drive
         SCOPES = [
             "https://www.googleapis.com/auth/bigquery",
             "https://www.googleapis.com/auth/drive"
         ]
+        
+        # Check for Streamlit Secrets (Production)
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-            return bigquery.Client(credentials=credentials, project=info["project_id"])
-        # If using local default credentials, scopes are managed via 'gcloud auth'
+            credentials = service_account.Credentials.from_service_account_info(
+                info, 
+                scopes=SCOPES
+            )
+            return bigquery.Client(
+                credentials=credentials, 
+                project=info.get("project_id", PROJECT_ID)
+            )
+        
+        # Fallback for Local Development (uses gcloud CLI auth)
         return bigquery.Client(project=PROJECT_ID)
+        
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
         return None
+
+# 3. GLOBAL CLIENT INITIALIZATION
+# Defining 'client' here at the top level makes it accessible to all functions
+client = get_bq_client()
+
+# Check if client initialized successfully
+if client is None:
+    st.critical("BigQuery Client failed to initialize. Check your Secrets/Credentials.")
+    st.stop()
+    
 ############################
 # - 2. DATA ENGINE LOGIC - #
 ############################
