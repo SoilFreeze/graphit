@@ -429,25 +429,29 @@ def render_executive_summary(client, selected_project, unit_label):
 
 def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Merged Version: Uses your preferred Snapshot logic with bulletproof arguments.
+    The strictly filtered view for clients. 
+    Only shows data where manual_rejections.reason = 'TRUE'.
     """
-    global convert_val, client
     st.header(f"📊 Project Status: {selected_project}")
+    
+    # Use the global client defined at the top of the app
+    global client
 
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar.")
+        st.info("💡 Please select a specific project in the sidebar to view approved data.")
         return
-
+    
     # 1. FETCH DATA (Client View)
     with st.spinner("Loading approved portal data..."):
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
     if p_df.empty:
-        st.info(f"No approved data is currently available for {selected_project}.")
+        st.info(f"No approved data is currently available for {selected_project}. Data must be approved in Admin Tools.")
     else:
         tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
         with tab_time:
+            # Viewing window: Default 6 weeks
             weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
             end_view = pd.Timestamp.now(tz='UTC')
             start_view = end_view - timedelta(weeks=weeks_view)
@@ -463,7 +467,6 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 
         with tab_depth:
             st.subheader("📏 Vertical Temperature Profile")
-            # Force Depth to numeric for graphing
             p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
             depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
             
@@ -472,11 +475,12 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                     loc_data = depth_only[depth_only['Location'] == loc].copy()
                     fig_d = go.Figure()
                     
-                    # Weekly Snapshot Logic from your file
+                    # Generate Monday 6AM snapshots for the last 6 weeks
                     mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                     
                     for m_date in mondays:
                         target_ts = m_date.replace(hour=6, minute=0, second=0)
+                        # Look for data within +/- 12 hours of target
                         window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                           (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                         
@@ -488,14 +492,19 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                                 snap_list.append(node_data.sort_values('diff').iloc[0])
                             
                             snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
+                            
+                            # FIX: Using Lambda to prevent NameError
+                            converted_temps = snap_df['temperature'].apply(
+                                lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
+                            )
+                            
                             fig_d.add_trace(go.Scattergl(
-                                x=snap_df['temperature'].apply(convert_val), 
+                                x=converted_temps, 
                                 y=snap_df['Depth_Num'], 
                                 mode='lines+markers', 
                                 name=target_ts.strftime('%m/%d/%y')
                             ))
 
-                    # Format the Depth Graph
                     y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
                     fig_d.update_layout(
                         plot_bgcolor='white', height=700,
@@ -507,68 +516,86 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 
         with tab_table:
             latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-            latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
+            # FIX: Using Lambda to prevent NameError
+            latest['Current Temp'] = latest['temperature'].apply(
+                lambda x: f"{round((x - 32) * 5/9 if unit_mode == 'Celsius' else x, 1)}{unit_label}"
+            )
             latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r.get('Depth', '??')} ft", axis=1)
             st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
             
+###########
+# - 8. PAGE: NODE DIAGNOSTICS - #
+###########
+
 def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
     Engineering-level view. Shows everything (Pending, Masked, Approved).
-    Used for troubleshooting sensor health and communication gaps.
     """
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
-    with st.spinner("🔍 Syncing diagnostic streams (Engineering View)..."):
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Select a specific project in the sidebar.")
+        return
+
+    with st.spinner("🔍 Syncing diagnostic streams..."):
         all_data = get_universal_portal_data(selected_project, view_mode="engineering")
     
     if all_data.empty:
         st.warning(f"No diagnostic data found for project {selected_project}.")
     else:
         loc_options = sorted(all_data['Location'].dropna().unique())
-        c1, c2 = st.columns([2, 1])
+        c1, c2, c3 = st.columns([2, 1, 1])
         with c1:
             sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options, key="diag_loc_select")
         with c2:
             weeks_view = st.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
+        with c3:
+            show_profile = st.checkbox("Show Vertical Profile", value=True)
             
         df_diag = all_data[all_data['Location'] == sel_loc].copy()
 
-        # 1. Engineering Timeline (Markers enabled for gap detection)
-        st.subheader("📈 Engineering Timeline")
+        # 1. Engineering Timeline
+        st.subheader("🕒 Engineering Timeline")
         fig_time = build_high_speed_graph(
             df_diag, f"Diagnostic Stream: {sel_loc}", 
             pd.Timestamp.now(tz='UTC') - timedelta(weeks=weeks_view), 
             pd.Timestamp.now(tz='UTC') + timedelta(hours=2), 
             tuple(active_refs), unit_mode, unit_label, display_tz
         )
-        st.plotly_chart(fig_time, use_container_width=True, key=f"diag_chart_{sel_loc}")
+        st.plotly_chart(fig_time, use_container_width=True)
 
-        # 2. Communication Health Table
-        st.subheader("📋 Sensor Communication Health")
-        now_utc = pd.Timestamp.now(tz=pytz.UTC)
-        latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-        
-        summary_rows = []
-        for _, row in latest_nodes.iterrows():
-            # Calculate hours since last reporting
-            ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-            hrs_ago = int((now_utc - ts).total_seconds() / 3600)
-            
-            # Status Logic: Green < 6h, Yellow < 24h, Red > 24h
-            status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-            
-            # Map database 'reason' column to human-readable status
-            db_status = row['is_approved']
-            status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
+        # 2. RESTORED Vertical Profile
+        if show_profile:
+            st.divider()
+            st.subheader("📏 Vertical Temperature Profile")
+            df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
+            profile_df = df_diag.dropna(subset=['Depth_Num']).copy()
 
-            summary_rows.append({
-                "Node": row['NodeNum'],
-                "Last Value": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
-                "Last Seen": f"{hrs_ago}h ago {status_icon}",
-                "Admin Status": status_label
-            })
-        
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+            if profile_df.empty:
+                st.info("No numeric depth data found for this location.")
+            else:
+                latest_snap = profile_df.sort_values('timestamp').groupby('Depth_Num').last().reset_index()
+                
+                # FIX: Using Lambda to prevent NameError
+                latest_snap['conv_temp'] = latest_snap['temperature'].apply(
+                    lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
+                )
+
+                fig_d = go.Figure()
+                fig_d.add_trace(go.Scattergl(
+                    x=latest_snap['conv_temp'], 
+                    y=latest_snap['Depth_Num'], 
+                    mode='lines+markers',
+                    line=dict(shape='spline', smoothing=0.5)
+                ))
+
+                y_limit = int(((profile_df['Depth_Num'].max() // 10) + 1) * 10)
+                fig_d.update_layout(
+                    plot_bgcolor='white', height=600,
+                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
+                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], gridcolor='Silver')
+                )
+                st.plotly_chart(fig_d, use_container_width=True)
 
 ###########
 # - 9. PAGE: DATA INTAKE LAB - #
