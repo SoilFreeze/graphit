@@ -121,15 +121,17 @@ def check_admin_access():
 
     st.warning("🔒 Restricted Area: Engineering Admin Only.")
     
-    # FIX: Add a unique key based on the 'service' variable 
-    # so that 'Data Intake' and 'Admin Tools' don't collide.
+    # Use the service name to create a unique ID for the widget
+    # This prevents the DuplicateElementId error
+    unique_id = service.replace(" ", "_").lower()
+    
     pwd_input = st.text_input(
         "Enter Admin Password", 
         type="password", 
-        key=f"admin_pwd_gate_{service.replace(' ', '_')}"
+        key=f"pwd_input_{unique_id}"
     )
     
-    if st.button("Unlock Tools", key=f"admin_btn_gate_{service.replace(' ', '_')}"):
+    if st.button("Unlock Tools", key=f"btn_unlock_{unique_id}"):
         if pwd_input == st.secrets["admin_password"]:
             st.session_state["admin_authenticated"] = True
             st.rerun()
