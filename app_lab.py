@@ -52,21 +52,15 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Standardizes data fetching based on the audience.
-    
-    view_mode:
-    - 'engineering': Sees Approved (TRUE), Pending (NULL), and Masked (MASKED). Hides FALSE.
-    - 'client': Sees ONLY Approved (TRUE).
+    Fetches data and joins with the manual_rejections table.
+    Engineering view: Shows Approved + Pending + Masked. Hides 'FALSE'.
+    Client view: Shows ONLY 'TRUE'.
     """
-    
-    # Define the filter based on the view mode
+    # Fix: Matching the column name 'approve' from your BQ schema
     if view_mode == "client":
-        # The client ONLY sees data explicitly marked as 'TRUE'
-        approval_filter = "AND rej.status = 'TRUE'"
+        approval_filter = "AND rej.approve = 'TRUE'"
     else:
-        # Engineering sees everything that hasn't been explicitly rejected ('FALSE')
-        # This includes NULL (new/pending data) and 'MASKED' (pre-project data)
-        approval_filter = "AND (rej.status IS NULL OR rej.status != 'FALSE')"
+        approval_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
         WITH UnifiedRaw AS (
@@ -78,8 +72,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             SELECT 
                 r.NodeNum, r.timestamp, r.temperature,
                 m.Location, m.Bank, m.Depth, m.Project,
-                # Join with the override table to get current status
-                rej.status as is_approved 
+                rej.approve as is_approved 
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
             LEFT JOIN `{OVERRIDE_TABLE}` rej 
@@ -97,8 +90,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         df = client.query(query).to_dataframe()
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            if 'Bank' not in df.columns:
-                df['Bank'] = ""
+            if 'Bank' not in df.columns: df['Bank'] = ""
         return df
     except Exception as e:
         st.error(f"BigQuery Error in Data Engine: {e}")
@@ -431,23 +423,19 @@ elif service == "🏠 Executive Summary":
 ###########
 elif service == "📊 Client Portal":
     if not selected_project:
-        st.sidebar.warning("Please select a project in the sidebar to view the portal.")
+        st.sidebar.warning("Please select a project.")
     else:
         st.header(f"📊 Project Status: {selected_project}")
-        
-        # 1. FETCH DATA (Strict Client View - ONLY Approved 'TRUE' data)
-        with st.spinner("Loading approved client data..."):
-            p_df = get_universal_portal_data(selected_project, view_mode="client")
+        p_df = get_universal_portal_data(selected_project, view_mode="client")
         
         if p_df.empty:
-            st.info(f"No approved data is currently available for {selected_project}. Check Admin Tools to approve pending points.")
+            st.info(f"No approved data found for {selected_project}.")
         else:
             tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
             with tab_time:
-                weeks_view = st.slider("Weeks to View", 1, 12, 6, key="cp_weeks")
+                weeks_view = st.slider("Weeks to View", 1, 12, 6)
                 now = pd.Timestamp.now(tz=pytz.UTC)
-                # Snap end view to Monday midnight for consistency
                 end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
                 start_view = end_view - timedelta(weeks=weeks_view)
                 
@@ -455,10 +443,9 @@ elif service == "📊 Client Portal":
                     with st.expander(f"📈 {loc}", expanded=True):
                         loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
                         fig = build_high_speed_graph(loc_data, loc, start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
-                        st.plotly_chart(fig, use_container_width=True, key=f"cht_{loc}", config={'displayModeBar': False})
+                        st.plotly_chart(fig, use_container_width=True, key=f"cht_{loc}")
 
             with tab_depth:
-                # Standard Depth Profile Logic
                 p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
                 depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
                 
@@ -466,31 +453,27 @@ elif service == "📊 Client Portal":
                     with st.expander(f"📏 {loc} Depth Profile", expanded=True):
                         loc_data = depth_only[depth_only['Location'] == loc].copy()
                         fig_d = go.Figure()
-                        
-                        # Generate Weekly Monday Snapshots (6AM)
                         mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
+                        
                         for m_date in mondays:
                             target_ts = m_date.replace(hour=6, minute=0, second=0).tz_localize(pytz.UTC)
                             window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                            
                             if not window.empty:
                                 snap_list = []
                                 for node in window['NodeNum'].unique():
                                     node_data = window[window['NodeNum'] == node].copy()
                                     node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
                                     snap_list.append(node_data.sort_values('diff').iloc[0])
-                                
                                 snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
                                 fig_d.add_trace(go.Scattergl(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
 
-                        # Chart Layout
                         y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5) if not loc_data.empty else 50
                         x_range = [-20, 80] if unit_mode == "Fahrenheit" else [(-20-32)*5/9, (80-32)*5/9]
                         
                         fig_d.update_layout(
                             plot_bgcolor='white', height=700,
-                            xaxis=dict(title=f"Temp ({unit_label})", range=x_range, gridcolor='Gainsboro'),
-                            yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver'),
+                            xaxis=dict(title=f"Temp ({unit_label})", range=x_range, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True),
+                            yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver', showline=True, linecolor='black', mirror=True),
                             legend=dict(title="Weekly Snapshots (6AM)", orientation="h", y=-0.2)
                         )
                         st.plotly_chart(fig_d, use_container_width=True, key=f"dep_{loc}")
@@ -507,12 +490,10 @@ elif service == "📊 Client Portal":
 ###########
 elif service == "📉 Node Diagnostics":
     st.header(f"📉 Node Diagnostics: {selected_project}")
-    
     if not selected_project:
-        st.warning("👈 Please select a project in the sidebar to begin analysis.")
+        st.warning("👈 Please select a project.")
     else:
-        # 1. FETCH DATA (Engineering View - Shows Approved + Pending/Blank)
-        with st.spinner("🔍 Syncing diagnostic streams (Engineering View)..."):
+        with st.spinner("🔍 Syncing diagnostic streams..."):
             all_data = get_universal_portal_data(selected_project, view_mode="engineering")
         
         if all_data.empty:
@@ -520,46 +501,31 @@ elif service == "📉 Node Diagnostics":
         else:
             loc_options = sorted(all_data['Location'].dropna().unique())
             c1, c2 = st.columns([2, 1])
-            with c1: 
-                sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options)
-            with c2: 
-                weeks_view = st.slider("Lookback (Weeks)", 1, 12, 4, key="diag_lookback")
+            with c1: sel_loc = st.selectbox("Select Pipe / Bank", loc_options)
+            with c2: weeks_view = st.slider("Lookback (Weeks)", 1, 12, 4)
 
             now_utc = pd.Timestamp.now(tz=pytz.UTC)
-            end_view = (now_utc + pd.Timedelta(days=(7 - now_utc.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
             start_view = end_view - timedelta(weeks=weeks_view)
-
             df_diag = all_data[all_data['Location'] == sel_loc].copy()
 
-            # --- TIMELINE ANALYSIS ---
             st.subheader("📈 Engineering Timeline")
-            st.caption("Viewing trends including unapproved data.")
             fig_time = build_high_speed_graph(df_diag, f"Diag: {sel_loc}", start_view, end_view, tuple(active_refs), unit_mode, unit_label, display_tz=display_tz)
             st.plotly_chart(fig_time, use_container_width=True)
 
-            # --- STATUS SUMMARY TABLE ---
-            st.subheader(f"📋 Node Health & Approval Status: {sel_loc}")
+            # Restored the Health Table logic
+            st.subheader(f"📋 Node Health Summary: {sel_loc}")
             latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-            
             summary_rows = []
             for _, row in latest_nodes.iterrows():
                 hrs_ago = int((now_utc - row['timestamp']).total_seconds() / 3600)
                 status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-                
-                # Show what the status actually is in the database
-                db_status = row['is_approved']
-                approval_display = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending Review")
-
                 summary_rows.append({
                     "Node": row['NodeNum'],
-                    "Depth/Bank": f"Bank {row['Bank']}" if str(row['Bank']).strip().lower() not in ["","none"] else f"{row['Depth']} ft",
-                    "Last Reading": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
                     "Last Seen": f"{hrs_ago}h ago {status_icon}",
-                    "Current Status": approval_display
+                    "Status": "✅ Approved" if row['is_approved'] == "TRUE" else ("🚫 Masked" if row['is_approved'] == "MASKED" else "⏳ Pending")
                 })
-            
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-
 ###########
 #- 9. DATA INTAKE LAB -
 ###########
