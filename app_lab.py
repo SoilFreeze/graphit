@@ -438,58 +438,75 @@ def render_executive_summary(client, selected_project, unit_label):
 
 def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Client-facing view: Only shows 'Approved' data and respects the visibility mask.
+    Client-facing view: Restored with Time Slider and Tabbed Interface.
+    Only shows 'Approved' data after the project visibility cutoff.
     """
     st.header(f"📊 Client Portal: {selected_project}")
 
     # 1. Validation: Client Portal requires a specific project
     if not selected_project or selected_project == "All Projects":
-        st.warning("Please select a specific project in the sidebar to view the Client Portal.")
+        st.info("💡 Please select a specific project in the sidebar to view the Client Portal.")
         return
 
-    # 2. Date Range Selection
-    c1, c2 = st.columns(2)
-    with c1:
-        start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7))
-    with c2:
-        end_date = st.date_input("End Date", value=datetime.now())
-
-    # Convert dates to UTC timestamps for the query
-    start_ts = pd.Timestamp(start_date).tz_localize(display_tz).tz_convert('UTC')
-    end_ts = pd.Timestamp(end_date).tz_localize(display_tz).tz_convert('UTC') + timedelta(days=1)
-
-    # 3. Fetch Data
-    with st.spinner("Loading approved data..."):
-        # We pass 'client' and 'view_mode=client' to respect the visibility mask
+    # 2. Restored Time Selection Slider
+    st.write("### 🕒 View Period")
+    weeks_to_show = st.slider("Select how many weeks to look back:", 1, 12, 2, key="client_week_slider")
+    
+    # Calculate timestamps
+    now_utc = pd.Timestamp.now(tz='UTC')
+    start_view_utc = now_utc - timedelta(weeks=weeks_to_show)
+    
+    # 3. Fetch Data from Engine
+    with st.spinner(f"🔍 Fetching approved data for {selected_project}..."):
+        # This engine respects the visibility cutoff and 'TRUE' approval status
         df = get_universal_portal_data(selected_project, view_mode="client")
 
     if df.empty:
-        st.info("No approved data found for this project in the selected range.")
+        st.warning(f"No approved data found for {selected_project} in the last 84 days.")
+        st.info("Note: Data only appears here once it has been marked as 'Approved' in Admin Tools.")
     else:
-        # Filter by the user-selected date range
-        mask = (df['timestamp'] >= start_ts) & (df['timestamp'] <= end_ts)
+        # Filter local dataframe to match the slider window
+        mask = (df['timestamp'] >= start_view_utc) & (df['timestamp'] <= now_utc)
         filtered_df = df.loc[mask]
 
         if filtered_df.empty:
-            st.warning("No data matches the selected date range.")
+            st.warning(f"No data available for the selected {weeks_to_show}-week window.")
         else:
-            # 4. Generate Graph
-            # Ensure build_high_speed_graph is called with all required arguments
-            fig = build_high_speed_graph(
-                df=filtered_df,
-                title=f"Project Temperature: {selected_project}",
-                start_view=start_ts,
-                end_view=end_ts,
-                active_refs=active_refs,
-                unit_mode=unit_mode,
-                unit_label=unit_label,
-                display_tz=display_tz
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            # 4. Restored Tabbed Interface
+            tab_graph, tab_data = st.tabs(["📈 Temperature Graph", "📋 Data Table"])
 
-            # 5. Data Table
-            with st.expander("View Raw Data Table"):
-                st.dataframe(filtered_df, use_container_width=True)
+            with tab_graph:
+                fig = build_high_speed_graph(
+                    df=filtered_df,
+                    title=f"Project Snapshot: {selected_project}",
+                    start_view=start_view_utc,
+                    end_view=now_utc,
+                    active_refs=active_refs,
+                    unit_mode=unit_mode,
+                    unit_label=unit_label,
+                    display_tz=display_tz
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            with tab_data:
+                st.subheader("Raw Data Export")
+                # Format for readability
+                display_df = filtered_df.copy()
+                display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(display_tz).dt.strftime('%Y-%m-%d %H:%M')
+                
+                st.dataframe(
+                    display_df[["timestamp", "Location", "Bank", "Depth", "temperature"]], 
+                    use_container_width=True, 
+                    hide_index=True
+                )
+                
+                csv = display_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="💾 Download Current View as CSV",
+                    data=csv,
+                    file_name=f"{selected_project}_Client_Export.csv",
+                    mime="text/csv"
+                )
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
