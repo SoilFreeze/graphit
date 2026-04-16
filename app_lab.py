@@ -588,14 +588,13 @@ elif service == "🛠️ Admin Tools":
             
             if st.button(f"🚀 Bulk Approve {selected_project}"):
                 with st.spinner("Executing Bulk Approval..."):
-                    # FIX: Explicitly use r.NodeNum and alias the subquery
+                    # REMOVED 'Project' from the INSERT and SELECT as it's not in your BQ schema
                     bulk_sql = f"""
-                        INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason, Project)
+                        INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
                         SELECT DISTINCT 
                             r.NodeNum, 
                             TIMESTAMP_TRUNC(r.timestamp, HOUR), 
-                            'TRUE', 
-                            '{selected_project}'
+                            'TRUE'
                         FROM (
                             SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                             UNION ALL
@@ -622,13 +621,12 @@ elif service == "🛠️ Admin Tools":
             # - Tab: Deep Scrub - #
             ###########
             st.subheader("🧹 Deep Data Scrub")
-            st.warning("This will average raw data to 1-hour intervals. This cannot be undone.")
-            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+            st.warning("This will average raw data to 1-hour intervals.")
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_select")
             t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
             
             if st.button(f"🧨 Purge & Average {scrub_target}"):
                 with st.spinner("Processing Raw Data Mean Reduction..."):
-                    # Use NodeNum directly as raw tables are usually simple
                     scrub_sql = f"""
                         CREATE OR REPLACE TABLE `{t_table}` AS 
                         SELECT 
@@ -645,6 +643,16 @@ elif service == "🛠️ Admin Tools":
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"Scrub Error: {e}")
+
+        with tab_surgical:
+            ###########
+            # - Tab: Surgical Cleaner - #
+            ###########
+            if not selected_project:
+                st.warning("Please select a project in the sidebar.")
+            else:
+                # This function should be defined in your script to handle the Lasso logic
+                render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
         with tab_surgical:
             ###########
@@ -685,12 +693,15 @@ def update_records(pts, df, val, proj):
     for p in pts:
         ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
         node = df.iloc[p['point_index']]['NodeNum']
-        # We write our status into the 'reason' column as per your schema image
-        recs.append({"NodeNum": str(node), "timestamp": ts, "reason": val, "Project": proj})
-    client.load_table_from_dataframe(pd.DataFrame(recs).drop_duplicates(), OVERRIDE_TABLE).result()
-    st.session_state.locked_selection = None
-    st.cache_data.clear()
-    st.rerun()
+        # Removed Project from here as well to match your BQ schema
+        recs.append({"NodeNum": str(node), "timestamp": ts, "reason": val})
+    
+    if recs:
+        status_df = pd.DataFrame(recs).drop_duplicates()
+        client.load_table_from_dataframe(status_df, OVERRIDE_TABLE).result()
+        st.session_state.locked_selection = None
+        st.cache_data.clear()
+        st.rerun()
     
 ###################################
 # - SURGICAL CLEANER FUNCTIONS - #
