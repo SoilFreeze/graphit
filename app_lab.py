@@ -305,22 +305,22 @@ def render_global_overview():
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-def render_executive_summary(client, selected_project, unit_label): # Add client here
-   
-    """
-    Command Center view: Shows 24-hour health, min/max temps, and delta magnitude.
-    """
-     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+###########
+# - 6. PAGE: EXECUTIVE SUMMARY - #
+###########
+
+def render_executive_summary(selected_project, unit_label):
+    # Ensure this st.header is indented exactly 4 spaces (one tab)
+    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
     st.write("### ↕️ Sorting & View Options")
     c1, c2 = st.columns([1, 1])
     with c1:
-        sort_choice = st.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"])
+        sort_choice = st.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"], key="summary_sort")
     with c2:
-        sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
+        sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True, key="summary_order")
     
-    # 1. Complex Summary Query
-    # Calculates the delta (current vs 24h ago) and finds latest rank per node
+    # The SQL query must also be indented to stay inside the function
     summary_q = f"""
         WITH RecentData AS (
             SELECT 
@@ -347,10 +347,17 @@ def render_executive_summary(client, selected_project, unit_label): # Add client
     """
     
     try:
-        with st.spinner("⚡ Fetching Command Center Snapshot..."):
-            raw_summary_df = client.query(summary_q).to_dataframe()
+        # 'client' must be defined globally at the top of your script
+        raw_summary_df = client.query(summary_q).to_dataframe()
         
         if raw_summary_df.empty:
+            st.warning("📡 No active sensors seen in the last 24 hours.")
+        else:
+            # Table processing logic goes here...
+            st.dataframe(raw_summary_df, use_container_width=True)
+            
+    except Exception as e:
+        st.error(f"Executive Summary Error: {e}")
             st.warning("📡 No active sensors seen in the last 24 hours.")
         else:
             now_utc = pd.Timestamp.now(tz=pytz.UTC)
