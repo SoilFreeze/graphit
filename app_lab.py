@@ -314,115 +314,109 @@ def render_global_overview():
                     st.plotly_chart(fig, use_container_width=True, key=f"ov_{target_project}_{loc}")
         else:
             st.info(f"No engineering data found for {target_project} in the last 84 days.")
-            
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-def render_executive_summary(client, selected_project, unit_label):  # <--- Added 'client' here
-    """
-    Command Center view: Shows 24-hour health, min/max temps, and delta magnitude.
-    """
-    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+def render_executive_summary(client, selected_project, unit_label):
+    st.header(f"🏠 Executive Summary: Health Monitor")
     
-    st.write("### ↕️ Sorting & View Options")
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        sort_choice = st.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"], key="summary_sort")
-    with c2:
-        sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True, key="summary_order")
-    
-    # 1. SQL Query Construction
+    # 1. Fuzzy Filter Logic
+    proj_filter = ""
+    if selected_project and selected_project != "All Projects":
+        proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
+
     summary_q = f"""
-        WITH RecentData AS (
-            SELECT 
-                r.NodeNum, r.timestamp, r.temperature, 
-                m.Project, m.Location, m.Bank, m.Depth,
-                FIRST_VALUE(r.temperature) OVER(PARTITION BY r.NodeNum ORDER BY r.timestamp ASC) as first_temp_24h,
-                ROW_NUMBER() OVER(PARTITION BY r.NodeNum ORDER BY r.timestamp DESC) as latest_rank
+        WITH MappedNodes AS (
+            SELECT TRIM(Project) as Project, NodeNum, Location
+            FROM `{PROJECT_ID}.{DATASET_ID}.metadata`
+            WHERE Project IS NOT NULL {proj_filter}
+        ),
+        RecentReporting AS (
+            SELECT r.NodeNum, MAX(r.timestamp) as last_ping
             FROM (
-                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                 UNION ALL
-                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             ) AS r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
             WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-            {"AND m.Project = '" + selected_project + "'" if selected_project else ""}
+            GROUP BY NodeNum
+        ),
+        HistoricalPings AS (
+            SELECT NodeNum, MAX(timestamp) as ever_ping
+            FROM (
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                UNION ALL
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) GROUP BY NodeNum
+        ),
+        JoinedData AS (
+            SELECT 
+                m.Project, m.Location, m.NodeNum,
+                CASE WHEN r.NodeNum IS NOT NULL THEN 1 ELSE 0 END as is_active,
+                h.ever_ping
+            FROM MappedNodes m
+            LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
+            LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
+        ),
+        LocationStats AS (
+            SELECT Project, Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
+            FROM JoinedData GROUP BY Project, Location
+        ),
+        ProjectTotals AS (
+            SELECT Project, '--- PROJECT TOTAL ---' as Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
+            FROM JoinedData GROUP BY Project
         )
-        SELECT 
-            NodeNum, Project, Location, Bank, Depth, timestamp, temperature,
-            first_temp_24h,
-            MIN(temperature) OVER(PARTITION BY NodeNum) as min_24h,
-            MAX(temperature) OVER(PARTITION BY NodeNum) as max_24h
-        FROM RecentData
-        WHERE latest_rank = 1
+        SELECT * FROM ProjectTotals
+        UNION ALL
+        SELECT * FROM LocationStats
+        ORDER BY Project ASC, (Location = '--- PROJECT TOTAL ---') DESC, Location ASC
     """
     
     try:
-        with st.spinner("⚡ Fetching Command Center Snapshot..."):
-            raw_summary_df = client.query(summary_q).to_dataframe()
+        with st.spinner("⚡ Auditing connectivity for all projects..."):
+            df = client.query(summary_q).to_dataframe()
         
-        if raw_summary_df.empty:
-            st.warning("📡 No active sensors seen in the last 24 hours.")
-        else:
-            now_utc = pd.Timestamp.now(tz=pytz.UTC)
+        if df.empty:
+            st.warning("⚠️ No data found. Check if your Metadata table is populated.")
+            return
+
+        now_utc = pd.Timestamp.now(tz=pytz.UTC)
+
+        def process_health_row(row):
+            is_total = row['Location'] == '--- PROJECT TOTAL ---'
+            last_ts = row['last_up']
             
-            # 2. Row Processing Function
-            def process_summary_row(row):
-                # Ensure timestamp is UTC localized
-                ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
-                hrs_ago = int((now_utc - ts).total_seconds() / 3600)
-                
-                # Logic Chain for Health Icons
-                if hrs_ago < 6:
-                    status_icon = "🟢"
-                elif hrs_ago < 12:
-                    status_icon = "🟡"
-                elif hrs_ago < 24:
-                    status_icon = "🟠"
-                else:
-                    status_icon = "🔴"
-                
-                # Temperature Delta calculation
-                raw_delta = row['temperature'] - row['first_temp_24h']
-                
-                # Formatting Position Label
-                bank_val = str(row.get('Bank', '')).strip().lower()
-                if bank_val in ["", "none", "nan", "null"]:
-                    pos_label = f"{row.get('Depth', '??')} ft"
-                else:
-                    pos_label = f"Bank {row['Bank']}"
-                
-                return pd.Series({
-                    "Project": row['Project'],
-                    "Node": row['NodeNum'],
-                    "Location": row['Location'],
-                    "Position": pos_label,
-                    "Min": f"{round(convert_val(row['min_24h']), 1)}{unit_label}",
-                    "Max": f"{round(convert_val(row['max_24h']), 1)}{unit_label}",
-                    "Delta_Val": raw_delta, 
-                    "Delta": f"{'+' if raw_delta > 0 else ''}{round(raw_delta, 1)}°F",
-                    "Hours_Ago": hrs_ago,
-                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
-                })
+            if pd.notnull(last_ts):
+                last_ts = last_ts.tz_convert(pytz.UTC)
+                gap = round((now_utc - last_ts).total_seconds() / 3600, 1)
+                icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
+                time_str = f"{gap}h ago {icon}"
+            else:
+                time_str = "Never Seen ⚪"
 
-            # 3. Apply processing and sorting
-            summary_df = raw_summary_df.apply(process_summary_row, axis=1)
+            return pd.Series({
+                "Project": f"⭐ {row['Project']}" if is_total else row['Project'],
+                "Location": row['Location'],
+                "Mapped": row['total'],
+                "Active": row['active'],
+                "Ratio": f"{row['active']}/{row['total']}",
+                "Status": "✅ Healthy" if row['total'] == row['active'] else f"⚠️ {row['total'] - row['active']} Offline",
+                "Last Activity": time_str
+            })
 
-            is_asc = (sort_order == "Ascending")
-            if sort_choice == "Hours Since Last Seen":
-                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=is_asc)
-            elif sort_choice == "Delta Magnitude":
-                # Sorts by absolute value of change
-                summary_df = summary_df.sort_values(by="Delta_Val", key=abs, ascending=is_asc)
+        health_df = df.apply(process_health_row, axis=1)
 
-            # 4. Final Display
-            st.dataframe(
-                summary_df[["Project", "Node", "Location", "Position", "Min", "Max", "Delta", "Last Seen"]],
-                use_container_width=True, 
-                hide_index=True
-            )
-            
+        # Metrics based on Project Totals rows only
+        totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
+        m1, m2, m3 = st.columns(3)
+        m1.metric("System Nodes", f"{totals_df['total'].sum()}")
+        m2.metric("System Active", f"{totals_df['active'].sum()}")
+        m3.metric("Uptime", f"{round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0}%")
+
+        st.divider()
+        st.dataframe(health_df, use_container_width=True, hide_index=True)
+
     except Exception as e:
         st.error(f"Executive Summary Error: {traceback.format_exc()}")
 
