@@ -20,7 +20,7 @@ import openpyxl
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, only_approved=True):
     """
-    Standardizes NY and Pacific data to UTC and handles hourly scrubbing joins.
+    Standardizes data to UTC and handles rounded hourly scrubbing joins.
     """
     query = f"""
         WITH UnifiedRaw AS (
@@ -32,13 +32,14 @@ def get_universal_portal_data(project_id, only_approved=True):
             SELECT 
                 r.NodeNum, r.timestamp, r.temperature,
                 m.Location, m.Bank, m.Depth, m.Project,
-                # Join logic: Truncate both to the hour so the scrub works
+                # Join logic: Snap both to nearest hour so the scrub/rejection works
                 CASE WHEN rej.NodeNum IS NULL THEN 'TRUE' ELSE 'FALSE' END as is_currently_approved
             FROM UnifiedRaw r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
             LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` rej 
                 ON r.NodeNum = rej.NodeNum 
-                AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = TIMESTAMP_TRUNC(rej.timestamp, HOUR)
+                AND TIMESTAMP_TRUNC(TIMESTAMP_ADD(r.timestamp, INTERVAL 30 MINUTE), HOUR) = 
+                    TIMESTAMP_TRUNC(TIMESTAMP_ADD(rej.timestamp, INTERVAL 30 MINUTE), HOUR)
         )
         SELECT * FROM JoinedData
         WHERE Project = '{project_id}'
@@ -49,7 +50,6 @@ def get_universal_portal_data(project_id, only_approved=True):
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
-            # Force UTC alignment for all incoming data
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
             if 'Bank' not in df.columns:
                 df['Bank'] = ""
@@ -152,6 +152,69 @@ def get_bq_client():
 
 client = get_bq_client()
 
+#########################
+# --- REBUILD TABLE --- #
+#########################
+#########################
+# --- REBUILD TABLE --- #
+#########################
+def rebuild_master_table(mode="preserve"):
+    """
+    Failsafe Rebuild: Snaps all timestamps to the hour and AVERAGES
+    multiple readings within that hour window.
+    """
+    table_id = f"{PROJECT_ID}.{DATASET_ID}.final_databoard_master"
+    
+    exists = True
+    try:
+        client.get_table(table_id)
+    except Exception:
+        exists = False
+
+    # Logic to preserve previous approval status if table exists
+    status_logic = "TRUE" if mode == "approve_all" else ("COALESCE(ex.is_approved, FALSE)" if exists else "FALSE")
+    join_clause = f"LEFT JOIN `{table_id}` ex ON TIMESTAMP_TRUNC(TIMESTAMP_ADD(h.ts, INTERVAL 30 MINUTE), HOUR) = ex.timestamp AND m.NodeNum = ex.sensor_id" if (exists and mode == "preserve") else ""
+
+    scrub_sql = f"""
+        CREATE OR REPLACE TABLE `{table_id}` AS 
+        WITH RawUnified AS (
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
+                   REGEXP_REPLACE(CAST(sensor_id AS STRING), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE temperature IS NOT NULL
+            UNION ALL
+            SELECT CAST(timestamp AS TIMESTAMP) as ts, temperature as temp, 
+                   REGEXP_REPLACE(REPLACE(NodeNum, ':', '-'), r'[^0-9]', '') as clean_node 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE temperature IS NOT NULL
+        ),
+        HourlyAveraged AS (
+            SELECT 
+                clean_node,
+                TIMESTAMP_TRUNC(TIMESTAMP_ADD(ts, INTERVAL 30 MINUTE), HOUR) as hour_ts,
+                AVG(temp) as avg_temp
+            FROM RawUnified
+            GROUP BY clean_node, hour_ts
+        )
+        SELECT 
+            h.hour_ts as timestamp, 
+            h.avg_temp as temperature, 
+            m.NodeNum as sensor_id,
+            m.NodeNum as sensor_name,
+            m.Project as project, 
+            m.Location as location, 
+            m.Depth as depth, 
+            {status_logic} as is_approved
+        FROM HourlyAveraged h 
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m 
+            ON SUBSTR(h.clean_node, 1, 12) = SUBSTR(REGEXP_REPLACE(CAST(m.PhysicalID AS STRING), r'[^0-9]', ''), 1, 12)
+        {join_clause}
+    """
+    try:
+        client.query(scrub_sql).result()
+        return True
+    except Exception as e:
+        st.error(f"Rebuild Error: {e}")
+        return False
+        
 #################
 # --- Graph --- #
 #################
@@ -719,21 +782,20 @@ elif service == "📉 Node Diagnostics":
 ###############################
 elif service == "📤 Data Intake Lab":
     if check_admin_access():
-        st.header("📤 Data Ingestion & Recovery")
+        st.header("📤 Data Ingestion & Export")
         
-        # Removed Maintenance Tab as requested
-        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "📡 API Data Recovery", "📥 Export Project Data"])
+        # Removed API Recovery Tab
+        tab1, tab2, tab3 = st.tabs(["📄 Manual File Upload", "🧹 Deep Data Scrub", "📥 Export Project Data"])
 
         with tab1:
             st.subheader("📄 Manual File Ingestion")
-            st.info("Upload Lord SensorConnect (Wide), Lord Desktop Log (Narrow), or SensorPush (CSV/Excel).")
-            
-            # File uploader (Allows CSV and Excel)
+            st.info("Upload Lord SensorConnect, Lord Desktop Log, or SensorPush files.")
             u_file = st.file_uploader("Upload CSV or Excel File", type=['csv', 'xlsx', 'xls'], key="manual_upload_unified_fixed")
             
             if u_file is not None:
                 filename = u_file.name.lower()
                 is_excel = filename.endswith(('.xlsx', '.xls'))
+                pass
                 
                 try:
                     # 1. READ FILE INTO DATAFRAME
@@ -836,46 +898,37 @@ elif service == "📤 Data Intake Lab":
                     st.error(f"Upload Error: {e}")
                     st.exception(e)
 
-       # 3. DEEP DATA SCRUB (Physical Purge) - SNAP TO HOUR FIX
-        with tab2:
-            st.subheader("🧹 Deep Data Scrub & Final Purge")
-            st.info("This tool dedups data to 1-hour intervals and snaps all timestamps to the **Top of the Hour**.")
+       with tab2:
+            st.subheader("🧹 Deep Data Scrub (Averaging Mode)")
+            st.info("This tool reduces data to 1-hour intervals. If multiple readings exist in an hour, they are **averaged**.")
             st.error("⚠️ WARNING: This permanently modifies data in RAW tables.")
             
             scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_radio_fixed")
             
-            # Use the exact column names from your ingestion functions
             if scrub_target == "SensorPush":
                 target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
                 node_col = "sensor_id"
-                temp_col = "temperature"
             else:
                 target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                node_col = "NodeNum" # Fixed from nodenumber
-                temp_col = "temperature" # Fixed from value
+                node_col = "NodeNum"
     
-            if st.button(f"🧨 Permanently Purge & Snap {scrub_target}"):
-                with st.spinner("Executing hard delete and snap-to-hour..."):
-                    # This snaps the timestamp to the top of the hour (:00:00)
+            if st.button(f"🧨 Purge, Snap & Average {scrub_target}"):
+                with st.spinner("Calculating hourly averages..."):
+                    # This SQL rounds to nearest hour and averages the temperature
                     scrub_sql = f"""
                     CREATE OR REPLACE TABLE `{target_table}` AS 
                     SELECT 
-                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
-                        * EXCEPT(timestamp, rn) 
-                    FROM (
-                        SELECT *, 
-                               ROW_NUMBER() OVER(
-                                   PARTITION BY {node_col}, TIMESTAMP_TRUNC(timestamp, HOUR) 
-                                   ORDER BY timestamp DESC
-                               ) as rn
-                        FROM `{target_table}` 
-                        WHERE (approve IS NULL OR UPPER(CAST(approve AS STRING)) != 'FALSE')
-                        AND {temp_col} IS NOT NULL
-                    ) WHERE rn = 1
+                        TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
+                        {node_col},
+                        AVG(temperature) as temperature,
+                        'TRUE' as approve  -- Re-approving processed data
+                    FROM `{target_table}` 
+                    WHERE temperature IS NOT NULL
+                    GROUP BY timestamp, {node_col}
                     """
                     try:
                         client.query(scrub_sql).result()
-                        st.success(f"✅ {scrub_target} purged and snapped to top-of-hour.")
+                        st.success(f"✅ {scrub_target} data averaged and snapped to top-of-hour.")
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"Scrub Error: {e}")
