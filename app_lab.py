@@ -427,10 +427,6 @@ def render_executive_summary(client, selected_project, unit_label):
 ###########
 
 def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Optimized Client View: Uses lazy-loading and selective rendering to 
-    prevent browser hang-ups during heavy data loads.
-    """
     st.header(f"📊 Project Status: {selected_project}")
     global client
 
@@ -438,46 +434,40 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
         st.info("💡 Please select a specific project in the sidebar.")
         return
     
-    # 1. Fetch Data with Cache Check
-    with st.spinner("⚡ High-speed sync..."):
+    with st.spinner("Loading approved data..."):
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
     if p_df.empty:
-        st.info(f"No approved data found for {selected_project}.")
+        st.info(f"No approved data available for {selected_project}.")
         return
 
-    # 2. Main Tab Interface
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
     with tab_time:
-        st.write("### 🕒 History Window")
         weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
-        
         end_view = pd.Timestamp.now(tz='UTC')
         start_view = end_view - timedelta(weeks=weeks_view)
         
-        # Performance Fix: Only render locations that exist in current project
+        # Performance: Pre-sort locations
         locations = sorted(p_df['Location'].dropna().unique())
         
         for loc in locations:
-            # We use a unique key and expanded=False by default to speed up initial load
-            # The graph only renders when the user clicks to expand.
-            with st.expander(f"📍 Location: {loc}", expanded=(len(locations) == 1)):
+            # We use the expander to keep the page fast
+            with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
                 loc_data = p_df[p_df['Location'] == loc]
                 
-                if not loc_data.empty:
-                    fig = build_high_speed_graph(
-                        df=loc_data, 
-                        title=f"{loc} History", 
-                        start_view=start_view, 
-                        end_view=end_view, 
-                        active_refs=tuple(active_refs), 
-                        unit_mode=unit_mode, 
-                        unit_label=unit_label, 
-                        display_tz=display_tz
-                    )
-                    # use_container_width=True is standard; static image export is faster
-                    st.plotly_chart(fig, use_container_width=True, key=f"p_graph_{loc}")
+                # CALLING THE ENGINE WITH THE GRID LOGIC
+                fig = build_high_speed_graph(
+                    df=loc_data, 
+                    title=f"{loc} Approved Data", 
+                    start_view=start_view, 
+                    end_view=end_view, 
+                    active_refs=tuple(active_refs), 
+                    unit_mode=unit_mode, 
+                    unit_label=unit_label, 
+                    display_tz=display_tz # <--- This calculates the Black/Gray lines
+                )
+                st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
