@@ -722,7 +722,7 @@ def render_data_intake_page(selected_project):
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # Define all four administrative tabs
+    # Define all administrative tabs
     tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
         "✅ Bulk Approval", 
         "🚫 Mask Data", 
@@ -767,54 +767,76 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 except Exception as e:
                     st.error(f"Bulk Approval Error: {e}")
 
-    # --- TAB 2: MASK DATA (NEW) ---
+    # --- TAB 2: MASK DATA (Updated with "Before End Date" & Clear Mask) ---
     with tab_mask:
         st.subheader("🚫 Temporal Data Masking")
-        st.info("Hides data from the Client Portal for a specific window (down to the hour).")
         
         if not selected_project or selected_project == "All Projects":
             st.warning("Please select a specific project in the sidebar.")
         else:
+            # Mask Mode Toggle
+            mask_mode = st.radio("Masking Mode", ["Specific Time Range", "All data before end date"], horizontal=True)
+            
             m_col1, m_col2 = st.columns(2)
             with m_col1:
-                m_start_date = st.date_input("Mask Start Date", value=datetime.now() - timedelta(days=7), key="m_sd")
-                m_start_time = st.time_input("Mask Start Time", value=datetime.time(datetime.now()), key="m_st")
+                # Start date only matters for "Specific Time Range"
+                m_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="m_sd", disabled=(mask_mode == "All data before end date"))
+                m_start_time = st.time_input("Start Time", value=datetime.time(datetime.now()), key="m_st", disabled=(mask_mode == "All data before end date"))
             with m_col2:
-                m_end_date = st.date_input("Mask End Date", value=datetime.now(), key="m_ed")
-                m_end_time = st.time_input("Mask End Time", value=datetime.time(datetime.now()), key="m_et")
+                m_end_date = st.date_input("End Date", value=datetime.now(), key="m_ed")
+                m_end_time = st.time_input("End Time", value=datetime.time(datetime.now()), key="m_et")
 
-            # Combine and format for BigQuery
-            start_dt = datetime.combine(m_start_date, m_start_time)
+            # Formatting logic
             end_dt = datetime.combine(m_end_date, m_end_time)
+            if mask_mode == "All data before end date":
+                start_dt_str = "2000-01-01 00:00:00" # Use an absolute floor
+                action_desc = f"Hiding EVERYTHING before `{end_dt}`"
+            else:
+                start_dt = datetime.combine(m_start_date, m_start_time)
+                start_dt_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+                action_desc = f"Hiding data from `{start_dt}` to `{end_dt}`"
 
-            st.write(f"**Action:** Mark data as `MASKED` from `{start_dt}` to `{end_dt}`")
+            st.write(f"**Action:** {action_desc}")
 
-            if st.button(f"🚫 Apply Mask to {selected_project}", type="primary", use_container_width=True):
-                with st.spinner("Applying temporal masks..."):
-                    mask_sql = f"""
-                        INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
-                        SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
-                        FROM (
-                            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                            UNION ALL 
-                            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                        ) AS r
-                        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                        WHERE m.Project = '{selected_project}'
-                        AND r.timestamp >= '{start_dt.strftime('%Y-%m-%d %H:%M:%S')}' 
-                        AND r.timestamp <= '{end_dt.strftime('%Y-%m-%d %H:%M:%S')}'
-                        AND NOT EXISTS (
-                            SELECT 1 FROM `{OVERRIDE_TABLE}` x 
-                            WHERE x.NodeNum = r.NodeNum 
-                            AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                        )
-                    """
-                    try:
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
+                    with st.spinner("Applying masks..."):
+                        mask_sql = f"""
+                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
+                            SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
+                            FROM (
+                                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                                UNION ALL 
+                                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                            ) AS r
+                            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                            WHERE m.Project = '{selected_project}'
+                            AND r.timestamp >= '{start_dt_str}' 
+                            AND r.timestamp <= '{end_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+                            AND NOT EXISTS (
+                                SELECT 1 FROM `{OVERRIDE_TABLE}` x 
+                                WHERE x.NodeNum = r.NodeNum 
+                                AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                            )
+                        """
                         client.query(mask_sql).result()
-                        st.success(f"✅ Data window successfully masked.")
+                        st.success("✅ Mask applied successfully.")
                         st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"Masking Error: {e}")
+            
+            with c2:
+                if st.button(f"🗑️ Clear ALL Masks/Approvals", use_container_width=True):
+                    with st.spinner("Clearing project overrides..."):
+                        clear_sql = f"""
+                            DELETE FROM `{OVERRIDE_TABLE}`
+                            WHERE NodeNum IN (
+                                SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` 
+                                WHERE Project = '{selected_project}'
+                            )
+                        """
+                        client.query(clear_sql).result()
+                        st.warning(f"🧹 All masks and approvals cleared for {selected_project}.")
+                        st.cache_data.clear()
 
     # --- TAB 3: DEEP DATA SCRUB ---
     with tab_scrub:
@@ -835,20 +857,16 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     WHERE temperature IS NOT NULL
                     GROUP BY 1, 2
                 """
-                try:
-                    client.query(scrub_sql).result()
-                    st.success(f"✅ {scrub_target} table successfully averaged.")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Scrub Error: {e}")
+                client.query(scrub_sql).result()
+                st.success(f"✅ {scrub_target} table successfully averaged.")
+                st.cache_data.clear()
 
     # --- TAB 4: SURGICAL CLEANER ---
     with tab_surgical:
         st.subheader("🧨 Surgical Point Cleaner")
         if not selected_project or selected_project == "All Projects":
-            st.warning("Please select a specific project in the sidebar to use the Lasso tool.")
+            st.warning("Please select a specific project in the sidebar.")
         else:
-            # Calls the external function defined in Section 11
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 
