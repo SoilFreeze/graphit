@@ -319,22 +319,23 @@ def render_global_overview():
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-def render_executive_summary(client, selected_project, unit_label):  # <--- Added 'client' here
+def render_executive_summary(client, selected_project, unit_label):
     """
-    Command Center view: Shows 24-hour health, min/max temps, and delta magnitude.
+    Command Center view: Project-level health metrics + detailed node table.
     """
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    st.write("### ↕️ Sorting & View Options")
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        sort_choice = st.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"], key="summary_sort")
-    with c2:
-        sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True, key="summary_order")
-    
     # 1. SQL Query Construction
+    # This query pulls data for the last 24h + the total count from metadata
     summary_q = f"""
-        WITH RecentData AS (
+        WITH ProjectStats AS (
+            SELECT 
+                Project, 
+                COUNT(DISTINCT NodeNum) as total_nodes
+            FROM `{PROJECT_ID}.{DATASET_ID}.metadata`
+            GROUP BY Project
+        ),
+        RecentData AS (
             SELECT 
                 r.NodeNum, r.timestamp, r.temperature, 
                 m.Project, m.Location, m.Bank, m.Depth,
@@ -350,12 +351,14 @@ def render_executive_summary(client, selected_project, unit_label):  # <--- Adde
             {"AND m.Project = '" + selected_project + "'" if selected_project else ""}
         )
         SELECT 
-            NodeNum, Project, Location, Bank, Depth, timestamp, temperature,
-            first_temp_24h,
-            MIN(temperature) OVER(PARTITION BY NodeNum) as min_24h,
-            MAX(temperature) OVER(PARTITION BY NodeNum) as max_24h
-        FROM RecentData
-        WHERE latest_rank = 1
+            d.NodeNum, d.Project, d.Location, d.Bank, d.Depth, d.timestamp, d.temperature,
+            d.first_temp_24h,
+            ps.total_nodes,
+            MIN(d.temperature) OVER(PARTITION BY d.NodeNum) as min_24h,
+            MAX(d.temperature) OVER(PARTITION BY d.NodeNum) as max_24h
+        FROM RecentData d
+        LEFT JOIN ProjectStats ps ON d.Project = ps.Project
+        WHERE d.latest_rank = 1
     """
     
     try:
@@ -367,31 +370,43 @@ def render_executive_summary(client, selected_project, unit_label):  # <--- Adde
         else:
             now_utc = pd.Timestamp.now(tz=pytz.UTC)
             
-            # 2. Row Processing Function
+            # --- PROJECT HEALTH DASHBOARD ---
+            st.subheader("📊 Project Health Dashboard")
+            
+            # Aggregate stats based on current filter
+            total_registered = int(raw_summary_df['total_nodes'].iloc[0]) if selected_project else raw_summary_df.drop_duplicates('NodeNum')['NodeNum'].nunique()
+            seen_last_24h = raw_summary_df['NodeNum'].nunique()
+            last_ping = raw_summary_df['timestamp'].max().tz_convert(pytz.UTC)
+            hrs_since_global_ping = round((now_utc - last_ping).total_seconds() / 3600, 1)
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Sensors (Metadata)", f"{total_registered} Nodes")
+            m2.metric("Reporting (24h)", f"{seen_last_24h} Nodes", f"{seen_last_24h - total_registered} vs Meta")
+            m3.metric("Latest Global Activity", f"{hrs_since_global_ping}h ago", f"{last_ping.strftime('%H:%M')} UTC")
+
+            st.divider()
+
+            # --- DETAILED NODE TABLE ---
+            st.write("### ↕️ Sorting & View Options")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                sort_choice = st.selectbox("Sort Table By", ["None", "Hours Since Last Seen", "Delta Magnitude"], key="summary_sort")
+            with c2:
+                sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True, key="summary_order")
+            
             def process_summary_row(row):
-                # Ensure timestamp is UTC localized
                 ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
                 hrs_ago = int((now_utc - ts).total_seconds() / 3600)
                 
-                # Logic Chain for Health Icons
-                if hrs_ago < 6:
-                    status_icon = "🟢"
-                elif hrs_ago < 12:
-                    status_icon = "🟡"
-                elif hrs_ago < 24:
-                    status_icon = "🟠"
-                else:
-                    status_icon = "🔴"
+                if hrs_ago < 6: status_icon = "🟢"
+                elif hrs_ago < 12: status_icon = "🟡"
+                elif hrs_ago < 24: status_icon = "🟠"
+                else: status_icon = "🔴"
                 
-                # Temperature Delta calculation
                 raw_delta = row['temperature'] - row['first_temp_24h']
                 
-                # Formatting Position Label
                 bank_val = str(row.get('Bank', '')).strip().lower()
-                if bank_val in ["", "none", "nan", "null"]:
-                    pos_label = f"{row.get('Depth', '??')} ft"
-                else:
-                    pos_label = f"Bank {row['Bank']}"
+                pos_label = f"Bank {row['Bank']}" if bank_val not in ["", "none", "nan", "null"] else f"{row.get('Depth', '??')} ft"
                 
                 return pd.Series({
                     "Project": row['Project'],
@@ -406,17 +421,14 @@ def render_executive_summary(client, selected_project, unit_label):  # <--- Adde
                     "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
                 })
 
-            # 3. Apply processing and sorting
             summary_df = raw_summary_df.apply(process_summary_row, axis=1)
 
             is_asc = (sort_order == "Ascending")
             if sort_choice == "Hours Since Last Seen":
                 summary_df = summary_df.sort_values(by="Hours_Ago", ascending=is_asc)
             elif sort_choice == "Delta Magnitude":
-                # Sorts by absolute value of change
                 summary_df = summary_df.sort_values(by="Delta_Val", key=abs, ascending=is_asc)
 
-            # 4. Final Display
             st.dataframe(
                 summary_df[["Project", "Node", "Location", "Position", "Min", "Max", "Delta", "Last Seen"]],
                 use_container_width=True, 
