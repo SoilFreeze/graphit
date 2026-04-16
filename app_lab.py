@@ -138,6 +138,114 @@ def check_admin_access():
     return False
 
 ###########################
+#- Function Data Intake Page -#
+###########################
+
+def render_data_intake_page(selected_project):
+    """
+    Handles ingestion of raw Lord and SensorPush files and data exports.
+    """
+    st.header("📤 Data Ingestion Lab")
+    tab_upload, tab_export = st.tabs(["📄 Manual File Upload", "📥 Export Project Data"])
+    
+    with tab_upload:
+        ###########
+        # - Tab: Upload Logic - #
+        ###########
+        st.subheader("📄 Manual File Ingestion")
+        st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), or SensorPush (CSV/Excel).")
+        
+        u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx', 'xls'], key="manual_upload_main")
+        
+        if u_file is not None:
+            filename = u_file.name.lower()
+            is_excel = filename.endswith(('.xlsx', '.xls'))
+            
+            try:
+                # 1. READ FILE
+                if is_excel:
+                    df_raw = pd.read_excel(u_file)
+                else:
+                    raw_bytes = u_file.getvalue().decode('utf-8', errors='ignore').splitlines()
+                    header_idx = 0
+                    # Scan for header keywords to skip noise
+                    for i, line in enumerate(raw_bytes[:100]):
+                        if any(k in line for k in ["Timestamp", "Channel", "nodenumber", "SensorId", "Observed"]):
+                            header_idx = i
+                            break
+                    df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])))
+
+                df_raw.columns = [str(c).strip() for c in df_raw.columns]
+                cols_lower = [c.lower() for c in df_raw.columns]
+
+                # 2. IDENTIFY FORMATS & PROCESS
+                
+                # Format A: Lord Wide (SensorConnect)
+                if not is_excel and any("DATA_START" in str(line) for line in raw_bytes[:100]):
+                    start_idx = next(i for i, line in enumerate(raw_bytes) if "DATA_START" in line)
+                    df_wide = pd.read_csv(io.StringIO("\n".join(raw_bytes[start_idx+1:])))
+                    df_proc = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
+                    df_proc['NodeNum'] = df_proc['NodeNum'].str.replace(':', '-', regex=False)
+                    df_proc['timestamp'] = pd.to_datetime(df_proc['Time'], format='mixed')
+                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
+
+                # Format B: SensorPush
+                elif "sensorid" in cols_lower or "observed" in cols_lower:
+                    id_col = next(c for c in df_raw.columns if "sensorid" in c.lower())
+                    ts_col = next(c for c in df_raw.columns if any(k in c.lower() for k in ["observed", "sample time"]))
+                    temp_col = next(c for c in df_raw.columns if "temp" in c.lower())
+                    df_proc = pd.DataFrame({
+                        'NodeNum': df_raw[id_col].astype(str).str.strip(),
+                        'timestamp': pd.to_datetime(df_raw[ts_col], format='mixed'),
+                        'temperature': pd.to_numeric(df_raw[temp_col], errors='coerce')
+                    }).dropna()
+                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
+
+                # Format C: Lord Narrow (Desktop)
+                else:
+                    mapping = {c: ("timestamp" if "timestamp" in c.lower() else "NodeNum" if any(k in c.lower() for k in ["channel", "node"]) else "temperature" if "temp" in c.lower() else c) for c in df_raw.columns}
+                    df_proc = df_raw.rename(columns=mapping)
+                    df_proc['NodeNum'] = df_proc['NodeNum'].astype(str).str.replace(':', '-', regex=False)
+                    df_proc['timestamp'] = pd.to_datetime(df_proc['timestamp'], format='mixed')
+                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
+                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
+
+                st.success(f"✅ Parsed {len(df_proc)} rows.")
+                st.dataframe(df_proc.head())
+
+                if st.button("🚀 Commit to BigQuery"):
+                    final_upload = df_proc[cols_to_keep].dropna()
+                    client.load_table_from_dataframe(final_upload, target_tbl).result()
+                    st.success(f"Data successfully uploaded to {target_tbl}.")
+                    st.cache_data.clear()
+
+            except Exception:
+                st.error(f"Ingestion Error: {traceback.format_exc()}")
+
+    with tab_export:
+        ###########
+        # - Tab: Export Logic - #
+        ###########
+        st.subheader("📥 Export Project Data")
+        if not selected_project:
+            st.warning("Please select a project in the sidebar.")
+        else:
+            with st.spinner("Fetching data for export..."):
+                export_df = get_universal_portal_data(selected_project, view_mode="engineering")
+            
+            if export_df.empty:
+                st.info("No data found for this project.")
+            else:
+                st.download_button(
+                    "💾 Download Project CSV", 
+                    export_df.to_csv(index=False).encode('utf-8'), 
+                    f"{selected_project}_Full_Export.csv", 
+                    "text/csv"
+                )
+
+###########################
 #- 3. SIDEBAR UI & STATE -#
 ###########################
 # --- GLOBAL SIDEBAR ---
@@ -540,110 +648,7 @@ elif service == "📉 Node Diagnostics":
 ###########
 #- 9. DATA INTAKE LAB -
 ###########
-def render_data_intake_page(selected_project):
-    """
-    Handles ingestion of raw Lord and SensorPush files and data exports.
-    """
-    st.header("📤 Data Ingestion Lab")
-    tab_upload, tab_export = st.tabs(["📄 Manual File Upload", "📥 Export Project Data"])
-    
-    with tab_upload:
-        ###########
-        # - Tab: Upload Logic - #
-        ###########
-        st.subheader("📄 Manual File Ingestion")
-        st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), or SensorPush (CSV/Excel).")
-        
-        u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx', 'xls'], key="manual_upload_main")
-        
-        if u_file is not None:
-            filename = u_file.name.lower()
-            is_excel = filename.endswith(('.xlsx', '.xls'))
-            
-            try:
-                # 1. READ FILE
-                if is_excel:
-                    df_raw = pd.read_excel(u_file)
-                else:
-                    raw_bytes = u_file.getvalue().decode('utf-8', errors='ignore').splitlines()
-                    header_idx = 0
-                    # Scan for header keywords
-                    for i, line in enumerate(raw_bytes[:100]):
-                        if any(k in line for k in ["Timestamp", "Channel", "nodenumber", "SensorId", "Observed"]):
-                            header_idx = i
-                            break
-                    df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])))
 
-                df_raw.columns = [str(c).strip() for c in df_raw.columns]
-                cols_lower = [c.lower() for c in df_raw.columns]
-
-                # 2. IDENTIFY FORMATS & PROCESS
-                # Lord Wide (SensorConnect)
-                if not is_excel and any("DATA_START" in str(line) for line in raw_bytes[:100]):
-                    start_idx = next(i for i, line in enumerate(raw_bytes) if "DATA_START" in line)
-                    df_wide = pd.read_csv(io.StringIO("\n".join(raw_bytes[start_idx+1:])))
-                    df_proc = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
-                    df_proc['NodeNum'] = df_proc['NodeNum'].str.replace(':', '-', regex=False)
-                    df_proc['timestamp'] = pd.to_datetime(df_proc['Time'], format='mixed')
-                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
-
-                # SensorPush
-                elif "sensorid" in cols_lower or "observed" in cols_lower:
-                    id_col = next(c for c in df_raw.columns if "sensorid" in c.lower())
-                    ts_col = next(c for c in df_raw.columns if any(k in c.lower() for k in ["observed", "sample time"]))
-                    temp_col = next(c for c in df_raw.columns if "temp" in c.lower())
-                    df_proc = pd.DataFrame({
-                        'NodeNum': df_raw[id_col].astype(str).str.strip(),
-                        'timestamp': pd.to_datetime(df_raw[ts_col], format='mixed'),
-                        'temperature': pd.to_numeric(df_raw[temp_col], errors='coerce')
-                    }).dropna()
-                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
-
-                # Lord Narrow (Desktop)
-                else:
-                    mapping = {c: ("timestamp" if "timestamp" in c.lower() else "NodeNum" if any(k in c.lower() for k in ["channel", "node"]) else "temperature" if "temp" in c.lower() else c) for c in df_raw.columns}
-                    df_proc = df_raw.rename(columns=mapping)
-                    df_proc['NodeNum'] = df_proc['NodeNum'].astype(str).str.replace(':', '-', regex=False)
-                    df_proc['timestamp'] = pd.to_datetime(df_proc['timestamp'], format='mixed')
-                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
-
-                st.success(f"✅ Parsed {len(df_proc)} rows.")
-                st.dataframe(df_proc.head())
-
-                if st.button("🚀 Commit to BigQuery"):
-                    # We ensure only necessary columns are uploaded
-                    final_upload = df_proc[cols_to_keep].dropna()
-                    client.load_table_from_dataframe(final_upload, target_tbl).result()
-                    st.success(f"Data successfully uploaded to {target_tbl}.")
-                    st.cache_data.clear()
-
-            except Exception:
-                st.error(f"Ingestion Error: {traceback.format_exc()}")
-
-    with tab_export:
-        ###########
-        # - Tab: Export Logic - #
-        ###########
-        st.subheader("📥 Export Project Data")
-        if not selected_project:
-            st.warning("Please select a project in the sidebar.")
-        else:
-            with st.spinner("Fetching data for export..."):
-                # Exports use the engineering view so you get all relevant data
-                export_df = get_universal_portal_data(selected_project, view_mode="engineering")
-            
-            if export_df.empty:
-                st.info("No data found for this project.")
-            else:
-                st.download_button(
-                    "💾 Download Project CSV", 
-                    export_df.to_csv(index=False).encode('utf-8'), 
-                    f"{selected_project}_Full_Export.csv", 
-                    "text/csv"
-                )
 
 ###########
 #- 10. ADMIN TOOLS -
