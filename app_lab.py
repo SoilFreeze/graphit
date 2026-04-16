@@ -156,7 +156,7 @@ display_tz = {"UTC": "UTC", "Local (US/Eastern)": "US/Eastern", "Local (US/Pacif
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
     Standard Plotly engine for the entire app.
-    Handles unit conversion, timezone shifting, and gap detection.
+    Restored with Grid Hierarchy (Mondays/Midnights) and localized axis framing.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -166,7 +166,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 1. TIMEZONE CONVERSION
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Convert start/end views to localized timestamps for the x-axis range
+    # Adjust axes windows to match the localized zone for correct framing
     tz = pytz.timezone(display_tz)
     start_local = start_view.astimezone(tz) if hasattr(start_view, 'astimezone') else start_view
     end_local = end_view.astimezone(tz) if hasattr(end_view, 'astimezone') else end_view
@@ -190,7 +190,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_mode = 'markers' if is_surgical else 'lines'
     marker_size = 7 if is_surgical else 3
 
-    fig = go.Figure() # This line caused your NameError
+    fig = go.Figure()
     
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
@@ -218,7 +218,18 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 7. REFERENCE LINES
+    # 7. RESTORED GRID HIERARCHY
+    grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
+    for ts in grid_times:
+        if ts.weekday() == 0 and ts.hour == 0:
+            color, width = "Black", 1.2 # Mondays
+        elif ts.hour == 0:
+            color, width = "Gray", 0.8  # Midnights
+        else:
+            color, width = "LightGray", 0.3 # 6-hour marks
+        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
+
+    # 8. REFERENCE LINES & "NOW" MARKER
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
@@ -226,15 +237,30 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 8. FINAL LAYOUT
+    # 9. FINAL LAYOUT
     fig.update_layout(
         title={'text': f"{title} ({display_tz})", 'x': 0},
         plot_bgcolor='white',
         hovermode="x unified",
         height=600,
         margin=dict(t=80, l=50, r=180, b=50),
-        xaxis=dict(range=[start_local, end_local], showline=True, linecolor='black', mirror=True, tickformat='%b %d\n%H:%M'),
-        yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=dt_major, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True),
+        xaxis=dict(
+            range=[start_local, end_local], 
+            showline=True, 
+            linecolor='black', 
+            mirror=True, 
+            tickformat='%b %d\n%H:%M',
+            gridcolor='rgba(0,0,0,0)' # Hide default grid to use our custom hierarchy
+        ),
+        yaxis=dict(
+            title=f"Temperature ({unit_label})", 
+            range=y_range, 
+            dtick=dt_major, 
+            gridcolor='Gainsboro', 
+            showline=True, 
+            linecolor='black', 
+            mirror=True
+        ),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1, xanchor="left")
     )
     
