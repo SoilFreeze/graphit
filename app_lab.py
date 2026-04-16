@@ -99,6 +99,7 @@ def check_admin_access(service_name):
             st.rerun()
     return False
 
+
 ###########################
 #- 3. SIDEBAR UI & STATE -#
 ###########################
@@ -107,7 +108,25 @@ service = st.sidebar.selectbox("📂 Page", ["🌐 Global Overview", "🏠 Execu
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Ensure project selection is visible for all relevant pages
+# Global Project Selection 
+selected_project = "All Projects" # Default
+
+if service != "🌐 Global Overview":
+    try:
+        proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+        proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].dropna().unique())
+        
+        # Add "All Projects" to the start of the list
+        options = ["All Projects"] + proj_list
+        
+        selected_project = st.sidebar.selectbox(
+            "🎯 Active Project", 
+            options,
+            index=0, # Defaults to All Projects
+            key="sidebar_project_picker"
+        )
+    except Exception as e:
+        st.sidebar.warning("Could not load project list.")
 
 
 def convert_val(f_val):
@@ -322,18 +341,21 @@ def render_global_overview():
 def render_executive_summary(client, selected_project, unit_label):
     """
     Project Health Monitor: Aggregates connectivity stats by Location (Pipes/Banks).
-    Provides a bird's-eye view of which hardware is currently reporting.
     """
-    st.header(f"🏠 Executive Summary: Project Health Monitor")
+    st.header(f"🏠 Executive Summary: Health Monitor")
     
     # 1. SQL Query Construction
-    # We join Metadata with the latest reporting data to get counts per Pipe/Bank
+    # Logic: If 'All Projects' is selected, we don't filter the WHERE clause.
+    proj_filter = ""
+    if selected_project and selected_project != "All Projects":
+        proj_filter = f"AND Project = '{selected_project}'"
+
     summary_q = f"""
         WITH MappedNodes AS (
             SELECT Project, NodeNum, Location, Bank, Depth
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata`
             WHERE Project IS NOT NULL
-            {"AND Project = '" + selected_project + "'" if selected_project else ""}
+            {proj_filter}
         ),
         RecentReporting AS (
             SELECT 
@@ -375,7 +397,7 @@ def render_executive_summary(client, selected_project, unit_label):
             df = client.query(summary_q).to_dataframe()
         
         if df.empty:
-            st.warning("⚠️ No sensors found in metadata.")
+            st.warning("⚠️ No sensors found in metadata for selection.")
             return
 
         now_utc = pd.Timestamp.now(tz=pytz.UTC)
@@ -386,35 +408,26 @@ def render_executive_summary(client, selected_project, unit_label):
             seen = row['seen_24h']
             silent = total - seen
             
-            # Formatting the "Last Updated" column
             last_ts = row['last_group_update']
             if pd.notnull(last_ts):
                 last_ts = last_ts.tz_convert(pytz.UTC)
                 gap_hrs = round((now_utc - last_ts).total_seconds() / 3600, 1)
                 
-                # Visual Status based on the gap
-                if gap_hrs < 2:
-                    icon = "🟢" # Fresh
-                elif gap_hrs < 6:
-                    icon = "🟡" # Stale
-                else:
-                    icon = "🔴" # Delayed
+                if gap_hrs < 2: icon = "🟢"
+                elif gap_hrs < 6: icon = "🟡"
+                else: icon = "🔴"
                 
                 time_str = f"{gap_hrs}h ago {icon}"
             else:
                 time_str = "Never Seen ⚪"
-
-            # Progress Bar or Ratio for reporting status
-            health_ratio = f"{seen}/{total}"
-            status_note = "✅ All Reporting" if silent == 0 else f"⚠️ {silent} Offline"
 
             return pd.Series({
                 "Project": row['Project'],
                 "Location / Pipe": row['Location'],
                 "Mapped Nodes": total,
                 "Seen (24h)": seen,
-                "Reporting Ratio": health_ratio,
-                "Status": status_note,
+                "Reporting Ratio": f"{seen}/{total}",
+                "Status": "✅ All Reporting" if silent == 0 else f"⚠️ {silent} Offline",
                 "Group Last Seen": time_str
             })
 
@@ -425,27 +438,22 @@ def render_executive_summary(client, selected_project, unit_label):
         total_sys_seen = df['seen_24h'].sum()
         
         m1, m2, m3 = st.columns(3)
-        m1.metric("Total System Nodes", f"{total_sys_nodes}")
-        m2.metric("Active (24h)", f"{total_sys_seen}", delta=f"{total_sys_seen - total_sys_nodes} vs Cap", delta_color="inverse")
+        m1.metric("Total Nodes", f"{total_sys_nodes}")
+        m2.metric("Active (24h)", f"{total_sys_seen}", delta=f"{total_sys_seen - total_sys_nodes}", delta_color="inverse")
         m3.metric("System Health", f"{round((total_sys_seen/total_sys_nodes)*100, 1)}%")
 
         st.divider()
 
-        # 4. Display Aggregated Table
+        # 4. Display Table
         st.dataframe(
             health_df, 
             use_container_width=True, 
             hide_index=True,
             column_config={
-                "Reporting Ratio": st.column_config.TextColumn("Data Flow (Active/Total)"),
-                "Group Last Seen": st.column_config.TextColumn("Latest Activity"),
-                "Status": st.column_config.TextColumn("Health Note")
+                "Reporting Ratio": st.column_config.TextColumn("Active/Total"),
+                "Group Last Seen": st.column_config.TextColumn("Latest Activity")
             }
         )
-        
-        # 5. Quick Filter Info
-        if selected_project:
-            st.info(f"💡 Showing health data specifically for **{selected_project}**. Clear sidebar selection to see all projects.")
 
     except Exception as e:
         st.error(f"Executive Summary Audit Error: {traceback.format_exc()}")
