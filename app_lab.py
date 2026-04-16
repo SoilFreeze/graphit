@@ -424,48 +424,116 @@ def render_executive_summary(client, selected_project, unit_label):
     except Exception as e:
         st.error(f"Executive Summary Error: {traceback.format_exc()}")
 ###########
-# - 12. MAIN ROUTER - #
+# - 7. PAGE: CLIENT PORTAL - #
 ###########
 
-# 1. Page Mapping Dictionary
-# This mapping ensures the router knows exactly which function to call
-PAGES = {
-    "🏠 Executive Summary": render_executive_summary,
-    "🌐 Global Overview": render_global_overview,
-    "📊 Client Portal": render_client_portal,
-    "📉 Node Diagnostics": render_node_diagnostics,
-    "📤 Data Intake Lab": render_data_intake_page,
-    "🛠️ Admin Tools": render_admin_page
-}
+def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    The Engineering-Approved Client View.
+    Features: 1-12 Week Slider, Tabs for Graph/Table, and Visibility Masking.
+    """
+    # 1. Page Header & Initial Validation
+    st.header(f"📊 Client Portal: {selected_project}")
 
-# 2. Execution Logic
-if service in PAGES:
-    func = PAGES[service]
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar to view approved data.")
+        return
+
+    # 2. View Period Selection (The Slider)
+    st.write("### 🕒 View Period")
+    weeks_to_show = st.slider(
+        "Select how many weeks of history to display:", 
+        min_value=1, 
+        max_value=12, 
+        value=2, 
+        key="portal_weeks_slider"
+    )
     
-    try:
-        if service == "🏠 Executive Summary":
-            func(client, selected_project, unit_label)
-            
-        elif service == "🌐 Global Overview":
-            func()
-            
-        elif service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
-            # Admin tools requires auth check first
-            if service == "🛠️ Admin Tools":
-                if check_admin_access(service):
-                    func(selected_project, display_tz, unit_mode, unit_label, active_refs)
-            else:
-                func(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
+    # Calculate UTC window for BigQuery
+    now_utc = pd.Timestamp.now(tz='UTC')
+    start_view_utc = now_utc - timedelta(weeks=weeks_to_show)
+
+    # 3. Data Fetching via the Engine
+    # This call triggers the SQL that checks 'approved = TRUE' and visibility masks
+    with st.spinner(f"🔍 Accessing approved records for {selected_project}..."):
+        try:
+            df = get_universal_portal_data(selected_project, view_mode="client")
+        except Exception as e:
+            st.error(f"📡 Data Engine Error: {e}")
+            return
+
+    # --- OPTIONAL DIAGNOSTIC: Hidden by default, useful if tabs don't show ---
+    with st.expander("🛠️ Connection Diagnostic"):
+        st.write(f"**Raw Rows Found:** {len(df)}")
+        if not df.empty:
+            st.write(f"**Data Range:** {df['timestamp'].min()} to {df['timestamp'].max()}")
+            st.write(f"**Columns:** {', '.join(df.columns.tolist())}")
+
+    # 4. Rendering Logic
+    if df.empty:
+        st.warning(f"No approved data found for project: {selected_project}")
+        st.info("Data only appears here once it has been marked as 'Approved' in Admin Tools and has passed the visibility start date.")
+    else:
+        # Convert timestamp to datetime if not already
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Filter local dataframe to the user's slider choice
+        mask = (df['timestamp'] >= start_view_utc) & (df['timestamp'] <= now_utc)
+        filtered_df = df.loc[mask].copy()
+
+        if filtered_df.empty:
+            st.warning(f"No data available within the selected {weeks_to_show}-week window.")
+        else:
+            # --- THE TABS ---
+            tab_graph, tab_data = st.tabs(["📈 Temperature Graph", "📋 Data Table"])
+
+            with tab_graph:
+                try:
+                    # Pass the filtered data to our standardized Plotly engine
+                    fig = build_high_speed_graph(
+                        df=filtered_df,
+                        title=f"Approved Readings: {selected_project}",
+                        start_view=start_view_utc,
+                        end_view=now_utc,
+                        active_refs=active_refs,
+                        unit_mode=unit_mode,
+                        unit_label=unit_label,
+                        display_tz=display_tz
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as g_err:
+                    st.error(f"Graphing Engine Failure: {g_err}")
+
+            with tab_data:
+                st.subheader("Tabular View & Export")
                 
-        elif service == "📤 Data Intake Lab":
-            if check_admin_access(service):
-                func(selected_project)
+                # Format for display: Shift to user's selected Timezone
+                display_df = filtered_df.copy()
+                display_df['timestamp'] = (
+                    display_df['timestamp']
+                    .dt.tz_convert(display_tz)
+                    .dt.strftime('%Y-%m-%d %H:%M')
+                )
                 
-    except NameError as e:
-        st.error(f"Execution Error: {e}")
-        st.info("The app detected a missing reference. Trying a hard refresh usually fixes this.")
-        if st.button("Hard Refresh App"):
-            st.rerun()
+                # Show only client-relevant columns
+                cols_to_show = ["timestamp", "Location", "Bank", "Depth", "temperature"]
+                # Only show columns that actually exist in the dataframe
+                available_cols = [c for c in cols_to_show if c in display_df.columns]
+                
+                st.dataframe(
+                    display_df[available_cols], 
+                    use_container_width=True, 
+                    hide_index=True
+                )
+                
+                # CSV Download Button
+                csv = display_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="💾 Download Approved Data (CSV)",
+                    data=csv,
+                    file_name=f"{selected_project}_approved_data.csv",
+                    mime="text/csv"
+                )
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
