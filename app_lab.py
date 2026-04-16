@@ -321,13 +321,13 @@ def render_global_overview():
 
 def render_executive_summary(client, selected_project, unit_label):
     """
-    Command Center: Tracks 100% of mapped sensors.
-    Shows reporting vs non-reporting and a global project health table.
+    Project Health Monitor: Aggregates connectivity stats by Location (Pipes/Banks).
+    Provides a bird's-eye view of which hardware is currently reporting.
     """
-    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+    st.header(f"🏠 Executive Summary: Project Health Monitor")
     
     # 1. SQL Query Construction
-    # We start with Metadata to ensure we count nodes that are NOT reporting.
+    # We join Metadata with the latest reporting data to get counts per Pipe/Bank
     summary_q = f"""
         WITH MappedNodes AS (
             SELECT Project, NodeNum, Location, Bank, Depth
@@ -335,20 +335,22 @@ def render_executive_summary(client, selected_project, unit_label):
             WHERE Project IS NOT NULL
             {"AND Project = '" + selected_project + "'" if selected_project else ""}
         ),
-        RecentData AS (
+        RecentReporting AS (
             SELECT 
-                r.NodeNum, r.timestamp, r.temperature,
-                FIRST_VALUE(r.temperature) OVER(PARTITION BY r.NodeNum ORDER BY r.timestamp ASC) as first_temp_24h,
-                ROW_NUMBER() OVER(PARTITION BY r.NodeNum ORDER BY r.timestamp DESC) as latest_rank
+                r.NodeNum, 
+                MAX(r.timestamp) as last_ping
             FROM (
-                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                 UNION ALL
-                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             ) AS r
             WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            GROUP BY NodeNum
         ),
-        HistoricalLastSeen AS (
-            SELECT NodeNum, MAX(timestamp) as last_seen_ever
+        HistoricalPings AS (
+            SELECT 
+                NodeNum, 
+                MAX(timestamp) as ever_ping
             FROM (
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                 UNION ALL
@@ -356,20 +358,20 @@ def render_executive_summary(client, selected_project, unit_label):
             ) GROUP BY NodeNum
         )
         SELECT 
-            m.Project, m.NodeNum, m.Location, m.Bank, m.Depth,
-            d.timestamp as last_timestamp_24h,
-            d.temperature,
-            d.first_temp_24h,
-            h.last_seen_ever,
-            MIN(d.temperature) OVER(PARTITION BY m.NodeNum) as min_24h,
-            MAX(d.temperature) OVER(PARTITION BY m.NodeNum) as max_24h
+            m.Project, 
+            m.Location,
+            COUNT(m.NodeNum) as total_mapped,
+            COUNT(r.NodeNum) as seen_24h,
+            MAX(h.ever_ping) as last_group_update
         FROM MappedNodes m
-        LEFT JOIN RecentData d ON m.NodeNum = d.NodeNum AND d.latest_rank = 1
-        LEFT JOIN HistoricalLastSeen h ON m.NodeNum = h.NodeNum
+        LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
+        LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
+        GROUP BY m.Project, m.Location
+        ORDER BY m.Project ASC, m.Location ASC
     """
     
     try:
-        with st.spinner("⚡ Auditing all mapped sensors..."):
+        with st.spinner("⚡ Auditing hardware connectivity..."):
             df = client.query(summary_q).to_dataframe()
         
         if df.empty:
@@ -378,87 +380,75 @@ def render_executive_summary(client, selected_project, unit_label):
 
         now_utc = pd.Timestamp.now(tz=pytz.UTC)
 
-        # --- PART A: GLOBAL PROJECT HEALTH TABLE ---
-        st.subheader("🌐 Global Project Health")
-        
-        def calc_health(group):
-            total = len(group)
-            reporting = group['last_timestamp_24h'].notnull().sum()
-            last_activity = group['last_seen_ever'].max()
-            if pd.notnull(last_activity):
-                last_activity = last_activity.tz_convert(pytz.UTC)
-                gap = round((now_utc - last_activity).total_seconds() / 3600, 1)
-                time_str = f"{gap}h ago"
-            else:
-                time_str = "Never"
+        # 2. Process Table for Display
+        def process_health_row(row):
+            total = row['total_mapped']
+            seen = row['seen_24h']
+            silent = total - seen
             
-            return pd.Series({
-                "Total Nodes": total,
-                "Active (24h)": reporting,
-                "Silent": total - reporting,
-                "Last Project Activity": time_str
-            })
-
-        global_health = df.groupby('Project').apply(calc_health).reset_index()
-        st.dataframe(global_health, use_container_width=True, hide_index=True)
-
-        st.divider()
-
-        # --- PART B: PROJECT METRICS ---
-        st.subheader("📊 Focused Metrics")
-        total_mapped = len(df)
-        active_now = df['last_timestamp_24h'].notnull().sum()
-        silent_now = total_mapped - active_now
-        
-        # Calculate global gap
-        latest_ping = df['last_seen_ever'].max().tz_convert(pytz.UTC) if pd.notnull(df['last_seen_ever'].max()) else now_utc
-        hrs_ago_global = round((now_utc - latest_ping).total_seconds() / 3600, 1)
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Mapped Sensors", f"{total_mapped} Nodes")
-        m2.metric("Not Reporting", f"{silent_now} Nodes", delta=f"{silent_now} silent", delta_color="inverse")
-        m3.metric("Latest Activity", f"{hrs_ago_global}h ago", f"{latest_ping.strftime('%H:%M')} UTC")
-
-        # --- PART C: DETAILED NODE LIST ---
-        st.write("### 📜 Detailed Sensor Status")
-        
-        def process_row(row):
-            # Use 24h timestamp if available, otherwise historical last seen
-            final_ts = row['last_timestamp_24h'] if pd.notnull(row['last_timestamp_24h']) else row['last_seen_ever']
-            
-            if pd.notnull(final_ts):
-                final_ts = final_ts.tz_localize(pytz.UTC) if final_ts.tzinfo is None else final_ts.tz_convert(pytz.UTC)
-                hrs_ago = int((now_utc - final_ts).total_seconds() / 3600)
-                time_display = f"{final_ts.strftime('%m/%d %H:%M')} ({hrs_ago}h)"
+            # Formatting the "Last Updated" column
+            last_ts = row['last_group_update']
+            if pd.notnull(last_ts):
+                last_ts = last_ts.tz_convert(pytz.UTC)
+                gap_hrs = round((now_utc - last_ts).total_seconds() / 3600, 1)
+                
+                # Visual Status based on the gap
+                if gap_hrs < 2:
+                    icon = "🟢" # Fresh
+                elif gap_hrs < 6:
+                    icon = "🟡" # Stale
+                else:
+                    icon = "🔴" # Delayed
+                
+                time_str = f"{gap_hrs}h ago {icon}"
             else:
-                hrs_ago = 9999
-                time_display = "Never Seen"
+                time_str = "Never Seen ⚪"
 
-            # Status Icons
-            if hrs_ago < 6: icon = "🟢"
-            elif hrs_ago < 24: icon = "🟡"
-            else: icon = "🔴"
-
-            # Delta/Temp formatting
-            cur_temp = f"{round(convert_val(row['temperature']), 1)}{unit_label}" if pd.notnull(row['temperature']) else "---"
-            raw_delta = row['temperature'] - row['first_temp_24h'] if pd.notnull(row['temperature']) else 0
-            delta_str = f"{'+' if raw_delta > 0 else ''}{round(raw_delta, 1)}°F" if pd.notnull(row['temperature']) else "---"
+            # Progress Bar or Ratio for reporting status
+            health_ratio = f"{seen}/{total}"
+            status_note = "✅ All Reporting" if silent == 0 else f"⚠️ {silent} Offline"
 
             return pd.Series({
                 "Project": row['Project'],
-                "Node": row['NodeNum'],
-                "Location": row['Location'],
-                "Current": cur_temp,
-                "Delta": delta_str,
-                "Last Seen": f"{time_display} {icon}",
-                "Hrs_Sort": hrs_ago
+                "Location / Pipe": row['Location'],
+                "Mapped Nodes": total,
+                "Seen (24h)": seen,
+                "Reporting Ratio": health_ratio,
+                "Status": status_note,
+                "Group Last Seen": time_str
             })
 
-        summary_df = df.apply(process_row, axis=1).sort_values("Hrs_Sort")
-        st.dataframe(summary_df.drop(columns=["Hrs_Sort"]), use_container_width=True, hide_index=True)
+        health_df = df.apply(process_health_row, axis=1)
+
+        # 3. High-Level Metrics
+        total_sys_nodes = df['total_mapped'].sum()
+        total_sys_seen = df['seen_24h'].sum()
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total System Nodes", f"{total_sys_nodes}")
+        m2.metric("Active (24h)", f"{total_sys_seen}", delta=f"{total_sys_seen - total_sys_nodes} vs Cap", delta_color="inverse")
+        m3.metric("System Health", f"{round((total_sys_seen/total_sys_nodes)*100, 1)}%")
+
+        st.divider()
+
+        # 4. Display Aggregated Table
+        st.dataframe(
+            health_df, 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "Reporting Ratio": st.column_config.TextColumn("Data Flow (Active/Total)"),
+                "Group Last Seen": st.column_config.TextColumn("Latest Activity"),
+                "Status": st.column_config.TextColumn("Health Note")
+            }
+        )
+        
+        # 5. Quick Filter Info
+        if selected_project:
+            st.info(f"💡 Showing health data specifically for **{selected_project}**. Clear sidebar selection to see all projects.")
 
     except Exception as e:
-        st.error(f"Audit Error: {traceback.format_exc()}")
+        st.error(f"Executive Summary Audit Error: {traceback.format_exc()}")
 
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
