@@ -613,6 +613,33 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
                     fig_d.add_vline(x=c_ref, line_dash="dash", line_color="Red", annotation_text=ref_label)
 
                 st.plotly_chart(fig_d, use_container_width=True)
+
+# 2. Communication Health Table
+        st.subheader("📋 Sensor Communication Health")
+        now_utc = pd.Timestamp.now(tz=pytz.UTC)
+        latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+        
+        summary_rows = []
+        for _, row in latest_nodes.iterrows():
+            # Calculate hours since last reporting
+            ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
+            hrs_ago = int((now_utc - ts).total_seconds() / 3600)
+            
+            # Status Logic: Green < 6h, Yellow < 24h, Red > 24h
+            status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
+            
+            # Map database 'reason' column to human-readable status
+            db_status = row['is_approved']
+            status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
+
+            summary_rows.append({
+                "Node": row['NodeNum'],
+                "Last Value": f"{round(convert_val(row['temperature']), 1)}{unit_label}",
+                "Last Seen": f"{hrs_ago}h ago {status_icon}",
+                "Admin Status": status_label
+            })
+        
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 ###########
 # - 9. PAGE: DATA INTAKE LAB - #
 ###########
