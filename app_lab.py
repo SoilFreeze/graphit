@@ -120,9 +120,16 @@ def check_admin_access():
         return False
 
     st.warning("🔒 Restricted Area: Engineering Admin Only.")
-    pwd_input = st.text_input("Enter Admin Password", type="password")
     
-    if st.button("Unlock Tools"):
+    # FIX: Add a unique key based on the 'service' variable 
+    # so that 'Data Intake' and 'Admin Tools' don't collide.
+    pwd_input = st.text_input(
+        "Enter Admin Password", 
+        type="password", 
+        key=f"admin_pwd_gate_{service.replace(' ', '_')}"
+    )
+    
+    if st.button("Unlock Tools", key=f"admin_btn_gate_{service.replace(' ', '_')}"):
         if pwd_input == st.secrets["admin_password"]:
             st.session_state["admin_authenticated"] = True
             st.rerun()
