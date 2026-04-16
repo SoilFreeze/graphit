@@ -103,51 +103,54 @@ def check_admin_access(service_name):
 #- 3. SIDEBAR UI & STATE -#
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
-service = st.sidebar.selectbox("📂 Page", ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+
+# --- 1. INITIALIZE FALLBACKS (Prevents NameError) ---
+# These ensure the variables exist even if a query fails
+service = "🏠 Executive Summary"
+unit_mode = "Fahrenheit"
+unit_label = "°F"
+selected_project = "All Projects"
+display_tz = "UTC"
+active_refs = [(32.0, "Freezing")]
+
+# --- 2. SIDEBAR WIDGETS ---
+service = st.sidebar.selectbox(
+    "📂 Page", 
+    ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
+)
+
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Ensure project selection is visible for all relevant pages
-
-
-def convert_val(f_val):
-    """Converts Fahrenheit from DB to selected unit."""
-    if f_val is None or pd.isna(f_val): return None
-    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
-
-# 3. Project Selection (Sidebar)
-target_pages = [
-    "📊 Client Portal", 
-    "📉 Node Diagnostics", 
-    "🛠️ Admin Tools", 
-    "🏠 Executive Summary",
-    "📤 Data Intake Lab"  # <-- Make sure this matches your selectbox string exactly
-]
-
-if service in target_pages:
+# Robust Project Selection
+if client is not None:
     try:
-        # Fetching project list directly from metadata for the sidebar
-        proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+        proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
         proj_df = client.query(proj_q).to_dataframe()
-        
-        # This creates the dropdown in the sidebar
-        selected_project = st.sidebar.selectbox(
-            "🎯 Active Project", 
-            sorted(proj_df['Project'].dropna().unique()),
-            key="sidebar_project_picker"
-        )
+        proj_list = sorted(proj_df['Project'].dropna().unique())
+        options = ["All Projects"] + proj_list
+        selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_final")
     except Exception as e:
-        st.sidebar.warning("Could not load project list from BigQuery.")
+        st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
+        selected_project = "All Projects"
 
-# 4. Reference Lines
+# Reference Lines
 st.sidebar.subheader("📏 Reference Lines")
-active_refs = []
-if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))
+active_refs = [] # Reset and rebuild based on checkboxes
+if st.sidebar.checkbox("Freezing (32°F)", value=True): 
+    active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F)", value=False): 
+    active_refs.append((26.6, "Type B"))
+if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
+    active_refs.append((10.2, "Type A"))
 
-# 5. Timezone Display
+# Timezone Display
 tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
-display_tz = {"UTC": "UTC", "Local (US/Eastern)": "US/Eastern", "Local (US/Pacific)": "US/Pacific"}[tz_mode]
+display_tz = {
+    "UTC": "UTC", 
+    "Local (US/Eastern)": "US/Eastern", 
+    "Local (US/Pacific)": "US/Pacific"
+}[tz_mode]
 
 ########################
 #- 4. GRAPHING ENGINE -#
