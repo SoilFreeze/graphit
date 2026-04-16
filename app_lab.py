@@ -309,6 +309,10 @@ def render_global_overview():
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
+###########
+# - 6. PAGE: EXECUTIVE SUMMARY - #
+###########
+
 def render_executive_summary(selected_project, unit_label):
     # Ensure this st.header is indented exactly 4 spaces (one tab)
     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
@@ -358,7 +362,7 @@ def render_executive_summary(selected_project, unit_label):
             
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
-            st.warning("📡 No active sensors seen in the last 24 hours.")
+        st.warning("📡 No active sensors seen in the last 24 hours.")
         else:
             now_utc = pd.Timestamp.now(tz=pytz.UTC)
             
