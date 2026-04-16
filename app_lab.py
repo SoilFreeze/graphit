@@ -852,6 +852,7 @@ elif service == "🏠 Executive Summary":
     render_executive_summary(client, selected_project, unit_label) 
 
 elif service == "📊 Client Portal":
+    # Ensure there are exactly 5 variables here to match the 5 in the definition above
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 elif service == "📉 Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
