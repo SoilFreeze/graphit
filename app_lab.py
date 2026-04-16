@@ -574,110 +574,6 @@ elif service == "📤 Data Intake Lab":
 ###########
 #- 10. ADMIN TOOLS -
 ###########
-elif service == "🛠️ Admin Tools":
-    if check_admin_access():
-        st.header("🛠️ Engineering Admin Tools")
-        tab_bulk, tab_scrub, tab_surgical = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
-
-        with tab_bulk:
-            ###########
-            # - Tab: Bulk Approval - #
-            ###########
-            st.subheader("✅ Bulk Project Approval")
-            st.info(f"Approving all pending data for **{selected_project}**.")
-            
-            if st.button(f"🚀 Bulk Approve {selected_project}"):
-                with st.spinner("Executing Bulk Approval..."):
-                    # REMOVED 'Project' from the INSERT and SELECT as it's not in your BQ schema
-                    bulk_sql = f"""
-                        INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
-                        SELECT DISTINCT 
-                            r.NodeNum, 
-                            TIMESTAMP_TRUNC(r.timestamp, HOUR), 
-                            'TRUE'
-                        FROM (
-                            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                            UNION ALL
-                            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                        ) AS r
-                        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                        WHERE m.Project = '{selected_project}'
-                        AND NOT EXISTS (
-                            SELECT 1 FROM `{OVERRIDE_TABLE}` AS x 
-                            WHERE x.NodeNum = r.NodeNum 
-                            AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                        )
-                    """
-                    try:
-                        client.query(bulk_sql).result()
-                        st.success(f"All pending data for {selected_project} is now live in the Client Portal.")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"Bulk Approval Error: {e}")
-                        st.code(bulk_sql, language="sql")
-
-        with tab_scrub:
-            ###########
-            # - Tab: Deep Scrub - #
-            ###########
-            st.subheader("🧹 Deep Data Scrub")
-            st.warning("This will average raw data to 1-hour intervals.")
-            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_select")
-            t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
-            
-            if st.button(f"🧨 Purge & Average {scrub_target}"):
-                with st.spinner("Processing Raw Data Mean Reduction..."):
-                    scrub_sql = f"""
-                        CREATE OR REPLACE TABLE `{t_table}` AS 
-                        SELECT 
-                            TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
-                            NodeNum, 
-                            AVG(temperature) as temperature
-                        FROM `{t_table}`
-                        WHERE temperature IS NOT NULL
-                        GROUP BY 1, 2
-                    """
-                    try:
-                        client.query(scrub_sql).result()
-                        st.success(f"✅ {scrub_target} table successfully averaged.")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"Scrub Error: {e}")
-
-        with tab_surgical:
-            ###########
-            # - Tab: Surgical Cleaner -#
-            ###########
-            if not selected_project:
-                st.warning("Please select a project.")
-            else:
-                p_df = get_universal_portal_data(selected_project, view_mode="engineering")
-                if not p_df.empty:
-                    sel_loc = st.selectbox("Select Pipe", sorted(p_df['Location'].unique()))
-                    scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
-                    if "locked_selection" not in st.session_state: st.session_state.locked_selection = None
-                    
-                    fig = build_high_speed_graph(scrub_df, f"Surgical: {sel_loc}", pd.Timestamp.now(tz='UTC') - timedelta(days=7), pd.Timestamp.now(tz='UTC') + timedelta(hours=2), active_refs, unit_mode, unit_label, display_tz)
-                    if st.session_state.locked_selection:
-                        fig.update_traces(selectedpoints=[p['point_index'] for p in st.session_state.locked_selection], unselected=dict(marker=dict(opacity=0.2)))
-                    
-                    evt = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=f"s_{sel_loc}")
-                    if evt and "selection" in evt:
-                        if len(evt["selection"].get("points", [])) > 0: st.session_state.locked_selection = evt["selection"]["points"]
-
-                    if st.session_state.locked_selection:
-                        c1, c2, c3, c4 = st.columns(4)
-                        with c1: 
-                            if st.button("✅ APPROVE"): update_records(st.session_state.locked_selection, scrub_df, "TRUE", selected_project)
-                        with c2: 
-                            if st.button("🚫 MASK"): update_records(st.session_state.locked_selection, scrub_df, "MASKED", selected_project)
-                        with c3: 
-                            if st.button("🗑️ DELETE", type="primary"): update_records(st.session_state.locked_selection, scrub_df, "FALSE", selected_project)
-                        with c4: 
-                            if st.button("Clear"): 
-                                st.session_state.locked_selection = None
-                                st.rerun()
-
 def update_records(pts, df, val, proj):
     """
     Writes status updates into the 'reason' column of manual_rejections.
@@ -696,48 +592,121 @@ def update_records(pts, df, val, proj):
         st.session_state.locked_selection = None
         st.cache_data.clear()
         st.rerun()
-    
+
+def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    The main UI for Engineering Admin tasks: Bulk Approval, Scrubbing, and Surgical Cleaning.
+    """
+    st.header("🛠️ Engineering Admin Tools")
+    tab_bulk, tab_scrub, tab_surgical = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
+
+    with tab_bulk:
+        ###########
+        # - Tab: Bulk Approval - #
+        ###########
+        st.subheader("✅ Bulk Project Approval")
+        st.info(f"Approving all pending data for **{selected_project}**.")
+        
+        if st.button(f"🚀 Bulk Approve {selected_project}"):
+            with st.spinner("Executing Bulk Approval..."):
+                # Joins raw data with metadata to find points for this project 
+                # that aren't already in the rejections table.
+                bulk_sql = f"""
+                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
+                    SELECT DISTINCT 
+                        r.NodeNum, 
+                        TIMESTAMP_TRUNC(r.timestamp, HOUR), 
+                        'TRUE'
+                    FROM (
+                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                        UNION ALL
+                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                    ) AS r
+                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                    WHERE m.Project = '{selected_project}'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM `{OVERRIDE_TABLE}` AS x 
+                        WHERE x.NodeNum = r.NodeNum 
+                        AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                    )
+                """
+                try:
+                    client.query(bulk_sql).result()
+                    st.success(f"All pending data for {selected_project} is now live in the Client Portal.")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Bulk Approval Error: {e}")
+
+    with tab_scrub:
+        ###########
+        # - Tab: Deep Scrub - #
+        ###########
+        st.subheader("🧹 Deep Data Scrub")
+        st.warning("This averages raw data to 1-hour intervals. This cannot be undone.")
+        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_select")
+        t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
+        
+        if st.button(f"🧨 Purge & Average {scrub_target}"):
+            with st.spinner("Processing Raw Data Mean Reduction..."):
+                scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{t_table}` AS 
+                    SELECT 
+                        TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
+                        NodeNum, 
+                        AVG(temperature) as temperature
+                    FROM `{t_table}`
+                    WHERE temperature IS NOT NULL
+                    GROUP BY 1, 2
+                """
+                try:
+                    client.query(scrub_sql).result()
+                    st.success(f"✅ {scrub_target} table successfully averaged.")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Scrub Error: {e}")
+
+    with tab_surgical:
+        ###########
+        # - Tab: Surgical Cleaner - #
+        ###########
+        if not selected_project:
+            st.warning("Please select a project in the sidebar.")
+        else:
+            # Calls the Lasso function (Defined in Section 11)
+            render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
+
 ###################################
 # - SURGICAL CLEANER FUNCTIONS - #
 ###################################
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Independent function to handle the Lasso tool and manual status overrides.
+    Handles the Plotly Lasso tool to Approve, Mask, or Delete specific data points.
     """
-    # 1. FETCH DATA (Engineering View - Shows everything except 'FALSE')
     p_df = get_universal_portal_data(selected_project, view_mode="engineering")
-
     if p_df.empty:
-        st.info("No data available to scrub for this project.")
+        st.info("No data available to scrub.")
         return
 
-    # 2. SELECTION UI
     loc_options = sorted(p_df['Location'].dropna().unique())
     sel_loc = st.selectbox("Select Pipe to Clean", loc_options, key="surgical_loc_select")
-    
-    # We reset the index so the Plotly 'point_index' aligns with our dataframe rows
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 3. STATE LOCK (Ensures lasso selection persists during button clicks)
     if "locked_selection" not in st.session_state:
         st.session_state.locked_selection = None
 
-    # 4. BUILD THE GRAPH (Using markers for selection)
-    # View window set to last 14 days for high detail
+    # Marker graph for precise lasso selection
     fig_scrub = build_high_speed_graph(
-        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
+        scrub_df, f"Surgical: {sel_loc}", 
         pd.Timestamp.now(tz='UTC') - timedelta(days=14), 
         pd.Timestamp.now(tz='UTC') + timedelta(hours=6), 
         tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
     )
 
-    # Highlight locked points if they exist
     if st.session_state.locked_selection:
         indices = [p['point_index'] for p in st.session_state.locked_selection]
         fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
 
-    # 5. RENDER & CAPTURE
     event_data = st.plotly_chart(fig_scrub, use_container_width=True, on_select="rerun", key=f"scrub_{sel_loc}")
 
     if event_data and "selection" in event_data:
@@ -745,24 +714,36 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         if len(pts) > 0:
             st.session_state.locked_selection = pts
 
-    # 6. ACTION CONTROLS
     if st.session_state.locked_selection:
         st.success(f"📍 {len(st.session_state.locked_selection)} points selected.")
         c1, c2, c3, c4 = st.columns(4)
-        
         with c1:
-            if st.button("✅ APPROVE (Client)", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "TRUE", selected_project)
+            if st.button("✅ APPROVE"): update_records(st.session_state.locked_selection, scrub_df, "TRUE")
         with c2:
-            if st.button("🚫 MASK (Client)", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "MASKED", selected_project)
+            if st.button("🚫 MASK"): update_records(st.session_state.locked_selection, scrub_df, "MASKED")
         with c3:
-            if st.button("🗑️ DELETE", type="primary", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "FALSE", selected_project)
+            if st.button("🗑️ DELETE", type="primary"): update_records(st.session_state.locked_selection, scrub_df, "FALSE")
         with c4:
-            if st.button("Clear Selection", use_container_width=True):
+            if st.button("Clear Selection"):
                 st.session_state.locked_selection = None
                 st.rerun()
+
+def update_records(pts, df, val):
+    """
+    Writes the TRUE/FALSE/MASKED status into the 'reason' column of BigQuery.
+    """
+    recs = []
+    for p in pts:
+        ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
+        node = df.iloc[p['point_index']]['NodeNum']
+        recs.append({"NodeNum": str(node), "timestamp": ts, "reason": val})
+    
+    if recs:
+        status_df = pd.DataFrame(recs).drop_duplicates()
+        client.load_table_from_dataframe(status_df, OVERRIDE_TABLE).result()
+        st.session_state.locked_selection = None
+        st.cache_data.clear()
+        st.rerun()
 
 def process_status_update(points, df, status_val, project_id):
     records = []
