@@ -48,16 +48,24 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Fetches data with independent time-masking for clients.
+    Updated Data Engine: Ensures 'MASKED' status overrides 'TRUE' status.
     """
-    # 1. Get the global cutoff for this project
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # Client ONLY sees Approved (TRUE) AND data after the visibility cutoff
-        query_filter = f"AND rej.reason = 'TRUE' AND r.timestamp >= '{cutoff}'"
+        # Logic: Must be marked 'TRUE' AND must NOT be marked 'MASKED'
+        query_filter = f"""
+            AND r.timestamp >= '{cutoff}'
+            AND rej.reason = 'TRUE'
+            AND NOT EXISTS (
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.reason = 'MASKED'
+            )
+        """
     else:
-        # Engineering sees everything except deleted (FALSE)
+        # Engineering sees everything except explicit deletions ('FALSE')
         query_filter = "AND (rej.reason IS NULL OR rej.reason != 'FALSE')"
 
     query = f"""
@@ -73,8 +81,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
-            AND TIMESTAMP_TRUNC(TIMESTAMP_ADD(r.timestamp, INTERVAL 30 MINUTE), HOUR) = 
-                TIMESTAMP_TRUNC(TIMESTAMP_ADD(rej.timestamp, INTERVAL 30 MINUTE), HOUR)
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE m.Project = '{project_id}'
         {query_filter}
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
@@ -82,8 +89,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     """
     try:
         df = client.query(query).to_dataframe()
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         return df
     except Exception as e:
         st.error(f"BQ Error: {e}")
