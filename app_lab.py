@@ -104,15 +104,16 @@ def check_admin_access(service_name):
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# --- STEP 1: INITIALIZE DEFAULTS (Prevents NameError) ---
+# --- 1. INITIALIZE FALLBACKS (Prevents NameError) ---
+# These ensure the variables exist even if a query fails
 service = "🏠 Executive Summary"
 unit_mode = "Fahrenheit"
 unit_label = "°F"
 selected_project = "All Projects"
 display_tz = "UTC"
-active_refs = [(32.0, "Freezing")] # Default to Freezing always existing
+active_refs = [(32.0, "Freezing")]
 
-# --- STEP 2: SIDEBAR WIDGETS ---
+# --- 2. SIDEBAR WIDGETS ---
 service = st.sidebar.selectbox(
     "📂 Page", 
     ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
@@ -130,13 +131,12 @@ if client is not None:
         options = ["All Projects"] + proj_list
         selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_final")
     except Exception as e:
-        st.sidebar.error("Sidebar Query Failed. Using default 'All Projects'.")
+        st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
         selected_project = "All Projects"
 
 # Reference Lines
 st.sidebar.subheader("📏 Reference Lines")
-# Re-calculating based on user clicks
-active_refs = []
+active_refs = [] # Reset and rebuild based on checkboxes
 if st.sidebar.checkbox("Freezing (32°F)", value=True): 
     active_refs.append((32.0, "Freezing"))
 if st.sidebar.checkbox("Type B (26.6°F)", value=False): 
