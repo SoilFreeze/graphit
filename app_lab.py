@@ -767,7 +767,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 except Exception as e:
                     st.error(f"Bulk Approval Error: {e}")
 
-    # --- TAB 2: MASK DATA (Updated with "Before End Date" & Clear Mask) ---
+    # --- TAB 2: MASK DATA (Updated: Clear Masks Only) ---
     with tab_mask:
         st.subheader("🚫 Temporal Data Masking")
         
@@ -779,7 +779,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             
             m_col1, m_col2 = st.columns(2)
             with m_col1:
-                # Start date only matters for "Specific Time Range"
                 m_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="m_sd", disabled=(mask_mode == "All data before end date"))
                 m_start_time = st.time_input("Start Time", value=datetime.time(datetime.now()), key="m_st", disabled=(mask_mode == "All data before end date"))
             with m_col2:
@@ -789,7 +788,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             # Formatting logic
             end_dt = datetime.combine(m_end_date, m_end_time)
             if mask_mode == "All data before end date":
-                start_dt_str = "2000-01-01 00:00:00" # Use an absolute floor
+                start_dt_str = "2000-01-01 00:00:00" 
                 action_desc = f"Hiding EVERYTHING before `{end_dt}`"
             else:
                 start_dt = datetime.combine(m_start_date, m_start_time)
@@ -825,17 +824,19 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.cache_data.clear()
             
             with c2:
-                if st.button(f"🗑️ Clear ALL Masks/Approvals", use_container_width=True):
-                    with st.spinner("Clearing project overrides..."):
-                        clear_sql = f"""
+                # UPDATED: Now strictly deletes MASKED rows for this project
+                if st.button(f"🗑️ Clear Project Masks", use_container_width=True):
+                    with st.spinner("Clearing project masks..."):
+                        clear_mask_sql = f"""
                             DELETE FROM `{OVERRIDE_TABLE}`
-                            WHERE NodeNum IN (
+                            WHERE reason = 'MASKED'
+                            AND NodeNum IN (
                                 SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` 
                                 WHERE Project = '{selected_project}'
                             )
                         """
-                        client.query(clear_sql).result()
-                        st.warning(f"🧹 All masks and approvals cleared for {selected_project}.")
+                        client.query(clear_mask_sql).result()
+                        st.warning(f"🧹 All masks cleared for {selected_project}. Approved data remains.")
                         st.cache_data.clear()
 
     # --- TAB 3: DEEP DATA SCRUB ---
@@ -868,7 +869,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.warning("Please select a specific project in the sidebar.")
         else:
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
-
 
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
