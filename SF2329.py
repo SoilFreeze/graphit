@@ -22,10 +22,6 @@ client = bigquery.Client(project=PROJECT_ID)
 # --- 2. DATA ENGINE (View Bypass Logic) ---
 @st.cache_data(ttl=600)
 def get_standalone_data():
-    """
-    Directly queries raw tables + metadata + rejections.
-    Bypasses 'master_data' view to fix the 'approve' column NameError.
-    """
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -39,8 +35,9 @@ def get_standalone_data():
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE m.Project LIKE '{TARGET_PROJECT}%'
-        AND rej.reason = 'TRUE'  -- Filters for Approved data only
+        -- USE 'LIKE' WITH '%' TO MATCH PARTIAL NAMES (e.g., '2538-Ferndale')
+        WHERE m.Project LIKE '{TARGET_PROJECT}%' 
+        AND rej.reason = 'TRUE'
         AND NOT EXISTS (
             SELECT 1 FROM `{OVERRIDE_TABLE}` m2 
             WHERE m2.NodeNum = r.NodeNum 
@@ -52,7 +49,6 @@ def get_standalone_data():
     try:
         return client.query(query).to_dataframe()
     except Exception as e:
-        # This will catch if even the override table schema is different
         st.error(f"Database Connection Error: {e}")
         return pd.DataFrame()
 
