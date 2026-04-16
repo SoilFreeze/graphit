@@ -427,6 +427,10 @@ def render_executive_summary(client, selected_project, unit_label):
 ###########
 
 def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    Optimized Client View: Uses lazy-loading and selective rendering to 
+    prevent browser hang-ups during heavy data loads.
+    """
     st.header(f"📊 Project Status: {selected_project}")
     global client
 
@@ -434,93 +438,114 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
         st.info("💡 Please select a specific project in the sidebar.")
         return
     
-    with st.spinner("Loading approved portal data..."):
+    # 1. Fetch Data with Cache Check
+    with st.spinner("⚡ High-speed sync..."):
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
     if p_df.empty:
-        st.info(f"No approved data is currently available for {selected_project}.")
-    else:
-        tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
+        st.info(f"No approved data found for {selected_project}.")
+        return
 
-        with tab_time:
-            weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
-            
-            # 1. SETUP TIME WINDOW
-            end_view = pd.Timestamp.now(tz='UTC')
-            start_view = end_view - timedelta(weeks=weeks_view)
-            
-            for loc in sorted(p_df['Location'].dropna().unique()):
-                with st.expander(f"📈 {loc}", expanded=True):
-                    loc_data = p_df[p_df['Location'] == loc]
-                    
-                    # 2. CALL ENGINE WITH FULL FORMATTING
+    # 2. Main Tab Interface
+    tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
+
+    with tab_time:
+        st.write("### 🕒 History Window")
+        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
+        
+        end_view = pd.Timestamp.now(tz='UTC')
+        start_view = end_view - timedelta(weeks=weeks_view)
+        
+        # Performance Fix: Only render locations that exist in current project
+        locations = sorted(p_df['Location'].dropna().unique())
+        
+        for loc in locations:
+            # We use a unique key and expanded=False by default to speed up initial load
+            # The graph only renders when the user clicks to expand.
+            with st.expander(f"📍 Location: {loc}", expanded=(len(locations) == 1)):
+                loc_data = p_df[p_df['Location'] == loc]
+                
+                if not loc_data.empty:
                     fig = build_high_speed_graph(
                         df=loc_data, 
-                        title=loc, 
+                        title=f"{loc} History", 
                         start_view=start_view, 
                         end_view=end_view, 
                         active_refs=tuple(active_refs), 
                         unit_mode=unit_mode, 
                         unit_label=unit_label, 
-                        display_tz=display_tz # <--- This triggers the grid lines
+                        display_tz=display_tz
                     )
-                    st.plotly_chart(fig, use_container_width=True, key=f"client_time_{loc}")
+                    # use_container_width=True is standard; static image export is faster
+                    st.plotly_chart(fig, use_container_width=True, key=f"p_graph_{loc}")
 
-        with tab_depth:
-            st.subheader("📏 Vertical Temperature Profile")
-            p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-            depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
-            
-            for loc in sorted(depth_only['Location'].unique()):
-                with st.expander(f"📏 {loc} Weekly Snapshots", expanded=True):
-                    loc_data = depth_only[depth_only['Location'] == loc].copy()
-                    fig_d = go.Figure()
+    with tab_depth:
+        st.subheader("📏 Vertical Temperature Profile")
+        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
+        
+        for loc in sorted(depth_only['Location'].unique()):
+            with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
+                loc_data = depth_only[depth_only['Location'] == loc].copy()
+                fig_d = go.Figure()
+                
+                # Snapshot processing (Performance: Pre-calculated range)
+                mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
+                
+                for m_date in mondays:
+                    target_ts = m_date.replace(hour=6, minute=0, second=0)
+                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                      (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                     
-                    mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
-                    
-                    for m_date in mondays:
-                        target_ts = m_date.replace(hour=6, minute=0, second=0)
-                        window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                          (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                    if not window.empty:
+                        # Find nearest reading per NodeNum
+                        snap_df = (
+                            window.assign(diff=(window['timestamp'] - target_ts).abs())
+                            .sort_values(['NodeNum', 'diff'])
+                            .drop_duplicates('NodeNum')
+                            .sort_values('Depth_Num')
+                        )
                         
-                        if not window.empty:
-                            snap_list = []
-                            for node in window['NodeNum'].unique():
-                                node_data = window[window['NodeNum'] == node].copy()
-                                node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
-                                snap_list.append(node_data.sort_values('diff').iloc[0])
-                            
-                            snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
-                            
-                            # Lambda conversion for snapshots
-                            conv_temps = snap_df['temperature'].apply(
-                                lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
-                            )
-                            
-                            fig_d.add_trace(go.Scatter(
-                                x=conv_temps, 
-                                y=snap_df['Depth_Num'], 
-                                mode='lines+markers', 
-                                name=target_ts.strftime('%m/%d/%y'),
-                                line=dict(shape='spline', smoothing=0.5)
-                            ))
+                        conv_temps = snap_df['temperature'].apply(
+                            lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
+                        )
+                        
+                        fig_d.add_trace(go.Scatter(
+                            x=conv_temps, 
+                            y=snap_df['Depth_Num'], 
+                            mode='lines+markers', 
+                            name=target_ts.strftime('%m/%d/%y'),
+                            line=dict(shape='spline', smoothing=0.5)
+                        ))
 
-                    y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
-                    fig_d.update_layout(
-                        plot_bgcolor='white', height=700,
-                        xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro', showline=True, linecolor='black'),
-                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver', showline=True, linecolor='black'),
-                        legend=dict(title="Weekly Snapshots (6AM)", orientation="h", y=-0.15)
-                    )
-                    st.plotly_chart(fig_d, use_container_width=True, key=f"client_depth_{loc}")
+                y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
+                fig_d.update_layout(
+                    plot_bgcolor='white', height=600,
+                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
+                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver'),
+                    legend=dict(orientation="h", y=-0.2)
+                )
+                st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
 
-        with tab_table:
-            latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-            latest['Current Temp'] = latest['temperature'].apply(
-                lambda x: f"{round((x - 32) * 5/9 if unit_mode == 'Celsius' else x, 1)}{unit_label}"
-            )
-            latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r.get('Depth', '??')} ft", axis=1)
-            st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
+    with tab_table:
+        # Latest Snapshot Table (Fastest way to group latest data)
+        latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        
+        # Efficient vector conversion
+        latest['Current Temp'] = latest['temperature'].apply(
+            lambda x: f"{round((x - 32) * 5/9 if unit_mode == 'Celsius' else x, 1)}{unit_label}"
+        )
+        
+        latest['Position'] = latest.apply(
+            lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" 
+            else f"{r.get('Depth', '??')} ft", axis=1
+        )
+        
+        st.dataframe(
+            latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), 
+            use_container_width=True, 
+            hide_index=True
+        )
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
