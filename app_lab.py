@@ -340,27 +340,25 @@ def render_global_overview():
 
 def render_executive_summary(client, selected_project, unit_label):
     """
-    Project Health Monitor: Aggregates connectivity stats by Location (Pipes/Banks).
+    Project Health Monitor: Shows Project Totals followed by Location breakdowns.
     """
     st.header(f"🏠 Executive Summary: Health Monitor")
     
     # 1. SQL Query Construction
-    # Logic: If 'All Projects' is selected, we don't filter the WHERE clause.
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND Project = '{selected_project}'"
 
+    # We use a ROLLUP to automatically generate the Project-level 'Total' rows
     summary_q = f"""
         WITH MappedNodes AS (
-            SELECT Project, NodeNum, Location, Bank, Depth
+            SELECT Project, NodeNum, Location
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata`
             WHERE Project IS NOT NULL
             {proj_filter}
         ),
         RecentReporting AS (
-            SELECT 
-                r.NodeNum, 
-                MAX(r.timestamp) as last_ping
+            SELECT r.NodeNum, MAX(r.timestamp) as last_ping
             FROM (
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                 UNION ALL
@@ -370,26 +368,34 @@ def render_executive_summary(client, selected_project, unit_label):
             GROUP BY NodeNum
         ),
         HistoricalPings AS (
-            SELECT 
-                NodeNum, 
-                MAX(timestamp) as ever_ping
+            SELECT NodeNum, MAX(timestamp) as ever_ping
             FROM (
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                 UNION ALL
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             ) GROUP BY NodeNum
+        ),
+        BaseData AS (
+            SELECT 
+                m.Project, 
+                m.Location,
+                m.NodeNum,
+                r.NodeNum as is_active,
+                h.ever_ping
+            FROM MappedNodes m
+            LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
+            LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
         )
         SELECT 
-            m.Project, 
-            m.Location,
-            COUNT(m.NodeNum) as total_mapped,
-            COUNT(r.NodeNum) as seen_24h,
-            MAX(h.ever_ping) as last_group_update
-        FROM MappedNodes m
-        LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
-        LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
-        GROUP BY m.Project, m.Location
-        ORDER BY m.Project ASC, m.Location ASC
+            Project, 
+            IFNULL(Location, '--- PROJECT OVERALL ---') as Location,
+            COUNT(NodeNum) as total_mapped,
+            COUNT(is_active) as seen_24h,
+            MAX(ever_ping) as last_group_update
+        FROM BaseData
+        GROUP BY ROLLUP(Project, Location)
+        HAVING Project IS NOT NULL
+        ORDER BY Project ASC, (Location = '--- PROJECT OVERALL ---') DESC, Location ASC
     """
     
     try:
@@ -407,6 +413,7 @@ def render_executive_summary(client, selected_project, unit_label):
             total = row['total_mapped']
             seen = row['seen_24h']
             silent = total - seen
+            is_overall = row['Location'] == '--- PROJECT OVERALL ---'
             
             last_ts = row['last_group_update']
             if pd.notnull(last_ts):
@@ -422,42 +429,43 @@ def render_executive_summary(client, selected_project, unit_label):
                 time_str = "Never Seen ⚪"
 
             return pd.Series({
-                "Project": row['Project'],
+                "Project": row['Project'] if not is_overall else f"⭐ {row['Project']}",
                 "Location / Pipe": row['Location'],
                 "Mapped Nodes": total,
                 "Seen (24h)": seen,
-                "Reporting Ratio": f"{seen}/{total}",
-                "Status": "✅ All Reporting" if silent == 0 else f"⚠️ {silent} Offline",
-                "Group Last Seen": time_str
+                "Ratio": f"{seen}/{total}",
+                "Status": "✅ Healthy" if silent == 0 else f"⚠️ {silent} Offline",
+                "Last Activity": time_str
             })
 
         health_df = df.apply(process_health_row, axis=1)
 
-        # 3. High-Level Metrics
-        total_sys_nodes = df['total_mapped'].sum()
-        total_sys_seen = df['seen_24h'].sum()
+        # 3. Summary Metrics (calculated from the Overall rows only)
+        overall_mask = df['Location'] == '--- PROJECT OVERALL ---'
+        total_sys_nodes = df[overall_mask]['total_mapped'].sum()
+        total_sys_seen = df[overall_mask]['seen_24h'].sum()
         
         m1, m2, m3 = st.columns(3)
-        m1.metric("Total Nodes", f"{total_sys_nodes}")
-        m2.metric("Active (24h)", f"{total_sys_seen}", delta=f"{total_sys_seen - total_sys_nodes}", delta_color="inverse")
-        m3.metric("System Health", f"{round((total_sys_seen/total_sys_nodes)*100, 1)}%")
+        m1.metric("System Total Nodes", f"{total_sys_nodes}")
+        m2.metric("System Active (24h)", f"{total_sys_seen}", delta=f"{total_sys_seen - total_sys_nodes}", delta_color="inverse")
+        m3.metric("Uptime Percentage", f"{round((total_sys_seen/total_sys_nodes)*100, 1)}%")
 
         st.divider()
 
-        # 4. Display Table
+        # 4. Display Table with highlighting
+        # We use st.dataframe but you can also use .style to bold the Overall rows
         st.dataframe(
             health_df, 
             use_container_width=True, 
             hide_index=True,
             column_config={
-                "Reporting Ratio": st.column_config.TextColumn("Active/Total"),
-                "Group Last Seen": st.column_config.TextColumn("Latest Activity")
+                "Ratio": st.column_config.TextColumn("Active/Total"),
+                "Location / Pipe": st.column_config.TextColumn("Location / Pipe", help="Project Overall shows the sum of all locations for that project.")
             }
         )
 
     except Exception as e:
         st.error(f"Executive Summary Audit Error: {traceback.format_exc()}")
-
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
