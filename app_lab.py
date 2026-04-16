@@ -1,73 +1,44 @@
+##################################
+# - 1. CONFIGURATION & STYLING - #
+##################################
 import streamlit as st
 import pandas as pd
-import time
-import plotly.express as px
-import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
-import traceback
 import io
 
-##################################
-# - 1. CONFIGURATION & STYLING - #
-##################################
+st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
-# 1. Initialize Page Config
-st.set_page_config(
-    page_title="SoilFreeze Data Lab", 
-    layout="wide", 
-    initial_sidebar_state="expanded"
-)
-
-# 2. Database Constants
+# Database Constants
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
-# The Override table stores our Approve/Mask/Delete statuses
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+
+# MASTER VISIBILITY SWITCHES
+# Format: "ProjectName": "YYYY-MM-DD HH:MM:SS"
+# Clients will see nothing before this date/time regardless of approval status.
+PROJECT_VISIBILITY_MASKS = {
+    "Office": "2026-03-03 15:00:00", 
+    "Main_Site": "2026-01-01 00:00:00"
+}
 
 @st.cache_resource
 def get_bq_client():
-    """
-    Handles authentication with BigQuery and Google Drive scopes.
-    Drive scope is required to access metadata stored in Google Sheets.
-    """
     try:
-        # These scopes allow the service account to bridge BQ and Drive
-        SCOPES = [
-            "https://www.googleapis.com/auth/bigquery",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        
-        # Check for Streamlit Secrets (Production)
+        SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive"]
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(
-                info, 
-                scopes=SCOPES
-            )
-            return bigquery.Client(
-                credentials=credentials, 
-                project=info.get("project_id", PROJECT_ID)
-            )
-        
-        # Fallback for Local Development (uses gcloud CLI auth)
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            return bigquery.Client(credentials=credentials, project=info["project_id"])
         return bigquery.Client(project=PROJECT_ID)
-        
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
         return None
 
-# 3. GLOBAL CLIENT INITIALIZATION
-# Defining 'client' here at the top level makes it accessible to all functions
 client = get_bq_client()
 
-# Check if client initialized successfully
-if client is None:
-    st.critical("BigQuery Client failed to initialize. Check your Secrets/Credentials.")
-    st.stop()
-    
 ############################
 # - 2. DATA ENGINE LOGIC - #
 ############################
@@ -75,16 +46,17 @@ if client is None:
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Fetches data and joins with manual_rejections for status flags.
-    Matches the schema: NodeNum, timestamp, and 'reason' (as status).
+    Fetches data with independent time-masking for clients.
     """
-    # Filter based on the 'reason' column in manual_rejections
+    # 1. Get the global cutoff for this project
+    cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
+    
     if view_mode == "client":
-        # Client view: ONLY shows points explicitly approved ('TRUE')
-        approval_filter = "AND rej.reason = 'TRUE'"
+        # Client ONLY sees Approved (TRUE) AND data after the visibility cutoff
+        query_filter = f"AND rej.reason = 'TRUE' AND r.timestamp >= '{cutoff}'"
     else:
-        # Engineering view: Shows everything NOT explicitly deleted ('FALSE')
-        approval_filter = "AND (rej.reason IS NULL OR rej.reason != 'FALSE')"
+        # Engineering sees everything except deleted (FALSE)
+        query_filter = "AND (rej.reason IS NULL OR rej.reason != 'FALSE')"
 
     query = f"""
         SELECT 
@@ -102,7 +74,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             AND TIMESTAMP_TRUNC(TIMESTAMP_ADD(r.timestamp, INTERVAL 30 MINUTE), HOUR) = 
                 TIMESTAMP_TRUNC(TIMESTAMP_ADD(rej.timestamp, INTERVAL 30 MINUTE), HOUR)
         WHERE m.Project = '{project_id}'
-        {approval_filter}
+        {query_filter}
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY m.Location ASC, r.timestamp ASC
     """
@@ -110,45 +82,31 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         df = client.query(query).to_dataframe()
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            if 'Bank' not in df.columns: df['Bank'] = ""
         return df
     except Exception as e:
-        st.error(f"BigQuery Error: {e}")
+        st.error(f"BQ Error: {e}")
         return pd.DataFrame()
 
-def check_admin_access(current_service):
-    """Security gate with unique keys to prevent DuplicateElementId errors."""
-    if "admin_authenticated" not in st.session_state:
-        st.session_state["admin_authenticated"] = False
-    
-    if st.session_state["admin_authenticated"]: 
-        return True
-    
-    st.warning("🔒 Restricted Area: Engineering Admin Only.")
-    # Unique ID based on service prevents widget collisions
-    unique_id = current_service.replace(" ", "_").lower()
-    pwd_input = st.text_input("Enter Admin Password", type="password", key=f"pwd_{unique_id}")
-    
-    if st.button("Unlock Tools", key=f"btn_{unique_id}"):
-        if "admin_password" in st.secrets and pwd_input == st.secrets["admin_password"]:
+def check_admin_access(service_name):
+    if st.session_state.get("admin_authenticated"): return True
+    st.warning("🔒 Admin Access Required")
+    pwd = st.text_input("Password", type="password", key=f"gate_{service_name}")
+    if st.button("Unlock", key=f"btn_{service_name}"):
+        if pwd == st.secrets["admin_password"]:
             st.session_state["admin_authenticated"] = True
             st.rerun()
-        else:
-            st.error("Incorrect password.")
     return False
 
 ###########################
 #- 3. SIDEBAR UI & STATE -#
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
-
-# 1. Navigation
-service = st.sidebar.selectbox("📂 Select Page", 
-    ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
-
-# 2. Units
-unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"])
+service = st.sidebar.selectbox("📂 Page", ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+# Ensure project selection is visible for all relevant pages
+
 
 def convert_val(f_val):
     """Converts Fahrenheit from DB to selected unit."""
@@ -609,11 +567,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
 ###########
 
 def render_data_intake_page(selected_project):
-    """
-    Handles ingestion of raw Lord and SensorPush files and data exports.
-    """
     st.header("📤 Data Ingestion Lab")
-    tab_upload, tab_export = st.tabs(["📄 Manual File Upload", "📥 Export Project Data"])
+    tab_upload, tab_export = st.tabs(["📄 Upload", "📥 Export"])
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
@@ -686,67 +641,57 @@ def render_data_intake_page(selected_project):
             except Exception:
                 st.error(f"Ingestion Error: {traceback.format_exc()}")
 
-    with tab_export:
+   with tab_export:
         st.subheader("📥 Export Project Data")
         if not selected_project:
-            st.warning("Please select a project in the sidebar.")
+            st.warning("Select a project in the sidebar.")
         else:
-            with st.spinner("Fetching data for export..."):
-                export_df = get_universal_portal_data(selected_project, view_mode="engineering")
+            c1, c2 = st.columns(2)
+            with c1:
+                e_start = st.date_input("Start Date", value=datetime.now() - timedelta(days=30))
+            with c2:
+                e_end = st.date_input("End Date", value=datetime.now())
             
-            if export_df.empty:
-                st.info("No data found for this project.")
-            else:
-                st.download_button(
-                    "💾 Download Project CSV", 
-                    export_df.to_csv(index=False).encode('utf-8'), 
-                    f"{selected_project}_Full_Export.csv", 
-                    "text/csv"
-                )
+            if st.button("📦 Prepare Export"):
+                df = get_universal_portal_data(selected_project, view_mode="engineering")
+                if not df.empty:
+                    # Filter by selected date range
+                    mask = (df['timestamp'].dt.date >= e_start) & (df['timestamp'].dt.date <= e_end)
+                    export_df = df.loc[mask]
+                    st.download_button("💾 Download CSV", export_df.to_csv(index=False).encode('utf-8'), f"{selected_project}_Export.csv")
 
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
 
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Main UI for Admin tasks: Bulk Approval, Scrubbing, and Surgical Cleaning.
-    """
-    st.header("🛠️ Engineering Admin Tools")
-    tab_bulk, tab_scrub, tab_surgical = st.tabs(["✅ Bulk Approval", "🧹 Deep Data Scrub", "🧨 Surgical Cleaner"])
+    st.header("🛠️ Admin Tools")
+    tab_bulk, tab_scrub, tab_surgical = st.tabs(["✅ Bulk Approval", "🧹 Scrub", "🧨 Surgical"])
 
     with tab_bulk:
-        st.subheader("✅ Bulk Project Approval")
-        st.info(f"Approving all pending data for **{selected_project}**.")
+        st.subheader("✅ Range-Based Bulk Approval")
+        st.write("Approve all data within this specific window:")
         
-        if st.button(f"🚀 Bulk Approve {selected_project}"):
-            with st.spinner("Executing Bulk Approval..."):
-                # Explicitly uses r.NodeNum to avoid ambiguity error
+        c1, c2 = st.columns(2)
+        with c1:
+            b_start = st.date_input("Approval Start", value=datetime.now() - timedelta(days=7), key="b_start")
+        with c2:
+            b_end = st.date_input("Approval End", value=datetime.now(), key="b_end")
+
+        if st.button(f"🚀 Approve {selected_project} Range"):
+            with st.spinner("Writing approvals..."):
                 bulk_sql = f"""
                     INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
-                    SELECT DISTINCT 
-                        r.NodeNum, 
-                        TIMESTAMP_TRUNC(r.timestamp, HOUR), 
-                        'TRUE'
-                    FROM (
-                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                        UNION ALL
-                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                    ) AS r
+                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
+                    FROM (SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` UNION ALL SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`) AS r
                     INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
                     WHERE m.Project = '{selected_project}'
-                    AND NOT EXISTS (
-                        SELECT 1 FROM `{OVERRIDE_TABLE}` AS x 
-                        WHERE x.NodeNum = r.NodeNum 
-                        AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                    )
+                    AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
+                    AND NOT EXISTS (SELECT 1 FROM `{OVERRIDE_TABLE}` x WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR))
                 """
-                try:
-                    client.query(bulk_sql).result()
-                    st.success(f"All data for {selected_project} is now live in the Client Portal.")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Bulk Approval Error: {e}")
+                client.query(bulk_sql).result()
+                st.success("Range successfully approved.")
+                st.cache_data.clear()
 
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
