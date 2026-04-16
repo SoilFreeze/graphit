@@ -23,10 +23,7 @@ client = bigquery.Client(project=PROJECT_ID)
 # --- 2. DATA ENGINE (With Mask Priority) ---
 @st.cache_data(ttl=600)
 def get_locked_client_data():
-    """
-    Fetches data only for the TARGET_PROJECT.
-    Logic: Must be TRUE (Approved) AND NOT MASKED.
-    """
+    # We bypass the 'master_data' view and query raw tables + metadata + rejections
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -40,23 +37,16 @@ def get_locked_client_data():
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE m.Project = '{TARGET_PROJECT}'
-        AND rej.reason = 'TRUE'
-        -- This subquery ensures 'MASKED' status blocks 'TRUE' status
+        WHERE m.Project = '2538'  -- Hardcoded for your project
+        AND rej.reason = 'TRUE'   -- Must be approved
         AND NOT EXISTS (
             SELECT 1 FROM `{OVERRIDE_TABLE}` m2 
             WHERE m2.NodeNum = r.NodeNum 
             AND m2.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
             AND m2.reason = 'MASKED'
         )
-        ORDER BY r.timestamp ASC
     """
-    try:
-        return client.query(query).to_dataframe()
-    except Exception as e:
-        st.error(f"BigQuery Error: {e}")
-        return pd.DataFrame()
-
+    return client.query(query).to_dataframe()
 # --- 3. GRAPHING ENGINE (The "Engineering" Look) ---
 def build_custom_graph(df, title, start_view, end_view):
     if df.empty: return go.Figure().update_layout(title="No Data")
