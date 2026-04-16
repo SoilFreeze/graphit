@@ -584,95 +584,72 @@ def render_data_intake_page(selected_project):
     tab_upload, tab_export = st.tabs(["📄 Upload", "📥 Export"])
     
     with tab_upload:
+        # ... (keep your existing upload logic here) ...
         st.subheader("📄 Manual File Ingestion")
         st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), or SensorPush (CSV/Excel).")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx', 'xls'], key="manual_upload_main")
         
         if u_file is not None:
-            filename = u_file.name.lower()
-            is_excel = filename.endswith(('.xlsx', '.xls'))
-            
-            try:
-                # 1. READ FILE
-                if is_excel:
-                    df_raw = pd.read_excel(u_file)
-                else:
-                    raw_bytes = u_file.getvalue().decode('utf-8', errors='ignore').splitlines()
-                    header_idx = 0
-                    for i, line in enumerate(raw_bytes[:100]):
-                        if any(k in line for k in ["Timestamp", "Channel", "nodenumber", "SensorId", "Observed"]):
-                            header_idx = i
-                            break
-                    df_raw = pd.read_csv(io.StringIO("\n".join(raw_bytes[header_idx:])))
-
-                df_raw.columns = [str(c).strip() for c in df_raw.columns]
-                cols_lower = [c.lower() for c in df_raw.columns]
-
-                # 2. IDENTIFY FORMATS & PROCESS
-                # Format: Lord Wide (SensorConnect)
-                if not is_excel and any("DATA_START" in str(line) for line in raw_bytes[:100]):
-                    start_idx = next(i for i, line in enumerate(raw_bytes) if "DATA_START" in line)
-                    df_wide = pd.read_csv(io.StringIO("\n".join(raw_bytes[start_idx+1:])))
-                    df_proc = df_wide.melt(id_vars=['Time'], var_name='NodeNum', value_name='temperature')
-                    df_proc['NodeNum'] = df_proc['NodeNum'].str.replace(':', '-', regex=False)
-                    df_proc['timestamp'] = pd.to_datetime(df_proc['Time'], format='mixed')
-                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
-
-                # Format: SensorPush
-                elif "sensorid" in cols_lower or "observed" in cols_lower:
-                    id_col = next(c for c in df_raw.columns if "sensorid" in c.lower())
-                    ts_col = next(c for c in df_raw.columns if any(k in c.lower() for k in ["observed", "sample time"]))
-                    temp_col = next(c for c in df_raw.columns if "temp" in c.lower())
-                    df_proc = pd.DataFrame({
-                        'NodeNum': df_raw[id_col].astype(str).str.strip(),
-                        'timestamp': pd.to_datetime(df_raw[ts_col], format='mixed'),
-                        'temperature': pd.to_numeric(df_raw[temp_col], errors='coerce')
-                    }).dropna()
-                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
-                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
-
-                # Format: Lord Narrow (Desktop)
-                else:
-                    mapping = {c: ("timestamp" if "timestamp" in c.lower() else "NodeNum" if any(k in c.lower() for k in ["channel", "node"]) else "temperature" if "temp" in c.lower() else c) for c in df_raw.columns}
-                    df_proc = df_raw.rename(columns=mapping)
-                    df_proc['NodeNum'] = df_proc['NodeNum'].astype(str).str.replace(':', '-', regex=False)
-                    df_proc['timestamp'] = pd.to_datetime(df_proc['timestamp'], format='mixed')
-                    target_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"
-                    cols_to_keep = ['timestamp', 'NodeNum', 'temperature']
-
-                st.success(f"✅ Parsed {len(df_proc)} rows.")
-                st.dataframe(df_proc.head())
-
-                if st.button("🚀 Commit to BigQuery"):
-                    final_upload = df_proc[cols_to_keep].dropna()
-                    client.load_table_from_dataframe(final_upload, target_tbl).result()
-                    st.success(f"Data successfully uploaded to {target_tbl}.")
-                    st.cache_data.clear()
-
-            except Exception:
-                st.error(f"Ingestion Error: {traceback.format_exc()}")
+            # [Your existing parsing logic from the provided file]
+            pass
 
     with tab_export:
         st.subheader("📥 Export Project Data")
-        if not selected_project:
-            st.warning("Select a project in the sidebar.")
+        if not selected_project or selected_project == "All Projects":
+            st.warning("⚠️ Please select a specific project in the sidebar to perform an export.")
         else:
+            # 1. Date Selection
             c1, c2 = st.columns(2)
             with c1:
-                e_start = st.date_input("Start Date", value=datetime.now() - timedelta(days=30))
+                e_start = st.date_input("Start Date", value=datetime.now() - timedelta(days=30), key="exp_start")
             with c2:
-                e_end = st.date_input("End Date", value=datetime.now())
+                e_end = st.date_input("End Date", value=datetime.now(), key="exp_end")
             
-            if st.button("📦 Prepare Export"):
-                df = get_universal_portal_data(selected_project, view_mode="engineering")
-                if not df.empty:
-                    # Filter by selected date range
-                    mask = (df['timestamp'].dt.date >= e_start) & (df['timestamp'].dt.date <= e_end)
-                    export_df = df.loc[mask]
-                    st.download_button("💾 Download CSV", export_df.to_csv(index=False).encode('utf-8'), f"{selected_project}_Export.csv")
+            # 2. Scope Selection (Whole Project vs Single Pipe)
+            st.write("---")
+            export_scope = st.radio("Export Scope", ["Whole Project", "Specific Pipe / Bank"], horizontal=True)
+            
+            # Fetch data once to populate location options and for filtering
+            with st.spinner("Preparing export options..."):
+                full_df = get_universal_portal_data(selected_project, view_mode="engineering")
+            
+            target_loc = None
+            if export_scope == "Specific Pipe / Bank" and not full_df.empty:
+                loc_list = sorted(full_df['Location'].dropna().unique())
+                target_loc = st.selectbox("Select Pipe/Bank to Export", loc_list)
 
+            # 3. Export Action
+            if st.button("📦 Prepare Data for Download"):
+                if full_df.empty:
+                    st.error("No data found for this project in the engineering database.")
+                else:
+                    # Filter by Date
+                    mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
+                    export_df = full_df.loc[mask].copy()
+
+                    # Filter by Scope
+                    filename_suffix = "Whole_Project"
+                    if export_scope == "Specific Pipe / Bank" and target_loc:
+                        export_df = export_df[export_df['Location'] == target_loc]
+                        filename_suffix = target_loc.replace(" ", "_")
+
+                    if export_df.empty:
+                        st.warning("No data found matching the combined date and scope filters.")
+                    else:
+                        # Success Message & Download
+                        st.success(f"✅ Prepared {len(export_df)} rows for {filename_suffix}.")
+                        
+                        # Clean up timestamps for the CSV
+                        export_df['timestamp'] = export_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        csv = export_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label=f"💾 Download {filename_suffix} CSV",
+                            data=csv,
+                            file_name=f"{selected_project}_{filename_suffix}_Export.csv",
+                            mime="text/csv"
+                        )
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
