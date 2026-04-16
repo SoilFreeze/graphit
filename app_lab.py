@@ -430,24 +430,26 @@ def render_executive_summary(client, selected_project, unit_label):  # <--- Adde
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
 
-def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
+def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    The strictly filtered view for clients. 
-    Only shows data where manual_rejections.reason = 'TRUE'.
+    Merged Version: Uses your preferred Snapshot logic with bulletproof arguments.
     """
     st.header(f"📊 Project Status: {selected_project}")
     
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar.")
+        return
+
     # 1. FETCH DATA (Client View)
     with st.spinner("Loading approved portal data..."):
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
     if p_df.empty:
-        st.info(f"No approved data is currently available for {selected_project}. Data must be approved in Admin Tools.")
+        st.info(f"No approved data is currently available for {selected_project}.")
     else:
         tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
         with tab_time:
-            # Viewing window: Default 6 weeks
             weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
             end_view = pd.Timestamp.now(tz='UTC')
             start_view = end_view - timedelta(weeks=weeks_view)
@@ -463,6 +465,7 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 
         with tab_depth:
             st.subheader("📏 Vertical Temperature Profile")
+            # Force Depth to numeric for graphing
             p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
             depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
             
@@ -471,12 +474,11 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                     loc_data = depth_only[depth_only['Location'] == loc].copy()
                     fig_d = go.Figure()
                     
-                    # Generate Monday 6AM snapshots for the last 6 weeks
+                    # Weekly Snapshot Logic from your file
                     mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                     
                     for m_date in mondays:
                         target_ts = m_date.replace(hour=6, minute=0, second=0)
-                        # Look for data within +/- 12 hours of the target Monday 6AM
                         window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                           (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                         
@@ -495,6 +497,7 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                                 name=target_ts.strftime('%m/%d/%y')
                             ))
 
+                    # Format the Depth Graph
                     y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
                     fig_d.update_layout(
                         plot_bgcolor='white', height=700,
@@ -505,7 +508,6 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                     st.plotly_chart(fig_d, use_container_width=True, key=f"client_depth_{loc}")
 
         with tab_table:
-            # Latest Snapshot Table
             latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
             latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
             latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r.get('Depth', '??')} ft", axis=1)
