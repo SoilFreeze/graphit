@@ -721,7 +721,8 @@ def render_data_intake_page(selected_project):
 
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
-    # Added 'tab_mask' to the list
+    
+    # Define all four administrative tabs
     tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
         "✅ Bulk Approval", 
         "🚫 Mask Data", 
@@ -729,36 +730,67 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         "🧨 Surgical"
     ])
 
+    # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
-        # ... (Keep existing Bulk Approval logic) ...
         st.subheader("✅ Range-Based Bulk Approval")
-        # [Existing code from your file]
+        st.write("Approve all data within this specific window for the client portal.")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            b_start = st.date_input("Approval Start", value=datetime.now() - timedelta(days=7), key="bulk_start")
+        with c2:
+            b_end = st.date_input("Approval End", value=datetime.now(), key="bulk_end")
 
-    # --- NEW TAB: MASK DATA ---
+        if st.button(f"🚀 Approve {selected_project} Range", use_container_width=True):
+            with st.spinner("Writing approvals to master override..."):
+                bulk_sql = f"""
+                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
+                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
+                    FROM (
+                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                        UNION ALL 
+                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                    ) AS r
+                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                    WHERE m.Project = '{selected_project}'
+                    AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM `{OVERRIDE_TABLE}` x 
+                        WHERE x.NodeNum = r.NodeNum 
+                        AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                    )
+                """
+                try:
+                    client.query(bulk_sql).result()
+                    st.success(f"✅ Data for {selected_project} successfully approved.")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Bulk Approval Error: {e}")
+
+    # --- TAB 2: MASK DATA (NEW) ---
     with tab_mask:
         st.subheader("🚫 Temporal Data Masking")
-        st.info("Use this to hide data from the Client Portal for a specific time window.")
+        st.info("Hides data from the Client Portal for a specific window (down to the hour).")
         
         if not selected_project or selected_project == "All Projects":
             st.warning("Please select a specific project in the sidebar.")
         else:
-            col1, col2 = st.columns(2)
-            with col1:
+            m_col1, m_col2 = st.columns(2)
+            with m_col1:
                 m_start_date = st.date_input("Mask Start Date", value=datetime.now() - timedelta(days=7), key="m_sd")
                 m_start_time = st.time_input("Mask Start Time", value=datetime.time(datetime.now()), key="m_st")
-            with col2:
+            with m_col2:
                 m_end_date = st.date_input("Mask End Date", value=datetime.now(), key="m_ed")
                 m_end_time = st.time_input("Mask End Time", value=datetime.time(datetime.now()), key="m_et")
 
-            # Combine Date and Time into UTC strings for BigQuery
+            # Combine and format for BigQuery
             start_dt = datetime.combine(m_start_date, m_start_time)
             end_dt = datetime.combine(m_end_date, m_end_time)
 
-            st.write(f"**Target Window:** `{start_dt}` to `{end_dt}`")
+            st.write(f"**Action:** Mark data as `MASKED` from `{start_dt}` to `{end_dt}`")
 
-            if st.button(f"🚫 Mask {selected_project} Data", type="primary"):
-                with st.spinner("Applying masks..."):
-                    # This SQL inserts MASKED records for the chosen window
+            if st.button(f"🚫 Apply Mask to {selected_project}", type="primary", use_container_width=True):
+                with st.spinner("Applying temporal masks..."):
                     mask_sql = f"""
                         INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
                         SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
@@ -779,20 +811,44 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     """
                     try:
                         client.query(mask_sql).result()
-                        st.success(f"✅ Data between {start_dt} and {end_dt} is now MASKED.")
+                        st.success(f"✅ Data window successfully masked.")
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"Masking Error: {e}")
 
+    # --- TAB 3: DEEP DATA SCRUB ---
     with tab_scrub:
-        # ... (Keep existing Scrub logic) ...
         st.subheader("🧹 Deep Data Scrub")
-        # [Existing code from your file]
+        st.warning("Averages raw data to 1-hour intervals. This is IRREVERSIBLE.")
+        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_select")
+        t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
+        
+        if st.button(f"🧨 Purge & Average {scrub_target}", use_container_width=True):
+            with st.spinner(f"Reducing {scrub_target} to hourly means..."):
+                scrub_sql = f"""
+                    CREATE OR REPLACE TABLE `{t_table}` AS 
+                    SELECT 
+                        TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
+                        NodeNum, 
+                        AVG(temperature) as temperature
+                    FROM `{t_table}`
+                    WHERE temperature IS NOT NULL
+                    GROUP BY 1, 2
+                """
+                try:
+                    client.query(scrub_sql).result()
+                    st.success(f"✅ {scrub_target} table successfully averaged.")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Scrub Error: {e}")
 
+    # --- TAB 4: SURGICAL CLEANER ---
     with tab_surgical:
-        if not selected_project:
-            st.warning("Please select a project in the sidebar.")
+        st.subheader("🧨 Surgical Point Cleaner")
+        if not selected_project or selected_project == "All Projects":
+            st.warning("Please select a specific project in the sidebar to use the Lasso tool.")
         else:
+            # Calls the external function defined in Section 11
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 
