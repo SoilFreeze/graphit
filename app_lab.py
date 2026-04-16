@@ -293,18 +293,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 if service == "🌐 Global Overview":
     st.header("🌐 Global Project Overview")
     
-    # 1. Fetch project list from metadata
-    try:
-        proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-        available_projects = sorted(client.query(proj_list_q).to_dataframe()['Project'].tolist())
-        target_project = st.selectbox("🏗️ Select a Project to Review", available_projects, key="global_proj_picker")
-    except Exception as e:
-        st.error(f"Metadata Error: {e}")
-        target_project = None
+    # We retrieve the project list from the metadata table
+    proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+    available_projects = sorted(client.query(proj_list_q).to_dataframe()['Project'].tolist())
+    target_project = st.selectbox("🏗️ Select a Project", available_projects, key="global_proj_picker")
 
     if target_project:
-        with st.spinner(f"Syncing {target_project} (Engineering View)..."):
-            # Engineering view shows everything not explicitly rejected in 'reason' column
+        with st.spinner(f"Loading {target_project} Engineering View..."):
+            # This calls the fixed Data Engine logic from the previous step
             p_df = get_universal_portal_data(target_project, view_mode="engineering")
 
         if not p_df.empty:
@@ -321,9 +317,9 @@ if service == "🌐 Global Overview":
                         start_view, end_view, tuple(active_refs), 
                         unit_mode, unit_label, display_tz=display_tz
                     )
-                    st.plotly_chart(fig, use_container_width=True, key=f"ov_{target_project}_{loc}")
+                    st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info(f"No engineering data found for {target_project} in the last 84 days.")
+            st.info(f"No active engineering data found for {target_project}.")
 ###########
 #- 6. EXECUTIVE SUMMARY -
 ###########
@@ -337,30 +333,43 @@ elif service == "🏠 Executive Summary":
     with c2:
         sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True)
     
-    # Summary query uses 'approve' from raw tables to show ingestion health
+    # FIX: We specify 'r.NodeNum' to avoid the 'ambiguous' error
     summary_q = f"""
         WITH RecentData AS (
-            SELECT *,
-                FIRST_VALUE(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp ASC) as first_temp_24h,
-                ROW_NUMBER() OVER(PARTITION BY NodeNum ORDER BY timestamp DESC) as latest_rank
+            SELECT 
+                r.NodeNum, 
+                r.timestamp, 
+                r.temperature, 
+                m.Project, 
+                m.Location, 
+                m.Bank, 
+                m.Depth,
+                FIRST_VALUE(r.temperature) OVER(PARTITION BY r.NodeNum ORDER BY r.timestamp ASC) as first_temp_24h,
+                ROW_NUMBER() OVER(PARTITION BY r.NodeNum ORDER BY r.timestamp DESC) as latest_rank
             FROM (
-                SELECT NodeNum, timestamp, temperature, approve FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                 UNION ALL
-                SELECT NodeNum, timestamp, temperature, approve FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
             WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
             {"AND m.Project = '" + selected_project + "'" if selected_project else ""}
         )
-        SELECT * FROM RecentData WHERE latest_rank = 1
+        SELECT 
+            NodeNum, Project, Location, Bank, Depth, timestamp, temperature,
+            first_temp_24h,
+            MIN(temperature) OVER(PARTITION BY NodeNum) as min_24h,
+            MAX(temperature) OVER(PARTITION BY NodeNum) as max_24h
+        FROM RecentData
+        WHERE latest_rank = 1
     """
     
     try:
-        with st.spinner("⚡ Fetching 24-Hour Snapshot..."):
+        with st.spinner("⚡ Fetching Command Center Snapshot..."):
             raw_summary_df = client.query(summary_q).to_dataframe()
         
         if raw_summary_df.empty:
-            st.warning("📡 No sensor activity detected in the last 24 hours.")
+            st.warning("📡 No active sensors seen in the last 24 hours.")
         else:
             now_utc = pd.Timestamp.now(tz=pytz.UTC)
             
@@ -374,8 +383,9 @@ elif service == "🏠 Executive Summary":
                     "Project": row['Project'],
                     "Node": row['NodeNum'],
                     "Location": row['Location'],
-                    "Position": f"Bank {row['Bank']}" if str(row['Bank']).strip() != "" else f"{row['Depth']} ft",
-                    "Min": f"{round(convert_val(row['temperature']), 1)}{unit_label}", # Simplified for snapshot
+                    "Position": f"Bank {row['Bank']}" if str(row['Bank']).strip() not in ["", "None", "nan"] else f"{row['Depth']} ft",
+                    "Min": f"{round(convert_val(row['min_24h']), 1)}{unit_label}",
+                    "Max": f"{round(convert_val(row['max_24h']), 1)}{unit_label}",
                     "Delta_Val": raw_delta, 
                     "Delta": f"{round(raw_delta, 1)}°F",
                     "Hours_Ago": hrs_ago,
@@ -384,14 +394,17 @@ elif service == "🏠 Executive Summary":
 
             summary_df = raw_summary_df.apply(process_summary_row, axis=1)
 
-            # Apply Sorting
+            # Sorting Logic
             asc = (sort_order == "Ascending")
             if sort_choice == "Hours Since Last Seen":
                 summary_df = summary_df.sort_values(by="Hours_Ago", ascending=asc)
             elif sort_choice == "Delta Magnitude":
                 summary_df = summary_df.sort_values(by="Delta_Val", key=abs, ascending=asc)
 
-            st.dataframe(summary_df[["Project", "Node", "Location", "Position", "Min", "Delta", "Last Seen"]], use_container_width=True, hide_index=True)
+            st.dataframe(
+                summary_df[["Project", "Node", "Location", "Position", "Min", "Max", "Delta", "Last Seen"]],
+                use_container_width=True, hide_index=True
+            )
             
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
