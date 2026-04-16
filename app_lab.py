@@ -433,80 +433,117 @@ def render_executive_summary(client, selected_project, unit_label):
     except Exception as e:
         st.error(f"Executive Summary Error: {traceback.format_exc()}")
 ###########
-# - 7. PAGE: CLIENT PORTAL - #
+# - 8. PAGE: NODE DIAGNOSTICS - #
 ###########
 
-def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
+def render_node_diagnostics(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Client-facing view: Restored with Time Slider and Tabbed Interface.
-    Only shows 'Approved' data after the project visibility cutoff.
+    Engineering view: High-detail time series + Temperature vs. Depth vertical profiles.
     """
-    st.header(f"📊 Client Portal: {selected_project}")
+    st.header(f"📉 Node Diagnostics: {selected_project}")
 
-    # 1. Validation: Client Portal requires a specific project
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view the Client Portal.")
+        st.info("💡 Select a specific project in the sidebar to view diagnostic profiles.")
         return
 
-    # 2. Restored Time Selection Slider
-    st.write("### 🕒 View Period")
-    weeks_to_show = st.slider("Select how many weeks to look back:", 1, 12, 2, key="client_week_slider")
-    
-    # Calculate timestamps
+    # 1. Diagnostic Controls
+    st.write("### 🛠️ Diagnostic View Options")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        lookback = st.slider("Lookback Period (Days):", 1, 84, 14, key="diag_lookback")
+    with c2:
+        view_type = st.radio("Graph Style", ["Lines", "Dots (Scrubbing)"])
+    with c3:
+        show_profile = st.checkbox("Show Depth Profile", value=True)
+
+    # Calculate Time window
     now_utc = pd.Timestamp.now(tz='UTC')
-    start_view_utc = now_utc - timedelta(weeks=weeks_to_show)
-    
-    # 3. Fetch Data from Engine
-    with st.spinner(f"🔍 Fetching approved data for {selected_project}..."):
-        # This engine respects the visibility cutoff and 'TRUE' approval status
-        df = get_universal_portal_data(selected_project, view_mode="client")
+    start_view = now_utc - timedelta(days=lookback)
+
+    # 2. Fetch Data (Engineering view shows all un-deleted data)
+    with st.spinner("Loading high-resolution diagnostic data..."):
+        df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if df.empty:
-        st.warning(f"No approved data found for {selected_project} in the last 84 days.")
-        st.info("Note: Data only appears here once it has been marked as 'Approved' in Admin Tools.")
+        st.warning(f"No diagnostic data found for {selected_project}.")
     else:
-        # Filter local dataframe to match the slider window
-        mask = (df['timestamp'] >= start_view_utc) & (df['timestamp'] <= now_utc)
-        filtered_df = df.loc[mask]
+        # Filter for the slider window
+        mask = (df['timestamp'] >= start_view) & (df['timestamp'] <= now_utc)
+        diag_df = df.loc[mask].copy()
 
-        if filtered_df.empty:
-            st.warning(f"No data available for the selected {weeks_to_show}-week window.")
+        if diag_df.empty:
+            st.warning("No data matches the current lookback window.")
         else:
-            # 4. Restored Tabbed Interface
-            tab_graph, tab_data = st.tabs(["📈 Temperature Graph", "📋 Data Table"])
+            # --- GRAPH 1: TIME SERIES ---
+            st.subheader("🕒 Temperature Over Time")
+            
+            # Use 'Scrubbing' in title to trigger dot mode if selected
+            title_tag = " [Scrubbing Mode]" if view_type == "Dots (Scrubbing)" else ""
+            
+            fig_time = build_high_speed_graph(
+                df=diag_df,
+                title=f"Diagnostic History: {selected_project}{title_tag}",
+                start_view=start_view,
+                end_view=now_utc,
+                active_refs=active_refs,
+                unit_mode=unit_mode,
+                unit_label=unit_label,
+                display_tz=display_tz
+            )
+            st.plotly_chart(fig_time, use_container_width=True)
 
-            with tab_graph:
-                fig = build_high_speed_graph(
-                    df=filtered_df,
-                    title=f"Project Snapshot: {selected_project}",
-                    start_view=start_view_utc,
-                    end_view=now_utc,
-                    active_refs=active_refs,
-                    unit_mode=unit_mode,
-                    unit_label=unit_label,
-                    display_tz=display_tz
-                )
-                st.plotly_chart(fig, use_container_width=True)
+            # --- GRAPH 2: TEMPERATURE VS DEPTH (THE RESTORED PROFILE) ---
+            if show_profile:
+                st.divider()
+                st.subheader("📏 Vertical Temperature Profile")
+                
+                # Filter for nodes that actually have depth data
+                profile_df = diag_df[pd.to_numeric(diag_df['Depth'], errors='coerce').notnull()].copy()
+                profile_df['Depth'] = pd.to_numeric(profile_df['Depth'])
 
-            with tab_data:
-                st.subheader("Raw Data Export")
-                # Format for readability
-                display_df = filtered_df.copy()
-                display_df['timestamp'] = display_df['timestamp'].dt.tz_convert(display_tz).dt.strftime('%Y-%m-%d %H:%M')
-                
-                st.dataframe(
-                    display_df[["timestamp", "Location", "Bank", "Depth", "temperature"]], 
-                    use_container_width=True, 
-                    hide_index=True
-                )
-                
-                csv = display_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="💾 Download Current View as CSV",
-                    data=csv,
-                    file_name=f"{selected_project}_Client_Export.csv",
-                    mime="text/csv"
-                )
+                if profile_df.empty:
+                    st.info("No depth-based metadata found for this project to generate vertical profiles.")
+                else:
+                    # Get the most recent reading for each depth to build the profile
+                    latest_profile = profile_df.sort_values('timestamp').groupby(['Location', 'Depth']).last().reset_index()
+                    
+                    # Convert temps if Celsius
+                    if unit_mode == "Celsius":
+                        latest_profile['temperature'] = (latest_profile['temperature'] - 32) * 5/9
+
+                    fig_depth = go.Figure()
+
+                    for loc in latest_profile['Location'].unique():
+                        loc_data = latest_profile[latest_profile['Location'] == loc].sort_values('Depth')
+                        
+                        fig_depth.add_trace(go.Scatter(
+                            x=loc_data['temperature'],
+                            y=loc_data['Depth'],
+                            name=f"Pipe: {loc}",
+                            mode='lines+markers',
+                            line=dict(shape='spline', smoothing=0.3),
+                            marker=dict(size=8),
+                            hovertemplate=f"<b>{loc}</b><br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                        ))
+
+                    fig_depth.update_layout(
+                        title=f"Current Vertical Profile (Latest Snapshot)",
+                        xaxis_title=f"Temperature ({unit_label})",
+                        yaxis_title="Depth (Feet Below Surface)",
+                        yaxis=dict(autorange="reversed", gridcolor='Gainsboro'), # Surface at top
+                        xaxis=dict(gridcolor='Gainsboro'),
+                        plot_bgcolor='white',
+                        height=700,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    
+                    # Add reference lines to the depth profile as well
+                    for val, ref_label in active_refs:
+                        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                        fig_depth.add_vline(x=c_val, line_dash="dash", line_color="RoyalBlue", 
+                                          annotation_text=ref_label)
+
+                    st.plotly_chart(fig_depth, use_container_width=True)
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
