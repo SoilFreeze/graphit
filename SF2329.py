@@ -39,7 +39,7 @@ def get_standalone_data():
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE m.Project = '{TARGET_PROJECT}'
+        WHERE m.Project LIKE '{TARGET_PROJECT}%'
         AND rej.reason = 'TRUE'  -- Filters for Approved data only
         AND NOT EXISTS (
             SELECT 1 FROM `{OVERRIDE_TABLE}` m2 
