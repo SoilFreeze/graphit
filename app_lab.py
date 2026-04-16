@@ -530,6 +530,7 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
     Engineering-level view. Shows everything (Pending, Masked, Approved).
+    Restored Vertical Profile with fix for Scattergl ValueError.
     """
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
@@ -554,7 +555,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
             
         df_diag = all_data[all_data['Location'] == sel_loc].copy()
 
-        # 1. Engineering Timeline
+        # 1. Engineering Timeline (Keep Scattergl for performance here)
         st.subheader("🕒 Engineering Timeline")
         fig_time = build_high_speed_graph(
             df_diag, f"Diagnostic Stream: {sel_loc}", 
@@ -568,35 +569,50 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
         if show_profile:
             st.divider()
             st.subheader("📏 Vertical Temperature Profile")
+            
+            # Ensure Depth is numeric
             df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
             profile_df = df_diag.dropna(subset=['Depth_Num']).copy()
 
             if profile_df.empty:
                 st.info("No numeric depth data found for this location.")
             else:
+                # Get the absolute latest reading for each depth sensor
                 latest_snap = profile_df.sort_values('timestamp').groupby('Depth_Num').last().reset_index()
                 
-                # FIX: Using Lambda to prevent NameError
+                # Lambda fix for NameError: convert_val
                 latest_snap['conv_temp'] = latest_snap['temperature'].apply(
                     lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
                 )
 
+                # Using standard go.Scatter to allow for smooth 'spline' curves
                 fig_d = go.Figure()
-                fig_d.add_trace(go.Scattergl(
+                fig_d.add_trace(go.Scatter(
                     x=latest_snap['conv_temp'], 
                     y=latest_snap['Depth_Num'], 
                     mode='lines+markers',
-                    line=dict(shape='spline', smoothing=0.5)
+                    name="Current Profile",
+                    line=dict(shape='spline', smoothing=0.5, width=3, color='RoyalBlue'),
+                    marker=dict(size=10, symbol='diamond')
                 ))
 
+                # Set Y-axis so 0 (surface) is at the top
                 y_limit = int(((profile_df['Depth_Num'].max() // 10) + 1) * 10)
                 fig_d.update_layout(
-                    plot_bgcolor='white', height=600,
-                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
-                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], gridcolor='Silver')
+                    title=f"Latest Vertical Snapshot: {sel_loc}",
+                    plot_bgcolor='white', 
+                    height=700,
+                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro', showline=True, linecolor='black'),
+                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver', showline=True, linecolor='black')
                 )
-                st.plotly_chart(fig_d, use_container_width=True)
+                
+                # Add reference lines to vertical profile
+                for val, ref_label in active_refs:
+                    # Convert ref line value if needed
+                    c_ref = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                    fig_d.add_vline(x=c_ref, line_dash="dash", line_color="Red", annotation_text=ref_label)
 
+                st.plotly_chart(fig_d, use_container_width=True)
 ###########
 # - 9. PAGE: DATA INTAKE LAB - #
 ###########
