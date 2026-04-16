@@ -104,18 +104,24 @@ def check_admin_access(service_name):
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# 1. Page Navigation
+# --- STEP 1: INITIALIZE DEFAULTS (Prevents NameError) ---
+service = "🏠 Executive Summary"
+unit_mode = "Fahrenheit"
+unit_label = "°F"
+selected_project = "All Projects"
+display_tz = "UTC"
+active_refs = [(32.0, "Freezing")] # Default to Freezing always existing
+
+# --- STEP 2: SIDEBAR WIDGETS ---
 service = st.sidebar.selectbox(
     "📂 Page", 
     ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
 )
 
-# 2. Units
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# 3. Global Project Selection
-selected_project = "All Projects"
+# Robust Project Selection
 if client is not None:
     try:
         proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
@@ -124,22 +130,21 @@ if client is not None:
         options = ["All Projects"] + proj_list
         selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_final")
     except Exception as e:
-        st.sidebar.error(f"Sidebar Sync Error: {e}")
+        st.sidebar.error("Sidebar Query Failed. Using default 'All Projects'.")
+        selected_project = "All Projects"
 
-# 4. Reference Lines (Ensuring active_refs is always defined)
+# Reference Lines
 st.sidebar.subheader("📏 Reference Lines")
-active_refs = [] 
-
+# Re-calculating based on user clicks
+active_refs = []
 if st.sidebar.checkbox("Freezing (32°F)", value=True): 
     active_refs.append((32.0, "Freezing"))
-
 if st.sidebar.checkbox("Type B (26.6°F)", value=False): 
     active_refs.append((26.6, "Type B"))
-
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
 
-# 5. Timezone Display (Ensuring display_tz is always defined)
+# Timezone Display
 tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
 display_tz = {
     "UTC": "UTC", 
@@ -862,7 +867,6 @@ def update_records(pts, df, val):
 # - 12. MAIN ROUTER - #
 ###########
 
-# This is the bottom of your script
 if service == "🏠 Executive Summary":
     render_executive_summary(client, selected_project, unit_label)
 
@@ -870,7 +874,6 @@ elif service == "🌐 Global Overview":
     render_global_overview()
 
 elif service == "📊 Client Portal":
-    # These 6 variables must have been defined in Section 3
     render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif service == "📉 Node Diagnostics":
