@@ -581,39 +581,70 @@ elif service == "🛠️ Admin Tools":
 
         with tab_bulk:
             ###########
-            # - Tab: Bulk Approval -#
+            # - Tab: Bulk Approval - #
             ###########
             st.subheader("✅ Bulk Project Approval")
-            if st.button(f"🚀 Approve All Pending for {selected_project}"):
-                # Uses 'reason' column to store 'TRUE' as requested by the schema
-                bulk_sql = f"""
-                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason, Project)
-                    SELECT DISTINCT NodeNum, TIMESTAMP_TRUNC(timestamp, HOUR), 'TRUE', '{selected_project}'
-                    FROM (SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` UNION ALL SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`)
-                    WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')
-                    AND NOT EXISTS (SELECT 1 FROM `{OVERRIDE_TABLE}` x WHERE x.NodeNum = NodeNum AND x.timestamp = TIMESTAMP_TRUNC(timestamp, HOUR))
-                """
-                client.query(bulk_sql).result()
-                st.success("Pending data approved for client.")
-                st.cache_data.clear()
+            st.info(f"Approving all pending data for **{selected_project}**.")
+            
+            if st.button(f"🚀 Bulk Approve {selected_project}"):
+                with st.spinner("Executing Bulk Approval..."):
+                    # FIX: Explicitly use r.NodeNum and alias the subquery
+                    bulk_sql = f"""
+                        INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason, Project)
+                        SELECT DISTINCT 
+                            r.NodeNum, 
+                            TIMESTAMP_TRUNC(r.timestamp, HOUR), 
+                            'TRUE', 
+                            '{selected_project}'
+                        FROM (
+                            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                            UNION ALL
+                            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                        ) AS r
+                        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                        WHERE m.Project = '{selected_project}'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM `{OVERRIDE_TABLE}` AS x 
+                            WHERE x.NodeNum = r.NodeNum 
+                            AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                        )
+                    """
+                    try:
+                        client.query(bulk_sql).result()
+                        st.success(f"All pending data for {selected_project} is now live in the Client Portal.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"Bulk Approval Error: {e}")
+                        st.code(bulk_sql, language="sql")
 
         with tab_scrub:
             ###########
-            # - Tab: Deep Scrub -#
+            # - Tab: Deep Scrub - #
             ###########
             st.subheader("🧹 Deep Data Scrub")
-            st.info("Averages raw measurements to 1-hour intervals.")
-            target = st.radio("Target", ["SensorPush", "Lord"], horizontal=True)
-            t_tbl = f"{PROJECT_ID}.{DATASET_ID}.raw_{target.lower()}"
-            if st.button(f"🧨 Purge & Average {target}"):
-                scrub_sql = f"""
-                    CREATE OR REPLACE TABLE `{t_tbl}` AS 
-                    SELECT TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, NodeNum, AVG(temperature) as temperature
-                    FROM `{t_tbl}` GROUP BY 1, 2
-                """
-                client.query(scrub_sql).result()
-                st.success("Averaged. Status remains 'Pending' (Engineering View Only).")
-                st.cache_data.clear()
+            st.warning("This will average raw data to 1-hour intervals. This cannot be undone.")
+            scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+            t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
+            
+            if st.button(f"🧨 Purge & Average {scrub_target}"):
+                with st.spinner("Processing Raw Data Mean Reduction..."):
+                    # Use NodeNum directly as raw tables are usually simple
+                    scrub_sql = f"""
+                        CREATE OR REPLACE TABLE `{t_table}` AS 
+                        SELECT 
+                            TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
+                            NodeNum, 
+                            AVG(temperature) as temperature
+                        FROM `{t_table}`
+                        WHERE temperature IS NOT NULL
+                        GROUP BY 1, 2
+                    """
+                    try:
+                        client.query(scrub_sql).result()
+                        st.success(f"✅ {scrub_target} table successfully averaged.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"Scrub Error: {e}")
 
         with tab_surgical:
             ###########
