@@ -431,10 +431,8 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
     """
     Merged Version: Uses your preferred Snapshot logic with bulletproof arguments.
     """
+    global convert_val, client
     st.header(f"📊 Project Status: {selected_project}")
-
-# Use the global 'client' defined at the top of your script
-    global client 
 
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar.")
