@@ -1,14 +1,18 @@
-##################################
-# - 1. CONFIGURATION & STYLING - #
-##################################
 import streamlit as st
 import pandas as pd
+import time
+import plotly.express as px
+import plotly.graph_objects as go  # This defines 'go'
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
+import traceback
 import io
 
+##################################
+# - 1. CONFIGURATION & STYLING - #
+##################################
 st.set_page_config(page_title="SoilFreeze Data Lab", layout="wide")
 
 # Database Constants
@@ -17,8 +21,6 @@ PROJECT_ID = "sensorpush-export"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
 # MASTER VISIBILITY SWITCHES
-# Format: "ProjectName": "YYYY-MM-DD HH:MM:SS"
-# Clients will see nothing before this date/time regardless of approval status.
 PROJECT_VISIBILITY_MASKS = {
     "Office": "2026-03-03 15:00:00", 
     "Main_Site": "2026-01-01 00:00:00"
@@ -162,16 +164,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df = df.copy()
     
     # 1. TIMEZONE CONVERSION
-    # Shifting the UTC timestamps to the user's selected display zone
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Adjust axes windows to match the localized zone for correct framing
-    start_local = start_view.astimezone(pytz.timezone(display_tz))
-    end_local = end_view.astimezone(pytz.timezone(display_tz))
+    # Convert start/end views to localized timestamps for the x-axis range
+    tz = pytz.timezone(display_tz)
+    start_local = start_view.astimezone(tz) if hasattr(start_view, 'astimezone') else start_view
+    end_local = end_view.astimezone(tz) if hasattr(end_view, 'astimezone') else end_view
     now_local = pd.Timestamp.now(tz=display_tz)
 
     # 2. UNIT CONVERSION
-    # BigQuery stores everything in Fahrenheit; we convert here if the user selected Celsius
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
         y_range, dt_major = [-30, 30], 5
@@ -179,25 +180,23 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         y_range, dt_major = [-20, 80], 10
 
     # 3. LABELING LOGIC
-    # Priority: Bank Name (if available) -> Depth
     plot_df['label'] = plot_df.apply(
         lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
         else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
     )
     
-    # 4. PLOT MODE (Markers for Admin/Surgical for selection, Lines for standard viewing)
+    # 4. PLOT MODE
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
     plot_mode = 'markers' if is_surgical else 'lines'
     marker_size = 7 if is_surgical else 3
 
-    fig = go.Figure()
+    fig = go.Figure() # This line caused your NameError
     
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
         hover_name = lbl.split('(')[0].strip()
 
         # 5. GAP DETECTION
-        # Prevents "stretching" lines across multi-hour data outages
         if not is_surgical:
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             gap_mask = s_df['gap_hrs'] > 6.0
@@ -219,19 +218,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 7. GRID HIERARCHY (Visual cues for time blocks)
-    # Mondays are black, Midnights are gray, 6-hour intervals are light gray
-    grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
-    for ts in grid_times:
-        if ts.weekday() == 0 and ts.hour == 0:
-            color, width = "Black", 1.2 
-        elif ts.hour == 0:
-            color, width = "Gray", 0.8  
-        else:
-            color, width = "LightGray", 0.3
-        fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
-    # 8. REFERENCE LINES & "NOW" MARKER
+    # 7. REFERENCE LINES
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
@@ -239,7 +226,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 9. FINAL LAYOUT
+    # 8. FINAL LAYOUT
     fig.update_layout(
         title={'text': f"{title} ({display_tz})", 'x': 0},
         plot_bgcolor='white',
