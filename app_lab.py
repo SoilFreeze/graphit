@@ -430,12 +430,15 @@ def render_executive_summary(client, selected_project, unit_label):  # <--- Adde
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
 
-def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
+def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
     Merged Version: Uses your preferred Snapshot logic with bulletproof arguments.
     """
     st.header(f"📊 Project Status: {selected_project}")
-    
+
+# Use the global 'client' defined at the top of your script
+    global client 
+
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar.")
         return
