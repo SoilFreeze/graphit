@@ -104,25 +104,24 @@ def check_admin_access(service_name):
 #- 3. SIDEBAR UI & STATE -#
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
-service = st.sidebar.selectbox("📂 Page", ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
+
+# Define the page list - "🏠 Executive Summary" is now our target landing page
+service = st.sidebar.selectbox("📂 Page", ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Initialize selected_project
+# Robust Project Selection
 selected_project = "All Projects"
-
-if service != "🌐 Global Overview":
-    if client is not None:
-        try:
-            proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-            proj_df = client.query(proj_q).to_dataframe()
-            proj_list = sorted(proj_df['Project'].dropna().unique())
-            options = ["All Projects"] + proj_list
-            selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0)
-        except Exception as e:
-            st.sidebar.error(f"BQ Sidebar Error: {str(e)[:50]}...")
-    else:
-        st.sidebar.warning("Waiting for BigQuery Client...")
+if client is not None:
+    try:
+        proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+        proj_df = client.query(proj_q).to_dataframe()
+        proj_list = sorted(proj_df['Project'].dropna().unique())
+        # Ensure "All Projects" is always the top choice
+        options = ["All Projects"] + proj_list
+        selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker")
+    except Exception as e:
+        st.sidebar.error(f"Sidebar Sync Error: {e}")
 
 
 def convert_val(f_val):
@@ -337,14 +336,14 @@ def render_global_overview():
 def render_executive_summary(client, selected_project, unit_label):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
+    # 1. Fuzzy Filter Logic
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
-        proj_filter = f"AND Project = '{selected_project}'"
+        proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # 1. SQL Query: UNION ALL forces a 'PROJECT TOTAL' row for every project
     summary_q = f"""
         WITH MappedNodes AS (
-            SELECT Project, NodeNum, Location
+            SELECT TRIM(Project) as Project, NodeNum, Location
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata`
             WHERE Project IS NOT NULL {proj_filter}
         ),
@@ -390,11 +389,11 @@ def render_executive_summary(client, selected_project, unit_label):
     """
     
     try:
-        with st.spinner("⚡ Auditing connectivity..."):
+        with st.spinner("⚡ Auditing connectivity for all projects..."):
             df = client.query(summary_q).to_dataframe()
         
         if df.empty:
-            st.warning("⚠️ No data found for the current selection.")
+            st.warning("⚠️ No data found. Check if your Metadata table is populated.")
             return
 
         now_utc = pd.Timestamp.now(tz=pytz.UTC)
@@ -424,11 +423,11 @@ def render_executive_summary(client, selected_project, unit_label):
         health_df = df.apply(process_health_row, axis=1)
 
         # Metrics based on Project Totals rows only
-        totals = df[df['Location'] == '--- PROJECT TOTAL ---']
+        totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
         m1, m2, m3 = st.columns(3)
-        m1.metric("System Nodes", f"{totals['total'].sum()}")
-        m2.metric("System Active", f"{totals['active'].sum()}")
-        m3.metric("Uptime", f"{round((totals['active'].sum()/totals['total'].sum())*100, 1)}%")
+        m1.metric("System Nodes", f"{totals_df['total'].sum()}")
+        m2.metric("System Active", f"{totals_df['active'].sum()}")
+        m3.metric("Uptime", f"{round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0}%")
 
         st.divider()
         st.dataframe(health_df, use_container_width=True, hide_index=True)
@@ -851,20 +850,23 @@ def update_records(pts, df, val):
 # - 12. MAIN ROUTER - #
 ###########
 
-if service == "🌐 Global Overview":
+# We moved Executive Summary to the top so it is the default landing page
+if service == "🏠 Executive Summary":
+    render_executive_summary(client, selected_project, unit_label)
+
+elif service == "🌐 Global Overview":
     render_global_overview()
 
-elif service == "🏠 Executive Summary":
-    # Pass 'client' into the function call here
-    render_executive_summary(client, selected_project, unit_label) 
-
 elif service == "📊 Client Portal":
-    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
+
 elif service == "📉 Node Diagnostics":
-    render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    render_node_diagnostics(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
+
 elif service == "📤 Data Intake Lab":
     if check_admin_access(service):
         render_data_intake_page(selected_project)
+
 elif service == "🛠️ Admin Tools":
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
