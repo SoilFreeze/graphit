@@ -23,6 +23,7 @@ OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
 @st.cache_resource
 def get_bq_client():
+    
     try:
         # These scopes must be requested during credential initialization
         SCOPES = [
@@ -304,11 +305,12 @@ def render_global_overview():
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-def render_executive_summary(selected_project, unit_label):
+def render_executive_summary(client, selected_project, unit_label): # Add client here
+   
     """
     Command Center view: Shows 24-hour health, min/max temps, and delta magnitude.
     """
-    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
+     st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
     st.write("### ↕️ Sorting & View Options")
     c1, c2 = st.columns([1, 1])
