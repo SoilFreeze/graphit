@@ -148,7 +148,7 @@ st.sidebar.subheader("📏 Reference Lines")
 active_refs = []
 if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): active_refs.append((10.2, "Type A"))
-if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))    
+if st.sidebar.checkbox("Type B (26.6°F)", value=False): active_refs.append((26.6, "Type B"))    
 
 # 5. Timezone
 tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
@@ -436,86 +436,60 @@ def render_executive_summary(client, selected_project, unit_label):
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
 
-def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
+def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    The strictly filtered view for clients. 
-    Only shows data where manual_rejections.reason = 'TRUE'.
+    Client-facing view: Only shows 'Approved' data and respects the visibility mask.
     """
-    st.header(f"📊 Project Status: {selected_project}")
-    
-    # 1. FETCH DATA (Client View)
-    with st.spinner("Loading approved portal data..."):
-        p_df = get_universal_portal_data(selected_project, view_mode="client")
-    
-    if p_df.empty:
-        st.info(f"No approved data is currently available for {selected_project}. Data must be approved in Admin Tools.")
+    st.header(f"📊 Client Portal: {selected_project}")
+
+    # 1. Validation: Client Portal requires a specific project
+    if not selected_project or selected_project == "All Projects":
+        st.warning("Please select a specific project in the sidebar to view the Client Portal.")
+        return
+
+    # 2. Date Range Selection
+    c1, c2 = st.columns(2)
+    with c1:
+        start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7))
+    with c2:
+        end_date = st.date_input("End Date", value=datetime.now())
+
+    # Convert dates to UTC timestamps for the query
+    start_ts = pd.Timestamp(start_date).tz_localize(display_tz).tz_convert('UTC')
+    end_ts = pd.Timestamp(end_date).tz_localize(display_tz).tz_convert('UTC') + timedelta(days=1)
+
+    # 3. Fetch Data
+    with st.spinner("Loading approved data..."):
+        # We pass 'client' and 'view_mode=client' to respect the visibility mask
+        df = get_universal_portal_data(selected_project, view_mode="client")
+
+    if df.empty:
+        st.info("No approved data found for this project in the selected range.")
     else:
-        tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
+        # Filter by the user-selected date range
+        mask = (df['timestamp'] >= start_ts) & (df['timestamp'] <= end_ts)
+        filtered_df = df.loc[mask]
 
-        with tab_time:
-            # Viewing window: Default 6 weeks
-            weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
-            end_view = pd.Timestamp.now(tz='UTC')
-            start_view = end_view - timedelta(weeks=weeks_view)
-            
-            for loc in sorted(p_df['Location'].dropna().unique()):
-                with st.expander(f"📈 {loc}", expanded=True):
-                    loc_data = p_df[p_df['Location'] == loc]
-                    fig = build_high_speed_graph(
-                        loc_data, loc, start_view, end_view, 
-                        tuple(active_refs), unit_mode, unit_label, display_tz
-                    )
-                    st.plotly_chart(fig, use_container_width=True, key=f"client_time_{loc}")
+        if filtered_df.empty:
+            st.warning("No data matches the selected date range.")
+        else:
+            # 4. Generate Graph
+            # Ensure build_high_speed_graph is called with all required arguments
+            fig = build_high_speed_graph(
+                df=filtered_df,
+                title=f"Project Temperature: {selected_project}",
+                start_view=start_ts,
+                end_view=end_ts,
+                active_refs=active_refs,
+                unit_mode=unit_mode,
+                unit_label=unit_label,
+                display_tz=display_tz
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-        with tab_depth:
-            st.subheader("📏 Vertical Temperature Profile")
-            p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-            depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
-            
-            for loc in sorted(depth_only['Location'].unique()):
-                with st.expander(f"📏 {loc} Weekly Snapshots", expanded=True):
-                    loc_data = depth_only[depth_only['Location'] == loc].copy()
-                    fig_d = go.Figure()
-                    
-                    # Generate Monday 6AM snapshots for the last 6 weeks
-                    mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
-                    
-                    for m_date in mondays:
-                        target_ts = m_date.replace(hour=6, minute=0, second=0)
-                        # Look for data within +/- 12 hours of the target Monday 6AM
-                        window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                          (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                        
-                        if not window.empty:
-                            snap_list = []
-                            for node in window['NodeNum'].unique():
-                                node_data = window[window['NodeNum'] == node].copy()
-                                node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
-                                snap_list.append(node_data.sort_values('diff').iloc[0])
-                            
-                            snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
-                            fig_d.add_trace(go.Scattergl(
-                                x=snap_df['temperature'].apply(convert_val), 
-                                y=snap_df['Depth_Num'], 
-                                mode='lines+markers', 
-                                name=target_ts.strftime('%m/%d/%y')
-                            ))
-
-                    y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
-                    fig_d.update_layout(
-                        plot_bgcolor='white', height=700,
-                        xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True),
-                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver', showline=True, linecolor='black', mirror=True),
-                        legend=dict(title="Weekly Snapshots (6AM)", orientation="h", y=-0.15)
-                    )
-                    st.plotly_chart(fig_d, use_container_width=True, key=f"client_depth_{loc}")
-
-        with tab_table:
-            # Latest Snapshot Table
-            latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-            latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
-            latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r.get('Depth', '??')} ft", axis=1)
-            st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
+            # 5. Data Table
+            with st.expander("View Raw Data Table"):
+                st.dataframe(filtered_df, use_container_width=True)
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
