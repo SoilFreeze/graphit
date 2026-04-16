@@ -23,19 +23,21 @@ OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
 @st.cache_resource
 def get_bq_client():
-    """Handles authentication with BigQuery."""
     try:
+        # These scopes must be requested during credential initialization
+        SCOPES = [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/drive"
+        ]
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(info)
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             return bigquery.Client(credentials=credentials, project=info["project_id"])
+        # If using local default credentials, scopes are managed via 'gcloud auth'
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
         return None
-
-client = get_bq_client()
-
 ############################
 # - 2. DATA ENGINE LOGIC - #
 ############################
