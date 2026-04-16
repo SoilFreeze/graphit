@@ -6,9 +6,10 @@ from datetime import datetime, timedelta
 import pytz
 
 # --- 1. SETTINGS & PROJECT LOCK ---
-TARGET_PROJECT = "2538"  # Locked to Pump 16 Upgrade
+TARGET_PROJECT = "2538"  # Matches '2538-Ferndale' via LIKE logic
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
+# Reverting to your original table/column naming convention
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
 # Localization
@@ -19,9 +20,14 @@ UNIT_LABEL = "°F"
 # Authenticate BigQuery
 client = bigquery.Client(project=PROJECT_ID)
 
-# --- 2. DATA ENGINE (View Bypass Logic) ---
+# --- 2. DATA ENGINE (Reverted to 'approve' column) ---
 @st.cache_data(ttl=600)
 def get_standalone_data():
+    """
+    Directly queries raw tables + metadata + rejections.
+    Bypasses 'master_data' view to avoid parser errors.
+    Uses 'approve' as the column name for status logic.
+    """
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -35,14 +41,13 @@ def get_standalone_data():
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        -- USE 'LIKE' WITH '%' TO MATCH PARTIAL NAMES (e.g., '2538-Ferndale')
         WHERE m.Project LIKE '{TARGET_PROJECT}%' 
-        AND rej.reason = 'TRUE'
+        AND rej.approve = 'TRUE'  -- Reverted from 'reason' to 'approve'
         AND NOT EXISTS (
             SELECT 1 FROM `{OVERRIDE_TABLE}` m2 
             WHERE m2.NodeNum = r.NodeNum 
             AND m2.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-            AND m2.reason = 'MASKED'
+            AND m2.approve = 'MASKED' -- Reverted from 'reason' to 'approve'
         )
         ORDER BY r.timestamp ASC
     """
@@ -59,12 +64,10 @@ def build_portal_graph(df, title, start_view, end_view):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(DISPLAY_TZ)
     
-    # Scale Y-axis for Fahrenheit
     y_range = [-20, 80]
 
     fig = go.Figure()
     
-    # Plot Lines
     for loc in sorted(pdf['Location'].unique()):
         ldf = pdf[pdf['Location'] == loc]
         fig.add_trace(go.Scattergl(
@@ -92,24 +95,21 @@ def build_portal_graph(df, title, start_view, end_view):
         yaxis=dict(title=UNIT_LABEL, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True, range=y_range),
         height=550,
         hovermode="x unified",
-        margin=dict(r=150) # Room for legend
+        margin=dict(r=150)
     )
     return fig
 
 # --- 4. UI LAYOUT ---
 st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
-# Header
 st.title(f"📊 Pump 16 Upgrade Project: {TARGET_PROJECT}")
 st.caption("Ferndale, Washington | Approved Client Data Only")
 
-# Fetch Data
 df = get_standalone_data()
 
 if df.empty:
     st.warning(f"No approved data found for Project {TARGET_PROJECT}.")
-    st.info("💡 **Action Required:** Ensure you have performed a 'Bulk Approval' for this project in the Admin Tools.")
-    # Show dummy data hint if available
+    st.info("💡 **Check Status:** Ensure data is marked 'TRUE' in the 'approve' column of your rejections table.")
 else:
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profiles", "📋 Latest Readings"])
     
@@ -118,7 +118,6 @@ else:
         end = pd.Timestamp.now(tz='UTC')
         start = end - timedelta(weeks=weeks)
         
-        # Group by location for clear expanders
         for loc in sorted(df['Location'].unique()):
             with st.expander(f"📍 {loc}", expanded=True):
                 loc_df = df[df['Location'] == loc]
@@ -139,7 +138,6 @@ else:
                     window = depth_df[(depth_df['Location'] == loc) & 
                                       (depth_df['timestamp'].between(target-timedelta(hours=12), target+timedelta(hours=12)))]
                     if not window.empty:
-                        # Find closest reading to 6AM for each node
                         snap = (window.assign(d=(window['timestamp']-target).abs())
                                 .sort_values(['NodeNum','d'])
                                 .drop_duplicates('NodeNum')
@@ -159,11 +157,8 @@ else:
                 st.plotly_chart(fig_d, use_container_width=True)
 
     with tab_table:
-        # Summary of most recent data points
         latest = df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}{UNIT_LABEL}")
-        
-        # Display localized timestamp
         latest['Last Seen'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%m/%d %H:%M')
         
         st.dataframe(
