@@ -103,54 +103,51 @@ def check_admin_access(service_name):
 #- 3. SIDEBAR UI & STATE -#
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
-
-# --- 1. INITIALIZE FALLBACKS (Prevents NameError) ---
-# These ensure the variables exist even if a query fails
-service = "🏠 Executive Summary"
-unit_mode = "Fahrenheit"
-unit_label = "°F"
-selected_project = "All Projects"
-display_tz = "UTC"
-active_refs = [(32.0, "Freezing")]
-
-# --- 2. SIDEBAR WIDGETS ---
-service = st.sidebar.selectbox(
-    "📂 Page", 
-    ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
-)
-
+service = st.sidebar.selectbox("📂 Page", ["🌐 Global Overview", "🏠 Executive Summary", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"])
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Robust Project Selection
-if client is not None:
+# Ensure project selection is visible for all relevant pages
+
+
+def convert_val(f_val):
+    """Converts Fahrenheit from DB to selected unit."""
+    if f_val is None or pd.isna(f_val): return None
+    return (f_val - 32) * 5/9 if unit_mode == "Celsius" else f_val
+
+# 3. Project Selection (Sidebar)
+target_pages = [
+    "📊 Client Portal", 
+    "📉 Node Diagnostics", 
+    "🛠️ Admin Tools", 
+    "🏠 Executive Summary",
+    "📤 Data Intake Lab"  # <-- Make sure this matches your selectbox string exactly
+]
+
+if service in target_pages:
     try:
-        proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+        # Fetching project list directly from metadata for the sidebar
+        proj_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
         proj_df = client.query(proj_q).to_dataframe()
-        proj_list = sorted(proj_df['Project'].dropna().unique())
-        options = ["All Projects"] + proj_list
-        selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_final")
+        
+        # This creates the dropdown in the sidebar
+        selected_project = st.sidebar.selectbox(
+            "🎯 Active Project", 
+            sorted(proj_df['Project'].dropna().unique()),
+            key="sidebar_project_picker"
+        )
     except Exception as e:
-        st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
-        selected_project = "All Projects"
+        st.sidebar.warning("Could not load project list from BigQuery.")
 
-# Reference Lines
+# 4. Reference Lines
 st.sidebar.subheader("📏 Reference Lines")
-active_refs = [] # Reset and rebuild based on checkboxes
-if st.sidebar.checkbox("Freezing (32°F)", value=True): 
-    active_refs.append((32.0, "Freezing"))
-if st.sidebar.checkbox("Type B (26.6°F)", value=False): 
-    active_refs.append((26.6, "Type B"))
-if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
-    active_refs.append((10.2, "Type A"))
+active_refs = []
+if st.sidebar.checkbox("Freezing (32°F)", value=True): active_refs.append((32.0, "Freezing"))
+if st.sidebar.checkbox("Type B (26.6°F)", value=True): active_refs.append((26.6, "Type B"))
 
-# Timezone Display
+# 5. Timezone Display
 tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
-display_tz = {
-    "UTC": "UTC", 
-    "Local (US/Eastern)": "US/Eastern", 
-    "Local (US/Pacific)": "US/Pacific"
-}[tz_mode]
+display_tz = {"UTC": "UTC", "Local (US/Eastern)": "US/Eastern", "Local (US/Pacific)": "US/Pacific"}[tz_mode]
 
 ########################
 #- 4. GRAPHING ENGINE -#
@@ -322,218 +319,197 @@ def render_global_overview():
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-def render_executive_summary(client, selected_project, unit_label):
-    st.header(f"🏠 Executive Summary: Health Monitor")
+def render_executive_summary(client, selected_project, unit_label):  # <--- Added 'client' here
+    """
+    Command Center view: Shows 24-hour health, min/max temps, and delta magnitude.
+    """
+    st.header(f"🏠 Executive Summary: {selected_project if selected_project else 'All Projects'}")
     
-    # 1. Fuzzy Filter Logic
-    proj_filter = ""
-    if selected_project and selected_project != "All Projects":
-        proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
-
+    st.write("### ↕️ Sorting & View Options")
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        sort_choice = st.selectbox("Sort By", ["None", "Hours Since Last Seen", "Delta Magnitude"], key="summary_sort")
+    with c2:
+        sort_order = st.radio("Order", ["Descending", "Ascending"], horizontal=True, key="summary_order")
+    
+    # 1. SQL Query Construction
     summary_q = f"""
-        WITH MappedNodes AS (
-            SELECT TRIM(Project) as Project, NodeNum, Location
-            FROM `{PROJECT_ID}.{DATASET_ID}.metadata`
-            WHERE Project IS NOT NULL {proj_filter}
-        ),
-        RecentReporting AS (
-            SELECT r.NodeNum, MAX(r.timestamp) as last_ping
-            FROM (
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                UNION ALL
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) AS r
-            WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-            GROUP BY NodeNum
-        ),
-        HistoricalPings AS (
-            SELECT NodeNum, MAX(timestamp) as ever_ping
-            FROM (
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                UNION ALL
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) GROUP BY NodeNum
-        ),
-        JoinedData AS (
+        WITH RecentData AS (
             SELECT 
-                m.Project, m.Location, m.NodeNum,
-                CASE WHEN r.NodeNum IS NOT NULL THEN 1 ELSE 0 END as is_active,
-                h.ever_ping
-            FROM MappedNodes m
-            LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
-            LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
-        ),
-        LocationStats AS (
-            SELECT Project, Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
-            FROM JoinedData GROUP BY Project, Location
-        ),
-        ProjectTotals AS (
-            SELECT Project, '--- PROJECT TOTAL ---' as Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
-            FROM JoinedData GROUP BY Project
+                r.NodeNum, r.timestamp, r.temperature, 
+                m.Project, m.Location, m.Bank, m.Depth,
+                FIRST_VALUE(r.temperature) OVER(PARTITION BY r.NodeNum ORDER BY r.timestamp ASC) as first_temp_24h,
+                ROW_NUMBER() OVER(PARTITION BY r.NodeNum ORDER BY r.timestamp DESC) as latest_rank
+            FROM (
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                UNION ALL
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+            WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            {"AND m.Project = '" + selected_project + "'" if selected_project else ""}
         )
-        SELECT * FROM ProjectTotals
-        UNION ALL
-        SELECT * FROM LocationStats
-        ORDER BY Project ASC, (Location = '--- PROJECT TOTAL ---') DESC, Location ASC
+        SELECT 
+            NodeNum, Project, Location, Bank, Depth, timestamp, temperature,
+            first_temp_24h,
+            MIN(temperature) OVER(PARTITION BY NodeNum) as min_24h,
+            MAX(temperature) OVER(PARTITION BY NodeNum) as max_24h
+        FROM RecentData
+        WHERE latest_rank = 1
     """
     
     try:
-        with st.spinner("⚡ Auditing connectivity for all projects..."):
-            df = client.query(summary_q).to_dataframe()
+        with st.spinner("⚡ Fetching Command Center Snapshot..."):
+            raw_summary_df = client.query(summary_q).to_dataframe()
         
-        if df.empty:
-            st.warning("⚠️ No data found. Check if your Metadata table is populated.")
-            return
-
-        now_utc = pd.Timestamp.now(tz=pytz.UTC)
-
-        def process_health_row(row):
-            is_total = row['Location'] == '--- PROJECT TOTAL ---'
-            last_ts = row['last_up']
+        if raw_summary_df.empty:
+            st.warning("📡 No active sensors seen in the last 24 hours.")
+        else:
+            now_utc = pd.Timestamp.now(tz=pytz.UTC)
             
-            if pd.notnull(last_ts):
-                last_ts = last_ts.tz_convert(pytz.UTC)
-                gap = round((now_utc - last_ts).total_seconds() / 3600, 1)
-                icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
-                time_str = f"{gap}h ago {icon}"
-            else:
-                time_str = "Never Seen ⚪"
+            # 2. Row Processing Function
+            def process_summary_row(row):
+                # Ensure timestamp is UTC localized
+                ts = row['timestamp'].tz_localize(pytz.UTC) if row['timestamp'].tzinfo is None else row['timestamp']
+                hrs_ago = int((now_utc - ts).total_seconds() / 3600)
+                
+                # Logic Chain for Health Icons
+                if hrs_ago < 6:
+                    status_icon = "🟢"
+                elif hrs_ago < 12:
+                    status_icon = "🟡"
+                elif hrs_ago < 24:
+                    status_icon = "🟠"
+                else:
+                    status_icon = "🔴"
+                
+                # Temperature Delta calculation
+                raw_delta = row['temperature'] - row['first_temp_24h']
+                
+                # Formatting Position Label
+                bank_val = str(row.get('Bank', '')).strip().lower()
+                if bank_val in ["", "none", "nan", "null"]:
+                    pos_label = f"{row.get('Depth', '??')} ft"
+                else:
+                    pos_label = f"Bank {row['Bank']}"
+                
+                return pd.Series({
+                    "Project": row['Project'],
+                    "Node": row['NodeNum'],
+                    "Location": row['Location'],
+                    "Position": pos_label,
+                    "Min": f"{round(convert_val(row['min_24h']), 1)}{unit_label}",
+                    "Max": f"{round(convert_val(row['max_24h']), 1)}{unit_label}",
+                    "Delta_Val": raw_delta, 
+                    "Delta": f"{'+' if raw_delta > 0 else ''}{round(raw_delta, 1)}°F",
+                    "Hours_Ago": hrs_ago,
+                    "Last Seen": f"{ts.strftime('%m/%d %H:%M')} ({hrs_ago}h) {status_icon}"
+                })
 
-            return pd.Series({
-                "Project": f"⭐ {row['Project']}" if is_total else row['Project'],
-                "Location": row['Location'],
-                "Mapped": row['total'],
-                "Active": row['active'],
-                "Ratio": f"{row['active']}/{row['total']}",
-                "Status": "✅ Healthy" if row['total'] == row['active'] else f"⚠️ {row['total'] - row['active']} Offline",
-                "Last Activity": time_str
-            })
+            # 3. Apply processing and sorting
+            summary_df = raw_summary_df.apply(process_summary_row, axis=1)
 
-        health_df = df.apply(process_health_row, axis=1)
+            is_asc = (sort_order == "Ascending")
+            if sort_choice == "Hours Since Last Seen":
+                summary_df = summary_df.sort_values(by="Hours_Ago", ascending=is_asc)
+            elif sort_choice == "Delta Magnitude":
+                # Sorts by absolute value of change
+                summary_df = summary_df.sort_values(by="Delta_Val", key=abs, ascending=is_asc)
 
-        # Metrics based on Project Totals rows only
-        totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
-        m1, m2, m3 = st.columns(3)
-        m1.metric("System Nodes", f"{totals_df['total'].sum()}")
-        m2.metric("System Active", f"{totals_df['active'].sum()}")
-        m3.metric("Uptime", f"{round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0}%")
-
-        st.divider()
-        st.dataframe(health_df, use_container_width=True, hide_index=True)
-
+            # 4. Final Display
+            st.dataframe(
+                summary_df[["Project", "Node", "Location", "Position", "Min", "Max", "Delta", "Last Seen"]],
+                use_container_width=True, 
+                hide_index=True
+            )
+            
     except Exception as e:
         st.error(f"Executive Summary Error: {traceback.format_exc()}")
+
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
 
-def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
+def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    The Engineering-Approved Client View.
-    Features: 1-12 Week Slider, Tabs for Graph/Table, and Visibility Masking.
+    The strictly filtered view for clients. 
+    Only shows data where manual_rejections.reason = 'TRUE'.
     """
-    # 1. Page Header & Initial Validation
-    st.header(f"📊 Client Portal: {selected_project}")
-
-    if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view approved data.")
-        return
-
-    # 2. View Period Selection (The Slider)
-    st.write("### 🕒 View Period")
-    weeks_to_show = st.slider(
-        "Select how many weeks of history to display:", 
-        min_value=1, 
-        max_value=12, 
-        value=2, 
-        key="portal_weeks_slider"
-    )
+    st.header(f"📊 Project Status: {selected_project}")
     
-    # Calculate UTC window for BigQuery
-    now_utc = pd.Timestamp.now(tz='UTC')
-    start_view_utc = now_utc - timedelta(weeks=weeks_to_show)
-
-    # 3. Data Fetching via the Engine
-    # This call triggers the SQL that checks 'approved = TRUE' and visibility masks
-    with st.spinner(f"🔍 Accessing approved records for {selected_project}..."):
-        try:
-            df = get_universal_portal_data(selected_project, view_mode="client")
-        except Exception as e:
-            st.error(f"📡 Data Engine Error: {e}")
-            return
-
-    # --- OPTIONAL DIAGNOSTIC: Hidden by default, useful if tabs don't show ---
-    with st.expander("🛠️ Connection Diagnostic"):
-        st.write(f"**Raw Rows Found:** {len(df)}")
-        if not df.empty:
-            st.write(f"**Data Range:** {df['timestamp'].min()} to {df['timestamp'].max()}")
-            st.write(f"**Columns:** {', '.join(df.columns.tolist())}")
-
-    # 4. Rendering Logic
-    if df.empty:
-        st.warning(f"No approved data found for project: {selected_project}")
-        st.info("Data only appears here once it has been marked as 'Approved' in Admin Tools and has passed the visibility start date.")
+    # 1. FETCH DATA (Client View)
+    with st.spinner("Loading approved portal data..."):
+        p_df = get_universal_portal_data(selected_project, view_mode="client")
+    
+    if p_df.empty:
+        st.info(f"No approved data is currently available for {selected_project}. Data must be approved in Admin Tools.")
     else:
-        # Convert timestamp to datetime if not already
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # Filter local dataframe to the user's slider choice
-        mask = (df['timestamp'] >= start_view_utc) & (df['timestamp'] <= now_utc)
-        filtered_df = df.loc[mask].copy()
+        tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
-        if filtered_df.empty:
-            st.warning(f"No data available within the selected {weeks_to_show}-week window.")
-        else:
-            # --- THE TABS ---
-            tab_graph, tab_data = st.tabs(["📈 Temperature Graph", "📋 Data Table"])
-
-            with tab_graph:
-                try:
-                    # Pass the filtered data to our standardized Plotly engine
+        with tab_time:
+            # Viewing window: Default 6 weeks
+            weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
+            end_view = pd.Timestamp.now(tz='UTC')
+            start_view = end_view - timedelta(weeks=weeks_view)
+            
+            for loc in sorted(p_df['Location'].dropna().unique()):
+                with st.expander(f"📈 {loc}", expanded=True):
+                    loc_data = p_df[p_df['Location'] == loc]
                     fig = build_high_speed_graph(
-                        df=filtered_df,
-                        title=f"Approved Readings: {selected_project}",
-                        start_view=start_view_utc,
-                        end_view=now_utc,
-                        active_refs=active_refs,
-                        unit_mode=unit_mode,
-                        unit_label=unit_label,
-                        display_tz=display_tz
+                        loc_data, loc, start_view, end_view, 
+                        tuple(active_refs), unit_mode, unit_label, display_tz
                     )
-                    st.plotly_chart(fig, use_container_width=True)
-                except Exception as g_err:
-                    st.error(f"Graphing Engine Failure: {g_err}")
+                    st.plotly_chart(fig, use_container_width=True, key=f"client_time_{loc}")
 
-            with tab_data:
-                st.subheader("Tabular View & Export")
-                
-                # Format for display: Shift to user's selected Timezone
-                display_df = filtered_df.copy()
-                display_df['timestamp'] = (
-                    display_df['timestamp']
-                    .dt.tz_convert(display_tz)
-                    .dt.strftime('%Y-%m-%d %H:%M')
-                )
-                
-                # Show only client-relevant columns
-                cols_to_show = ["timestamp", "Location", "Bank", "Depth", "temperature"]
-                # Only show columns that actually exist in the dataframe
-                available_cols = [c for c in cols_to_show if c in display_df.columns]
-                
-                st.dataframe(
-                    display_df[available_cols], 
-                    use_container_width=True, 
-                    hide_index=True
-                )
-                
-                # CSV Download Button
-                csv = display_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="💾 Download Approved Data (CSV)",
-                    data=csv,
-                    file_name=f"{selected_project}_approved_data.csv",
-                    mime="text/csv"
-                )
+        with tab_depth:
+            st.subheader("📏 Vertical Temperature Profile")
+            p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+            depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
+            
+            for loc in sorted(depth_only['Location'].unique()):
+                with st.expander(f"📏 {loc} Weekly Snapshots", expanded=True):
+                    loc_data = depth_only[depth_only['Location'] == loc].copy()
+                    fig_d = go.Figure()
+                    
+                    # Generate Monday 6AM snapshots for the last 6 weeks
+                    mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
+                    
+                    for m_date in mondays:
+                        target_ts = m_date.replace(hour=6, minute=0, second=0)
+                        # Look for data within +/- 12 hours of the target Monday 6AM
+                        window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                          (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                        
+                        if not window.empty:
+                            snap_list = []
+                            for node in window['NodeNum'].unique():
+                                node_data = window[window['NodeNum'] == node].copy()
+                                node_data['diff'] = (node_data['timestamp'] - target_ts).abs()
+                                snap_list.append(node_data.sort_values('diff').iloc[0])
+                            
+                            snap_df = pd.DataFrame(snap_list).sort_values('Depth_Num')
+                            fig_d.add_trace(go.Scattergl(
+                                x=snap_df['temperature'].apply(convert_val), 
+                                y=snap_df['Depth_Num'], 
+                                mode='lines+markers', 
+                                name=target_ts.strftime('%m/%d/%y')
+                            ))
+
+                    y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
+                    fig_d.update_layout(
+                        plot_bgcolor='white', height=700,
+                        xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True),
+                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver', showline=True, linecolor='black', mirror=True),
+                        legend=dict(title="Weekly Snapshots (6AM)", orientation="h", y=-0.15)
+                    )
+                    st.plotly_chart(fig_d, use_container_width=True, key=f"client_depth_{loc}")
+
+        with tab_table:
+            # Latest Snapshot Table
+            latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
+            latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(convert_val(x), 1)}{unit_label}")
+            latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r.get('Depth', '??')} ft", axis=1)
+            st.dataframe(latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
@@ -866,42 +842,20 @@ def update_records(pts, df, val):
 # - 12. MAIN ROUTER - #
 ###########
 
-# 1. Page Mapping Dictionary
-# This mapping ensures the router knows exactly which function to call
-PAGES = {
-    "🏠 Executive Summary": render_executive_summary,
-    "🌐 Global Overview": render_global_overview,
-    "📊 Client Portal": render_client_portal,
-    "📉 Node Diagnostics": render_node_diagnostics,
-    "📤 Data Intake Lab": render_data_intake_page,
-    "🛠️ Admin Tools": render_admin_page
-}
+if service == "🌐 Global Overview":
+    render_global_overview()
 
-# 2. Execution Logic
-if service in PAGES:
-    func = PAGES[service]
-    
-    try:
-        if service == "🏠 Executive Summary":
-            func(client, selected_project, unit_label)
-            
-        elif service == "🌐 Global Overview":
-            func()
-            
-        elif service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
-            # Admin tools requires auth check first
-            if service == "🛠️ Admin Tools":
-                if check_admin_access(service):
-                    func(selected_project, display_tz, unit_mode, unit_label, active_refs)
-            else:
-                func(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
-                
-        elif service == "📤 Data Intake Lab":
-            if check_admin_access(service):
-                func(selected_project)
-                
-    except NameError as e:
-        st.error(f"Execution Error: {e}")
-        st.info("The app detected a missing reference. Trying a hard refresh usually fixes this.")
-        if st.button("Hard Refresh App"):
-            st.rerun()
+elif service == "🏠 Executive Summary":
+    # Pass 'client' into the function call here
+    render_executive_summary(client, selected_project, unit_label) 
+
+elif service == "📊 Client Portal":
+    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
+elif service == "📉 Node Diagnostics":
+    render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
+elif service == "📤 Data Intake Lab":
+    if check_admin_access(service):
+        render_data_intake_page(selected_project)
+elif service == "🛠️ Admin Tools":
+    if check_admin_access(service):
+        render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
