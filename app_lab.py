@@ -158,8 +158,8 @@ display_tz = {
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Standard Plotly engine for the entire app.
-    Restored with Grid Hierarchy (Mondays/Midnights) and localized axis framing.
+    Standard Plotly engine with Grid Hierarchy (Mondays/Midnights) 
+    and localized axis framing restored.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -169,26 +169,26 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 1. TIMEZONE CONVERSION
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Adjust axes windows to match the localized zone for correct framing
+    # Localize window boundaries for the X-axis
     tz = pytz.timezone(display_tz)
     start_local = start_view.astimezone(tz) if hasattr(start_view, 'astimezone') else start_view
     end_local = end_view.astimezone(tz) if hasattr(end_view, 'astimezone') else end_view
     now_local = pd.Timestamp.now(tz=display_tz)
 
-    # 2. UNIT CONVERSION
+    # 2. UNIT CONVERSION & AXIS SCALING
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
         y_range, dt_major = [-30, 30], 5
     else:
         y_range, dt_major = [-20, 80], 10
 
-    # 3. LABELING LOGIC
+    # 3. LABELING LOGIC (Bank vs Depth)
     plot_df['label'] = plot_df.apply(
         lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
         else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
     )
     
-    # 4. PLOT MODE
+    # 4. PLOT STYLE (Lines for portal, dots for diagnostics)
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
     plot_mode = 'markers' if is_surgical else 'lines'
     marker_size = 7 if is_surgical else 3
@@ -197,9 +197,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
     for lbl in sorted(plot_df['label'].unique()):
         s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
-        hover_name = lbl.split('(')[0].strip()
-
-        # 5. GAP DETECTION
+        
+        # 5. GAP DETECTION (Prevents lines from jumping across missing data)
         if not is_surgical:
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             gap_mask = s_df['gap_hrs'] > 6.0
@@ -217,27 +216,27 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             mode=plot_mode,
             marker=dict(size=marker_size, opacity=0.8 if is_surgical else 1.0),
             connectgaps=False,
-            customdata=[hover_name] * len(s_df),
-            hovertemplate=f"<b>%{{customdata}}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
+            hovertemplate=f"<b>{lbl.split('(')[0]}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
         ))
 
-    # 7. RESTORED GRID HIERARCHY
+    # 7. GRID HIERARCHY (The "Engineering" Look)
     grid_times = pd.date_range(start=start_local, end=end_local, freq='6h', tz=display_tz)
     for ts in grid_times:
         if ts.weekday() == 0 and ts.hour == 0:
-            color, width = "Black", 1.2 # Mondays
+            color, width = "Black", 1.2  # Heavy line for Mondays
         elif ts.hour == 0:
-            color, width = "Gray", 0.8  # Midnights
+            color, width = "Gray", 0.8   # Medium line for Midnights
         else:
-            color, width = "LightGray", 0.3 # 6-hour marks
+            color, width = "LightGray", 0.3 # Light line for 6-hour blocks
         fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-    # 8. REFERENCE LINES & "NOW" MARKER
+    # 8. REFERENCE LINES & NOW MARKER
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right")
 
+    # The Red vertical line for "Now"
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
     # 9. FINAL LAYOUT
@@ -253,7 +252,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             linecolor='black', 
             mirror=True, 
             tickformat='%b %d\n%H:%M',
-            gridcolor='rgba(0,0,0,0)' # Hide default grid to use our custom hierarchy
+            gridcolor='rgba(0,0,0,0)' # Hide default grid to show our custom hierarchy
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})", 
