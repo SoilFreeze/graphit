@@ -52,52 +52,59 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Fetches data and joins with the manual_rejections table.
+    Fetches data and joins with the manual_rejections table for status.
     - Engineering view: Shows everything except 'FALSE' (Deleted).
     - Client view: Shows ONLY 'TRUE' (Approved).
     """
     
-    # We use 'reason' for filtering because that is the column name in manual_rejections
+    # 1. Define the Approval Filter based on your 'reason' column in manual_rejections
     if view_mode == "client":
         approval_filter = "AND rej.reason = 'TRUE'"
     else:
-        # Engineering sees everything NOT explicitly deleted
+        # Engineering sees everything NOT explicitly deleted ('FALSE')
         approval_filter = "AND (rej.reason IS NULL OR rej.reason != 'FALSE')"
 
+    # 2. Construct Query
+    # We ensure UnifiedRaw and Metadata are joined BEFORE the filter is applied
     query = f"""
-        WITH UnifiedRaw AS (
+        SELECT 
+            r.NodeNum, 
+            r.timestamp, 
+            r.temperature,
+            m.Location, 
+            m.Bank, 
+            m.Depth, 
+            m.Project,
+            rej.reason as is_approved 
+        FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ),
-        JoinedData AS (
-            SELECT 
-                r.NodeNum, r.timestamp, r.temperature,
-                m.Location, m.Bank, m.Depth, m.Project,
-                # Mapping the 'reason' column from the schema to our is_approved status
-                rej.reason as is_approved 
-            FROM UnifiedRaw r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` m ON r.NodeNum = m.NodeNum
-            LEFT JOIN `{OVERRIDE_TABLE}` rej 
-                ON r.NodeNum = rej.NodeNum 
-                AND TIMESTAMP_TRUNC(TIMESTAMP_ADD(r.timestamp, INTERVAL 30 MINUTE), HOUR) = 
-                    TIMESTAMP_TRUNC(TIMESTAMP_ADD(rej.timestamp, INTERVAL 30 MINUTE), HOUR)
-        )
-        SELECT * FROM JoinedData
-        WHERE Project = '{project_id}'
+        ) AS r
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m 
+            ON r.NodeNum = m.NodeNum
+        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+            ON r.NodeNum = rej.NodeNum 
+            AND TIMESTAMP_TRUNC(TIMESTAMP_ADD(r.timestamp, INTERVAL 30 MINUTE), HOUR) = 
+                TIMESTAMP_TRUNC(TIMESTAMP_ADD(rej.timestamp, INTERVAL 30 MINUTE), HOUR)
+        WHERE m.Project = '{project_id}'
         {approval_filter}
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-        ORDER BY Location ASC, timestamp ASC
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        ORDER BY m.Location ASC, r.timestamp ASC
     """
+    
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            # Ensure Bank exists even if null in metadata
             if 'Bank' not in df.columns:
                 df['Bank'] = ""
         return df
     except Exception as e:
         st.error(f"BigQuery Error in Data Engine: {e}")
+        # Log the query for debugging if it fails again
+        st.code(query, language="sql")
         return pd.DataFrame()
 
 def check_admin_access():
