@@ -21,6 +21,8 @@ PROJECT_ID = "sensorpush-export"
 # manual_rejections is our override table for status flags
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
+client = get_bq_client()
+
 @st.cache_resource
 def get_bq_client():
     
@@ -305,7 +307,7 @@ def render_global_overview():
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-def render_executive_summary(selected_project, unit_label):
+def render_executive_summary(client, selected_project, unit_label):  # <--- Added 'client' here
     """
     Command Center view: Shows 24-hour health, min/max temps, and delta magnitude.
     """
@@ -843,8 +845,11 @@ def update_records(pts, df, val):
 
 if service == "🌐 Global Overview":
     render_global_overview()
+
 elif service == "🏠 Executive Summary":
-    render_executive_summary(selected_project, unit_label)
+    # Pass 'client' into the function call here
+    render_executive_summary(client, selected_project, unit_label) 
+
 elif service == "📊 Client Portal":
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 elif service == "📉 Node Diagnostics":
