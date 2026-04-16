@@ -641,7 +641,7 @@ def render_data_intake_page(selected_project):
             except Exception:
                 st.error(f"Ingestion Error: {traceback.format_exc()}")
 
-   with tab_export:
+    with tab_export:
         st.subheader("📥 Export Project Data")
         if not selected_project:
             st.warning("Select a project in the sidebar.")
