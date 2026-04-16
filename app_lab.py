@@ -426,7 +426,26 @@ def render_executive_summary(client, selected_project, unit_label):
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
 ###########
+def render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    Client-facing view. We've added explicit internal checks to prevent
+    the function from crashing if a global variable flickers.
+    """
+    # Defensive check: if any required arg is missing/None, stop here
+    if any(v is None for v in [client, display_tz, unit_mode, active_refs]):
+        st.error("Connection data is temporarily unavailable. Please refresh the page.")
+        return
 
+    st.header(f"📊 Client Portal: {selected_project}")
+
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar.")
+        return
+
+    # Rest of your tab and graph logic...
+    st.write("### 🕒 View Period")
+    weeks = st.slider("Weeks back:", 1, 12, 2, key="client_slider")
+    
 def render_node_diagnostics(client, selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
     Engineering view: High-detail time series + Temperature vs. Depth vertical profiles.
@@ -867,22 +886,42 @@ def update_records(pts, df, val):
 # - 12. MAIN ROUTER - #
 ###########
 
-if service == "🏠 Executive Summary":
-    render_executive_summary(client, selected_project, unit_label)
+# 1. Page Mapping Dictionary
+# This mapping ensures the router knows exactly which function to call
+PAGES = {
+    "🏠 Executive Summary": render_executive_summary,
+    "🌐 Global Overview": render_global_overview,
+    "📊 Client Portal": render_client_portal,
+    "📉 Node Diagnostics": render_node_diagnostics,
+    "📤 Data Intake Lab": render_data_intake_page,
+    "🛠️ Admin Tools": render_admin_page
+}
 
-elif service == "🌐 Global Overview":
-    render_global_overview()
-
-elif service == "📊 Client Portal":
-    render_client_portal(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
-
-elif service == "📉 Node Diagnostics":
-    render_node_diagnostics(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
-
-elif service == "📤 Data Intake Lab":
-    if check_admin_access(service):
-        render_data_intake_page(selected_project)
-
-elif service == "🛠️ Admin Tools":
-    if check_admin_access(service):
-        render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+# 2. Execution Logic
+if service in PAGES:
+    func = PAGES[service]
+    
+    try:
+        if service == "🏠 Executive Summary":
+            func(client, selected_project, unit_label)
+            
+        elif service == "🌐 Global Overview":
+            func()
+            
+        elif service in ["📊 Client Portal", "📉 Node Diagnostics", "🛠️ Admin Tools"]:
+            # Admin tools requires auth check first
+            if service == "🛠️ Admin Tools":
+                if check_admin_access(service):
+                    func(selected_project, display_tz, unit_mode, unit_label, active_refs)
+            else:
+                func(client, selected_project, display_tz, unit_mode, unit_label, active_refs)
+                
+        elif service == "📤 Data Intake Lab":
+            if check_admin_access(service):
+                func(selected_project)
+                
+    except NameError as e:
+        st.error(f"Execution Error: {e}")
+        st.info("The app detected a missing reference. Trying a hard refresh usually fixes this.")
+        if st.button("Hard Refresh App"):
+            st.rerun()
