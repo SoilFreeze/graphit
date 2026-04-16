@@ -305,23 +305,32 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 ##################
 
 ###########
-#- 5. GLOBAL OVERVIEW -
+# - 5. PAGE: GLOBAL OVERVIEW - #
 ###########
-if service == "🌐 Global Overview":
+
+def render_global_overview():
+    """
+    Shows all pipes/banks for a selected project in one scrolling view.
+    """
     st.header("🌐 Global Project Overview")
     
-    # We retrieve the project list from the metadata table
+    # 1. Project Selection
     proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
-    available_projects = sorted(client.query(proj_list_q).to_dataframe()['Project'].tolist())
-    target_project = st.selectbox("🏗️ Select a Project", available_projects, key="global_proj_picker")
+    try:
+        available_projects = sorted(client.query(proj_list_q).to_dataframe()['Project'].tolist())
+        target_project = st.selectbox("🏗️ Select a Project", available_projects, key="global_proj_picker")
+    except Exception as e:
+        st.error(f"Metadata Error: {e}")
+        return
 
     if target_project:
         with st.spinner(f"Loading {target_project} Engineering View..."):
-            # This calls the fixed Data Engine logic from the previous step
+            # Ensure get_universal_portal_data is also defined above this!
             p_df = get_universal_portal_data(target_project, view_mode="engineering")
 
         if not p_df.empty:
-            lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4)
+            # Graphing logic
+            lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback")
             now_utc = pd.Timestamp.now(tz='UTC')
             end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0)
             start_view = end_view - timedelta(weeks=lookback)
