@@ -52,27 +52,24 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     """
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    if view_mode == "client":
-        # Logic: Must be marked 'TRUE' AND must NOT be marked 'MASKED'
-        query_filter = f"""
-            AND r.timestamp >= '{cutoff}'
-            AND rej.reason = 'TRUE'
-            AND NOT EXISTS (
-                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
-                WHERE m.NodeNum = r.NodeNum 
-                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                AND m.reason = 'MASKED'
-            )
-        """
-    else:
-        # Engineering sees everything except explicit deletions ('FALSE')
-        query_filter = "AND (rej.reason IS NULL OR rej.reason != 'FALSE')"
-
+   if view_mode == "client":
+    query_filter = f"""
+        ...
+        AND rej.status = 'TRUE'
+        AND NOT EXISTS (
+            SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+            ...
+            AND m.status = 'MASKED'
+        )
+    """
+else:
+    query_filter = "AND (rej.status IS NULL OR rej.status != 'FALSE')"
+    
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
             m.Location, m.Bank, m.Depth, m.Project,
-            rej.reason as is_approved 
+            rej.status as is_approved 
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
@@ -295,7 +292,7 @@ def render_global_overview():
 
     if target_project:
         with st.spinner(f"Syncing {target_project} (Engineering View)..."):
-            # Engineering view shows all data not explicitly rejected ('FALSE') in 'reason' column
+            # Engineering view shows all data not explicitly rejected ('FALSE') in 'status' column
             p_df = get_universal_portal_data(target_project, view_mode="engineering")
 
         if not p_df.empty:
@@ -760,7 +757,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         if st.button(f"🚀 Approve {selected_project} Range", use_container_width=True):
             with st.spinner("Writing approvals to master override..."):
                 bulk_sql = f"""
-                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
+                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, status)
                     SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
                     FROM (
                         SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
@@ -818,7 +815,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
                     with st.spinner("Applying masks..."):
                         mask_sql = f"""
-                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, reason)
+                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, status)
                             SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
                             FROM (
                                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
@@ -845,7 +842,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     with st.spinner("Clearing project masks..."):
                         clear_mask_sql = f"""
                             DELETE FROM `{OVERRIDE_TABLE}`
-                            WHERE reason = 'MASKED'
+                            WHERE status = 'MASKED'
                             AND NodeNum IN (
                                 SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` 
                                 WHERE Project = '{selected_project}'
@@ -957,8 +954,8 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
 
 def update_records(pts, df, val):
     """
-    Final corrected version: Writes status updates into the 'reason' column.
-    Matches schema: NodeNum (STRING), timestamp (TIMESTAMP), reason (STRING).
+    Final corrected version: Writes status updates into the 'status' column.
+    Matches schema: NodeNum (STRING), timestamp (TIMESTAMP), status (STRING).
     """
     recs = []
     for p in pts:
@@ -969,7 +966,7 @@ def update_records(pts, df, val):
         recs.append({
             "NodeNum": str(node), 
             "timestamp": ts, 
-            "reason": val
+            "status": val
         })
     
     if recs:
