@@ -52,7 +52,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     """
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-   if view_mode == "client":
+if view_mode == "client":
     query_filter = f"""
         ...
         AND rej.status = 'TRUE'
