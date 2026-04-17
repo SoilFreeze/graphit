@@ -48,23 +48,26 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Updated Data Engine: Ensures 'MASKED' status overrides 'TRUE' status.
+    Updated Data Engine: Uses 'status' column for visibility logic.
     """
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-if view_mode == "client":
-    query_filter = f"""
-        ...
-        AND rej.status = 'TRUE'
-        AND NOT EXISTS (
-            SELECT 1 FROM `{OVERRIDE_TABLE}` m 
-            ...
-            AND m.status = 'MASKED'
-        )
-    """
-else:
-    query_filter = "AND (rej.status IS NULL OR rej.status != 'FALSE')"
-    
+    if view_mode == "client":
+        # Logic: Must be marked 'TRUE' AND must NOT be marked 'MASKED' [cite: 16]
+        query_filter = f"""
+            AND r.timestamp >= '{cutoff}'
+            AND rej.status = 'TRUE'
+            AND NOT EXISTS (
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.status = 'MASKED'
+            )
+        """
+    else:
+        # Engineering sees everything except explicit deletions ('FALSE') [cite: 17]
+        query_filter = "AND (rej.status IS NULL OR rej.status != 'FALSE')"
+
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -85,6 +88,7 @@ else:
         ORDER BY m.Location ASC, r.timestamp ASC
     """
     try:
+        # Ensure these two lines use SPACES, not TABS
         df = client.query(query).to_dataframe()
         return df
     except Exception as e:
