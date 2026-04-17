@@ -295,7 +295,7 @@ def render_global_overview():
 
     if target_project:
         with st.spinner(f"Syncing {target_project} (Engineering View)..."):
-            # Engineering view shows all data not explicitly rejected ('FALSE') in 'status' column
+            # Engineering view shows all data not explicitly rejected ('FALSE') in 'approve' column
             p_df = get_universal_portal_data(target_project, view_mode="engineering")
 
         if not p_df.empty:
@@ -760,7 +760,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         if st.button(f"🚀 Approve {selected_project} Range", use_container_width=True):
             with st.spinner("Writing approvals to master override..."):
                 bulk_sql = f"""
-                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, status)
+                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                     SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
                     FROM (
                         SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
@@ -818,7 +818,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
                     with st.spinner("Applying masks..."):
                         mask_sql = f"""
-                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, status)
+                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                             SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
                             FROM (
                                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
@@ -845,7 +845,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     with st.spinner("Clearing project masks..."):
                         clear_mask_sql = f"""
                             DELETE FROM `{OVERRIDE_TABLE}`
-                            WHERE status = 'MASKED'
+                            WHERE approve = 'MASKED'
                             AND NodeNum IN (
                                 SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` 
                                 WHERE Project = '{selected_project}'
