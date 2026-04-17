@@ -48,31 +48,31 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Updated Data Engine: Uses 'status' column for visibility logic.
+    Updated Data Engine: Uses 'approve' column for visibility logic as per schema.
     """
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # Logic: Must be marked 'TRUE' AND must NOT be marked 'MASKED' [cite: 16]
+        # Logic: Must be marked 'TRUE' (Approved) AND must NOT be marked 'MASKED'
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
-            AND rej.status = 'TRUE'
+            AND rej.approve = 'TRUE'
             AND NOT EXISTS (
                 SELECT 1 FROM `{OVERRIDE_TABLE}` m 
                 WHERE m.NodeNum = r.NodeNum 
                 AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                AND m.status = 'MASKED'
+                AND m.approve = 'MASKED'
             )
         """
     else:
-        # Engineering sees everything except explicit deletions ('FALSE') [cite: 17]
-        query_filter = "AND (rej.status IS NULL OR rej.status != 'FALSE')"
+        # Engineering sees everything except explicit deletions ('FALSE')
+        query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
             m.Location, m.Bank, m.Depth, m.Project,
-            rej.status as is_approved 
+            rej.approve as is_approved 
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
@@ -88,7 +88,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         ORDER BY m.Location ASC, r.timestamp ASC
     """
     try:
-        # Ensure these two lines use SPACES, not TABS
         df = client.query(query).to_dataframe()
         return df
     except Exception as e:
@@ -958,19 +957,19 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
 
 def update_records(pts, df, val):
     """
-    Final corrected version: Writes status updates into the 'status' column.
-    Matches schema: NodeNum (STRING), timestamp (TIMESTAMP), status (STRING).
+    Updated: Writes status updates into the 'approve' column.
+    Matches updated schema: NodeNum (STRING), timestamp (TIMESTAMP), approve (STRING).
     """
     recs = []
     for p in pts:
-        # Snap timestamp to the hour to match master/raw intervals
+        # Snap timestamp to the hour to match master/raw intervals [cite: 15]
         ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
         node = df.iloc[p['point_index']]['NodeNum']
         
         recs.append({
             "NodeNum": str(node), 
             "timestamp": ts, 
-            "status": val
+            "approve": val  # Using 'approve' column for TRUE, FALSE, or MASKED [cite: 13]
         })
     
     if recs:
