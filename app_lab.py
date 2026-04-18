@@ -668,7 +668,7 @@ def render_data_intake_page(selected_project):
 
     if uploaded_file is not None:
         try:
-            # 1. Load Data
+            # 1. LOAD DATA
             file_ext = uploaded_file.name.split('.')[-1].lower()
             df = pd.read_csv(uploaded_file) if file_ext == 'csv' else pd.read_excel(uploaded_file)
             
@@ -680,43 +680,37 @@ def render_data_intake_page(selected_project):
             detected_type = "Unknown"
             mapping = {}
 
-            # FORMAT A: Lord Standard (From your image: Timestamp, Channel, Temperature)
+            # Format Detection Logic
             if 'channel' in cols_lower and 'temperature' in cols_lower:
                 detected_type = "Lord"
                 mapping = {'Timestamp': 'timestamp', 'Channel': 'NodeNum', 'Temperature': 'temperature'}
-            
-            # FORMAT B: Third Lord Format (Original Code: Node ID, Date/Time, Value)
             elif 'node id' in cols_lower or 'probe' in cols_lower:
                 detected_type = "Lord"
-                # This maps the "Third" format to standard headers
-                mapping = {
-                    'Node ID': 'NodeNum', 
-                    'Probe': 'NodeNum',
-                    'Date/Time': 'timestamp', 
-                    'Value': 'temperature'
-                }
-
-            # FORMAT C: SensorPush (Gateway, Sampled, Value)
+                mapping = {'Node ID': 'NodeNum', 'Probe': 'NodeNum', 'Date/Time': 'timestamp', 'Value': 'temperature'}
             elif 'gateway' in cols_lower or 'node' in cols_lower:
                 detected_type = "SensorPush"
                 mapping = {'Sampled': 'timestamp', 'Node': 'NodeNum', 'Value': 'temperature'}
 
-            # Apply mapping if detected
             if detected_type != "Unknown":
                 df = df.rename(columns=mapping)
                 st.info(f"🔍 **Auto-Detected:** {detected_type} Format")
-            else:
-                st.warning("❓ Metadata check failed. Please ensure headers match standard formats.")
-
-            # 3. DATA CLEANING
-            # Ensure we only have the columns BQ expects
-            required_cols = ['timestamp', 'NodeNum', 'temperature']
             
-            # Filter for only existing required columns
+            # Filter to required columns ONLY
+            required_cols = ['timestamp', 'NodeNum', 'temperature']
             available_cols = [c for c in required_cols if c in df.columns]
             final_df = df[available_cols].copy()
 
-            st.dataframe(final_df.head(5), use_container_width=True)
+            # 3. PREVIEW & DOWNLOAD (The restored function)
+            st.subheader("📄 Data Preview")
+            st.dataframe(final_df.head(10), use_container_width=True)
+            
+            csv_data = final_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Cleaned CSV",
+                data=csv_data,
+                file_name=f"cleaned_{uploaded_file.name.split('.')[0]}.csv",
+                mime='text/csv',
+            )
 
             # 4. UPLOAD FORM
             with st.form("intake_form"):
@@ -731,12 +725,23 @@ def render_data_intake_page(selected_project):
 
             if submit and confirm:
                 with st.spinner(f"Pushing to raw_{target_table.lower()}..."):
-                    # Standardize types for BigQuery
+                    # --- TIMESTAMP FIX ---
+                    # Convert to datetime object, then to string WITHOUT timezone info
+                    # This prevents the "expected a zone offset" 400 error.
+                    final_df['timestamp'] = pd.to_datetime(final_df['timestamp']).dt.tz_localize(None)
                     final_df['NodeNum'] = final_df['NodeNum'].astype(str)
-                    final_df['timestamp'] = pd.to_datetime(final_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
                     
                     table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
-                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+                    
+                    # Manual Schema definition to force Timestamp type without TZ
+                    job_config = bigquery.LoadJobConfig(
+                        write_disposition="WRITE_APPEND",
+                        schema=[
+                            bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                            bigquery.SchemaField("NodeNum", "STRING"),
+                            bigquery.SchemaField("temperature", "FLOAT"),
+                        ]
+                    )
 
                     job = client.load_table_from_dataframe(final_df, table_id, job_config=job_config)
                     job.result()
