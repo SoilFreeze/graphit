@@ -982,42 +982,50 @@ def update_records(pts, df, val):
             st.error(f"Failed to update records: {e}")
 
 ###########
-# - 12. MAIN ROUTER - #
-###########
-
-###########
 # - 12. MAIN APP ROUTER - #
 ###########
 
-# This logic usually sits at the very bottom of your app_lab.py
 def main():
-    # ... (Authentication/Login logic should be above this) ...
+    # 1. SIDEBAR NAVIGATION
+    # This creates the 'page' variable so it is defined for the logic below
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio(
+        "Go to:", 
+        ["🏠 Overview", "🛠️ Admin Tools", "📥 Data Import", "📈 Project Portal"]
+    )
 
-    # The 'page' variable usually comes from a sidebar selectbox or radio
+    # 2. PROJECT SELECTION
+    # If your pages need a specific project, define it here
+    project_list = ["2538-Ferndale", "2329-Example", "All Projects"]
+    selected_project = st.sidebar.selectbox("Select Project Scope", project_list)
+
+    st.sidebar.markdown("---")
+    st.sidebar.write(f"Logged in as: **{st.session_state.get('role', 'Guest')}**")
+
+    # 3. ROUTING LOGIC
+    # Now 'page' and 'selected_project' are defined, so no NameError will occur
     if page == "🏠 Overview":
         render_overview_page(selected_project)
 
     elif page == "🛠️ Admin Tools":
-        # Check for Admin access for Rejections/Approvals
         if st.session_state.get("role") == "Admin":
             render_admin_page(selected_project)
         else:
-            st.error("Access Denied: Admin role required.")
+            st.error("🚫 Access Denied: Admin role required.")
 
     elif page == "📥 Data Import":
-        # Check for Admin access for Raw Data Uploads
         if st.session_state.get("role") == "Admin":
-            render_import_page() # Call the function from Section 9
+            render_import_page() # From Section 9
         else:
             st.error("🚫 Access Denied: Admin privileges required for data import.")
-            st.info("Please contact your administrator to upgrade your permissions.")
-            if st.button("Return to Overview"):
-                st.session_state.page = "🏠 Overview"
-                st.rerun()
 
     elif page == "📈 Project Portal":
         render_portal_page(selected_project)
 
-# Execute the app
+# --- EXECUTION ---
 if __name__ == "__main__":
+    # Ensure session state for role exists so the app doesn't crash on first load
+    if "role" not in st.session_state:
+        st.session_state["role"] = "Guest" 
+        
     main()
