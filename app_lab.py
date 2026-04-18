@@ -662,62 +662,53 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
 
 def render_import_page():
     st.header("📥 Data Import")
-    st.write("Upload CSV files from SensorPush or Lord sensors to update the master database.")
+    st.write("Upload CSV files to update the master BigQuery database.")
 
     # 1. File Uploader
-    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    uploaded_file = st.file_uploader("Choose a SensorPush or Lord CSV file", type="csv")
 
     if uploaded_file is not None:
-        # Read the file into a dataframe immediately so the user can see it
         try:
-            df_preview = pd.read_csv(uploaded_file)
-            st.success("✅ File received!")
-            st.dataframe(df_preview.head(5), use_container_width=True)
-            
-            # 2. Configuration Form
-            # We wrap the process in a form to ensure the button doesn't disappear
-            with st.form("upload_form"):
-                st.subheader("Confirm Upload Settings")
-                target_table = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
-                
-                # Validation Toggle
-                skip_val = st.checkbox("Skip duplicate check (Faster, but risky)", value=False)
-                
-                # THE UPLOAD BUTTON
-                submit_button = st.form_submit_button(f"🚀 Start Upload to {target_table}", use_container_width=True)
+            # Load preview
+            df = pd.read_csv(uploaded_file)
+            st.success("✅ CSV Loaded successfully")
+            st.dataframe(df.head(3), use_container_width=True)
 
-            if submit_button:
-                with st.spinner(f"Writing data to BigQuery `{target_table}`..."):
-                    # Process timestamps (Standardizing formats)
-                    if 'timestamp' in df_preview.columns:
-                        df_preview['timestamp'] = pd.to_datetime(df_preview['timestamp'])
+            # 2. Upload Form
+            with st.form("import_logic_form"):
+                st.subheader("Data Destination")
+                target_table = st.radio("Select Sensor Type", ["SensorPush", "Lord"], horizontal=True)
+                
+                # BigQuery settings
+                st.caption(f"Target: {DATASET_ID}.raw_{target_table.lower()}")
+                
+                submit = st.form_submit_button("🚀 Execute Upload", use_container_width=True)
+
+            if submit:
+                with st.spinner("Processing BigQuery Upload..."):
+                    # Standardize timestamp column
+                    if 'timestamp' in df.columns:
+                        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
                     
-                    # BigQuery Load Configuration
-                    table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
+                    full_table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
                     
                     job_config = bigquery.LoadJobConfig(
-                        write_disposition="WRITE_APPEND", # Adds to existing data
-                        source_format=bigquery.SourceFormat.CSV,
+                        write_disposition="WRITE_APPEND",
                         autodetect=True,
                     )
 
-                    # Execute Upload
-                    try:
-                        job = client.load_table_from_dataframe(df_preview, table_id, job_config=job_config)
-                        job.result()  # Wait for the job to complete
-                        
-                        st.balloons()
-                        st.success(f"Successfully uploaded {len(df_preview)} rows to {target_table}!")
-                        st.cache_data.clear() # Clear cache so graphs update immediately
-                        
-                    except Exception as e:
-                        st.error(f"Upload Failed: {e}")
-        
-        except Exception as e:
-            st.error(f"Error reading CSV: {e}")
+                    # Send to Cloud
+                    job = client.load_table_from_dataframe(df, full_table_path, job_config=job_config)
+                    job.result() # Wait for completion
+                    
+                    st.success(f"Successfully added {len(df)} rows to {target_table} database!")
+                    st.balloons()
+                    st.cache_data.clear()
 
+        except Exception as e:
+            st.error(f"Error processing file: {e}")
     else:
-        st.info("Please drag and drop a CSV file above to begin.")
+        st.info("Waiting for file upload...")
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
@@ -988,9 +979,9 @@ elif service == "📊 Client Portal":
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 elif service == "📉 Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
-elif service == "📤 Data Intake Lab":
+elif page == "📥 Data Import":
     if check_admin_access(service):
-        render_data_intake_page(selected_project)
+       render_import_page()
 elif service == "🛠️ Admin Tools":
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
