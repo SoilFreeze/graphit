@@ -661,32 +661,29 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
 ###########
 
 def render_import_page():
+    # Double-check admin status internally
+    if st.session_state.get("role") != "Admin":
+        st.error("Unauthorized access attempt.")
+        return
+
     st.header("📥 Data Import")
     st.write("Upload CSV files to update the master BigQuery database.")
 
-    # 1. File Uploader
-    uploaded_file = st.file_uploader("Choose a SensorPush or Lord CSV file", type="csv")
+    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
     if uploaded_file is not None:
         try:
-            # Load preview
             df = pd.read_csv(uploaded_file)
-            st.success("✅ CSV Loaded successfully")
+            st.success("✅ CSV Loaded")
             st.dataframe(df.head(3), use_container_width=True)
 
-            # 2. Upload Form
             with st.form("import_logic_form"):
-                st.subheader("Data Destination")
                 target_table = st.radio("Select Sensor Type", ["SensorPush", "Lord"], horizontal=True)
-                
-                # BigQuery settings
-                st.caption(f"Target: {DATASET_ID}.raw_{target_table.lower()}")
-                
-                submit = st.form_submit_button("🚀 Execute Upload", use_container_width=True)
+                submit = st.form_submit_button("🚀 Execute Admin Upload", use_container_width=True)
 
             if submit:
                 with st.spinner("Processing BigQuery Upload..."):
-                    # Standardize timestamp column
+                    # Standardize timestamp
                     if 'timestamp' in df.columns:
                         df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
                     
@@ -697,18 +694,14 @@ def render_import_page():
                         autodetect=True,
                     )
 
-                    # Send to Cloud
                     job = client.load_table_from_dataframe(df, full_table_path, job_config=job_config)
-                    job.result() # Wait for completion
+                    job.result() 
                     
-                    st.success(f"Successfully added {len(df)} rows to {target_table} database!")
-                    st.balloons()
+                    st.success(f"Admin Upload Complete: {len(df)} rows added.")
                     st.cache_data.clear()
 
         except Exception as e:
-            st.error(f"Error processing file: {e}")
-    else:
-        st.info("Waiting for file upload...")
+            st.error(f"Error: {e}")
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
@@ -979,9 +972,14 @@ elif service == "📊 Client Portal":
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 elif service == "📉 Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
+# --- PAGE ROUTER (Bottom of app_lab.py) ---
 elif page == "📥 Data Import":
-    if check_admin_access(service):
-       render_import_page()
+    # 1. Check if the 'role' exists in session state and is 'Admin'
+    if st.session_state.get("role") == "Admin":
+        render_import_page()  # Ensure this name matches your Section 9 function
+    else:
+        st.error("🚫 Access Denied: Admin privileges required to import data.")
+        st.info("Please contact your system administrator if you believe this is an error.")
 elif service == "🛠️ Admin Tools":
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
