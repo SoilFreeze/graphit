@@ -657,80 +657,67 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
     else:
         st.info("No communication logs available for this selection.")
 ###########
-# - 9. PAGE: DATA INTAKE LAB - #
+# - 9. PAGE: DATA IMPORT - #
 ###########
 
-def render_data_intake_page(selected_project):
-    st.header("📤 Data Ingestion Lab")
-    tab_upload, tab_export = st.tabs(["📄 Upload", "📥 Export"])
-    
-    with tab_upload:
-        # ... (keep your existing upload logic here) ...
-        st.subheader("📄 Manual File Ingestion")
-        st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), or SensorPush (CSV/Excel).")
-        
-        u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx', 'xls'], key="manual_upload_main")
-        
-        if u_file is not None:
-            # [Your existing parsing logic from the provided file]
-            pass
+def render_import_page():
+    st.header("📥 Data Import")
+    st.write("Upload CSV files from SensorPush or Lord sensors to update the master database.")
 
-    with tab_export:
-        st.subheader("📥 Export Project Data")
-        if not selected_project or selected_project == "All Projects":
-            st.warning("⚠️ Please select a specific project in the sidebar to perform an export.")
-        else:
-            # 1. Date Selection
-            c1, c2 = st.columns(2)
-            with c1:
-                e_start = st.date_input("Start Date", value=datetime.now() - timedelta(days=30), key="exp_start")
-            with c2:
-                e_end = st.date_input("End Date", value=datetime.now(), key="exp_end")
+    # 1. File Uploader
+    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+
+    if uploaded_file is not None:
+        # Read the file into a dataframe immediately so the user can see it
+        try:
+            df_preview = pd.read_csv(uploaded_file)
+            st.success("✅ File received!")
+            st.dataframe(df_preview.head(5), use_container_width=True)
             
-            # 2. Scope Selection (Whole Project vs Single Pipe)
-            st.write("---")
-            export_scope = st.radio("Export Scope", ["Whole Project", "Specific Pipe / Bank"], horizontal=True)
-            
-            # Fetch data once to populate location options and for filtering
-            with st.spinner("Preparing export options..."):
-                full_df = get_universal_portal_data(selected_project, view_mode="engineering")
-            
-            target_loc = None
-            if export_scope == "Specific Pipe / Bank" and not full_df.empty:
-                loc_list = sorted(full_df['Location'].dropna().unique())
-                target_loc = st.selectbox("Select Pipe/Bank to Export", loc_list)
+            # 2. Configuration Form
+            # We wrap the process in a form to ensure the button doesn't disappear
+            with st.form("upload_form"):
+                st.subheader("Confirm Upload Settings")
+                target_table = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+                
+                # Validation Toggle
+                skip_val = st.checkbox("Skip duplicate check (Faster, but risky)", value=False)
+                
+                # THE UPLOAD BUTTON
+                submit_button = st.form_submit_button(f"🚀 Start Upload to {target_table}", use_container_width=True)
 
-            # 3. Export Action
-            if st.button("📦 Prepare Data for Download"):
-                if full_df.empty:
-                    st.error("No data found for this project in the engineering database.")
-                else:
-                    # Filter by Date
-                    mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
-                    export_df = full_df.loc[mask].copy()
+            if submit_button:
+                with st.spinner(f"Writing data to BigQuery `{target_table}`..."):
+                    # Process timestamps (Standardizing formats)
+                    if 'timestamp' in df_preview.columns:
+                        df_preview['timestamp'] = pd.to_datetime(df_preview['timestamp'])
+                    
+                    # BigQuery Load Configuration
+                    table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
+                    
+                    job_config = bigquery.LoadJobConfig(
+                        write_disposition="WRITE_APPEND", # Adds to existing data
+                        source_format=bigquery.SourceFormat.CSV,
+                        autodetect=True,
+                    )
 
-                    # Filter by Scope
-                    filename_suffix = "Whole_Project"
-                    if export_scope == "Specific Pipe / Bank" and target_loc:
-                        export_df = export_df[export_df['Location'] == target_loc]
-                        filename_suffix = target_loc.replace(" ", "_")
-
-                    if export_df.empty:
-                        st.warning("No data found matching the combined date and scope filters.")
-                    else:
-                        # Success Message & Download
-                        st.success(f"✅ Prepared {len(export_df)} rows for {filename_suffix}.")
+                    # Execute Upload
+                    try:
+                        job = client.load_table_from_dataframe(df_preview, table_id, job_config=job_config)
+                        job.result()  # Wait for the job to complete
                         
-                        # Clean up timestamps for the CSV
-                        export_df['timestamp'] = export_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        st.balloons()
+                        st.success(f"Successfully uploaded {len(df_preview)} rows to {target_table}!")
+                        st.cache_data.clear() # Clear cache so graphs update immediately
                         
-                        csv = export_df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label=f"💾 Download {filename_suffix} CSV",
-                            data=csv,
-                            file_name=f"{selected_project}_{filename_suffix}_Export.csv",
-                            mime="text/csv"
-                        )
+                    except Exception as e:
+                        st.error(f"Upload Failed: {e}")
+        
+        except Exception as e:
+            st.error(f"Error reading CSV: {e}")
+
+    else:
+        st.info("Please drag and drop a CSV file above to begin.")
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
