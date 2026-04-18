@@ -660,98 +660,135 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
 # - 9. PAGE: DATA INTAKE LAB - #
 ###########
 
+###########
+# - 9. PAGE: DATA INTAKE LAB - #
+###########
+
 def render_data_intake_page(selected_project):
-    st.header("📥 Data Intake Lab")
-    st.write(f"Multi-Format Auto-Mapper | Scope: **{selected_project}**")
+    st.header("📥 Data Management Lab")
+    
+    # Create two tabs: one for Uploading, one for Exporting
+    tab_upload, tab_export = st.tabs(["🚀 Import New Data", "📦 Export Project Data"])
 
-    uploaded_file = st.file_uploader("Upload Sensor File (CSV, XLSX)", type=["csv", "xlsx", "xls"])
+    # --- TAB 1: UPLOAD LOGIC ---
+    with tab_upload:
+        st.subheader("Upload Sensor Data")
+        uploaded_file = st.file_uploader("Upload Sensor File (CSV, XLSX)", type=["csv", "xlsx", "xls"], key="intake_upload")
 
-    if uploaded_file is not None:
-        try:
-            # 1. LOAD DATA
-            file_ext = uploaded_file.name.split('.')[-1].lower()
-            df = pd.read_csv(uploaded_file) if file_ext == 'csv' else pd.read_excel(uploaded_file)
+        if uploaded_file is not None:
+            try:
+                # 1. Load Data
+                file_ext = uploaded_file.name.split('.')[-1].lower()
+                df = pd.read_csv(uploaded_file) if file_ext == 'csv' else pd.read_excel(uploaded_file)
+                
+                # Clean headers
+                df.columns = [str(c).strip() for c in df.columns]
+                cols_lower = [c.lower() for c in df.columns]
+
+                # 2. Auto-Detect Format & Map
+                detected_type = "Unknown"
+                mapping = {}
+
+                if 'channel' in cols_lower and 'temperature' in cols_lower:
+                    detected_type = "Lord"
+                    mapping = {'Timestamp': 'timestamp', 'Channel': 'NodeNum', 'Temperature': 'temperature'}
+                elif 'node id' in cols_lower or 'probe' in cols_lower:
+                    detected_type = "Lord"
+                    mapping = {'Node ID': 'NodeNum', 'Probe': 'NodeNum', 'Date/Time': 'timestamp', 'Value': 'temperature'}
+                elif 'gateway' in cols_lower or 'node' in cols_lower:
+                    detected_type = "SensorPush"
+                    mapping = {'Sampled': 'timestamp', 'Node': 'NodeNum', 'Value': 'temperature'}
+
+                if detected_type != "Unknown":
+                    df = df.rename(columns=mapping)
+                    st.info(f"🔍 **Auto-Detected:** {detected_type} Format")
+                
+                # Keep only what BigQuery needs
+                required_cols = ['timestamp', 'NodeNum', 'temperature']
+                final_df = df[[c for c in required_cols if c in df.columns]].copy()
+
+                st.dataframe(final_df.head(5), use_container_width=True)
+
+                # 3. Form for Upload
+                with st.form("upload_to_bq_form"):
+                    target_table = st.radio("Database Target", ["SensorPush", "Lord"], 
+                                         index=1 if detected_type == "Lord" else 0, horizontal=True)
+                    confirm = st.checkbox("Confirm: Timestamps and NodeNums look correct.")
+                    submit = st.form_submit_button("🚀 Start BigQuery Upload")
+
+                if submit and confirm:
+                    with st.spinner("Processing Upload..."):
+                        # FIX: Remove Timezone metadata to prevent the "scalar type" error
+                        final_df['timestamp'] = pd.to_datetime(final_df['timestamp']).dt.tz_localize(None)
+                        final_df['NodeNum'] = final_df['NodeNum'].astype(str)
+                        
+                        table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
+                        
+                        job_config = bigquery.LoadJobConfig(
+                            write_disposition="WRITE_APPEND",
+                            schema=[
+                                bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                bigquery.SchemaField("NodeNum", "STRING"),
+                                bigquery.SchemaField("temperature", "FLOAT"),
+                            ]
+                        )
+                        job = client.load_table_from_dataframe(final_df, table_id, job_config=job_config)
+                        job.result()
+                        st.success(f"✅ Successfully uploaded {len(final_df)} records to {target_table}.")
+                        st.cache_data.clear()
+
+            except Exception as e:
+                st.error(f"❌ Upload Error: {e}")
+
+    # --- TAB 2: EXPORT LOGIC (Your Provided Code) ---
+    with tab_export:
+        st.subheader("📥 Export Project Data")
+        if not selected_project or selected_project == "All Projects":
+            st.warning("⚠️ Please select a specific project in the sidebar to perform an export.")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                e_start = st.date_input("Start Date", value=datetime.now() - timedelta(days=30), key="exp_start")
+            with c2:
+                e_end = st.date_input("End Date", value=datetime.now(), key="exp_end")
             
-            # Clean header whitespace
-            df.columns = [str(c).strip() for c in df.columns]
-            cols_lower = [c.lower() for c in df.columns]
-
-            # 2. IDENTIFY AND MAP FORMATS
-            detected_type = "Unknown"
-            mapping = {}
-
-            # Format Detection Logic
-            if 'channel' in cols_lower and 'temperature' in cols_lower:
-                detected_type = "Lord"
-                mapping = {'Timestamp': 'timestamp', 'Channel': 'NodeNum', 'Temperature': 'temperature'}
-            elif 'node id' in cols_lower or 'probe' in cols_lower:
-                detected_type = "Lord"
-                mapping = {'Node ID': 'NodeNum', 'Probe': 'NodeNum', 'Date/Time': 'timestamp', 'Value': 'temperature'}
-            elif 'gateway' in cols_lower or 'node' in cols_lower:
-                detected_type = "SensorPush"
-                mapping = {'Sampled': 'timestamp', 'Node': 'NodeNum', 'Value': 'temperature'}
-
-            if detected_type != "Unknown":
-                df = df.rename(columns=mapping)
-                st.info(f"🔍 **Auto-Detected:** {detected_type} Format")
+            st.write("---")
+            export_scope = st.radio("Export Scope", ["Whole Project", "Specific Pipe / Bank"], horizontal=True)
             
-            # Filter to required columns ONLY
-            required_cols = ['timestamp', 'NodeNum', 'temperature']
-            available_cols = [c for c in required_cols if c in df.columns]
-            final_df = df[available_cols].copy()
-
-            # 3. PREVIEW & DOWNLOAD (The restored function)
-            st.subheader("📄 Data Preview")
-            st.dataframe(final_df.head(10), use_container_width=True)
+            with st.spinner("Preparing export options..."):
+                # Using your helper function to get data
+                full_df = get_universal_portal_data(selected_project, view_mode="engineering")
             
-            csv_data = final_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Cleaned CSV",
-                data=csv_data,
-                file_name=f"cleaned_{uploaded_file.name.split('.')[0]}.csv",
-                mime='text/csv',
-            )
+            target_loc = None
+            if export_scope == "Specific Pipe / Bank" and not full_df.empty:
+                loc_list = sorted(full_df['Location'].dropna().unique())
+                target_loc = st.selectbox("Select Pipe/Bank to Export", loc_list)
 
-            # 4. UPLOAD FORM
-            with st.form("intake_form"):
-                target_table = st.radio(
-                    "Database Target", 
-                    ["SensorPush", "Lord"], 
-                    index=1 if detected_type == "Lord" else 0,
-                    horizontal=True
-                )
-                confirm = st.checkbox("I verify the mapping and data preview.")
-                submit = st.form_submit_button("🚀 Upload to BigQuery", use_container_width=True)
+            if st.button("📦 Prepare Data for Download"):
+                if full_df.empty:
+                    st.error("No data found for this project in the engineering database.")
+                else:
+                    # Filter by Date
+                    mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
+                    export_df = full_df.loc[mask].copy()
 
-            if submit and confirm:
-                with st.spinner(f"Pushing to raw_{target_table.lower()}..."):
-                    # --- TIMESTAMP FIX ---
-                    # Convert to datetime object, then to string WITHOUT timezone info
-                    # This prevents the "expected a zone offset" 400 error.
-                    final_df['timestamp'] = pd.to_datetime(final_df['timestamp']).dt.tz_localize(None)
-                    final_df['NodeNum'] = final_df['NodeNum'].astype(str)
-                    
-                    table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
-                    
-                    # Manual Schema definition to force Timestamp type without TZ
-                    job_config = bigquery.LoadJobConfig(
-                        write_disposition="WRITE_APPEND",
-                        schema=[
-                            bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                            bigquery.SchemaField("NodeNum", "STRING"),
-                            bigquery.SchemaField("temperature", "FLOAT"),
-                        ]
-                    )
+                    filename_suffix = "Whole_Project"
+                    if export_scope == "Specific Pipe / Bank" and target_loc:
+                        export_df = export_df[export_df['Location'] == target_loc]
+                        filename_suffix = target_loc.replace(" ", "_")
 
-                    job = client.load_table_from_dataframe(final_df, table_id, job_config=job_config)
-                    job.result()
-                    
-                    st.balloons()
-                    st.success(f"Successfully uploaded {len(final_df)} records.")
-                    st.cache_data.clear()
-
-        except Exception as e:
-            st.error(f"❌ Processing Error: {e}")
+                    if export_df.empty:
+                        st.warning("No data found matching the filters.")
+                    else:
+                        st.success(f"✅ Prepared {len(export_df)} rows.")
+                        export_df['timestamp'] = export_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        csv = export_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label=f"💾 Download {filename_suffix} CSV",
+                            data=csv,
+                            file_name=f"{selected_project}_{filename_suffix}_Export.csv",
+                            mime="text/csv"
+                        )
 
 
 ###########
