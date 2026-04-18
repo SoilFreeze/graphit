@@ -657,65 +657,51 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
     else:
         st.info("No communication logs available for this selection.")
 ###########
-# - 9. PAGE: DATA INTAKE - #
+# - 9. PAGE: DATA INTAKE LAB - #
 ###########
 
 def render_data_intake_page(selected_project):
-    """
-    Handles CSV uploads to BigQuery.
-    """
-    st.header("📥 Data Intake")
-    
-    # Check for Admin access
-    if st.session_state.get("role") != "Admin":
-        st.error("🚫 Access Denied: Admin privileges required.")
-        return
-
-    st.write(f"Direct upload to raw tables for scope: **{selected_project}**")
+    st.header("📥 Data Intake Lab")
+    st.write(f"Direct BigQuery Upload for Scope: **{selected_project}**")
 
     # 1. File Uploader
-    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    uploaded_file = st.file_uploader("Upload Sensor CSV (SensorPush or Lord)", type="csv")
 
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
-            st.success("✅ File loaded successfully")
+            st.success("✅ File loaded. Preview below:")
             st.dataframe(df.head(3), use_container_width=True)
 
-            # 2. Configuration Form (Prevents button from disappearing)
-            with st.form("intake_form"):
-                st.subheader("Upload Settings")
-                target_table = st.radio("Select Sensor Type", ["SensorPush", "Lord"], horizontal=True)
+            # 2. Upload Form (Standardized to prevent "disappearing button" bug)
+            with st.form("intake_upload_form"):
+                st.subheader("Database Destination")
+                target_table = st.radio("Sensor Type", ["SensorPush", "Lord"], horizontal=True)
                 
-                # Checkbox for confirmation
-                confirm = st.checkbox("I verify the data format is correct.")
+                confirm = st.checkbox("I verify this data is for the current project scope.")
                 
-                # The submit button
+                # THE SUBMIT BUTTON
                 submit = st.form_submit_button("🚀 Start BigQuery Upload", use_container_width=True)
 
             if submit:
                 if not confirm:
-                    st.warning("Please confirm the data format check.")
+                    st.warning("Please check the confirmation box.")
                 else:
-                    with st.spinner(f"Uploading to {target_table}..."):
-                        # Standardize timestamp for BQ
+                    with st.spinner(f"Writing to raw_{target_table.lower()}..."):
+                        # Timestamp standardization
                         if 'timestamp' in df.columns:
                             df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
                         
                         table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
-                        
-                        job_config = bigquery.LoadJobConfig(
-                            write_disposition="WRITE_APPEND",
-                            autodetect=True,
-                        )
+                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
 
                         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
-                        job.result() # Wait for job
+                        job.result() # Wait for job to finish
                         
                         st.balloons()
-                        st.success(f"Successfully added {len(df)} rows to {target_table}!")
+                        st.success(f"Successfully uploaded {len(df)} rows.")
                         st.cache_data.clear()
-        
+
         except Exception as e:
             st.error(f"Upload Error: {e}")
 
@@ -988,11 +974,19 @@ elif service == "🏠 Executive Summary":
 elif service == "📊 Client Portal":
     # Ensure there are exactly 5 variables here to match the 5 in the definition above
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
+
 elif service == "📉 Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
+
 elif service == "📤 Data Intake Lab":
+    # Ensure this check matches your session_state['role'] == 'Admin'
     if check_admin_access(service):
         render_data_intake_page(selected_project)
+    else:
+        st.error("🚫 Access Denied: Admin privileges required.")
+
 elif service == "🛠️ Admin Tools":
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    else:
+        st.error("🚫 Access Denied: Admin privileges required.")
