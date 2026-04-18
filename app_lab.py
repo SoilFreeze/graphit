@@ -664,23 +664,32 @@ def render_data_intake_page(selected_project):
     st.header("📥 Data Intake Lab")
     st.write(f"Direct BigQuery Upload for Scope: **{selected_project}**")
 
-    # 1. File Uploader
-    uploaded_file = st.file_uploader("Upload Sensor CSV (SensorPush or Lord)", type="csv")
+    # 1. File Uploader - Now accepts both CSV and Excel
+    uploaded_file = st.file_uploader(
+        "Upload Sensor File (CSV or Excel)", 
+        type=["csv", "xlsx", "xls"]
+    )
 
     if uploaded_file is not None:
         try:
-            df = pd.read_csv(uploaded_file)
-            st.success("✅ File loaded. Preview below:")
+            # --- AUTO-DETECT FILE TYPE ---
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            
+            if file_extension == 'csv':
+                df = pd.read_csv(uploaded_file)
+            else:
+                # Requires 'openpyxl' for .xlsx files
+                df = pd.read_excel(uploaded_file)
+            
+            st.success(f"✅ {file_extension.upper()} file loaded. Preview below:")
             st.dataframe(df.head(3), use_container_width=True)
 
-            # 2. Upload Form (Standardized to prevent "disappearing button" bug)
+            # 2. Upload Form
             with st.form("intake_upload_form"):
                 st.subheader("Database Destination")
                 target_table = st.radio("Sensor Type", ["SensorPush", "Lord"], horizontal=True)
-                
                 confirm = st.checkbox("I verify this data is for the current project scope.")
                 
-                # THE SUBMIT BUTTON
                 submit = st.form_submit_button("🚀 Start BigQuery Upload", use_container_width=True)
 
             if submit:
@@ -689,21 +698,337 @@ def render_data_intake_page(selected_project):
                 else:
                     with st.spinner(f"Writing to raw_{target_table.lower()}..."):
                         # Timestamp standardization
+                        # BigQuery needs YYYY-MM-DD HH:MM:SS
                         if 'timestamp' in df.columns:
                             df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
                         
                         table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
-                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+                        job_config = bigquery.LoadJobConfig(
+                            write_disposition="WRITE_APPEND", 
+                            autodetect=True
+                        )
 
+                        # Load to BQ
                         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
-                        job.result() # Wait for job to finish
+                        job.result() 
                         
                         st.balloons()
-                        st.success(f"Successfully uploaded {len(df)} rows.")
+                        st.success(f"Successfully uploaded {len(df)} rows from {file_extension.upper()}.")
                         st.cache_data.clear()
 
         except Exception as e:
-            st.error(f"Upload Error: {e}")
+            st.error(f"❌ Load Error: {e}")
+            st.info("Ensure your file has a 'timestamp', 'NodeNum', and 'temperature' column.")###########
+# - 9. PAGE: DATA INTAKE LAB - #
+###########
+
+def render_data_intake_page(selected_project):
+    st.header("📥 Data Intake Lab")
+    st.write(f"Direct BigQuery Upload for Scope: **{selected_project}**")
+
+    # 1. File Uploader - Now accepts both CSV and Excel
+    uploaded_file = st.file_uploader(
+        "Upload Sensor File (CSV or Excel)", 
+        type=["csv", "xlsx", "xls"]
+    )
+
+    if uploaded_file is not None:
+        try:
+            # --- AUTO-DETECT FILE TYPE ---
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            
+            if file_extension == 'csv':
+                df = pd.read_csv(uploaded_file)
+            else:
+                # Requires 'openpyxl' for .xlsx files
+                df = pd.read_excel(uploaded_file)
+            
+            st.success(f"✅ {file_extension.upper()} file loaded. Preview below:")
+            st.dataframe(df.head(3), use_container_width=True)
+
+            # 2. Upload Form
+            with st.form("intake_upload_form"):
+                st.subheader("Database Destination")
+                target_table = st.radio("Sensor Type", ["SensorPush", "Lord"], horizontal=True)
+                confirm = st.checkbox("I verify this data is for the current project scope.")
+                
+                submit = st.form_submit_button("🚀 Start BigQuery Upload", use_container_width=True)
+
+            if submit:
+                if not confirm:
+                    st.warning("Please check the confirmation box.")
+                else:
+                    with st.spinner(f"Writing to raw_{target_table.lower()}..."):
+                        # Timestamp standardization
+                        # BigQuery needs YYYY-MM-DD HH:MM:SS
+                        if 'timestamp' in df.columns:
+                            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
+                        job_config = bigquery.LoadJobConfig(
+                            write_disposition="WRITE_APPEND", 
+                            autodetect=True
+                        )
+
+                        # Load to BQ
+                        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+                        job.result() 
+                        
+                        st.balloons()
+                        st.success(f"Successfully uploaded {len(df)} rows from {file_extension.upper()}.")
+                        st.cache_data.clear()
+
+        except Exception as e:
+            st.error(f"❌ Load Error: {e}")
+            st.info("Ensure your file has a 'timestamp', 'NodeNum', and 'temperature' column.")###########
+# - 9. PAGE: DATA INTAKE LAB - #
+###########
+
+def render_data_intake_page(selected_project):
+    st.header("📥 Data Intake Lab")
+    st.write(f"Direct BigQuery Upload for Scope: **{selected_project}**")
+
+    # 1. File Uploader - Now accepts both CSV and Excel
+    uploaded_file = st.file_uploader(
+        "Upload Sensor File (CSV or Excel)", 
+        type=["csv", "xlsx", "xls"]
+    )
+
+    if uploaded_file is not None:
+        try:
+            # --- AUTO-DETECT FILE TYPE ---
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            
+            if file_extension == 'csv':
+                df = pd.read_csv(uploaded_file)
+            else:
+                # Requires 'openpyxl' for .xlsx files
+                df = pd.read_excel(uploaded_file)
+            
+            st.success(f"✅ {file_extension.upper()} file loaded. Preview below:")
+            st.dataframe(df.head(3), use_container_width=True)
+
+            # 2. Upload Form
+            with st.form("intake_upload_form"):
+                st.subheader("Database Destination")
+                target_table = st.radio("Sensor Type", ["SensorPush", "Lord"], horizontal=True)
+                confirm = st.checkbox("I verify this data is for the current project scope.")
+                
+                submit = st.form_submit_button("🚀 Start BigQuery Upload", use_container_width=True)
+
+            if submit:
+                if not confirm:
+                    st.warning("Please check the confirmation box.")
+                else:
+                    with st.spinner(f"Writing to raw_{target_table.lower()}..."):
+                        # Timestamp standardization
+                        # BigQuery needs YYYY-MM-DD HH:MM:SS
+                        if 'timestamp' in df.columns:
+                            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
+                        job_config = bigquery.LoadJobConfig(
+                            write_disposition="WRITE_APPEND", 
+                            autodetect=True
+                        )
+
+                        # Load to BQ
+                        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+                        job.result() 
+                        
+                        st.balloons()
+                        st.success(f"Successfully uploaded {len(df)} rows from {file_extension.upper()}.")
+                        st.cache_data.clear()
+
+        except Exception as e:
+            st.error(f"❌ Load Error: {e}")
+            st.info("Ensure your file has a 'timestamp', 'NodeNum', and 'temperature' column.")###########
+# - 9. PAGE: DATA INTAKE LAB - #
+###########
+
+def render_data_intake_page(selected_project):
+    st.header("📥 Data Intake Lab")
+    st.write(f"Direct BigQuery Upload for Scope: **{selected_project}**")
+
+    # 1. File Uploader - Now accepts both CSV and Excel
+    uploaded_file = st.file_uploader(
+        "Upload Sensor File (CSV or Excel)", 
+        type=["csv", "xlsx", "xls"]
+    )
+
+    if uploaded_file is not None:
+        try:
+            # --- AUTO-DETECT FILE TYPE ---
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            
+            if file_extension == 'csv':
+                df = pd.read_csv(uploaded_file)
+            else:
+                # Requires 'openpyxl' for .xlsx files
+                df = pd.read_excel(uploaded_file)
+            
+            st.success(f"✅ {file_extension.upper()} file loaded. Preview below:")
+            st.dataframe(df.head(3), use_container_width=True)
+
+            # 2. Upload Form
+            with st.form("intake_upload_form"):
+                st.subheader("Database Destination")
+                target_table = st.radio("Sensor Type", ["SensorPush", "Lord"], horizontal=True)
+                confirm = st.checkbox("I verify this data is for the current project scope.")
+                
+                submit = st.form_submit_button("🚀 Start BigQuery Upload", use_container_width=True)
+
+            if submit:
+                if not confirm:
+                    st.warning("Please check the confirmation box.")
+                else:
+                    with st.spinner(f"Writing to raw_{target_table.lower()}..."):
+                        # Timestamp standardization
+                        # BigQuery needs YYYY-MM-DD HH:MM:SS
+                        if 'timestamp' in df.columns:
+                            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
+                        job_config = bigquery.LoadJobConfig(
+                            write_disposition="WRITE_APPEND", 
+                            autodetect=True
+                        )
+
+                        # Load to BQ
+                        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+                        job.result() 
+                        
+                        st.balloons()
+                        st.success(f"Successfully uploaded {len(df)} rows from {file_extension.upper()}.")
+                        st.cache_data.clear()
+
+        except Exception as e:
+            st.error(f"❌ Load Error: {e}")
+            st.info("Ensure your file has a 'timestamp', 'NodeNum', and 'temperature' column.")###########
+# - 9. PAGE: DATA INTAKE LAB - #
+###########
+
+def render_data_intake_page(selected_project):
+    st.header("📥 Data Intake Lab")
+    st.write(f"Direct BigQuery Upload for Scope: **{selected_project}**")
+
+    # 1. File Uploader - Now accepts both CSV and Excel
+    uploaded_file = st.file_uploader(
+        "Upload Sensor File (CSV or Excel)", 
+        type=["csv", "xlsx", "xls"]
+    )
+
+    if uploaded_file is not None:
+        try:
+            # --- AUTO-DETECT FILE TYPE ---
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            
+            if file_extension == 'csv':
+                df = pd.read_csv(uploaded_file)
+            else:
+                # Requires 'openpyxl' for .xlsx files
+                df = pd.read_excel(uploaded_file)
+            
+            st.success(f"✅ {file_extension.upper()} file loaded. Preview below:")
+            st.dataframe(df.head(3), use_container_width=True)
+
+            # 2. Upload Form
+            with st.form("intake_upload_form"):
+                st.subheader("Database Destination")
+                target_table = st.radio("Sensor Type", ["SensorPush", "Lord"], horizontal=True)
+                confirm = st.checkbox("I verify this data is for the current project scope.")
+                
+                submit = st.form_submit_button("🚀 Start BigQuery Upload", use_container_width=True)
+
+            if submit:
+                if not confirm:
+                    st.warning("Please check the confirmation box.")
+                else:
+                    with st.spinner(f"Writing to raw_{target_table.lower()}..."):
+                        # Timestamp standardization
+                        # BigQuery needs YYYY-MM-DD HH:MM:SS
+                        if 'timestamp' in df.columns:
+                            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
+                        job_config = bigquery.LoadJobConfig(
+                            write_disposition="WRITE_APPEND", 
+                            autodetect=True
+                        )
+
+                        # Load to BQ
+                        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+                        job.result() 
+                        
+                        st.balloons()
+                        st.success(f"Successfully uploaded {len(df)} rows from {file_extension.upper()}.")
+                        st.cache_data.clear()
+
+        except Exception as e:
+            st.error(f"❌ Load Error: {e}")
+            st.info("Ensure your file has a 'timestamp', 'NodeNum', and 'temperature' column.")###########
+# - 9. PAGE: DATA INTAKE LAB - #
+###########
+
+def render_data_intake_page(selected_project):
+    st.header("📥 Data Intake Lab")
+    st.write(f"Direct BigQuery Upload for Scope: **{selected_project}**")
+
+    # 1. File Uploader - Now accepts both CSV and Excel
+    uploaded_file = st.file_uploader(
+        "Upload Sensor File (CSV or Excel)", 
+        type=["csv", "xlsx", "xls"]
+    )
+
+    if uploaded_file is not None:
+        try:
+            # --- AUTO-DETECT FILE TYPE ---
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            
+            if file_extension == 'csv':
+                df = pd.read_csv(uploaded_file)
+            else:
+                # Requires 'openpyxl' for .xlsx files
+                df = pd.read_excel(uploaded_file)
+            
+            st.success(f"✅ {file_extension.upper()} file loaded. Preview below:")
+            st.dataframe(df.head(3), use_container_width=True)
+
+            # 2. Upload Form
+            with st.form("intake_upload_form"):
+                st.subheader("Database Destination")
+                target_table = st.radio("Sensor Type", ["SensorPush", "Lord"], horizontal=True)
+                confirm = st.checkbox("I verify this data is for the current project scope.")
+                
+                submit = st.form_submit_button("🚀 Start BigQuery Upload", use_container_width=True)
+
+            if submit:
+                if not confirm:
+                    st.warning("Please check the confirmation box.")
+                else:
+                    with st.spinner(f"Writing to raw_{target_table.lower()}..."):
+                        # Timestamp standardization
+                        # BigQuery needs YYYY-MM-DD HH:MM:SS
+                        if 'timestamp' in df.columns:
+                            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
+                        job_config = bigquery.LoadJobConfig(
+                            write_disposition="WRITE_APPEND", 
+                            autodetect=True
+                        )
+
+                        # Load to BQ
+                        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+                        job.result() 
+                        
+                        st.balloons()
+                        st.success(f"Successfully uploaded {len(df)} rows from {file_extension.upper()}.")
+                        st.cache_data.clear()
+
+        except Exception as e:
+            st.error(f"❌ Load Error: {e}")
+            st.info("Ensure your file has a 'timestamp', 'NodeNum', and 'temperature' column.")
 
 
 ###########
