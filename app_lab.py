@@ -657,76 +657,69 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
     else:
         st.info("No communication logs available for this selection.")
 ###########
-# - 9. PAGE: DATA IMPORT - #
+# - 9. PAGE: DATA INTAKE - #
 ###########
 
-def render_import_page():
+def render_data_intake_page(selected_project):
     """
-    Handles CSV uploads to BigQuery raw tables.
-    Wrapped in Admin session state checks for security.
+    Handles CSV uploads to BigQuery.
     """
-    # Double-check admin status internally for safety
+    st.header("📥 Data Intake")
+    
+    # Check for Admin access
     if st.session_state.get("role") != "Admin":
-        st.error("🚫 Unauthorized access attempt detected.")
+        st.error("🚫 Access Denied: Admin privileges required.")
         return
 
-    st.header("📥 Admin Data Import")
-    st.write("Upload sensor data CSVs directly to the BigQuery raw tables.")
+    st.write(f"Direct upload to raw tables for scope: **{selected_project}**")
 
     # 1. File Uploader
-    uploaded_file = st.file_uploader("Choose a CSV file (SensorPush or Lord)", type="csv")
+    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
     if uploaded_file is not None:
         try:
-            # Immediate data preview
             df = pd.read_csv(uploaded_file)
-            st.success("✅ CSV file read successfully.")
-            st.dataframe(df.head(5), use_container_width=True)
+            st.success("✅ File loaded successfully")
+            st.dataframe(df.head(3), use_container_width=True)
 
-            # 2. Upload Configuration Form
-            # Forms prevent the page from refreshing and losing the file before upload
-            with st.form("admin_upload_form"):
-                st.subheader("Destination Settings")
-                target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+            # 2. Configuration Form (Prevents button from disappearing)
+            with st.form("intake_form"):
+                st.subheader("Upload Settings")
+                target_table = st.radio("Select Sensor Type", ["SensorPush", "Lord"], horizontal=True)
                 
-                st.markdown("---")
-                confirm = st.checkbox("I verify that column names match (timestamp, NodeNum, temperature).")
+                # Checkbox for confirmation
+                confirm = st.checkbox("I verify the data format is correct.")
                 
-                # THE SUBMIT BUTTON
+                # The submit button
                 submit = st.form_submit_button("🚀 Start BigQuery Upload", use_container_width=True)
 
             if submit:
                 if not confirm:
-                    st.warning("⚠️ You must check the confirmation box to proceed.")
+                    st.warning("Please confirm the data format check.")
                 else:
-                    with st.spinner(f"Uploading to {target}..."):
-                        # Standardize the timestamp for BigQuery compatibility
+                    with st.spinner(f"Uploading to {target_table}..."):
+                        # Standardize timestamp for BQ
                         if 'timestamp' in df.columns:
                             df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
                         
-                        # Construct the full table ID
-                        table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_{target.lower()}"
+                        table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
                         
-                        # Load Job Configuration
                         job_config = bigquery.LoadJobConfig(
                             write_disposition="WRITE_APPEND",
                             autodetect=True,
                         )
 
-                        # Execute the job
-                        job = client.load_table_from_dataframe(df, table_path, job_config=job_config)
-                        job.result() # Wait for completion
+                        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+                        job.result() # Wait for job
                         
                         st.balloons()
-                        st.success(f"Successfully uploaded {len(df)} rows to {target}!")
-                        
-                        # Clear cache so graphs update immediately across the app
+                        st.success(f"Successfully added {len(df)} rows to {target_table}!")
                         st.cache_data.clear()
-
+        
         except Exception as e:
-            st.error(f"❌ Upload Error: {e}")
-    else:
-        st.info("Please drag and drop a CSV file to begin the import process.")
+            st.error(f"Upload Error: {e}")
+
+
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
@@ -986,46 +979,42 @@ def update_records(pts, df, val):
 ###########
 
 def main():
-    # 1. SIDEBAR NAVIGATION
-    # This creates the 'page' variable so it is defined for the logic below
+    # 1. SIDEBAR SETUP
+    # Define variables here so they exist before the IF/ELIF checks
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio(
-        "Go to:", 
-        ["🏠 Overview", "🛠️ Admin Tools", "📥 Data Import", "📈 Project Portal"]
-    )
-
-    # 2. PROJECT SELECTION
-    # If your pages need a specific project, define it here
+    page = st.sidebar.radio("Go to:", ["🏠 Overview", "🛠️ Admin Tools", "📥 Data Intake", "📈 Project Portal"])
+    
+    # Fetch project list for the selector
     project_list = ["2538-Ferndale", "2329-Example", "All Projects"]
     selected_project = st.sidebar.selectbox("Select Project Scope", project_list)
 
-    st.sidebar.markdown("---")
-    st.sidebar.write(f"Logged in as: **{st.session_state.get('role', 'Guest')}**")
-
-    # 3. ROUTING LOGIC
-    # Now 'page' and 'selected_project' are defined, so no NameError will occur
+    # 2. ROUTING LOGIC
     if page == "🏠 Overview":
+        # Calling your original function name
         render_overview_page(selected_project)
 
     elif page == "🛠️ Admin Tools":
         if st.session_state.get("role") == "Admin":
+            # Calling your original function name
             render_admin_page(selected_project)
         else:
             st.error("🚫 Access Denied: Admin role required.")
 
-    elif page == "📥 Data Import":
+    elif page == "📥 Data Intake":
         if st.session_state.get("role") == "Admin":
-            render_import_page() # From Section 9
+            # Calling your original function name
+            render_data_intake_page(selected_project)
         else:
-            st.error("🚫 Access Denied: Admin privileges required for data import.")
+            st.error("🚫 Access Denied: Admin privileges required.")
 
     elif page == "📈 Project Portal":
+        # Calling your original function name
         render_portal_page(selected_project)
 
 # --- EXECUTION ---
 if __name__ == "__main__":
-    # Ensure session state for role exists so the app doesn't crash on first load
+    # Ensure role exists in session state
     if "role" not in st.session_state:
-        st.session_state["role"] = "Guest" 
+        st.session_state["role"] = "Guest"
         
     main()
