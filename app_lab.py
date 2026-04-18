@@ -975,46 +975,24 @@ def update_records(pts, df, val):
             st.error(f"Failed to update records: {e}")
 
 ###########
-# - 12. MAIN APP ROUTER - #
+# - 12. MAIN ROUTER - #
 ###########
 
-def main():
-    # 1. SIDEBAR SETUP
-    # Define variables here so they exist before the IF/ELIF checks
-    st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to:", ["🏠 Overview", "🛠️ Admin Tools", "📥 Data Intake", "📈 Project Portal"])
-    
-    # Fetch project list for the selector
-    project_list = ["2538-Ferndale", "2329-Example", "All Projects"]
-    selected_project = st.sidebar.selectbox("Select Project Scope", project_list)
+if service == "🌐 Global Overview":
+    render_global_overview()
 
-    # 2. ROUTING LOGIC
-    if page == "🏠 Overview":
-        # Calling your original function name
-        render_overview_page(selected_project)
+elif service == "🏠 Executive Summary":
+    # Pass 'client' into the function call here
+    render_executive_summary(client, selected_project, unit_label) 
 
-    elif page == "🛠️ Admin Tools":
-        if st.session_state.get("role") == "Admin":
-            # Calling your original function name
-            render_admin_page(selected_project)
-        else:
-            st.error("🚫 Access Denied: Admin role required.")
-
-    elif page == "📥 Data Intake":
-        if st.session_state.get("role") == "Admin":
-            # Calling your original function name
-            render_data_intake_page(selected_project)
-        else:
-            st.error("🚫 Access Denied: Admin privileges required.")
-
-    elif page == "📈 Project Portal":
-        # Calling your original function name
-        render_portal_page(selected_project)
-
-# --- EXECUTION ---
-if __name__ == "__main__":
-    # Ensure role exists in session state
-    if "role" not in st.session_state:
-        st.session_state["role"] = "Guest"
-        
-    main()
+elif service == "📊 Client Portal":
+    # Ensure there are exactly 5 variables here to match the 5 in the definition above
+    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
+elif service == "📉 Node Diagnostics":
+    render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
+elif service == "📤 Data Intake Lab":
+    if check_admin_access(service):
+        render_data_intake_page(selected_project)
+elif service == "🛠️ Admin Tools":
+    if check_admin_access(service):
+        render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
