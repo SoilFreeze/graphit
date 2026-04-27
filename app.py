@@ -665,15 +665,43 @@ def render_data_intake_page(selected_project):
     tab_upload, tab_export = st.tabs(["📄 Upload", "📥 Export"])
     
     with tab_upload:
-        # ... (keep your existing upload logic here) ...
         st.subheader("📄 Manual File Ingestion")
         st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), or SensorPush (CSV/Excel).")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx', 'xls'], key="manual_upload_main")
         
         if u_file is not None:
-            # [Your existing parsing logic from the provided file]
-            pass
+            try:
+                # 1. Load the data
+                if u_file.name.endswith('.csv'):
+                    df_raw = pd.read_csv(u_file)
+                else:
+                    df_raw = pd.read_excel(u_file)
+
+                st.write("### 🔍 Data Preview")
+                st.dataframe(df_raw.head(10))
+
+                # 2. Map to BigQuery Schema
+                # Note: You'll need to add your specific column mapping logic here 
+                # to transform 'df_raw' into the 'NodeNum, timestamp, temperature' format.
+                
+                target_table = st.selectbox("Select Destination Table", ["raw_sensorpush", "raw_lord"])
+                
+                if st.button("🚀 Upload to BigQuery"):
+                    with st.spinner("Pushing data to Cloud..."):
+                        full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
+                        
+                        # BigQuery Load Job
+                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                        job = client.load_table_from_dataframe(df_raw, full_table_id, job_config=job_config)
+                        job.result()
+                        
+                        st.success(f"✅ Successfully uploaded {len(df_raw)} rows to {target_table}!")
+                        st.cache_data.clear()
+            
+            except Exception as e:
+                st.error(f"Error processing file: {e}")
+                st.exception(e)
 
     with tab_export:
         st.subheader("📥 Export Project Data")
