@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import pytz
 import traceback
 import io
+import re
 
 ##################################
 # - 1. CONFIGURATION & STYLING - #
@@ -666,42 +667,67 @@ def render_data_intake_page(selected_project):
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Upload Lord SensorConnect (Wide), Lord Desktop (Narrow), or SensorPush (CSV/Excel).")
+        st.info("Upload SensorPush CSV or Lord files. Node ID will be pulled from the filename.")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx', 'xls'], key="manual_upload_main")
         
         if u_file is not None:
             try:
-                # 1. Load the data
+                # 1. Read the raw data
                 if u_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_file)
                 else:
                     df_raw = pd.read_excel(u_file)
 
-                st.write("### 🔍 Data Preview")
-                st.dataframe(df_raw.head(10))
+                # 2. Extract NodeNum from filename (e.g., "Tp-0043 (1).csv" -> "Tp-0043")
+                # This regex looks for letters and numbers before the first space or dot
+                match = re.search(r'^([a-zA-Z0-9\-]+)', u_file.name)
+                extracted_node = match.group(1) if match else "UNKNOWN"
 
-                # 2. Map to BigQuery Schema
-                # Note: You'll need to add your specific column mapping logic here 
-                # to transform 'df_raw' into the 'NodeNum, timestamp, temperature' format.
+                # 3. Transform data to match BigQuery schema
+                # Standardize column names (SensorPush format)
+                df_processed = df_raw.copy()
                 
+                # Mapping common variations to our standard names
+                rename_map = {
+                    'Timestamp': 'timestamp',
+                    'Temperature (°F)': 'temperature',
+                    'Temperature (°C)': 'temperature'
+                }
+                df_processed = df_processed.rename(columns=rename_map)
+
+                # Add the NodeNum from the filename
+                df_processed['NodeNum'] = extracted_node
+                
+                # Keep only what we need for the DB
+                cols_to_keep = ['NodeNum', 'timestamp', 'temperature']
+                df_processed = df_processed[[c for c in cols_to_keep if c in df_processed.columns]]
+
+                # Ensure timestamp is in datetime format
+                if 'timestamp' in df_processed.columns:
+                    df_processed['timestamp'] = pd.to_datetime(df_processed['timestamp'])
+
+                # 4. Display Preview
+                st.write(f"### 🔍 Detected Node: **{extracted_node}**")
+                st.dataframe(df_processed.head(10))
+
+                # 5. Ingestion Selection
                 target_table = st.selectbox("Select Destination Table", ["raw_sensorpush", "raw_lord"])
                 
-                if st.button("🚀 Upload to BigQuery"):
+                if st.button("🚀 Confirm & Upload to BigQuery"):
                     with st.spinner("Pushing data to Cloud..."):
                         full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                         
                         # BigQuery Load Job
                         job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                        job = client.load_table_from_dataframe(df_raw, full_table_id, job_config=job_config)
+                        job = client.load_table_from_dataframe(df_processed, full_table_id, job_config=job_config)
                         job.result()
                         
-                        st.success(f"✅ Successfully uploaded {len(df_raw)} rows to {target_table}!")
+                        st.success(f"✅ Successfully uploaded {len(df_processed)} rows for {extracted_node}!")
                         st.cache_data.clear()
             
             except Exception as e:
-                st.error(f"Error processing file: {e}")
-                st.exception(e)
+                st.error(f"Error processing {u_file.name}: {e}")
 
     with tab_export:
         st.subheader("📥 Export Project Data")
