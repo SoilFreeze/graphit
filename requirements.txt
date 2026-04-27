@@ -10,3 +10,5 @@ google-cloud-secret-manager
 tzdata
 kaleido==0.2.1
 openpyxl
+xlrd
+pyarrow
