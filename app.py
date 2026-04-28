@@ -667,14 +667,31 @@ def render_data_intake_page(selected_project):
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Ingestion Rule: Lord (NodeNum in 'Channel' column) | SensorPush (NodeNum in Filename)")
+        st.info("Supported: SensorPush (Filename ID), Lord Narrow (Channel Col), and Lord SensorConnect (Wide)")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx'], key="manual_upload_main")
         
         if u_file is not None:
             try:
-                # 1. READ FILE: Force everything to string to prevent truncation
+                # --- 1. DETECTION FOR SENSORCONNECT (WIDE) ---
+                is_sensorconnect = False
+                skip_rows = 0
+                
                 if u_file.name.endswith('.csv'):
+                    u_file.seek(0)
+                    for i, line in enumerate(u_file):
+                        if b"DATA_START" in line:
+                            is_sensorconnect = True
+                            skip_rows = i + 1  # Headers are the line immediately after DATA_START
+                            break
+                    u_file.seek(0)
+
+                # --- 2. INITIAL READ ---
+                if is_sensorconnect:
+                    st.info("Format Detected: Lord SensorConnect (Wide)")
+                    # Read starting from the data headers
+                    df_raw = pd.read_csv(u_file, encoding='latin1', skiprows=skip_rows, dtype=str)
+                elif u_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_file, encoding='latin1', dtype=str)
                 else:
                     df_raw = pd.read_excel(u_file, dtype=str)
@@ -682,43 +699,48 @@ def render_data_intake_page(selected_project):
                 if not df_raw.empty:
                     df_processed = pd.DataFrame()
                     actual_headers = list(df_raw.columns)
-                    # Clean headers for reliable matching
                     clean_headers = [str(h).strip().lower() for h in actual_headers]
                     
-                    # --- IMPROVED LORD DETECTION ---
-                    # Look for 'channel' or 'node' anywhere in the headers
-                    has_channel_col = any('channel' in h or 'node' in h for h in clean_headers)
-                    has_time_col = any('time' in h for h in clean_headers)
-
-                    if has_channel_col and has_time_col:
-                        st.info("Format Detected: Lord")
+                    # --- BRANCH A: SENSORCONNECT (Wide Format) ---
+                    if is_sensorconnect:
+                        # Find the Time column (usually the first one)
+                        time_col = [h for h in actual_headers if 'time' in h.lower()][0]
                         
-                        # Find the exact header names
+                        # Identify all data columns (every column that isn't 'Time')
+                        value_vars = [h for h in actual_headers if h != time_col]
+                        
+                        # Transform 'Wide' to 'Long' (Time, NodeNum, Temperature)
+                        df_melted = df_raw.melt(
+                            id_vars=[time_col], 
+                            value_vars=value_vars, 
+                            var_name='NodeNum', 
+                            value_name='temperature'
+                        )
+                        
+                        df_processed['timestamp'] = pd.to_datetime(df_melted[time_col], format='mixed')
+                        df_processed['NodeNum'] = df_melted['NodeNum'].str.strip()
+                        df_processed['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
+
+                    # --- BRANCH B: LORD (Long/Narrow Format - Existing Case 1) ---
+                    elif any('channel' in h or 'node' in h for h in clean_headers) and any('time' in h for h in clean_headers):
+                        st.info("Format Detected: Lord (Channel-based)")
                         time_idx = next(i for i, h in enumerate(clean_headers) if 'time' in h)
                         node_idx = next(i for i, h in enumerate(clean_headers) if 'channel' in h or 'node' in h)
                         
                         time_header = actual_headers[time_idx]
                         node_header = actual_headers[node_idx]
-                        
-                        # Find Temperature column
                         temp_match = [h for h in actual_headers if 'temp' in h.lower()]
+                        
                         if temp_match:
-                            temp_header = temp_match[0]
-                            
-                            # MAP DATA: Using 'mixed' format for the timestamp error
                             df_processed['timestamp'] = pd.to_datetime(df_raw[time_header], format='mixed')
-                            # Capture FULL NodeNum entry
                             df_processed['NodeNum'] = df_raw[node_header].str.strip()
-                            df_processed['temperature'] = pd.to_numeric(df_raw[temp_header], errors='coerce')
-                        else:
-                            st.error("Could not find a Temperature column.")
+                            df_processed['temperature'] = pd.to_numeric(df_raw[temp_match[0]], errors='coerce')
 
-                    # --- BRANCH B: SENSORPUSH (Fallback) ---
+                    # --- BRANCH C: SENSORPUSH (Existing Case 2) ---
                     else:
                         st.info("Format Detected: SensorPush")
                         t_match = [h for h in actual_headers if 'timestamp' in h.lower()]
                         v_match = [h for h in actual_headers if 'temp' in h.lower()]
-                        
                         if t_match and v_match:
                             import re
                             match = re.search(r'^([^ \(\.]+)', u_file.name)
@@ -726,19 +748,20 @@ def render_data_intake_page(selected_project):
                             df_processed['temperature'] = pd.to_numeric(df_raw[v_match[0]], errors='coerce')
                             df_processed['NodeNum'] = match.group(1) if match else "Unknown"
 
-                    # --- 2. PREVIEW & UPLOAD ---
+                    # --- 3. PREVIEW & UPLOAD ---
                     if not df_processed.empty:
+                        # Drop any rows where temperature couldn't be parsed (like 'NaN')
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # Verification display
-                        sample_node = str(df_processed['NodeNum'].iloc[0])
-                        st.success(f"✅ Ready: Node ID captured as: **{sample_node}**")
+                        found_nodes = df_processed['NodeNum'].unique()
+                        st.success(f"✅ Ready: Found {len(found_nodes)} Nodes: {', '.join(found_nodes)}")
                         st.dataframe(df_processed.head(10))
 
-                        target_table = "raw_lord" if has_channel_col else "raw_sensorpush"
+                        # Determine destination table (SensorConnect is a Lord device)
+                        target_table = "raw_lord" if (is_sensorconnect or 'channel' in clean_headers or 'node' in clean_headers) else "raw_sensorpush"
                         
                         if st.button("🚀 Push to BigQuery"):
-                            with st.spinner("Uploading..."):
+                            with st.spinner("Uploading data..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_processed, table_id, job_config=config).result()
@@ -746,7 +769,7 @@ def render_data_intake_page(selected_project):
                                 st.success("Upload successful!")
                                 st.cache_data.clear()
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Error processing file: {e}")
 
     with tab_export:
         st.subheader("📥 Export Project Data")
