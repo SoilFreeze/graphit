@@ -667,13 +667,13 @@ def render_data_intake_page(selected_project):
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Strict Mapping: For Lord files, NodeNum = EXACT entry in 'Channel' column.")
+        st.info("Ingestion Rule: Lord (NodeNum in 'Channel' column) | SensorPush (NodeNum in Filename)")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx'], key="manual_upload_main")
         
         if u_file is not None:
             try:
-                # 1. READ FILE: Force 'Channel' to be a string immediately
+                # 1. READ FILE: Force everything to string to prevent truncation
                 if u_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_file, encoding='latin1', dtype=str)
                 else:
@@ -682,28 +682,36 @@ def render_data_intake_page(selected_project):
                 if not df_raw.empty:
                     df_processed = pd.DataFrame()
                     actual_headers = list(df_raw.columns)
-                    lower_headers = [str(h).lower() for h in actual_headers]
+                    # Clean headers for reliable matching
+                    clean_headers = [str(h).strip().lower() for h in actual_headers]
                     
-                    # --- BRANCH A: LORD (NodeNum = Channel Column) ---
-                    if 'channel' in lower_headers and 'time' in lower_headers:
-                        st.info("Format Detected: Lord (Channel-based)")
+                    # --- IMPROVED LORD DETECTION ---
+                    # Look for 'channel' or 'node' anywhere in the headers
+                    has_channel_col = any('channel' in h or 'node' in h for h in clean_headers)
+                    has_time_col = any('time' in h for h in clean_headers)
+
+                    if has_channel_col and has_time_col:
+                        st.info("Format Detected: Lord")
                         
-                        time_col = actual_headers[lower_headers.index('time')]
-                        node_col = actual_headers[lower_headers.index('channel')]
+                        # Find the exact header names
+                        time_idx = next(i for i, h in enumerate(clean_headers) if 'time' in h)
+                        node_idx = next(i for i, h in enumerate(clean_headers) if 'channel' in h or 'node' in h)
                         
-                        # Find the Temperature column
+                        time_header = actual_headers[time_idx]
+                        node_header = actual_headers[node_idx]
+                        
+                        # Find Temperature column
                         temp_match = [h for h in actual_headers if 'temp' in h.lower()]
-                        temp_col = temp_match[0] if temp_match else None
-                        
-                        if temp_col:
-                            # FIX: Use format='mixed' to handle various timestamp styles
-                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_col], format='mixed')
+                        if temp_match:
+                            temp_header = temp_match[0]
                             
-                            # MAP DATA: Using the FULL entry from the 'Channel' column
-                            df_processed['NodeNum'] = df_raw[node_col].str.strip() 
-                            df_processed['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
+                            # MAP DATA: Using 'mixed' format for the timestamp error
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_header], format='mixed')
+                            # Capture FULL NodeNum entry
+                            df_processed['NodeNum'] = df_raw[node_header].str.strip()
+                            df_processed['temperature'] = pd.to_numeric(df_raw[temp_header], errors='coerce')
                         else:
-                            st.error("Missing 'Temperature' column.")
+                            st.error("Could not find a Temperature column.")
 
                     # --- BRANCH B: SENSORPUSH (Fallback) ---
                     else:
@@ -722,15 +730,15 @@ def render_data_intake_page(selected_project):
                     if not df_processed.empty:
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # VERIFICATION: Show the exact string found
-                        full_id_sample = str(df_processed['NodeNum'].iloc[0])
-                        st.success(f"✅ Ready: Node ID captured as: **{full_id_sample}**")
+                        # Verification display
+                        sample_node = str(df_processed['NodeNum'].iloc[0])
+                        st.success(f"✅ Ready: Node ID captured as: **{sample_node}**")
                         st.dataframe(df_processed.head(10))
 
-                        target_table = "raw_lord" if 'channel' in lower_headers else "raw_sensorpush"
+                        target_table = "raw_lord" if has_channel_col else "raw_sensorpush"
                         
                         if st.button("🚀 Push to BigQuery"):
-                            with st.spinner("Writing to database..."):
+                            with st.spinner("Uploading..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_processed, table_id, job_config=config).result()
