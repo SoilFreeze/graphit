@@ -690,27 +690,41 @@ def render_data_intake_page(selected_project):
                     
                     if is_lord:
                         st.info("Format Detected: Lord (Wide)")
-                        # Find the time column (prefer exact 'time', fallback to anything with 'time')
+                        
+                        # 1. Identify the Time Column
                         if 'time' in lower_headers:
                             time_col = actual_headers[lower_headers.index('time')]
                         else:
                             time_col = [h for h in actual_headers if 'time' in h.lower()][0]
                         
-                        # Identify the Channel Column
-                        # We exclude 'time' and 'flag' to find things like '11955-ch1'
-                        data_candidates = [h for h in actual_headers if h.lower() not in ['time', 'flag', 'index', 'unnamed: 0']]
+                        # 2. Identify the Node/Data Column
+                        # We specifically look for the column that contains the temperature values.
+                        # Usually, this is the column that is NOT 'time', 'flag', or 'index'.
+                        data_cols = [h for h in actual_headers if h.lower() not in ['time', 'flag', 'index', 'unnamed: 0']]
                         
-                        if data_candidates:
-                            # This captures the LITERALLY header (e.g., "11955-ch1")
-                            literal_channel_id = str(data_candidates[0]) 
+                        if data_cols:
+                            # We grab the first available data column
+                            # Example: "62260-ch1"
+                            full_channel_id = str(data_cols[0]) 
                             
+                            # 3. Map to BigQuery Schema
                             df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
-                            df_processed['temperature'] = pd.to_numeric(df_raw[literal_channel_id], errors='coerce')
                             
-                            # FORCE NodeNum to be the full column string
-                            df_processed['NodeNum'] = literal_channel_id
+                            # Force the temperature to be the values UNDER the channel header
+                            df_processed['temperature'] = pd.to_numeric(df_raw[full_channel_id], errors='coerce')
+                            
+                            # Force the NodeNum to be the STRING of the channel header
+                            df_processed['NodeNum'] = full_channel_id
+                            
+                            # DEBUG: If it's still swapped, we check if the columns were offset
+                            if df_processed['temperature'].isna().all():
+                                st.warning("Data mismatch detected. Re-aligning columns...")
+                                # Fallback: grab the very last column if the first one was empty/wrong
+                                full_channel_id = str(data_cols[-1])
+                                df_processed['temperature'] = pd.to_numeric(df_raw[full_channel_id], errors='coerce')
+                                df_processed['NodeNum'] = full_channel_id
                         else:
-                            st.error("Could not find a channel column.")
+                            st.error("Could not find a valid data column in the Lord file.")
 
                     # --- SENSORPUSH FALLBACK ---
                     else:
