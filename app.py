@@ -671,9 +671,8 @@ def render_data_intake_page(selected_project):
         
         if u_file is not None:
             try:
-                # 1. Read file with flexible encoding (handling special characters like °)
+                # 1. Read file with latin1 encoding to handle the degree symbol (°F)
                 if u_file.name.endswith('.csv'):
-                    # 'latin1' encoding helps with the degree symbol (°F)
                     df_raw = pd.read_csv(u_file, encoding='latin1')
                 else:
                     df_raw = pd.read_excel(u_file)
@@ -681,18 +680,17 @@ def render_data_intake_page(selected_project):
                 if df_raw.empty:
                     st.error("The uploaded file contains no data rows.")
                 else:
-                    # 2. Extract NodeNum from filename (e.g., "Tp-0043 (1).csv")
-                    # We look for the first part before a space or parenthesis
-                    match = re.search(r'^([^\s\(]+)', u_file.name)
+                    # 2. Refined NodeNum extraction: Stops at space, '(', or '.'
+                    # Example: "Tp-0043 (1).csv" -> "Tp-0043"
+                    # Example: "Node-A.csv" -> "Node-A"
+                    match = re.search(r'^([^ \(\.]+)', u_file.name)
                     node_id = match.group(1) if match else "Unknown_Node"
 
-                    # 3. Fuzzy Column Mapping
-                    # This finds the right column even if the name has extra symbols
+                    # 3. Process data into BigQuery Schema
                     df_processed = pd.DataFrame()
                     
-                    # Find Timestamp column
+                    # Fuzzy find columns
                     time_col = [c for c in df_raw.columns if 'time' in c.lower()]
-                    # Find Temperature column (handles 'Temperature (°F)')
                     temp_col = [c for c in df_raw.columns if 'temp' in c.lower()]
 
                     if time_col and temp_col:
@@ -700,20 +698,26 @@ def render_data_intake_page(selected_project):
                         df_processed['temperature'] = pd.to_numeric(df_raw[temp_col[0]], errors='coerce')
                         df_processed['NodeNum'] = node_id
                         
-                        # Remove any rows where conversion failed
+                        # Clean up data
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
 
-                        st.success(f"✅ Identified Node: **{node_id}**")
-                        st.write(f"Found {len(df_processed)} valid data points.")
+                        st.success(f"✅ Ready to upload Node: **{node_id}**")
+                        st.write(f"Parsed {len(df_processed)} rows.")
                         st.dataframe(df_processed.head(5))
 
-                        # 4. Upload Action
-                        target = st.selectbox("DB Table", ["raw_sensorpush", "raw_lord"])
-                        if st.button("🚀 Push to BigQuery"):
-                            # ... your existing client.load_table_from_dataframe logic ...
-                            st.success("Data pushed successfully!")
+                        # 4. Final Upload Button
+                        target = st.selectbox("Destination Table", ["raw_sensorpush", "raw_lord"])
+                        if st.button("🚀 Confirm Upload to BigQuery"):
+                            with st.spinner("Uploading..."):
+                                full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{target}"
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                job = client.load_table_from_dataframe(df_processed, full_table_id, job_config=job_config)
+                                job.result()
+                                
+                                st.success(f"Successfully uploaded data for {node_id}!")
+                                st.cache_data.clear()
                     else:
-                        st.error(f"Could not find required columns. Found: {list(df_raw.columns)}")
+                        st.error(f"Mapping failed. Required: 'Timestamp' and 'Temperature'. Found: {list(df_raw.columns)}")
 
             except Exception as e:
                 st.error(f"Processing Error: {e}")
