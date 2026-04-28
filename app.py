@@ -673,9 +673,8 @@ def render_data_intake_page(selected_project):
         
         if u_file is not None:
             try:
-                # 1. READ FILE: Force 'Channel' to be a string immediately to prevent truncation
+                # 1. READ FILE: Force 'Channel' to be a string immediately
                 if u_file.name.endswith('.csv'):
-                    # We use dtype=str to ensure no 'auto-formatting' of IDs happens
                     df_raw = pd.read_csv(u_file, encoding='latin1', dtype=str)
                 else:
                     df_raw = pd.read_excel(u_file, dtype=str)
@@ -685,26 +684,23 @@ def render_data_intake_page(selected_project):
                     actual_headers = list(df_raw.columns)
                     lower_headers = [str(h).lower() for h in actual_headers]
                     
-                    # --- BRANCH A: LORD (Long Format) ---
-                    # Explicitly looking for the word 'channel'
+                    # --- BRANCH A: LORD (NodeNum = Channel Column) ---
                     if 'channel' in lower_headers and 'time' in lower_headers:
                         st.info("Format Detected: Lord (Channel-based)")
                         
                         time_col = actual_headers[lower_headers.index('time')]
                         node_col = actual_headers[lower_headers.index('channel')]
                         
-                        # Find the Temperature column (looking for 'temp')
+                        # Find the Temperature column
                         temp_match = [h for h in actual_headers if 'temp' in h.lower()]
                         temp_col = temp_match[0] if temp_match else None
                         
                         if temp_col:
+                            # FIX: Use format='mixed' to handle various timestamp styles
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_col], format='mixed')
+                            
                             # MAP DATA: Using the FULL entry from the 'Channel' column
-                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
-                            
-                            # We take the raw value and ensure no extra spaces are causing issues
                             df_processed['NodeNum'] = df_raw[node_col].str.strip() 
-                            
-                            # Convert temperature back to numeric for math/BigQuery
                             df_processed['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
                         else:
                             st.error("Missing 'Temperature' column.")
@@ -717,19 +713,16 @@ def render_data_intake_page(selected_project):
                         
                         if t_match and v_match:
                             import re
-                            # Only use the filename regex for SensorPush
                             match = re.search(r'^([^ \(\.]+)', u_file.name)
-                            node_id = match.group(1) if match else "Unknown"
-                            
-                            df_processed['timestamp'] = pd.to_datetime(df_raw[t_match[0]])
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[t_match[0]], format='mixed')
                             df_processed['temperature'] = pd.to_numeric(df_raw[v_match[0]], errors='coerce')
-                            df_processed['NodeNum'] = node_id
+                            df_processed['NodeNum'] = match.group(1) if match else "Unknown"
 
                     # --- 2. PREVIEW & UPLOAD ---
                     if not df_processed.empty:
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # VERIFICATION: Show the exact string found in the first row
+                        # VERIFICATION: Show the exact string found
                         full_id_sample = str(df_processed['NodeNum'].iloc[0])
                         st.success(f"✅ Ready: Node ID captured as: **{full_id_sample}**")
                         st.dataframe(df_processed.head(10))
@@ -737,10 +730,10 @@ def render_data_intake_page(selected_project):
                         target_table = "raw_lord" if 'channel' in lower_headers else "raw_sensorpush"
                         
                         if st.button("🚀 Push to BigQuery"):
-                            with st.spinner("Uploading..."):
+                            with st.spinner("Writing to database..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
-                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
+                                config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(df_processed, table_id, job_config=config).result()
                                 
                                 st.success("Upload successful!")
                                 st.cache_data.clear()
