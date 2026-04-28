@@ -718,9 +718,6 @@ def render_data_intake_page(selected_project):
             except Exception as e:
                 st.error(f"Processing Error: {e}"))
 
-            except Exception as e:
-                st.error(f"Processing Error: {e}")
-
     with tab_export:
         st.subheader("📥 Export Project Data")
         if not selected_project or selected_project == "All Projects":
