@@ -667,13 +667,13 @@ def render_data_intake_page(selected_project):
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Lord files: Channel Header = NodeNum. SensorPush: Filename = NodeNum.")
+        st.info("Lord files: Column Header = NodeNum. SensorPush: Filename = NodeNum.")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx'], key="manual_upload_main")
         
         if u_file is not None:
             try:
-                # 1. Load file with latin1 to handle special characters
+                # 1. Read the file with latin1 to handle the degree symbol (°F)
                 if u_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_file, encoding='latin1')
                 else:
@@ -681,66 +681,67 @@ def render_data_intake_page(selected_project):
 
                 if not df_raw.empty:
                     df_processed = pd.DataFrame()
-                    actual_cols = list(df_raw.columns)
-                    lower_cols = [str(c).lower() for c in actual_cols]
+                    actual_headers = list(df_raw.columns)
+                    lower_headers = [str(h).lower() for h in actual_headers]
                     
-                    # --- BRANCH A: LORD (Wide Format) ---
-                    # Logic: If 'time' is found, use the first data column header AS IS.
-                    if 'time' in lower_cols:
+                    # --- LORD BRANCH (Channel = NodeNum) ---
+                    if 'time' in lower_headers:
                         st.info("Format Detected: Lord (Wide)")
-                        time_idx = lower_cols.index('time')
-                        time_header = actual_cols[time_idx]
+                        time_idx = lower_headers.index('time')
+                        time_col = actual_headers[time_idx]
                         
-                        # Find the first column that isn't Time, Flag, or Index
-                        # This variable 'channel_id' will hold the full string like "62260-ch1"
-                        data_candidates = [c for c in actual_cols if c.lower() not in ['time', 'flag', 'index', 'unnamed: 0']]
+                        # Find the first column that isn't 'time' or 'flag'
+                        # We capture the RAW header string here
+                        data_candidates = [h for h in actual_headers if h.lower() not in ['time', 'flag', 'index', 'unnamed: 0']]
                         
                         if data_candidates:
-                            channel_id = str(data_candidates[0]) # <--- THE FULL CHANNEL NAME
+                            # This is your literal string (e.g., "62260-ch1")
+                            literal_node_id = str(data_candidates[0]) 
                             
-                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_header])
-                            df_processed['temperature'] = pd.to_numeric(df_raw[channel_id], errors='coerce')
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
+                            df_processed['temperature'] = pd.to_numeric(df_raw[literal_node_id], errors='coerce')
                             
-                            # CRITICAL: Directly set NodeNum to the literal channel string
-                            df_processed['NodeNum'] = channel_id 
+                            # CRITICAL: Directly assign the literal string to every row
+                            df_processed['NodeNum'] = literal_node_id
                         else:
-                            st.error("No channel column found in this Lord file.")
+                            st.error("Could not find a channel column in the Lord file.")
 
-                    # --- BRANCH B: SENSORPUSH (Standard Format) ---
+                    # --- SENSORPUSH BRANCH (Filename = NodeNum) ---
                     else:
                         st.info("Format Detected: SensorPush")
-                        t_cols = [c for c in actual_cols if 'timestamp' in c.lower()]
-                        v_cols = [c for c in actual_cols if 'temp' in c.lower()]
+                        t_match = [h for h in actual_headers if 'timestamp' in h.lower()]
+                        v_match = [h for h in actual_headers if 'temp' in h.lower()]
                         
-                        if t_cols and v_cols:
-                            # Pull from filename ONLY for SensorPush
+                        if t_match and v_match:
                             import re
+                            # Filename regex ONLY for SensorPush
                             match = re.search(r'^([^ \(\.]+)', u_file.name)
-                            fn_id = match.group(1) if match else "Unknown"
+                            literal_node_id = match.group(1) if match else "Unknown"
                             
-                            df_processed['timestamp'] = pd.to_datetime(df_raw[t_cols[0]])
-                            df_processed['temperature'] = pd.to_numeric(df_raw[v_cols[0]], errors='coerce')
-                            df_processed['NodeNum'] = fn_id
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[t_match[0]])
+                            df_processed['temperature'] = pd.to_numeric(df_raw[v_match[0]], errors='coerce')
+                            df_processed['NodeNum'] = literal_node_id
 
-                    # --- 2. PREVIEW & UPLOAD ---
+                    # --- FINAL PROCESSING & UPLOAD ---
                     if not df_processed.empty:
+                        # Only drop rows where temperature or time failed
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # Display what we found for verification
-                        final_id = df_processed['NodeNum'].iloc[0]
-                        st.success(f"✅ Ready: NodeNum = **{final_id}**")
+                        # Verify the ID in the UI
+                        confirmed_id = str(df_processed['NodeNum'].iloc[0])
+                        st.success(f"✅ Ready: NodeNum is exactly **{confirmed_id}**")
                         st.dataframe(df_processed.head(5))
 
-                        target_table = "raw_lord" if 'time' in lower_cols else "raw_sensorpush"
+                        target_table = "raw_lord" if 'time' in lower_headers else "raw_sensorpush"
                         
                         if st.button("🚀 Push to BigQuery"):
                             with st.spinner("Writing to database..."):
-                                table_ref = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
+                                table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                client.load_table_from_dataframe(df_processed, table_ref, job_config=config).result()
+                                client.load_table_from_dataframe(df_processed, table_id, job_config=config).result()
                                 
-                                st.success(f"Successfully uploaded {len(df_processed)} rows for {final_id}")
-                                st.cache_data.clear() # Clears existing data cache
+                                st.success(f"Uploaded {len(df_processed)} rows for {confirmed_id}")
+                                st.cache_data.clear()
             except Exception as e:
                 st.error(f"Upload failed: {e}")
 
