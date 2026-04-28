@@ -665,6 +665,11 @@ def render_data_intake_page(selected_project):
     st.header("📤 Data Ingestion Lab")
     tab_upload, tab_export = st.tabs(["📄 Upload", "📥 Export"])
     
+    import re
+import pandas as pd
+import streamlit as st
+
+# ... inside render_data_intake_page ...
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
         u_file = st.file_uploader("Upload SensorPush CSV", type=['csv', 'xlsx'], key="manual_upload_main")
@@ -716,7 +721,7 @@ def render_data_intake_page(selected_project):
                         st.error(f"Could not find required columns. Found: {list(df_raw.columns)}")
 
             except Exception as e:
-                st.error(f"Processing Error: {e}"))
+                st.error(f"Processing Error: {e}")
 
     with tab_export:
         st.subheader("📥 Export Project Data")
