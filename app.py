@@ -667,13 +667,13 @@ def render_data_intake_page(selected_project):
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Lord files: Column Header = NodeNum. SensorPush: Filename = NodeNum.")
+        st.info("Direct Mapping: Lord (Channel Header) | Filename: SensorPush")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx'], key="manual_upload_main")
         
         if u_file is not None:
             try:
-                # 1. Read the file with latin1 to handle the degree symbol (°F)
+                # 1. Read the file
                 if u_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_file, encoding='latin1')
                 else:
@@ -684,29 +684,35 @@ def render_data_intake_page(selected_project):
                     actual_headers = list(df_raw.columns)
                     lower_headers = [str(h).lower() for h in actual_headers]
                     
-                    # --- LORD BRANCH (Channel = NodeNum) ---
-                    if 'time' in lower_headers:
+                    # --- IMPROVED DETECTION ---
+                    # Check for 'time' or any column with 'ch' (typical for Lord)
+                    is_lord = 'time' in lower_headers or any('ch' in h for h in lower_headers)
+                    
+                    if is_lord:
                         st.info("Format Detected: Lord (Wide)")
-                        time_idx = lower_headers.index('time')
-                        time_col = actual_headers[time_idx]
+                        # Find the time column (prefer exact 'time', fallback to anything with 'time')
+                        if 'time' in lower_headers:
+                            time_col = actual_headers[lower_headers.index('time')]
+                        else:
+                            time_col = [h for h in actual_headers if 'time' in h.lower()][0]
                         
-                        # Find the first column that isn't 'time' or 'flag'
-                        # We capture the RAW header string here
+                        # Identify the Channel Column
+                        # We exclude 'time' and 'flag' to find things like '11955-ch1'
                         data_candidates = [h for h in actual_headers if h.lower() not in ['time', 'flag', 'index', 'unnamed: 0']]
                         
                         if data_candidates:
-                            # This is your literal string (e.g., "62260-ch1")
-                            literal_node_id = str(data_candidates[0]) 
+                            # This captures the LITERALLY header (e.g., "11955-ch1")
+                            literal_channel_id = str(data_candidates[0]) 
                             
                             df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
-                            df_processed['temperature'] = pd.to_numeric(df_raw[literal_node_id], errors='coerce')
+                            df_processed['temperature'] = pd.to_numeric(df_raw[literal_channel_id], errors='coerce')
                             
-                            # CRITICAL: Directly assign the literal string to every row
-                            df_processed['NodeNum'] = literal_node_id
+                            # FORCE NodeNum to be the full column string
+                            df_processed['NodeNum'] = literal_channel_id
                         else:
-                            st.error("Could not find a channel column in the Lord file.")
+                            st.error("Could not find a channel column.")
 
-                    # --- SENSORPUSH BRANCH (Filename = NodeNum) ---
+                    # --- SENSORPUSH FALLBACK ---
                     else:
                         st.info("Format Detected: SensorPush")
                         t_match = [h for h in actual_headers if 'timestamp' in h.lower()]
@@ -714,33 +720,29 @@ def render_data_intake_page(selected_project):
                         
                         if t_match and v_match:
                             import re
-                            # Filename regex ONLY for SensorPush
                             match = re.search(r'^([^ \(\.]+)', u_file.name)
-                            literal_node_id = match.group(1) if match else "Unknown"
-                            
                             df_processed['timestamp'] = pd.to_datetime(df_raw[t_match[0]])
                             df_processed['temperature'] = pd.to_numeric(df_raw[v_match[0]], errors='coerce')
-                            df_processed['NodeNum'] = literal_node_id
+                            df_processed['NodeNum'] = match.group(1) if match else "Unknown"
 
-                    # --- FINAL PROCESSING & UPLOAD ---
+                    # --- 2. PREVIEW & UPLOAD ---
                     if not df_processed.empty:
-                        # Only drop rows where temperature or time failed
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # Verify the ID in the UI
-                        confirmed_id = str(df_processed['NodeNum'].iloc[0])
-                        st.success(f"✅ Ready: NodeNum is exactly **{confirmed_id}**")
+                        # Display EXACT NodeNum string
+                        final_id = str(df_processed['NodeNum'].iloc[0])
+                        st.success(f"✅ Ready: NodeNum is exactly **{final_id}**")
                         st.dataframe(df_processed.head(5))
 
-                        target_table = "raw_lord" if 'time' in lower_headers else "raw_sensorpush"
+                        target_table = "raw_lord" if is_lord else "raw_sensorpush"
                         
                         if st.button("🚀 Push to BigQuery"):
-                            with st.spinner("Writing to database..."):
+                            with st.spinner(f"Uploading {final_id}..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_processed, table_id, job_config=config).result()
                                 
-                                st.success(f"Uploaded {len(df_processed)} rows for {confirmed_id}")
+                                st.success(f"Uploaded {len(df_processed)} rows for {final_id}")
                                 st.cache_data.clear()
             except Exception as e:
                 st.error(f"Upload failed: {e}")
