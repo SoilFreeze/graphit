@@ -671,72 +671,75 @@ def render_data_intake_page(selected_project):
         
         if u_file is not None:
             try:
-                # 1. Read file - using latin1 to handle special characters like °F
+                # 1. Read file - using latin1 to handle special characters
                 if u_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_file, encoding='latin1')
                 else:
                     df_raw = pd.read_excel(u_file)
 
                 if df_raw.empty:
-                    st.error("The uploaded file contains no data.")
+                    st.error("The uploaded file is empty.")
                 else:
-                    # 2. Extract NodeNum from filename
-                    # Regex captures everything before the first space, '(', or '.'
-                    match = re.search(r'^([^ \(\.]+)', u_file.name)
-                    node_id = match.group(1) if match else "Unknown_Node"
-
-                    # 3. Identify Format & Map Columns
                     df_processed = pd.DataFrame()
-                    cols = [c.lower() for c in df_raw.columns]
+                    cols = [c for c in df_raw.columns]
                     
-                    # CASE A: SensorPush (Timestamp, Temperature)
-                    if any('timestamp' in c for c in cols):
-                        time_col = [c for c in df_raw.columns if 'timestamp' in c.lower()][0]
-                        temp_col = [c for c in df_raw.columns if 'temp' in c.lower()][0]
+                    # CASE A: Lord (Node ID is a column name, timestamp is 'Time')
+                    # We check if there is a 'Time' column and a numeric-looking column
+                    lord_time_col = [c for c in cols if c.lower() == 'time']
+                    
+                    if lord_time_col:
+                        st.info("Format Detected: Lord (Wide Column)")
+                        # Find the first column that isn't 'Time' or 'Flag' - this is our NodeNum
+                        data_cols = [c for c in cols if c.lower() not in ['time', 'flag', 'index']]
                         
-                        df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
-                        df_processed['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
-                        df_processed['NodeNum'] = node_id
+                        if data_cols:
+                            target_col = data_cols[0] # This is your full channel name (e.g., '62260')
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[lord_time_col[0]])
+                            df_processed['temperature'] = pd.to_numeric(df_raw[target_col], errors='coerce')
+                            df_processed['NodeNum'] = str(target_col) # Use the column name as NodeNum
+                        else:
+                            st.error("Could not find a data column in the Lord file.")
+
+                    # CASE B: SensorPush (Timestamp and Temperature columns)
+                    else:
                         st.info("Format Detected: SensorPush")
-
-                    # CASE B: Lord (Time, ch1, etc.)
-                    elif any(c == 'time' for c in cols):
-                        time_col = [c for c in df_raw.columns if c.lower() == 'time'][0]
-                        # Lord files often have 'ch1', 'channel 1', or 'temperature'
-                        temp_col = [c for c in df_raw.columns if 'ch' in c.lower() or 'temp' in c.lower()][0]
+                        time_col = [c for c in cols if 'timestamp' in c.lower()]
+                        temp_col = [c for c in cols if 'temp' in c.lower()]
                         
-                        df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
-                        df_processed['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
-                        df_processed['NodeNum'] = node_id
-                        st.info("Format Detected: Lord")
+                        if time_col and temp_col:
+                            # Pull NodeNum from filename as fallback for SensorPush
+                            match = re.search(r'^([^ \(\.]+)', u_file.name)
+                            node_id = match.group(1) if match else "Unknown"
+                            
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_col[0]])
+                            df_processed['temperature'] = pd.to_numeric(df_raw[temp_col[0]], errors='coerce')
+                            df_processed['NodeNum'] = node_id
 
-                    # 4. Final Processing & Preview
+                    # 3. Final Validation and Preview
                     if not df_processed.empty:
-                        # Clean data: Drop NaNs and ensure types match BigQuery schema
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        st.success(f"✅ Prepared data for Node: **{node_id}**")
+                        # Show the user what was extracted
+                        st.success(f"✅ Prepared Data for Node: **{df_processed['NodeNum'].iloc[0]}**")
                         st.dataframe(df_processed.head(10))
 
-                        # 5. Ingestion Target
-                        # Based on your app logic, we select the correct raw table
-                        target_table = "raw_lord" if "lord" in u_file.name.lower() or "62260" in u_file.name else "raw_sensorpush"
-                        target = st.selectbox("Destination Table", ["raw_sensorpush", "raw_lord"], 
-                                            index=0 if target_table == "raw_sensorpush" else 1)
+                        # Target Selection
+                        default_table = "raw_lord" if lord_time_col else "raw_sensorpush"
+                        target = st.selectbox("DB Table", ["raw_sensorpush", "raw_lord"], 
+                                            index=1 if default_table == "raw_lord" else 0)
 
                         if st.button("🚀 Push to BigQuery"):
-                            with st.spinner("Writing to Database..."):
+                            with st.spinner("Uploading..."):
                                 full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{target}"
                                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_processed, full_table_id, job_config=job_config).result()
-                                
-                                st.success(f"Successfully uploaded {len(df_processed)} rows to {target}!")
-                                st.cache_data.clear() # Refresh dashboard
+                                st.success("Upload complete!")
+                                st.cache_data.clear()
                     else:
-                        st.error(f"Could not map columns. Found: {list(df_raw.columns)}")
+                        st.error(f"Mapping failed. Columns found: {cols}")
 
             except Exception as e:
-                st.error(f"File Processing Error: {e}")
+                st.error(f"Processing Error: {e}")
 
     with tab_export:
         st.subheader("📥 Export Project Data")
