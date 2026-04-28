@@ -667,17 +667,18 @@ def render_data_intake_page(selected_project):
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Ingestion Rule: For Lord files, NodeNum = Full entry in the 'Channel' column.")
+        st.info("Strict Mapping: For Lord files, NodeNum = EXACT entry in 'Channel' column.")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx'], key="manual_upload_main")
         
         if u_file is not None:
             try:
-                # 1. Read the file (using latin1 to preserve special characters)
+                # 1. READ FILE: Force 'Channel' to be a string immediately to prevent truncation
                 if u_file.name.endswith('.csv'):
-                    df_raw = pd.read_csv(u_file, encoding='latin1')
+                    # We use dtype=str to ensure no 'auto-formatting' of IDs happens
+                    df_raw = pd.read_csv(u_file, encoding='latin1', dtype=str)
                 else:
-                    df_raw = pd.read_excel(u_file)
+                    df_raw = pd.read_excel(u_file, dtype=str)
 
                 if not df_raw.empty:
                     df_processed = pd.DataFrame()
@@ -685,11 +686,10 @@ def render_data_intake_page(selected_project):
                     lower_headers = [str(h).lower() for h in actual_headers]
                     
                     # --- BRANCH A: LORD (Long Format) ---
-                    # We detect this if there is a 'time' column AND a 'channel' column
-                    if 'time' in lower_headers and 'channel' in lower_headers:
+                    # Explicitly looking for the word 'channel'
+                    if 'channel' in lower_headers and 'time' in lower_headers:
                         st.info("Format Detected: Lord (Channel-based)")
                         
-                        # Get the exact case-sensitive header names
                         time_col = actual_headers[lower_headers.index('time')]
                         node_col = actual_headers[lower_headers.index('channel')]
                         
@@ -698,12 +698,16 @@ def render_data_intake_page(selected_project):
                         temp_col = temp_match[0] if temp_match else None
                         
                         if temp_col:
-                            # MAP DATA: Using the full entry from the 'Channel' column for NodeNum
+                            # MAP DATA: Using the FULL entry from the 'Channel' column
                             df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
-                            df_processed['NodeNum'] = df_raw[node_col].astype(str) # No stripping/truncating
+                            
+                            # We take the raw value and ensure no extra spaces are causing issues
+                            df_processed['NodeNum'] = df_raw[node_col].str.strip() 
+                            
+                            # Convert temperature back to numeric for math/BigQuery
                             df_processed['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
                         else:
-                            st.error("Could not find a 'Temperature' column in the file.")
+                            st.error("Missing 'Temperature' column.")
 
                     # --- BRANCH B: SENSORPUSH (Fallback) ---
                     else:
@@ -713,7 +717,7 @@ def render_data_intake_page(selected_project):
                         
                         if t_match and v_match:
                             import re
-                            # Pull from filename ONLY for SensorPush
+                            # Only use the filename regex for SensorPush
                             match = re.search(r'^([^ \(\.]+)', u_file.name)
                             node_id = match.group(1) if match else "Unknown"
                             
@@ -721,32 +725,27 @@ def render_data_intake_page(selected_project):
                             df_processed['temperature'] = pd.to_numeric(df_raw[v_match[0]], errors='coerce')
                             df_processed['NodeNum'] = node_id
 
-                    # --- 2. VALIDATION, PREVIEW & UPLOAD ---
+                    # --- 2. PREVIEW & UPLOAD ---
                     if not df_processed.empty:
-                        # Drop incomplete rows
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # Display distinctive IDs found in the Channel column
-                        found_ids = df_processed['NodeNum'].unique()
-                        st.success(f"✅ Ready: Found {len(found_ids)} Node ID(s): {', '.join(found_ids)}")
+                        # VERIFICATION: Show the exact string found in the first row
+                        full_id_sample = str(df_processed['NodeNum'].iloc[0])
+                        st.success(f"✅ Ready: Node ID captured as: **{full_id_sample}**")
                         st.dataframe(df_processed.head(10))
 
-                        # Determine target table
                         target_table = "raw_lord" if 'channel' in lower_headers else "raw_sensorpush"
                         
                         if st.button("🚀 Push to BigQuery"):
-                            with st.spinner(f"Uploading data to {target_table}..."):
+                            with st.spinner("Uploading..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
                                 
-                                st.success("Upload complete!")
-                                st.cache_data.clear() # Clears existing data cache to update graphs
-                    else:
-                        st.warning("Could not map the columns. Ensure the file has 'Time', 'Channel', and 'Temperature'.")
-
+                                st.success("Upload successful!")
+                                st.cache_data.clear()
             except Exception as e:
-                st.error(f"Processing Error: {e}")
+                st.error(f"Error: {e}")
 
     with tab_export:
         st.subheader("📥 Export Project Data")
