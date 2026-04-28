@@ -667,7 +667,7 @@ def render_data_intake_page(selected_project):
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Supported: SensorPush (Filename ID), Lord Narrow (Channel Col), and Lord SensorConnect (Wide)")
+        st.info("Standardized Rule: All Lord Node IDs will use '-' as a separator (e.g., 58014-ch1).")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx'], key="manual_upload_main")
         
@@ -682,14 +682,13 @@ def render_data_intake_page(selected_project):
                     for i, line in enumerate(u_file):
                         if b"DATA_START" in line:
                             is_sensorconnect = True
-                            skip_rows = i + 1  # Headers are the line immediately after DATA_START
+                            skip_rows = i + 1 
                             break
                     u_file.seek(0)
 
                 # --- 2. INITIAL READ ---
                 if is_sensorconnect:
                     st.info("Format Detected: Lord SensorConnect (Wide)")
-                    # Read starting from the data headers
                     df_raw = pd.read_csv(u_file, encoding='latin1', skiprows=skip_rows, dtype=str)
                 elif u_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_file, encoding='latin1', dtype=str)
@@ -703,13 +702,9 @@ def render_data_intake_page(selected_project):
                     
                     # --- BRANCH A: SENSORCONNECT (Wide Format) ---
                     if is_sensorconnect:
-                        # Find the Time column (usually the first one)
                         time_col = [h for h in actual_headers if 'time' in h.lower()][0]
-                        
-                        # Identify all data columns (every column that isn't 'Time')
                         value_vars = [h for h in actual_headers if h != time_col]
                         
-                        # Transform 'Wide' to 'Long' (Time, NodeNum, Temperature)
                         df_melted = df_raw.melt(
                             id_vars=[time_col], 
                             value_vars=value_vars, 
@@ -718,10 +713,11 @@ def render_data_intake_page(selected_project):
                         )
                         
                         df_processed['timestamp'] = pd.to_datetime(df_melted[time_col], format='mixed')
-                        df_processed['NodeNum'] = df_melted['NodeNum'].str.strip()
+                        # STANDARDIZATION: Swap ':' for '-'
+                        df_processed['NodeNum'] = df_melted['NodeNum'].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
 
-                    # --- BRANCH B: LORD (Long/Narrow Format - Existing Case 1) ---
+                    # --- BRANCH B: LORD (Long/Narrow Format) ---
                     elif any('channel' in h or 'node' in h for h in clean_headers) and any('time' in h for h in clean_headers):
                         st.info("Format Detected: Lord (Channel-based)")
                         time_idx = next(i for i, h in enumerate(clean_headers) if 'time' in h)
@@ -733,10 +729,11 @@ def render_data_intake_page(selected_project):
                         
                         if temp_match:
                             df_processed['timestamp'] = pd.to_datetime(df_raw[time_header], format='mixed')
-                            df_processed['NodeNum'] = df_raw[node_header].str.strip()
+                            # STANDARDIZATION: Swap ':' for '-'
+                            df_processed['NodeNum'] = df_raw[node_header].str.strip().str.replace(':', '-')
                             df_processed['temperature'] = pd.to_numeric(df_raw[temp_match[0]], errors='coerce')
 
-                    # --- BRANCH C: SENSORPUSH (Existing Case 2) ---
+                    # --- BRANCH C: SENSORPUSH ---
                     else:
                         st.info("Format Detected: SensorPush")
                         t_match = [h for h in actual_headers if 'timestamp' in h.lower()]
@@ -750,14 +747,12 @@ def render_data_intake_page(selected_project):
 
                     # --- 3. PREVIEW & UPLOAD ---
                     if not df_processed.empty:
-                        # Drop any rows where temperature couldn't be parsed (like 'NaN')
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
                         found_nodes = df_processed['NodeNum'].unique()
-                        st.success(f"✅ Ready: Found {len(found_nodes)} Nodes: {', '.join(found_nodes)}")
+                        st.success(f"✅ Ready: Standardized Node IDs: {', '.join(found_nodes)}")
                         st.dataframe(df_processed.head(10))
 
-                        # Determine destination table (SensorConnect is a Lord device)
                         target_table = "raw_lord" if (is_sensorconnect or 'channel' in clean_headers or 'node' in clean_headers) else "raw_sensorpush"
                         
                         if st.button("🚀 Push to BigQuery"):
@@ -766,7 +761,7 @@ def render_data_intake_page(selected_project):
                                 config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_processed, table_id, job_config=config).result()
                                 
-                                st.success("Upload successful!")
+                                st.success(f"Successfully uploaded {len(df_processed)} rows to {target_table}!")
                                 st.cache_data.clear()
             except Exception as e:
                 st.error(f"Error processing file: {e}")
