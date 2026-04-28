@@ -667,13 +667,13 @@ def render_data_intake_page(selected_project):
     
     with tab_upload:
         st.subheader("📄 Manual File Ingestion")
-        st.info("Mapping: Lord (Node ID in Rows) | SensorPush (Node ID in Filename)")
+        st.info("Ingestion Rule: For Lord files, NodeNum = Full entry in the 'Channel' column.")
         
         u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx'], key="manual_upload_main")
         
         if u_file is not None:
             try:
-                # 1. Read the file
+                # 1. Read the file (using latin1 to preserve special characters)
                 if u_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_file, encoding='latin1')
                 else:
@@ -684,31 +684,27 @@ def render_data_intake_page(selected_project):
                     actual_headers = list(df_raw.columns)
                     lower_headers = [str(h).lower() for h in actual_headers]
                     
-                    # --- BRANCH A: LORD (Long/Narrow Format) ---
-                    # Detected if 'time' AND 'channel' (or similar) exist in headers
-                    is_lord = 'time' in lower_headers and any(x in lower_headers for x in ['channel', 'node', 'sensor id'])
-                    
-                    if is_lord:
-                        st.info("Format Detected: Lord (Long/Narrow)")
+                    # --- BRANCH A: LORD (Long Format) ---
+                    # We detect this if there is a 'time' column AND a 'channel' column
+                    if 'time' in lower_headers and 'channel' in lower_headers:
+                        st.info("Format Detected: Lord (Channel-based)")
                         
-                        # Find the Time Column
+                        # Get the exact case-sensitive header names
                         time_col = actual_headers[lower_headers.index('time')]
+                        node_col = actual_headers[lower_headers.index('channel')]
                         
-                        # Find the Channel/NodeNum Column
-                        # We look for 'channel', 'node', or 'sensor'
-                        node_col_options = [h for h in actual_headers if any(x in h.lower() for x in ['channel', 'node', 'sensor'])]
-                        node_col = node_col_options[0]
+                        # Find the Temperature column (looking for 'temp')
+                        temp_match = [h for h in actual_headers if 'temp' in h.lower()]
+                        temp_col = temp_match[0] if temp_match else None
                         
-                        # Find the Temperature Column
-                        # We look for 'temp' or 'data' or 'value'
-                        temp_col_options = [h for h in actual_headers if any(x in h.lower() for x in ['temp', 'data', 'value'])]
-                        temp_col = temp_col_options[0]
-                        
-                        # MAP DATA
-                        df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
-                        df_processed['NodeNum'] = df_raw[node_col].astype(str) # Pulls the ID from every row
-                        df_processed['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
-                        
+                        if temp_col:
+                            # MAP DATA: Using the full entry from the 'Channel' column for NodeNum
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_col])
+                            df_processed['NodeNum'] = df_raw[node_col].astype(str) # No stripping/truncating
+                            df_processed['temperature'] = pd.to_numeric(df_raw[temp_col], errors='coerce')
+                        else:
+                            st.error("Could not find a 'Temperature' column in the file.")
+
                     # --- BRANCH B: SENSORPUSH (Fallback) ---
                     else:
                         st.info("Format Detected: SensorPush")
@@ -717,32 +713,40 @@ def render_data_intake_page(selected_project):
                         
                         if t_match and v_match:
                             import re
+                            # Pull from filename ONLY for SensorPush
                             match = re.search(r'^([^ \(\.]+)', u_file.name)
+                            node_id = match.group(1) if match else "Unknown"
+                            
                             df_processed['timestamp'] = pd.to_datetime(df_raw[t_match[0]])
                             df_processed['temperature'] = pd.to_numeric(df_raw[v_match[0]], errors='coerce')
-                            df_processed['NodeNum'] = match.group(1) if match else "Unknown"
+                            df_processed['NodeNum'] = node_id
 
-                    # --- 2. PREVIEW & UPLOAD ---
+                    # --- 2. VALIDATION, PREVIEW & UPLOAD ---
                     if not df_processed.empty:
+                        # Drop incomplete rows
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # Show distinct nodes found in this file
-                        unique_nodes = df_processed['NodeNum'].unique()
-                        st.success(f"✅ Found {len(unique_nodes)} Nodes: {', '.join(unique_nodes)}")
+                        # Display distinctive IDs found in the Channel column
+                        found_ids = df_processed['NodeNum'].unique()
+                        st.success(f"✅ Ready: Found {len(found_ids)} Node ID(s): {', '.join(found_ids)}")
                         st.dataframe(df_processed.head(10))
 
-                        target_table = "raw_lord" if is_lord else "raw_sensorpush"
+                        # Determine target table
+                        target_table = "raw_lord" if 'channel' in lower_headers else "raw_sensorpush"
                         
                         if st.button("🚀 Push to BigQuery"):
-                            with st.spinner("Uploading..."):
+                            with st.spinner(f"Uploading data to {target_table}..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
-                                config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                client.load_table_from_dataframe(df_processed, table_id, job_config=config).result()
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
                                 
-                                st.success(f"Successfully uploaded {len(df_processed)} rows to {target_table}!")
-                                st.cache_data.clear()
+                                st.success("Upload complete!")
+                                st.cache_data.clear() # Clears existing data cache to update graphs
+                    else:
+                        st.warning("Could not map the columns. Ensure the file has 'Time', 'Channel', and 'Temperature'.")
+
             except Exception as e:
-                st.error(f"Upload failed: {e}")
+                st.error(f"Processing Error: {e}")
 
     with tab_export:
         st.subheader("📥 Export Project Data")
