@@ -716,6 +716,9 @@ def render_data_intake_page(selected_project):
                         st.error(f"Could not find required columns. Found: {list(df_raw.columns)}")
 
             except Exception as e:
+                st.error(f"Processing Error: {e}"))
+
+            except Exception as e:
                 st.error(f"Processing Error: {e}")
 
     with tab_export:
