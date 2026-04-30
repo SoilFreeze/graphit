@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import pytz
 import traceback
 import io
+import re
 
 ##################################
 # - 1. CONFIGURATION & STYLING - #
@@ -58,10 +59,10 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             AND r.timestamp >= '{cutoff}'
             AND rej.approve = 'TRUE'
             AND NOT EXISTS (
-                SELECT 1 FROM `{OVERRIDE_TABLE}` m_mask 
-                WHERE m_mask.NodeNum = r.NodeNum 
-                AND m_mask.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                AND m_mask.approve = 'MASKED'
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.approve = 'MASKED'
             )
         """
     else:
@@ -295,7 +296,7 @@ def render_global_overview():
 
     if target_project:
         with st.spinner(f"Syncing {target_project} (Engineering View)..."):
-            # Engineering view shows all data not explicitly rejected ('FALSE') in 'status' column
+            # Engineering view shows all data not explicitly rejected ('FALSE') in 'approve' column
             p_df = get_universal_portal_data(target_project, view_mode="engineering")
 
         if not p_df.empty:
@@ -437,10 +438,14 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
         return
     
     with st.spinner("Loading approved data..."):
+        # The portal specifically filters for manual_rejections.status = 'TRUE' [cite: 15, 16]
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
-    if p_df.empty:
-        st.info(f"No approved data available for {selected_project}.")
+    # DEBUG: Help identify if data exists but is being filtered out later
+    if not p_df.empty:
+        st.caption(f"✅ Found {len(p_df)} approved records for {selected_project}.")
+    else:
+        st.warning(f"⚠️ No data marked as 'Approved' found for {selected_project}. Check the Admin Tools.")
         return
 
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
@@ -453,12 +458,18 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
         # Performance: Pre-sort locations
         locations = sorted(p_df['Location'].dropna().unique())
         
+        if not locations:
+            st.error("Data loaded, but no 'Location' metadata was found to group the charts.")
+        
         for loc in locations:
-            # We use the expander to keep the page fast
             with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
-                loc_data = p_df[p_df['Location'] == loc]
+                loc_data = p_df[p_df['Location'] == loc].copy()
                 
-                # CALLING THE ENGINE WITH THE GRID LOGIC
+                # Check if this specific location has data in the selected time window
+                if loc_data.empty:
+                    st.write("No data available for this specific location.")
+                    continue
+
                 fig = build_high_speed_graph(
                     df=loc_data, 
                     title=f"{loc} Approved Data", 
@@ -467,12 +478,13 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                     active_refs=tuple(active_refs), 
                     unit_mode=unit_mode, 
                     unit_label=unit_label, 
-                    display_tz=display_tz # <--- This calculates the Black/Gray lines
+                    display_tz=display_tz 
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
+        # Ensure Depth is numeric for proper Y-axis scaling [cite: 6, 9]
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
         
@@ -481,7 +493,6 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                 loc_data = depth_only[depth_only['Location'] == loc].copy()
                 fig_d = go.Figure()
                 
-                # Snapshot processing (Performance: Pre-calculated range)
                 mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                 
                 for m_date in mondays:
@@ -490,7 +501,6 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                                       (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                     
                     if not window.empty:
-                        # Find nearest reading per NodeNum
                         snap_df = (
                             window.assign(diff=(window['timestamp'] - target_ts).abs())
                             .sort_values(['NodeNum', 'diff'])
@@ -660,103 +670,129 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
 # - 9. PAGE: DATA INTAKE LAB - #
 ###########
 
-###########
-# - 9. PAGE: DATA INTAKE LAB - #
-###########
-
 def render_data_intake_page(selected_project):
-    st.header("📥 Data Management Lab")
+    st.header("📤 Data Ingestion Lab")
+    tab_upload, tab_export = st.tabs(["📄 Upload", "📥 Export"])
     
-    # Create two tabs: one for Uploading, one for Exporting
-    tab_upload, tab_export = st.tabs(["🚀 Import New Data", "📦 Export Project Data"])
-
-    # --- TAB 1: UPLOAD LOGIC ---
     with tab_upload:
-        st.subheader("Upload Sensor Data")
-        uploaded_file = st.file_uploader("Upload Sensor File (CSV, XLSX)", type=["csv", "xlsx", "xls"], key="intake_upload")
-
-        if uploaded_file is not None:
+        st.subheader("📄 Manual File Ingestion")
+        st.info("Standardized Rule: All Lord Node IDs will use '-' as a separator (e.g., 58014-ch1).")
+        
+        u_file = st.file_uploader("Upload Data File", type=['csv', 'xlsx'], key="manual_upload_main")
+        
+        if u_file is not None:
             try:
-                # 1. Load Data
-                file_ext = uploaded_file.name.split('.')[-1].lower()
-                df = pd.read_csv(uploaded_file) if file_ext == 'csv' else pd.read_excel(uploaded_file)
+                # --- 1. DETECTION FOR SENSORCONNECT (WIDE) ---
+                is_sensorconnect = False
+                skip_rows = 0
                 
-                # Clean headers
-                df.columns = [str(c).strip() for c in df.columns]
-                cols_lower = [c.lower() for c in df.columns]
+                if u_file.name.endswith('.csv'):
+                    u_file.seek(0)
+                    for i, line in enumerate(u_file):
+                        if b"DATA_START" in line:
+                            is_sensorconnect = True
+                            skip_rows = i + 1 
+                            break
+                    u_file.seek(0)
 
-                # 2. Auto-Detect Format & Map
-                detected_type = "Unknown"
-                mapping = {}
+                # --- 2. INITIAL READ ---
+                if is_sensorconnect:
+                    st.info("Format Detected: Lord SensorConnect (Wide)")
+                    df_raw = pd.read_csv(u_file, encoding='latin1', skiprows=skip_rows, dtype=str)
+                elif u_file.name.endswith('.csv'):
+                    df_raw = pd.read_csv(u_file, encoding='latin1', dtype=str)
+                else:
+                    df_raw = pd.read_excel(u_file, dtype=str)
 
-                if 'channel' in cols_lower and 'temperature' in cols_lower:
-                    detected_type = "Lord"
-                    mapping = {'Timestamp': 'timestamp', 'Channel': 'NodeNum', 'Temperature': 'temperature'}
-                elif 'node id' in cols_lower or 'probe' in cols_lower:
-                    detected_type = "Lord"
-                    mapping = {'Node ID': 'NodeNum', 'Probe': 'NodeNum', 'Date/Time': 'timestamp', 'Value': 'temperature'}
-                elif 'gateway' in cols_lower or 'node' in cols_lower:
-                    detected_type = "SensorPush"
-                    mapping = {'Sampled': 'timestamp', 'Node': 'NodeNum', 'Value': 'temperature'}
-
-                if detected_type != "Unknown":
-                    df = df.rename(columns=mapping)
-                    st.info(f"🔍 **Auto-Detected:** {detected_type} Format")
-                
-                # Keep only what BigQuery needs
-                required_cols = ['timestamp', 'NodeNum', 'temperature']
-                final_df = df[[c for c in required_cols if c in df.columns]].copy()
-
-                st.dataframe(final_df.head(5), use_container_width=True)
-
-                # 3. Form for Upload
-                with st.form("upload_to_bq_form"):
-                    target_table = st.radio("Database Target", ["SensorPush", "Lord"], 
-                                         index=1 if detected_type == "Lord" else 0, horizontal=True)
-                    confirm = st.checkbox("Confirm: Timestamps and NodeNums look correct.")
-                    submit = st.form_submit_button("🚀 Start BigQuery Upload")
-
-                if submit and confirm:
-                    with st.spinner("Processing Upload..."):
-                        # FIX: Remove Timezone metadata to prevent the "scalar type" error
-                        final_df['timestamp'] = pd.to_datetime(final_df['timestamp']).dt.tz_localize(None)
-                        final_df['NodeNum'] = final_df['NodeNum'].astype(str)
+                if not df_raw.empty:
+                    df_processed = pd.DataFrame()
+                    actual_headers = list(df_raw.columns)
+                    clean_headers = [str(h).strip().lower() for h in actual_headers]
+                    
+                    # --- BRANCH A: SENSORCONNECT (Wide Format) ---
+                    if is_sensorconnect:
+                        time_col = [h for h in actual_headers if 'time' in h.lower()][0]
+                        value_vars = [h for h in actual_headers if h != time_col]
                         
-                        table_id = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_table.lower()}"
-                        
-                        job_config = bigquery.LoadJobConfig(
-                            write_disposition="WRITE_APPEND",
-                            schema=[
-                                bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                bigquery.SchemaField("NodeNum", "STRING"),
-                                bigquery.SchemaField("temperature", "FLOAT"),
-                            ]
+                        df_melted = df_raw.melt(
+                            id_vars=[time_col], 
+                            value_vars=value_vars, 
+                            var_name='NodeNum', 
+                            value_name='temperature'
                         )
-                        job = client.load_table_from_dataframe(final_df, table_id, job_config=job_config)
-                        job.result()
-                        st.success(f"✅ Successfully uploaded {len(final_df)} records to {target_table}.")
-                        st.cache_data.clear()
+                        
+                        df_processed['timestamp'] = pd.to_datetime(df_melted[time_col], format='mixed')
+                        # STANDARDIZATION: Swap ':' for '-'
+                        df_processed['NodeNum'] = df_melted['NodeNum'].str.strip().str.replace(':', '-')
+                        df_processed['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
 
+                    # --- BRANCH B: LORD (Long/Narrow Format) ---
+                    elif any('channel' in h or 'node' in h for h in clean_headers) and any('time' in h for h in clean_headers):
+                        st.info("Format Detected: Lord (Channel-based)")
+                        time_idx = next(i for i, h in enumerate(clean_headers) if 'time' in h)
+                        node_idx = next(i for i, h in enumerate(clean_headers) if 'channel' in h or 'node' in h)
+                        
+                        time_header = actual_headers[time_idx]
+                        node_header = actual_headers[node_idx]
+                        temp_match = [h for h in actual_headers if 'temp' in h.lower()]
+                        
+                        if temp_match:
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[time_header], format='mixed')
+                            # STANDARDIZATION: Swap ':' for '-'
+                            df_processed['NodeNum'] = df_raw[node_header].str.strip().str.replace(':', '-')
+                            df_processed['temperature'] = pd.to_numeric(df_raw[temp_match[0]], errors='coerce')
+
+                    # --- BRANCH C: SENSORPUSH ---
+                    else:
+                        st.info("Format Detected: SensorPush")
+                        t_match = [h for h in actual_headers if 'timestamp' in h.lower()]
+                        v_match = [h for h in actual_headers if 'temp' in h.lower()]
+                        if t_match and v_match:
+                            import re
+                            match = re.search(r'^([^ \(\.]+)', u_file.name)
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[t_match[0]], format='mixed')
+                            df_processed['temperature'] = pd.to_numeric(df_raw[v_match[0]], errors='coerce')
+                            df_processed['NodeNum'] = match.group(1) if match else "Unknown"
+
+                    # --- 3. PREVIEW & UPLOAD ---
+                    if not df_processed.empty:
+                        df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
+                        
+                        found_nodes = df_processed['NodeNum'].unique()
+                        st.success(f"✅ Ready: Standardized Node IDs: {', '.join(found_nodes)}")
+                        st.dataframe(df_processed.head(10))
+
+                        target_table = "raw_lord" if (is_sensorconnect or 'channel' in clean_headers or 'node' in clean_headers) else "raw_sensorpush"
+                        
+                        if st.button("🚀 Push to BigQuery"):
+                            with st.spinner("Uploading data..."):
+                                table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
+                                config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(df_processed, table_id, job_config=config).result()
+                                
+                                st.success(f"Successfully uploaded {len(df_processed)} rows to {target_table}!")
+                                st.cache_data.clear()
             except Exception as e:
-                st.error(f"❌ Upload Error: {e}")
+                st.error(f"Error processing file: {e}")
 
-    # --- TAB 2: EXPORT LOGIC (Your Provided Code) ---
     with tab_export:
         st.subheader("📥 Export Project Data")
         if not selected_project or selected_project == "All Projects":
             st.warning("⚠️ Please select a specific project in the sidebar to perform an export.")
         else:
+            # 1. Date Selection
             c1, c2 = st.columns(2)
             with c1:
                 e_start = st.date_input("Start Date", value=datetime.now() - timedelta(days=30), key="exp_start")
             with c2:
                 e_end = st.date_input("End Date", value=datetime.now(), key="exp_end")
             
+            # 2. Scope Selection (Whole Project vs Single Pipe)
             st.write("---")
             export_scope = st.radio("Export Scope", ["Whole Project", "Specific Pipe / Bank"], horizontal=True)
             
+            # Fetch data once to populate location options and for filtering
             with st.spinner("Preparing export options..."):
-                # Using your helper function to get data
                 full_df = get_universal_portal_data(selected_project, view_mode="engineering")
             
             target_loc = None
@@ -764,6 +800,7 @@ def render_data_intake_page(selected_project):
                 loc_list = sorted(full_df['Location'].dropna().unique())
                 target_loc = st.selectbox("Select Pipe/Bank to Export", loc_list)
 
+            # 3. Export Action
             if st.button("📦 Prepare Data for Download"):
                 if full_df.empty:
                     st.error("No data found for this project in the engineering database.")
@@ -772,16 +809,21 @@ def render_data_intake_page(selected_project):
                     mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
                     export_df = full_df.loc[mask].copy()
 
+                    # Filter by Scope
                     filename_suffix = "Whole_Project"
                     if export_scope == "Specific Pipe / Bank" and target_loc:
                         export_df = export_df[export_df['Location'] == target_loc]
                         filename_suffix = target_loc.replace(" ", "_")
 
                     if export_df.empty:
-                        st.warning("No data found matching the filters.")
+                        st.warning("No data found matching the combined date and scope filters.")
                     else:
-                        st.success(f"✅ Prepared {len(export_df)} rows.")
+                        # Success Message & Download
+                        st.success(f"✅ Prepared {len(export_df)} rows for {filename_suffix}.")
+                        
+                        # Clean up timestamps for the CSV
                         export_df['timestamp'] = export_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
                         csv = export_df.to_csv(index=False).encode('utf-8')
                         st.download_button(
                             label=f"💾 Download {filename_suffix} CSV",
@@ -789,8 +831,6 @@ def render_data_intake_page(selected_project):
                             file_name=f"{selected_project}_{filename_suffix}_Export.csv",
                             mime="text/csv"
                         )
-
-
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
@@ -820,7 +860,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         if st.button(f"🚀 Approve {selected_project} Range", use_container_width=True):
             with st.spinner("Writing approvals to master override..."):
                 bulk_sql = f"""
-                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, status)
+                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                     SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
                     FROM (
                         SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
@@ -878,7 +918,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
                     with st.spinner("Applying masks..."):
                         mask_sql = f"""
-                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, status)
+                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                             SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
                             FROM (
                                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
@@ -905,7 +945,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     with st.spinner("Clearing project masks..."):
                         clear_mask_sql = f"""
                             DELETE FROM `{OVERRIDE_TABLE}`
-                            WHERE status = 'MASKED'
+                            WHERE approve = 'MASKED'
                             AND NodeNum IN (
                                 SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` 
                                 WHERE Project = '{selected_project}'
@@ -1059,19 +1099,11 @@ elif service == "🏠 Executive Summary":
 elif service == "📊 Client Portal":
     # Ensure there are exactly 5 variables here to match the 5 in the definition above
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
-
 elif service == "📉 Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
-
 elif service == "📤 Data Intake Lab":
-    # Ensure this check matches your session_state['role'] == 'Admin'
     if check_admin_access(service):
         render_data_intake_page(selected_project)
-    else:
-        st.error("🚫 Access Denied: Admin privileges required.")
-
 elif service == "🛠️ Admin Tools":
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
-    else:
-        st.error("🚫 Access Denied: Admin privileges required.")
