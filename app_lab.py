@@ -24,7 +24,8 @@ OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 # MASTER VISIBILITY SWITCHES
 PROJECT_VISIBILITY_MASKS = {
     "Office": "2026-03-03 15:00:00", 
-    "Main_Site": "2026-01-01 00:00:00"
+    "Main_Site": "2026-01-01 00:00:00",
+    "2527": "2026-01-01 00:00:00"
 }
 
 @st.cache_resource
