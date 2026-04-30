@@ -287,7 +287,7 @@ def render_global_overview():
     st.header("🌐 Global Project Overview")
     
     # 1. Project Selection from Metadata
-    proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+    proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot` WHERE Project IS NOT NULL"
     try:
         available_projects = sorted(client.query(proj_list_q).to_dataframe()['Project'].tolist())
         target_project = st.selectbox("🏗️ Select a Project to Review", available_projects, key="global_proj_picker")
@@ -335,7 +335,7 @@ def render_executive_summary(client, selected_project, unit_label):
     summary_q = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location
-            FROM `{PROJECT_ID}.{DATASET_ID}.metadata`
+            FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
             WHERE Project IS NOT NULL {proj_filter}
         ),
         RecentReporting AS (
