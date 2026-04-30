@@ -58,10 +58,10 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             AND r.timestamp >= '{cutoff}'
             AND rej.approve = 'TRUE'
             AND NOT EXISTS (
-                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
-                WHERE m.NodeNum = r.NodeNum 
-                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                AND m.approve = 'MASKED'
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m_mask 
+                WHERE m_mask.NodeNum = r.NodeNum 
+                AND m_mask.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m_mask.approve = 'MASKED'
             )
         """
     else:
