@@ -1070,10 +1070,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 ###########
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Hard-Locked Surgical Cleaner.
-    Uses direct session_state access to prevent the 'disappearing lasso' bug.
-    """
     st.subheader("🧨 Surgical Point Cleaner")
 
     # 1. VIEW MODE & ACTION TOGGLES
@@ -1082,72 +1078,62 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     delete_method = c2.radio("Action Type", ["Soft Delete (Hide)", "Hard Delete (Purge)"], horizontal=True)
     v_mode = "engineering" if "Engineering" in view_toggle else "client"
 
-    # 2. DATA FETCHING [cite: 13, 15]
+    # 2. DATA PREP
     p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
     if p_df.empty:
-        st.info("No data available to scrub in this view.")
+        st.info("No data available to scrub.")
         return
 
-    sel_loc = st.selectbox("Select Pipe to Clean", sorted(p_df['Location'].unique()), key="surgical_loc_select")
-    
-    # reset_index is critical: ensures Plotly point_index matches Dataframe row index
+    sel_loc = st.selectbox("Select Pipe to Clean", sorted(p_df['Location'].unique()))
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 3. BUILD THE GRAPH
+    # 3. THE CHART (Placed outside the form for interactivity)
+    # We use a static key so the chart doesn't reset when you click buttons
+    chart_key = f"scrub_chart_{sel_loc}"
+    
     fig_scrub = build_high_speed_graph(
-        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
+        scrub_df, f"Scrubbing: {sel_loc}", 
         pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
         pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
         active_refs, unit_mode, unit_label, display_tz=display_tz
     )
     fig_scrub.update_layout(dragmode='lasso', clickmode='event+select')
 
-    # 4. RENDER AND IDENTIFY KEY
-    chart_key = f"scrub_chart_{selected_project}_{sel_loc}_{v_mode}"
-    
-    # We remove 'on_select' to stop the auto-rerun flicker
+    # IMPORTANT: Do NOT use on_select="rerun" here. Let the form handle the submission.
     st.plotly_chart(fig_scrub, use_container_width=True, key=chart_key)
 
-    # 5. THE "LOCK" BUTTON
-    # This button manually triggers the state capture so it cannot disappear
-    if st.button("🔒 LOCK LASSO SELECTION", use_container_width=True):
-        # Look directly into Streamlit's internal state for this specific widget
-        widget_state = st.session_state.get(chart_key)
-        if widget_state and "selection" in widget_state:
-            pts = widget_state["selection"].get("points", [])
-            if pts:
-                st.session_state.locked_selection = pts
-                st.success(f"Successfully locked {len(pts)} points. Choose an action below.")
-            else:
-                st.warning("No points were lassoed. Please select points on the graph first.")
-        else:
-            st.error("Chart state not found. Please try lassoing again.")
-
-    # 6. ACTION BUTTONS [cite: 12, 16]
-    if st.session_state.get("locked_selection"):
-        num_pts = len(st.session_state.locked_selection)
-        st.divider()
-        st.write(f"**Locked Buffer:** {num_pts} points")
+    # 4. THE ACTION FORM
+    # This "packages" the selection so it doesn't disappear
+    with st.form(key=f"scrub_form_{sel_loc}"):
+        st.write("### 🛠️ Step 2: Choose Action")
+        st.info("Lasso your points on the graph above, then click one of these buttons.")
         
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            if st.button("✅ Approve", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "TRUE")
-        with col2:
-            if st.button("🚫 Mask", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "MASKED")
-        with col3:
-            # Conditional Label based on the 'Hard/Soft' radio choice
-            btn_label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
-            if st.button(btn_label, type="primary", use_container_width=True):
-                if "Hard" in delete_method:
-                    hard_purge_points(st.session_state.locked_selection, scrub_df)
-                else:
-                    update_records(st.session_state.locked_selection, scrub_df, "FALSE")
-        with col4:
-            if st.button("Clear Buffer", use_container_width=True):
-                st.session_state.locked_selection = []
-                st.rerun()
+        col1, col2, col3 = st.columns(3)
+        
+        submit_approve = col1.form_submit_button("✅ APPROVE (Client)")
+        submit_mask = col2.form_submit_button("🚫 MASK (Internal)")
+        
+        # Hard vs Soft Delete logic based on the radio button above
+        del_label = "🔥 PERMANENT PURGE" if "Hard" in delete_method else "🗑️ DELETE (Hide)"
+        submit_delete = col3.form_submit_button(del_label)
+
+        if submit_approve or submit_mask or submit_delete:
+            # PULL THE DATA FROM THE CHART STATE
+            widget_state = st.session_state.get(chart_key)
+            selection = widget_state.get("selection", {}).get("points", []) if widget_state else []
+
+            if not selection:
+                st.error("No points found in selection. Ensure the lasso is visible on the chart.")
+            else:
+                if submit_approve:
+                    update_records(selection, scrub_df, "TRUE")
+                elif submit_mask:
+                    update_records(selection, scrub_df, "MASKED")
+                elif submit_delete:
+                    if "Hard" in delete_method:
+                        hard_purge_points(selection, scrub_df)
+                    else:
+                        update_records(selection, scrub_df, "FALSE")
 
 def hard_purge_points(pts, df):
     """
