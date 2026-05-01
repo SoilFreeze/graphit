@@ -1071,100 +1071,83 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Stabilized Surgical Cleaner.
-    Uses index-locking to ensure the graph and database actions are perfectly synced.
+    Hard-Locked Surgical Cleaner.
+    Uses direct session_state access to prevent the 'disappearing lasso' bug.
     """
     st.subheader("🧨 Surgical Point Cleaner")
 
-    # 1. VIEW MODE TOGGLE
-    # Allows switching between what the client sees and the full engineering stream [cite: 16]
-    view_toggle = st.radio(
-        "Display Mode", 
-        ["Engineering (All Points)", "Client (Approved Only)"], 
-        horizontal=True,
-        key="surgical_view_selection"
-    )
+    # 1. VIEW MODE & ACTION TOGGLES
+    c1, c2 = st.columns(2)
+    view_toggle = c1.radio("Display Mode", ["Engineering (All)", "Client (Approved)"], horizontal=True)
+    delete_method = c2.radio("Action Type", ["Soft Delete (Hide)", "Hard Delete (Purge)"], horizontal=True)
     v_mode = "engineering" if "Engineering" in view_toggle else "client"
 
-    # 2. DATA FETCHING
-    # Fetch data based on the chosen mode 
+    # 2. DATA FETCHING [cite: 13, 15]
     p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
-    
     if p_df.empty:
         st.info("No data available to scrub in this view.")
         return
 
-    # 3. LOCATION SELECTION
-    loc_options = sorted(p_df['Location'].dropna().unique())
-    sel_loc = st.selectbox("Select Pipe to Clean", loc_options, key="surgical_loc_select")
+    sel_loc = st.selectbox("Select Pipe to Clean", sorted(p_df['Location'].unique()), key="surgical_loc_select")
     
-    # CRITICAL: reset_index ensures Plotly's point_index (0, 1, 2...) 
-    # maps exactly to our dataframe rows.
+    # reset_index is critical: ensures Plotly point_index matches Dataframe row index
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 4. PERSISTENT SELECTION BUFFER
-    if "locked_selection" not in st.session_state:
-        st.session_state.locked_selection = []
-
-    # 5. BUILD THE GRAPH
-    # Note: We use the existing build_high_speed_graph engine for consistency
+    # 3. BUILD THE GRAPH
     fig_scrub = build_high_speed_graph(
-        scrub_df, 
-        f"Surgical Scrubbing: {sel_loc}", 
+        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
         pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
         pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
         active_refs, unit_mode, unit_label, display_tz=display_tz
     )
+    fig_scrub.update_layout(dragmode='lasso', clickmode='event+select')
 
-    # If points are already in the buffer, highlight them
-    if st.session_state.locked_selection:
-        indices = [p['point_index'] for p in st.session_state.locked_selection]
-        fig_scrub.update_traces(
-            selectedpoints=indices, 
-            unselected=dict(marker=dict(opacity=0.2))
-        )
+    # 4. RENDER AND IDENTIFY KEY
+    chart_key = f"scrub_chart_{selected_project}_{sel_loc}_{v_mode}"
+    
+    # We remove 'on_select' to stop the auto-rerun flicker
+    st.plotly_chart(fig_scrub, use_container_width=True, key=chart_key)
 
-    # 6. RENDER & CAPTURE
-    chart_key = f"scrub_chart_{sel_loc}_{v_mode}"
-    event_data = st.plotly_chart(
-        fig_scrub, 
-        use_container_width=True, 
-        on_select="rerun", 
-        key=chart_key
-    )
+    # 5. THE "LOCK" BUTTON
+    # This button manually triggers the state capture so it cannot disappear
+    if st.button("🔒 LOCK LASSO SELECTION", use_container_width=True):
+        # Look directly into Streamlit's internal state for this specific widget
+        widget_state = st.session_state.get(chart_key)
+        if widget_state and "selection" in widget_state:
+            pts = widget_state["selection"].get("points", [])
+            if pts:
+                st.session_state.locked_selection = pts
+                st.success(f"Successfully locked {len(pts)} points. Choose an action below.")
+            else:
+                st.warning("No points were lassoed. Please select points on the graph first.")
+        else:
+            st.error("Chart state not found. Please try lassoing again.")
 
-    # LOCK SELECTION INTO SESSION STATE
-    # If a new lasso is detected, save it and rerun to update the UI
-    if event_data and "selection" in event_data:
-        new_pts = event_data["selection"].get("points", [])
-        if new_pts and new_pts != st.session_state.locked_selection:
-            st.session_state.locked_selection = new_pts
-            st.rerun()
-
-    # 7. ACTION BUTTONS
-    if st.session_state.locked_selection:
+    # 6. ACTION BUTTONS [cite: 12, 16]
+    if st.session_state.get("locked_selection"):
         num_pts = len(st.session_state.locked_selection)
-        st.success(f"📍 {num_pts} points selected.")
+        st.divider()
+        st.write(f"**Locked Buffer:** {num_pts} points")
         
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            # Mark as TRUE for Client Portal visibility [cite: 12]
-            if st.button("✅ APPROVE", use_container_width=True):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            if st.button("✅ Approve", use_container_width=True):
                 update_records(st.session_state.locked_selection, scrub_df, "TRUE")
-        with c2:
-            # Mark as MASKED for Engineering-only visibility [cite: 12]
-            if st.button("🚫 MASK", use_container_width=True):
+        with col2:
+            if st.button("🚫 Mask", use_container_width=True):
                 update_records(st.session_state.locked_selection, scrub_df, "MASKED")
-        with c3:
-            # Mark as FALSE to hide from all dashboard views 
-            if st.button("🗑️ DELETE", use_container_width=True, type="primary"):
-                update_records(st.session_state.locked_selection, scrub_df, "FALSE")
-        with c4:
-            if st.button("Clear", use_container_width=True):
+        with col3:
+            # Conditional Label based on the 'Hard/Soft' radio choice
+            btn_label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
+            if st.button(btn_label, type="primary", use_container_width=True):
+                if "Hard" in delete_method:
+                    hard_purge_points(st.session_state.locked_selection, scrub_df)
+                else:
+                    update_records(st.session_state.locked_selection, scrub_df, "FALSE")
+        with col4:
+            if st.button("Clear Buffer", use_container_width=True):
                 st.session_state.locked_selection = []
                 st.rerun()
-    else:
-        st.info("💡 Use the Lasso or Box tool to select points on the graph.")
 
 def hard_purge_points(pts, df):
     """
