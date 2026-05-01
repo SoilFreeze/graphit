@@ -374,10 +374,13 @@ def render_global_overview(selected_project, display_tz):
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
+###########
+# - 6. PAGE: EXECUTIVE SUMMARY - #
+###########
+
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # 1. DATA GATHERING
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
@@ -389,9 +392,9 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             WHERE Project IS NOT NULL {proj_filter}
         ),
         BaseReporting AS (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ),
         HistoricalStats AS (
             SELECT 
@@ -415,9 +418,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             st.warning("No metadata found for this project.")
             return
 
+        # --- CRITICAL FIX FOR NA ERROR ---
+        # Replace missing activity with 0 so logic doesn't break
+        raw_df['active_6h'] = raw_df['active_6h'].fillna(0).astype(int)
+        raw_df['active_24h'] = raw_df['active_24h'].fillna(0).astype(int)
+        
         now_local = pd.Timestamp.now(tz=display_tz)
 
-        # 2. RENDER MAIN SUMMARY TABLE (BY LOCATION)
+        # 2. MAIN SUMMARY TABLE
         summary_df = raw_df.groupby(['Project', 'Location']).agg(
             Nodes=('NodeNum', 'count'),
             Seen_24h=('active_24h', 'sum'),
@@ -427,7 +435,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
         def format_summary(row):
             oldest = row['Oldest_Ping']
-            lag_str = "N/A"
+            lag_str = "Never Seen ⚪"
             if pd.notnull(oldest):
                 if oldest.tzinfo is None: oldest = oldest.tz_localize('UTC')
                 lag = round((now_local - oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
@@ -444,11 +452,9 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
         st.subheader("📍 Location Overview")
         display_summary = summary_df.apply(format_summary, axis=1)
-        
-        # Apply the gray styling for PROJECT TOTAL rows if they exist in your union
         st.dataframe(display_summary, use_container_width=True, hide_index=True)
 
-        # 3. DRILL-DOWN SECTION (BY SENSOR)
+        # 3. DRILL-DOWN SECTION
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         
@@ -456,34 +462,35 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         selected_loc = st.selectbox("Detailed view for:", search_options)
 
         if selected_loc != search_options[0]:
-            # Filter for the specific location
             sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
             
             def format_sensor_row(row):
                 ping = row['last_ping']
-                lag_str = "Never Seen"
+                lag_str = "Never Seen ⚪"
                 if pd.notnull(ping):
                     if ping.tzinfo is None: ping = ping.tz_localize('UTC')
                     lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
                     lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
 
+                # Safe boolean checking
+                s24 = "✅" if row['active_24h'] == 1 else "❌"
+                s6 = "✅" if row['active_6h'] == 1 else "❌"
+
                 return pd.Series({
                     "Node ID": row['NodeNum'],
                     "Bank": row['Bank'],
                     "Depth": f"{row['Depth']}ft",
-                    "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
-                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
+                    "Seen (24h)": s24,
+                    "Seen (6h)": s6,
                     "Last Seen": lag_str
                 })
 
             detail_display = sensor_df.apply(format_sensor_row, axis=1)
-            
             st.write(f"Showing **{len(detail_display)}** sensors for **{selected_loc}**:")
             st.dataframe(detail_display, use_container_width=True, hide_index=True)
 
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
-
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
