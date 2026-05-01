@@ -111,8 +111,7 @@ def check_admin_access(service_name):
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# --- 1. INITIALIZE FALLBACKS (Prevents NameError) ---
-# These ensure the variables exist even if a query fails
+# --- 1. INITIALIZE FALLBACKS ---
 service = "🏠 Executive Summary"
 unit_mode = "Fahrenheit"
 unit_label = "°F"
@@ -129,21 +128,22 @@ service = st.sidebar.selectbox(
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Robust Project Selection
+# Global Project Selection - Now used by Global Overview, Client Portal, and Node Diagnostics
 if client is not None:
     try:
+        # Fetch projects from metadata to populate the sidebar [cite: 5]
         proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
         proj_df = client.query(proj_q).to_dataframe()
         proj_list = sorted(proj_df['Project'].dropna().unique())
         options = ["All Projects"] + proj_list
-        selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_final")
+        selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_global")
     except Exception as e:
         st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
         selected_project = "All Projects"
 
 # Reference Lines
 st.sidebar.subheader("📏 Reference Lines")
-active_refs = [] # Reset and rebuild based on checkboxes
+active_refs = [] 
 if st.sidebar.checkbox("Freezing (32°F)", value=True): 
     active_refs.append((32.0, "Freezing"))
 if st.sidebar.checkbox("Type B (26.6°F)", value=False): 
@@ -279,47 +279,45 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 # - 5. PAGE: GLOBAL OVERVIEW - #
 ###########
 
-def render_global_overview():
+def render_global_overview(selected_project):
     """
-    Shows all pipes/banks for a selected project in one scrolling view.
-    Engineering view: shows everything except 'FALSE'.
+    Shows all pipes/banks for the project selected in the sidebar.
+    Engineering view: shows everything except 'FALSE'[cite: 16].
     """
     st.header("🌐 Global Project Overview")
     
-    # 1. Project Selection from Metadata
-    proj_list_q = f"SELECT DISTINCT Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot` WHERE Project IS NOT NULL"
-    try:
-        available_projects = sorted(client.query(proj_list_q).to_dataframe()['Project'].tolist())
-        target_project = st.selectbox("🏗️ Select a Project to Review", available_projects, key="global_proj_picker")
-    except Exception as e:
-        st.error(f"Metadata Error: {e}")
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar to view the Global Overview.")
         return
 
-    if target_project:
-        with st.spinner(f"Syncing {target_project} (Engineering View)..."):
-            # Engineering view shows all data not explicitly rejected ('FALSE') in 'approve' column
-            p_df = get_universal_portal_data(target_project, view_mode="engineering")
+    # Use the project selected from the sidebar
+    target_project = selected_project
 
-        if not p_df.empty:
-            # 2. View Constraints
-            lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
-            now_utc = pd.Timestamp.now(tz='UTC')
-            # Snap end view to the upcoming Monday for consistent weekly alignment
-            end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-            start_view = end_view - timedelta(weeks=lookback)
+    with st.spinner(f"Syncing {target_project} (Engineering View)..."):
+        # Engineering view shows all data not explicitly rejected ('FALSE') [cite: 16]
+        p_df = get_universal_portal_data(target_project, view_mode="engineering")
 
-            # 3. Render a graph for every physical location (Pipe/Bank) in the project
-            for loc in sorted(p_df['Location'].unique()):
-                with st.expander(f"📍 Location: {loc}", expanded=True):
-                    loc_df = p_df[p_df['Location'] == loc]
-                    fig = build_high_speed_graph(
-                        loc_df, f"📈 {target_project} - {loc}", 
-                        start_view, end_view, tuple(active_refs), 
-                        unit_mode, unit_label, display_tz=display_tz
-                    )
-                    st.plotly_chart(fig, use_container_width=True, key=f"ov_{target_project}_{loc}")
-        else:
-            st.info(f"No engineering data found for {target_project} in the last 84 days.")
+    if not p_df.empty:
+        # 2. View Constraints
+        lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
+        now_utc = pd.Timestamp.now(tz='UTC')
+        
+        # Snap end view to the upcoming Monday for consistent weekly alignment
+        end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_view = end_view - timedelta(weeks=lookback)
+
+        # 3. Render a graph for every physical location (Pipe/Bank) in the project [cite: 6]
+        for loc in sorted(p_df['Location'].unique()):
+            with st.expander(f"📍 Location: {loc}", expanded=True):
+                loc_df = p_df[p_df['Location'] == loc]
+                fig = build_high_speed_graph(
+                    loc_df, f"📈 {target_project} - {loc}", 
+                    start_view, end_view, tuple(active_refs), 
+                    unit_mode, unit_label, display_tz=display_tz
+                )
+                st.plotly_chart(fig, use_container_width=True, key=f"ov_{target_project}_{loc}")
+    else:
+        st.info(f"No engineering data found for {target_project} in the last 84 days.")
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
@@ -1091,20 +1089,21 @@ def update_records(pts, df, val):
 ###########
 
 if service == "🌐 Global Overview":
-    render_global_overview()
+    render_global_overview(selected_project) # Now passing the sidebar variable
 
 elif service == "🏠 Executive Summary":
-    # Pass 'client' into the function call here
     render_executive_summary(client, selected_project, unit_label) 
 
 elif service == "📊 Client Portal":
-    # Ensure there are exactly 5 variables here to match the 5 in the definition above
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
+
 elif service == "📉 Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
+
 elif service == "📤 Data Intake Lab":
     if check_admin_access(service):
         render_data_intake_page(selected_project)
+
 elif service == "🛠️ Admin Tools":
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
