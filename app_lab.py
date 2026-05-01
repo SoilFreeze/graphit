@@ -165,8 +165,8 @@ display_tz = {
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Upgraded High-Performance Engine.
-    Uses Legend Grouping and Minor Tick Hierarchies to handle large datasets.
+    High-Performance Engine with Restored Now Marker and Legend Fixes.
+    Uses Scattergl for high data density.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -176,13 +176,16 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 1. TIMEZONE & UNIT CONVERSION
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
+    # Localize current time for the 'Now' marker 
+    now_local = pd.Timestamp.now(tz=display_tz)
+    
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
         y_range, dt_major, dt_minor = [-30, 30], 10, 5
     else:
         y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
-    # 2. ADVANCED LABELING & SORTING (From sf2527.py)
+    # 2. ADVANCED LABELING & SORTING [cite: 6]
     def get_sort_info(r):
         b = str(r.get('Bank', '')).strip()
         d = str(r.get('Depth', '')).strip()
@@ -198,7 +201,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     plot_df[['depth_label', 'sort_val']] = plot_df.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
     
-    # 3. TRACE GENERATION WITH LEGEND GROUPING
+    # 3. TRACE GENERATION
     fig = go.Figure()
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
     
@@ -214,7 +217,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for j, sn in enumerate(sensors):
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # Gap Detection (6h threshold)
+            # 6h Gap Detection [cite: 14]
             if not is_surgical:
                 s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
                 gap_mask = s_df['gap_hrs'] > 6.0
@@ -227,9 +230,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             fig.add_trace(go.Scattergl(
                 x=s_df['timestamp'], 
                 y=s_df['temperature'], 
-                name=f"{group_lbl} ({sn})", 
-                legendgroup=group_lbl, # Groups all nodes at same depth/bank
-                showlegend=True if j == 0 else False, # Only show one legend item per group
+                name=group_lbl if j == 0 else f"{group_lbl} ({sn})", 
+                legendgroup=group_lbl, 
+                showlegend=True if j == 0 else False, 
                 mode='lines+markers' if not is_surgical else 'markers',
                 connectgaps=False,
                 line=dict(color=color, width=1.5),
@@ -243,7 +246,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right")
 
-    # 5. GRID HIERARCHY (Optimized performance from sf2527.py)
+    # RESTORED: Now Marker (Red vertical line) 
+    fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
+
+    # 5. GRID HIERARCHY & LAYOUT
     fig.update_layout(
         title={'text': f"{title} ({display_tz})", 'x': 0},
         plot_bgcolor='white',
