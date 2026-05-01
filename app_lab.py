@@ -165,85 +165,85 @@ display_tz = {
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Standard Plotly engine.
-    REMOVED: 6-hour lines.
-    KEEP: Black Monday lines and Gray Midnight lines.
+    Upgraded High-Performance Engine.
+    Uses Legend Grouping and Minor Tick Hierarchies to handle large datasets.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
 
     plot_df = df.copy()
     
-    # 1. TIMEZONE CONVERSION
+    # 1. TIMEZONE & UNIT CONVERSION
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Localize window boundaries
-    tz = pytz.timezone(display_tz)
-    start_local = start_view.astimezone(tz) if hasattr(start_view, 'astimezone') else start_view
-    end_local = end_view.astimezone(tz) if hasattr(end_view, 'astimezone') else end_view
-    now_local = pd.Timestamp.now(tz=display_tz)
-
-    # 2. UNIT CONVERSION
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range, dt_major = [-30, 30], 5
+        y_range, dt_major, dt_minor = [-30, 30], 10, 5
     else:
-        y_range, dt_major = [-20, 80], 10
+        y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
-    # 3. LABELING
-    plot_df['label'] = plot_df.apply(
-        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if str(r.get('Bank')).strip().lower() not in ["", "none", "nan", "null"]
-        else f"{r.get('Depth')}ft ({r.get('NodeNum')})", axis=1
-    )
+    # 2. ADVANCED LABELING & SORTING (From sf2527.py)
+    def get_sort_info(r):
+        b = str(r.get('Bank', '')).strip()
+        d = str(r.get('Depth', '')).strip()
+        if b and b.lower() not in ['nan', 'none', '']: 
+            return f"Bank {b}", 0.0
+        if d and d.lower() not in ['nan', 'none', '']:
+            try:
+                num = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
+                return f"{d}ft", num
+            except: 
+                return f"{d}ft", 999.0
+        return f"Node {r['NodeNum']}", 1000.0
+
+    plot_df[['depth_label', 'sort_val']] = plot_df.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
     
-    is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
-    plot_mode = 'markers' if is_surgical else 'lines'
-
+    # 3. TRACE GENERATION WITH LEGEND GROUPING
     fig = go.Figure()
+    is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
     
-    for lbl in sorted(plot_df['label'].unique()):
-        s_df = plot_df[plot_df['label'] == lbl].sort_values('timestamp')
+    unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+
+    for i, (_, g_row) in enumerate(unique_groups.iterrows()):
+        group_lbl = g_row['depth_label']
+        group_data = plot_df[plot_df['depth_label'] == group_lbl]
+        color = colors[i % len(colors)]
+        sensors = group_data['NodeNum'].unique()
         
-        # Gap Detection
-        if not is_surgical:
-            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 6.0
-            if gap_mask.any():
-                gaps = s_df[gap_mask].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-
-        fig.add_trace(go.Scattergl(
-            x=s_df['timestamp'], 
-            y=s_df['temperature'], 
-            name=lbl, 
-            mode=plot_mode,
-            connectgaps=False,
-            hovertemplate=f"<b>{lbl.split('(')[0]}</b>: %{{y:.1f}}{unit_label}<extra></extra>"
-        ))
-
-    # 4. SIMPLIFIED GRID HIERARCHY (Mondays and Midnights Only)
-    # Generate daily markers instead of 6-hour markers
-    grid_days = pd.date_range(start=start_local.floor('D'), end=end_local.ceil('D'), freq='D', tz=display_tz)
-    
-    for ts in grid_days:
-        if ts.weekday() == 0:  # Monday
-            color, width, dash = "rgba(0,0,0,1)", 1.5, "solid" # Strong Black
-        else:  # Other Midnights
-            color, width, dash = "rgba(128,128,128,0.6)", 1.0, "dot" # Gray Dotted
+        for j, sn in enumerate(sensors):
+            s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-        fig.add_vline(x=ts, line_width=width, line_color=color, line_dash=dash, layer='below')
+            # Gap Detection (6h threshold)
+            if not is_surgical:
+                s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+                gap_mask = s_df['gap_hrs'] > 6.0
+                if gap_mask.any():
+                    gaps = s_df[gap_mask].copy()
+                    gaps['temperature'] = None
+                    gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                    s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-    # 5. REFERENCE LINES & NOW MARKER
+            fig.add_trace(go.Scattergl(
+                x=s_df['timestamp'], 
+                y=s_df['temperature'], 
+                name=f"{group_lbl} ({sn})", 
+                legendgroup=group_lbl, # Groups all nodes at same depth/bank
+                showlegend=True if j == 0 else False, # Only show one legend item per group
+                mode='lines+markers' if not is_surgical else 'markers',
+                connectgaps=False,
+                line=dict(color=color, width=1.5),
+                marker=dict(size=4, opacity=0.8),
+                hovertemplate=f"<b>{group_lbl} ({sn})</b>: %{{y:.1f}}{unit_label}<extra></extra>"
+            ))
+
+    # 4. REFERENCE LINES & NOW MARKER
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right")
 
-    fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
-
-    # 6. FINAL LAYOUT
+    # 5. GRID HIERARCHY (Optimized performance from sf2527.py)
     fig.update_layout(
         title={'text': f"{title} ({display_tz})", 'x': 0},
         plot_bgcolor='white',
@@ -251,25 +251,31 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         height=600,
         margin=dict(t=80, l=50, r=180, b=50),
         xaxis=dict(
-            range=[start_local, end_local], 
-            gridcolor='rgba(0,0,0,0)', # Hide default grid
-            showline=True, 
-            linecolor='black', 
-            mirror=True, 
+            range=[start_view, end_view], 
+            showline=True, mirror=True, linecolor='black',
+            showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1,
+            minor=dict(
+                dtick=6*60*60*1000, # 6 Hours
+                showgrid=True, 
+                gridcolor='Gainsboro', 
+                griddash='dash' 
+            ),
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})", 
-            range=y_range, 
-            dtick=dt_major, 
-            gridcolor='Gainsboro', 
-            showline=True, 
-            linecolor='black', 
-            mirror=True
+            range=y_range, dtick=dt_major, 
+            gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
+            minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
         ),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1, xanchor="left")
+        legend=dict(title="Depth Groups", orientation="v", x=1.02, y=1)
     )
     
+    # Solid Monday Lines
+    mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON', tz=display_tz)
+    for mon in mondays:
+        fig.add_vline(x=mon, line_width=2, line_color="dimgray", layer="below")
+
     return fig
 ##################
 # Page Functions #
