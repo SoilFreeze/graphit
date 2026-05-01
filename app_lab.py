@@ -1070,19 +1070,18 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Handles Plotly Lasso selection to Approve, Mask, or Delete specific data points.
-    Includes toggle for Client vs. Engineering view.
+    Stabilized Surgical Cleaner with Session State locking and View Mode toggles.
     """
     st.subheader("🧨 Surgical Point Cleaner")
 
     # 1. VIEW MODE TOGGLE
-    # Allows you to see points as the client does or see the raw diagnostic stream 
     view_toggle = st.radio(
         "Display Mode", 
         ["Engineering (All Points)", "Client (Approved Only)"], 
         horizontal=True,
-        key="surgical_view_mode"
+        key="surgical_view_selection"
     )
+    # Map selection to view_mode logic 
     v_mode = "engineering" if "Engineering" in view_toggle else "client"
 
     # 2. DATA FETCHING
@@ -1095,15 +1094,15 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     loc_options = sorted(p_df['Location'].dropna().unique())
     sel_loc = st.selectbox("Select Pipe to Clean", loc_options, key="surgical_loc_select")
     
-    # reset_index is critical so Plotly's point_index matches the dataframe row [cite: 11]
+    # reset_index is critical: ensures Plotly point_index matches Dataframe row index
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 4. PERSISTENT SELECTION STATE
+    # 4. PERSISTENT STATE INITIALIZATION
     if "locked_selection" not in st.session_state:
         st.session_state.locked_selection = []
 
     # 5. BUILD THE GRAPH
-    # Note: Use Scatter (SVG) for lasso stability; Scattergl can be finicky with lasso [cite: 11]
+    # Using 'Scatter' (SVG) instead of 'Scattergl' for more reliable Lasso capture
     fig_scrub = build_high_speed_graph(
         scrub_df, 
         f"Surgical Scrubbing: {sel_loc} ({view_toggle})", 
@@ -1112,82 +1111,92 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
     )
 
-    # Apply previous selection if it exists to keep points highlighted after rerun
+    # Highlight previously selected points so they stay selected after rerun
     if st.session_state.locked_selection:
         indices = [p['point_index'] for p in st.session_state.locked_selection]
-        fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.3)))
+        fig_scrub.update_traces(
+            selectedpoints=indices, 
+            unselected=dict(marker=dict(opacity=0.2))
+        )
 
     # 6. RENDER & CAPTURE
-    # 'on_select="rerun"' captures the lasso event [cite: 11]
-    event_data = st.plotly_chart(fig_scrub, use_container_width=True, on_select="rerun", key=f"scrub_plot_{sel_loc}")
+    # We use 'rerun' to catch the lasso event immediately
+    event_data = st.plotly_chart(
+        fig_scrub, 
+        use_container_width=True, 
+        on_select="rerun", 
+        key=f"scrub_chart_{sel_loc}_{v_mode}"
+    )
 
-    # Update state with new selection if lasso was used
+    # --- CRITICAL: IMMEDIATE STATE LOCKING ---
+    # If the user just lassoed points, we grab them and save them to session_state
+    # before the next line of code runs.
     if event_data and "selection" in event_data:
         new_pts = event_data["selection"].get("points", [])
         if new_pts:
             st.session_state.locked_selection = new_pts
+            # Force a rerun to ensure the buttons appear and points stay highlighted
+            st.rerun()
 
     # 7. ACTION BUTTONS
     if st.session_state.locked_selection:
         num_pts = len(st.session_state.locked_selection)
-        st.success(f"📍 {num_pts} points selected. Choose an action:")
+        st.success(f"📍 {num_pts} points selected.")
         
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             if st.button("✅ APPROVE (Client)", use_container_width=True, type="primary"):
-                update_records(st.session_state.locked_selection, scrub_df, "TRUE") # [cite: 12, 16]
+                update_records(st.session_state.locked_selection, scrub_df, "TRUE")
         with c2:
             if st.button("🚫 MASK (Internal)", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "MASKED") # 
+                update_records(st.session_state.locked_selection, scrub_df, "MASKED")
         with c3:
             if st.button("🗑️ DELETE (Reject)", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "FALSE") # 
+                update_records(st.session_state.locked_selection, scrub_df, "FALSE")
         with c4:
             if st.button("Clear Selection", use_container_width=True):
                 st.session_state.locked_selection = []
                 st.rerun()
     else:
-        st.info("💡 Use the Lasso or Box tool on the graph to select points for cleaning.")
+        st.info("💡 Use the Lasso or Box tool on the graph to select points.")
 ###########
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
 
 def update_records(pts, df, val):
     """
-    Writes status updates into the 'approve' column of manual_rejections.
+    Writes status updates (TRUE, FALSE, MASKED) to the manual_rejections table. 
     """
     recs = []
     for p in pts:
-        # Snap timestamp to the hour for database alignment [cite: 11, 14]
         try:
-            raw_x = p['x']
-            ts = pd.to_datetime(raw_x).tz_convert('UTC').floor('h')
+            # Snap timestamp to the hour for database alignment [cite: 14]
+            ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
             node = df.iloc[p['point_index']]['NodeNum']
             
             recs.append({
                 "NodeNum": str(node), 
                 "timestamp": ts, 
-                "approve": val # TRUE, FALSE, or MASKED 
+                "approve": val 
             })
-        except Exception:
+        except Exception as e:
             continue
     
     if recs:
-        # Prevent duplicates before upload
         status_df = pd.DataFrame(recs).drop_duplicates(subset=['NodeNum', 'timestamp'])
         try:
-            # Upload to manual_rejections [cite: 11]
+            # Load into BigQuery manual_rejections table [cite: 11]
             job = client.load_table_from_dataframe(status_df, OVERRIDE_TABLE)
             job.result() 
             
-            # Reset state and refresh
+            # Clear selection and cache after success
             st.session_state.locked_selection = []
             st.cache_data.clear()
             st.success(f"Successfully marked {len(status_df)} records as {val}")
             time.sleep(1) 
             st.rerun()
         except Exception as e:
-            st.error(f"Database Write Failed: {e}")
+            st.error(f"Database Error: {e}")
 
 ###########
 # - 12. MAIN ROUTER - #
