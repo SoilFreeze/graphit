@@ -165,8 +165,7 @@ display_tz = {
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    High-Performance Engine with Restored Now Marker and Legend Fixes.
-    Uses Scattergl for high data density.
+    Stabilized Engine: Uses standard Scatter for stability and proper legend grouping.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -175,8 +174,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
     # 1. TIMEZONE & UNIT CONVERSION
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
-    
-    # Localize current time for the 'Now' marker 
     now_local = pd.Timestamp.now(tz=display_tz)
     
     if unit_mode == "Celsius":
@@ -185,7 +182,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     else:
         y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
-    # 2. ADVANCED LABELING & SORTING [cite: 6]
+    # 2. LABELING & SORTING [cite: 6, 9]
     def get_sort_info(r):
         b = str(r.get('Bank', '')).strip()
         d = str(r.get('Depth', '')).strip()
@@ -205,6 +202,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig = go.Figure()
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
     
+    # Identify unique depth/bank groups
     unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
@@ -217,7 +215,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for j, sn in enumerate(sensors):
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # 6h Gap Detection [cite: 14]
+            # Gap Detection (6h threshold) [cite: 14]
             if not is_surgical:
                 s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
                 gap_mask = s_df['gap_hrs'] > 6.0
@@ -227,12 +225,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                     s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-            fig.add_trace(go.Scattergl(
+            # Using standard Scatter (not gl) for better multi-chart stability
+            fig.add_trace(go.Scatter(
                 x=s_df['timestamp'], 
                 y=s_df['temperature'], 
-                name=group_lbl if j == 0 else f"{group_lbl} ({sn})", 
+                name=f"{group_lbl} ({sn})", 
                 legendgroup=group_lbl, 
-                showlegend=True if j == 0 else False, 
+                showlegend=True if j == 0 else False, # Show only the first sensor of a group in legend
                 mode='lines+markers' if not is_surgical else 'markers',
                 connectgaps=False,
                 line=dict(color=color, width=1.5),
@@ -246,12 +245,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right")
 
-    # RESTORED: Now Marker (Red vertical line) 
+    # RESTORED: Red Vertical 'Now' Line
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
     # 5. GRID HIERARCHY & LAYOUT
     fig.update_layout(
-        title={'text': f"{title} ({display_tz})", 'x': 0},
+        title={'text': f"<b>{title}</b>", 'x': 0},
         plot_bgcolor='white',
         hovermode="x unified",
         height=600,
@@ -261,7 +260,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             showline=True, mirror=True, linecolor='black',
             showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1,
             minor=dict(
-                dtick=6*60*60*1000, # 6 Hours
+                dtick=6*60*60*1000, 
                 showgrid=True, 
                 gridcolor='Gainsboro', 
                 griddash='dash' 
@@ -274,10 +273,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
             minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
         ),
-        legend=dict(title="Depth Groups", orientation="v", x=1.02, y=1)
+        legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
     
-    # Solid Monday Lines
+    # Monday markers
     mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON', tz=display_tz)
     for mon in mondays:
         fig.add_vline(x=mon, line_width=2, line_color="dimgray", layer="below")
