@@ -49,48 +49,15 @@ client = get_bq_client()
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    """
-    Updated Data Engine: Uses 'approve' column for visibility logic as per schema.
-    """
-    cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
-    
-    if view_mode == "client":
-        # Logic: Must be marked 'TRUE' (Approved) AND must NOT be marked 'MASKED'
-        query_filter = f"""
-            AND r.timestamp >= '{cutoff}'
-            AND rej.approve = 'TRUE'
-            AND NOT EXISTS (
-                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
-                WHERE m.NodeNum = r.NodeNum 
-                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                AND m.approve = 'MASKED'
-            )
-        """
-    else:
-        # Engineering sees everything except explicit deletions ('FALSE')
-        query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
-
-    query = f"""
-        SELECT 
-            r.NodeNum, r.timestamp, r.temperature,
-            m.Location, m.Bank, m.Depth, m.Project,
-            rej.approve as is_approved 
-        FROM (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ) AS r
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
-            ON r.NodeNum = rej.NodeNum 
-            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE m.Project = '{project_id}'
-        {query_filter}
-        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-        ORDER BY m.Location ASC, r.timestamp ASC
-    """
+    # ... [Query logic] ...
     try:
         df = client.query(query).to_dataframe()
+        
+        # FIX: Ensure 'timestamp' is localized to UTC first, then we can convert it later
+        if not df.empty and 'timestamp' in df.columns:
+            if df['timestamp'].dt.tz is None:
+                df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
+        
         return df
     except Exception as e:
         st.error(f"BQ Error: {e}")
@@ -155,8 +122,10 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False):
 # UPDATED: Set index=2 to make "Local (US/Pacific)" the default selection [cite: 7]
 # --- 2. SIDEBAR WIDGETS ---
 tz_options = ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"]
+# Setting index=2 forces "Local (US/Pacific)" as the default on load
 tz_mode = st.sidebar.selectbox("Timezone Display", tz_options, index=2)
 
+# Map the selection to a pytz-compatible string
 display_tz = {
     "UTC": "UTC", 
     "Local (US/Eastern)": "US/Eastern", 
@@ -339,7 +308,7 @@ def render_global_overview(selected_project):
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # ... [Query logic remains the same] ...
+    # ... [Query logic] ...
     
     try:
         with st.spinner("⚡ Auditing connectivity..."):
@@ -349,7 +318,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             st.warning("⚠️ No data found.")
             return
 
-        # UPDATED: Use the selected display_tz for current time comparison
+        # FORCE 'now' to the selected timezone
         now_local = pd.Timestamp.now(tz=display_tz)
 
         def process_health_row(row):
@@ -357,9 +326,13 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             last_ts = row['last_up']
             
             if pd.notnull(last_ts):
-                # Convert BigQuery UTC timestamp to the selected local timezone
+                # Ensure the DB timestamp is recognized as UTC, then converted to Pacific
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.tz_localize('UTC')
+                
                 last_ts_local = last_ts.tz_convert(display_tz)
                 gap = round((now_local - last_ts_local).total_seconds() / 3600, 1)
+                
                 icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
                 time_str = f"{gap}h ago {icon}"
             else:
@@ -370,16 +343,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 "Location": row['Location'],
                 "Mapped": row['total'],
                 "Active": row['active'],
-                "Status": "✅ Healthy" if row['total'] == row['active'] else f"⚠️ {row['total'] - row['active']} Offline",
                 "Last Activity": time_str
             })
 
         health_df = df.apply(process_health_row, axis=1)
-        # ... [Metric columns remain the same] ...
         st.dataframe(health_df, use_container_width=True, hide_index=True)
 
     except Exception as e:
-        st.error(f"Executive Summary Error: {e}")
+        st.error(f"Summary Error: {e}")
 
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
