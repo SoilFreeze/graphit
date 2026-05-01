@@ -373,137 +373,118 @@ def render_global_overview(selected_project, display_tz):
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # 1. Fuzzy Filter Logic
+    # 1. DATA QUERY (Same robust logic as before)
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # SQL query tracking 24h activity, 6h activity, and lag endpoints
     query = f"""
         WITH MappedNodes AS (
-            SELECT TRIM(Project) as Project, NodeNum, Location
+            SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
             WHERE Project IS NOT NULL {proj_filter}
         ),
         BaseReporting AS (
-            SELECT NodeNum, timestamp 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
-            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ),
-        RecentReporting24h AS (
-            SELECT NodeNum, 1 as active_24 
-            FROM BaseReporting 
-            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-            GROUP BY NodeNum
-        ),
-        RecentReporting6h AS (
-            SELECT NodeNum, 1 as active_6 
-            FROM BaseReporting 
-            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
-            GROUP BY NodeNum
-        ),
-        HistoricalPings AS (
+        HistoricalStats AS (
             SELECT 
                 NodeNum, 
-                MAX(timestamp) as ever_ping_max
-            FROM BaseReporting 
-            GROUP BY NodeNum
+                MAX(timestamp) as last_ping,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as active_6h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h
+            FROM BaseReporting GROUP BY NodeNum
         ),
         JoinedData AS (
-            SELECT 
-                m.Project, m.Location, m.NodeNum,
-                COALESCE(r24.active_24, 0) as is_active_24,
-                COALESCE(r6.active_6, 0) as is_active_6,
-                h.ever_ping_max
+            SELECT m.*, h.last_ping, h.active_6h, h.active_24h
             FROM MappedNodes m
-            LEFT JOIN RecentReporting24h r24 ON m.NodeNum = r24.NodeNum
-            LEFT JOIN RecentReporting6h r6 ON m.NodeNum = r6.NodeNum
-            LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
-        ),
-        LocationStats AS (
-            SELECT 
-                Project, Location, 
-                COUNT(NodeNum) as total, 
-                SUM(is_active_24) as active_24h, 
-                SUM(is_active_6) as active_6h,
-                MAX(ever_ping_max) as last_up,
-                MIN(ever_ping_max) as oldest_node_ping 
-            FROM JoinedData GROUP BY Project, Location
-        ),
-        ProjectTotals AS (
-            SELECT 
-                Project, 'PROJECT TOTAL' as Location, 
-                COUNT(NodeNum) as total, 
-                SUM(is_active_24) as active_24h, 
-                SUM(is_active_6) as active_6h,
-                MAX(ever_ping_max) as last_up,
-                MIN(ever_ping_max) as oldest_node_ping
-            FROM JoinedData GROUP BY Project
+            LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
         )
-        SELECT * FROM ProjectTotals
-        UNION ALL
-        SELECT * FROM LocationStats
-        ORDER BY Project ASC, (Location = 'PROJECT TOTAL') DESC, Location ASC
+        SELECT * FROM JoinedData
     """
     
     try:
-        with st.spinner("⚡ Auditing connectivity..."):
-            df = client.query(query).to_dataframe()
-        
-        if df.empty:
-            st.warning("⚠️ No data found. Check your Metadata and Project selection.")
+        raw_df = client.query(query).to_dataframe()
+        if raw_df.empty:
+            st.warning("No metadata found for this project.")
             return
 
+        # 2. GROUP DATA FOR SUMMARY TABLE
+        summary_df = raw_df.groupby(['Project', 'Location']).agg(
+            Nodes=('NodeNum', 'count'),
+            Seen_24h=('active_24h', 'sum'),
+            Seen_6h=('active_6h', 'sum'),
+            Oldest_Ping=('last_ping', 'min'),
+            Latest_Ping=('last_ping', 'max')
+        ).reset_index()
+
+        # 3. RENDER SUMMARY TABLE
         now_local = pd.Timestamp.now(tz=display_tz)
 
-        def process_health_row(row):
-            last_ts = row['last_up']
-            oldest_ts = row['oldest_node_ping']
-            
-            # Last Seen Calculation
-            if pd.notnull(last_ts):
-                if last_ts.tzinfo is None: last_ts = last_ts.tz_localize('UTC')
-                last_ts_local = last_ts.tz_convert(display_tz)
-                last_gap = round((now_local - last_ts_local).total_seconds() / 3600, 1)
-                last_seen_str = f"{last_gap}h ago"
-            else:
-                last_seen_str = "Never"
-
-            # Max Lag Calculation
-            if pd.notnull(oldest_ts):
-                if oldest_ts.tzinfo is None: oldest_ts = oldest_ts.tz_localize('UTC')
-                oldest_ts_local = oldest_ts.tz_convert(display_tz)
-                max_lag_hrs = round((now_local - oldest_ts_local).total_seconds() / 3600, 1)
-                icon = "🔴" if max_lag_hrs > 24 else ("🟡" if max_lag_hrs > 6 else "🟢")
-                lag_str = f"{max_lag_hrs}h {icon}"
+        def format_summary(row):
+            # Calculate Max Lag
+            oldest = row['Oldest_Ping']
+            if pd.notnull(oldest):
+                if oldest.tzinfo is None: oldest = oldest.tz_localize('UTC')
+                lag = round((now_local - oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
+                lag_str = f"{lag}h {'🔴' if lag > 24 else '🟢'}"
             else:
                 lag_str = "N/A"
 
             return pd.Series({
                 "Project": row['Project'],
                 "Location": row['Location'],
-                "Nodes": row['total'],
-                "Seen (24h)": row['active_24h'],
-                "Seen (6h)": row['active_6h'],  # NEW COLUMN
-                "Last Seen": last_seen_str,
+                "Nodes": row['Nodes'],
+                "Seen (24h)": int(row['Seen_24h']),
+                "Seen (6h)": int(row['Seen_6h']),
                 "Max Lag": lag_str
             })
 
-        health_df = df.apply(process_health_row, axis=1)
+        display_df = summary_df.apply(format_summary, axis=1)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-        # --- STYLING LOGIC ---
-        def style_project_rows(row):
-            if row['Location'] == 'PROJECT TOTAL':
-                return ['background-color: #f0f2f6; font-weight: bold'] * len(row)
-            return [''] * len(row)
+        # 4. DRILL-DOWN SECTION
+        st.divider()
+        st.subheader("🔍 Location Drill-Down")
+        
+        # Filterable dropdown to select a specific location
+        search_options = ["--- Select a Location to see individual sensors ---"] + sorted(raw_df['Location'].unique().tolist())
+        selected_loc = st.selectbox("View Sensor Details for:", search_options)
 
-        styled_df = health_df.style.apply(style_project_rows, axis=1)
+        if selected_loc != search_options[0]:
+            st.info(f"Showing all sensors for: **{selected_loc}**")
+            
+            # Filter raw data for this specific pipe/bank
+            detail_df = raw_df[raw_df['Location'] == selected_loc].copy()
+            
+            # Create a grid of "Sensor Cards"
+            cols = st.columns(3)
+            for i, (_, node) in enumerate(detail_df.iterrows()):
+                with cols[i % 3]:
+                    # Calculate individual lag
+                    ping = node['last_ping']
+                    if pd.notnull(ping):
+                        if ping.tzinfo is None: ping = ping.tz_localize('UTC')
+                        node_lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
+                        status_color = "green" if node_lag < 6 else ("orange" if node_lag < 24 else "red")
+                        time_label = f"{node_lag}h ago"
+                    else:
+                        status_color = "gray"
+                        time_label = "Never Seen"
 
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                    # Display individual Node Card
+                    st.markdown(f"""
+                    <div style="padding:15px; border-radius:10px; border:2px solid {status_color}; margin-bottom:10px">
+                        <h4 style="margin:0; color:{status_color}">Node {node['NodeNum']}</h4>
+                        <p style="margin:5px 0"><b>Position:</b> {node['Bank']} / {node['Depth']}ft</p>
+                        <p style="margin:0; font-size:0.9em"><b>Last Seen:</b> {time_label}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
 
     except Exception as e:
-        st.error(f"Executive Summary Error: {e}")
+        st.error(f"Drill-down Error: {e}")
 
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
