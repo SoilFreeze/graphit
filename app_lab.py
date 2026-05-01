@@ -1069,104 +1069,148 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 ###########
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Stabilized Surgical Cleaner.
-    Incorporates Lasso-locking and the choice between 'Soft Delete' (Hide) 
-    and 'Hard Delete' (Permanent Purge).
-    """
     st.subheader("🧨 Surgical Point Cleaner")
 
-    # 1. VIEW MODE & ACTION TYPE
+    # 1. SETUP TOGGLES
     c1, c2 = st.columns(2)
     view_toggle = c1.radio("Display Mode", ["Engineering (All)", "Client (Approved)"], horizontal=True)
-    delete_type = c2.radio("Delete Method", ["Soft (Hide/Mask)", "Hard (Permanent Purge)"], horizontal=True)
-    
+    delete_method = c2.radio("Action Type", ["Soft Delete (Hide)", "Hard Delete (Purge)"], horizontal=True)
     v_mode = "engineering" if "Engineering" in view_toggle else "client"
 
-    # 2. DATA FETCHING
+    # 2. DATA PREP
     p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
     if p_df.empty:
-        st.info("No data available to scrub.")
+        st.info("No data available.")
         return
 
-    # 3. LOCATION & SELECTION
-    sel_loc = st.selectbox("Select Pipe to Clean", sorted(p_df['Location'].unique()))
+    sel_loc = st.selectbox("Select Pipe", sorted(p_df['Location'].unique()))
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    if "locked_selection" not in st.session_state:
-        st.session_state.locked_selection = []
+    # 3. INITIALIZE BUFFER
+    if "selection_buffer" not in st.session_state:
+        st.session_state.selection_buffer = []
 
-    # 4. BUILD STABILIZED GRAPH
+    # 4. THE CHART
     fig_scrub = build_high_speed_graph(
-        scrub_df, f"Scrubbing: {sel_loc}", 
+        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
         pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
         pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
         active_refs, unit_mode, unit_label, display_tz=display_tz
     )
 
-    if st.session_state.locked_selection:
-        indices = [p['point_index'] for p in st.session_state.locked_selection]
+    # VISUAL FEEDBACK: Keep points highlighted if they are in the buffer
+    if st.session_state.selection_buffer:
+        indices = [p['point_index'] for p in st.session_state.selection_buffer]
         fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
 
-    # 5. CAPTURE SELECTION (The Fix for the 'Thinking/Unselecting' bug)
-    chart_key = f"surgical_chart_{sel_loc}"
-    st.plotly_chart(fig_scrub, use_container_width=True, on_select="rerun", key=chart_key)
+    chart_key = f"lasso_{sel_loc}_{v_mode}"
+    # Note: We REMOVE 'on_select="rerun"' to stop the 'thinking/flickering' behavior
+    event_data = st.plotly_chart(fig_scrub, use_container_width=True, key=chart_key)
 
-    # Force the selection into the persistent session state
-    if chart_key in st.session_state:
-        current_selection = st.session_state[chart_key].get("selection", {}).get("points", [])
-        if current_selection and current_selection != st.session_state.locked_selection:
-            st.session_state.locked_selection = current_selection
+    # 5. THE BUFFER BUTTONS
+    # This button explicitly pulls the data from the widget into the buffer
+    if st.button("🔒 LOCK SELECTED POINTS", use_container_width=True):
+        # Access the widget state directly from Streamlit's internal dictionary
+        raw_selection = st.session_state[chart_key].get("selection", {}).get("points", [])
+        if raw_selection:
+            st.session_state.selection_buffer = raw_selection
+            st.success(f"Locked {len(raw_selection)} points. You can now safely use the action buttons below.")
             st.rerun()
+        else:
+            st.warning("No points were lassoed. Please select points first.")
 
-    # 6. EXECUTE ACTIONS
-    if st.session_state.locked_selection:
-        st.success(f"📍 {len(st.session_state.locked_selection)} points selected.")
-        col1, col2, col3 = st.columns(3)
+    # 6. ACTION BUTTONS (Only visible if buffer is full)
+    if st.session_state.selection_buffer:
+        st.divider()
+        st.write(f"**Action Queue:** {len(st.session_state.selection_buffer)} points locked.")
         
-        if col1.button("✅ Approve"):
-            update_records(st.session_state.locked_selection, scrub_df, "TRUE")
-            
-        if col2.button("🚫 Mask"):
-            update_records(st.session_state.locked_selection, scrub_df, "MASKED")
+        b1, b2, b3, b4 = st.columns(4)
+        with b1:
+            if st.button("✅ Approve", use_container_width=True):
+                update_records(st.session_state.selection_buffer, scrub_df, "TRUE") [cite: 12]
+        with b2:
+            if st.button("🚫 Mask", use_container_width=True):
+                update_records(st.session_state.selection_buffer, scrub_df, "MASKED") [cite: 12]
+        with b3:
+            label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
+            if st.button(label, use_container_width=True, type="primary"):
+                if "Hard" in delete_method:
+                    hard_purge_points(st.session_state.selection_buffer, scrub_df) [cite: 14]
+                else:
+                    update_records(st.session_state.selection_buffer, scrub_df, "FALSE") [cite: 12]
+        with b4:
+            if st.button("Clear Buffer", use_container_width=True):
+                st.session_state.selection_buffer = []
+                st.rerun()
 
-        # The 'Hard Delete' option uses your shared logic but specifically for the lassoed points
-        btn_label = "🔥 PERMANENT PURGE" if "Hard" in delete_type else "🗑️ Delete (Soft)"
-        if col3.button(btn_label, type="primary"):
-            if "Hard" in delete_type:
-                hard_purge_points(st.session_state.locked_selection, scrub_df)
-            else:
-                update_records(st.session_state.locked_selection, scrub_df, "FALSE")
+def hard_purge_points(pts, df):
+    """
+    Permanently deletes lassoed points from the raw BigQuery tables.
+    """
+    with st.spinner("Executing permanent purge..."):
+        for p in pts:
+            try:
+                node = df.iloc[p['point_index']]['NodeNum']
+                ts = p['x'] 
+                
+                # Determine table and ID column [cite: 2, 3]
+                table = "raw_lord" if "-" in str(node) else "raw_sensorpush"
+                id_col = "NodeNum" if "lord" in table else "sensor_id"
+                
+                # Permanent DELETE query 
+                delete_sql = f"""
+                    DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` 
+                    WHERE {id_col} = '{node}' 
+                    AND timestamp = '{ts}'
+                """
+                client.query(delete_sql).result()
+            except:
+                continue
+    
+    st.session_state.locked_selection = []
+    st.cache_data.clear() # 
+    st.success("Points purged. Database sync complete.")
+    st.rerun()
 
 
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
 
-def hard_purge_points(pts, df):
+def update_records(pts, df, val):
     """
-    Applies your shared logic to PERMANENTLY delete 
-    only the specific lassoed points from the raw tables.
+    Writes status updates (TRUE, FALSE, MASKED) to the manual_rejections table.
     """
+    recs = []
     for p in pts:
-        node = df.iloc[p['point_index']]['NodeNum']
-        ts = p['x'] # The specific time of the point
-        
-        # Determine table based on hardware type
-        table = "raw_lord" if "-" in str(node) else "raw_sensorpush"
-        id_col = "NodeNum" if "lord" in table else "sensor_id"
-        
-        delete_sql = f"""
-            DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` 
-            WHERE {id_col} = '{node}' 
-            AND timestamp = '{ts}'
-        """
-        client.query(delete_sql).result()
+        try:
+            # Snap timestamp to the hour for database alignment [cite: 14]
+            ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
+            node = df.iloc[p['point_index']]['NodeNum']
+            
+            recs.append({
+                "NodeNum": str(node), 
+                "timestamp": ts, 
+                "approve": val 
+            })
+        except Exception:
+            continue
     
-    st.session_state.locked_selection = []
-    st.cache_data.clear()
-    st.success("Points permanently purged from raw source.")
-    st.rerun()
-
+    if recs:
+        # Deduplicate to prevent multiple entries for the same hour [cite: 15]
+        status_df = pd.DataFrame(recs).drop_duplicates(subset=['NodeNum', 'timestamp'])
+        try:
+            # Load updates into BigQuery [cite: 1, 11]
+            job = client.load_table_from_dataframe(status_df, OVERRIDE_TABLE)
+            job.result() 
+            
+            # Reset state and clear cache to reflect changes immediately [cite: 15]
+            st.session_state.locked_selection = []
+            st.cache_data.clear()
+            st.success(f"Successfully marked {len(status_df)} records as {val}")
+            time.sleep(1) 
+            st.rerun()
+        except Exception as e:
+            st.error(f"Database Error: {e}")
 ###########
 # - 12. MAIN ROUTER - #
 ###########
