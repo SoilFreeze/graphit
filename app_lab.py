@@ -1069,6 +1069,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 ###########
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    Stabilized Surgical Cleaner using the Selection Callback pattern.
+    Ensures lasso data is captured and held in session state reliably.
+    """
     st.subheader("🧨 Surgical Point Cleaner")
 
     # 1. SETUP TOGGLES
@@ -1090,7 +1094,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     if "selection_buffer" not in st.session_state:
         st.session_state.selection_buffer = []
 
-    # 4. THE CHART
+    # 4. BUILD THE GRAPH
     fig_scrub = build_high_speed_graph(
         scrub_df, f"Surgical Scrubbing: {sel_loc}", 
         pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
@@ -1098,50 +1102,59 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         active_refs, unit_mode, unit_label, display_tz=display_tz
     )
 
-    # VISUAL FEEDBACK: Keep points highlighted if they are in the buffer
+    # Enable the lasso/box tools explicitly 
+    fig_scrub.update_layout(dragmode='lasso')
+
+    # Visual feedback: keep points highlighted if they are in the buffer
     if st.session_state.selection_buffer:
         indices = [p['point_index'] for p in st.session_state.selection_buffer]
         fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
 
+    # 5. RENDER THE CHART
+    # We use on_select to trigger a specific update to our buffer
     chart_key = f"lasso_{sel_loc}_{v_mode}"
-    # Note: We REMOVE 'on_select="rerun"' to stop the 'thinking/flickering' behavior
-    event_data = st.plotly_chart(fig_scrub, use_container_width=True, key=chart_key)
+    
+    event_data = st.plotly_chart(
+        fig_scrub, 
+        use_container_width=True, 
+        on_select="rerun", # Re-enabled to allow selection capture
+        key=chart_key
+    )
 
-    # 5. THE BUFFER BUTTONS
-    # This button explicitly pulls the data from the widget into the buffer
-    if st.button("🔒 LOCK SELECTED POINTS", use_container_width=True):
-        # Access the widget state directly from Streamlit's internal dictionary
-        raw_selection = st.session_state[chart_key].get("selection", {}).get("points", [])
-        if raw_selection:
-            st.session_state.selection_buffer = raw_selection
-            st.success(f"Locked {len(raw_selection)} points. You can now safely use the action buttons below.")
+    # --- THE FIX: SAFE STATE CAPTURE ---
+    # We check if the key exists in session_state safely using .get() 
+    chart_state = st.session_state.get(chart_key)
+    if chart_state and "selection" in chart_state:
+        pts = chart_state["selection"].get("points", [])
+        if pts and pts != st.session_state.selection_buffer:
+            st.session_state.selection_buffer = pts
             st.rerun()
-        else:
-            st.warning("No points were lassoed. Please select points first.")
 
-    # 6. ACTION BUTTONS (Only visible if buffer is full)
+    # 6. ACTION BUTTONS (Visible only when points are buffered)
     if st.session_state.selection_buffer:
         st.divider()
-        st.write(f"**Action Queue:** {len(st.session_state.selection_buffer)} points locked.")
+        st.success(f"📍 {len(st.session_state.selection_buffer)} points locked in buffer.")
         
         b1, b2, b3, b4 = st.columns(4)
         with b1:
             if st.button("✅ Approve", use_container_width=True):
-                update_records(st.session_state.selection_buffer, scrub_df, "TRUE") [cite: 12]
+                update_records(st.session_state.selection_buffer, scrub_df, "TRUE") [cite: 11, 12]
         with b2:
             if st.button("🚫 Mask", use_container_width=True):
-                update_records(st.session_state.selection_buffer, scrub_df, "MASKED") [cite: 12]
+                update_records(st.session_state.selection_buffer, scrub_df, "MASKED") [cite: 11, 12]
         with b3:
             label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
             if st.button(label, use_container_width=True, type="primary"):
                 if "Hard" in delete_method:
-                    hard_purge_points(st.session_state.selection_buffer, scrub_df) [cite: 14]
+                    hard_purge_points(st.session_state.selection_buffer, scrub_df)
                 else:
-                    update_records(st.session_state.selection_buffer, scrub_df, "FALSE") [cite: 12]
+                    update_records(st.session_state.selection_buffer, scrub_df, "FALSE") [cite: 11, 12]
         with b4:
-            if st.button("Clear Buffer", use_container_width=True):
+            if st.button("Clear Selection", use_container_width=True):
                 st.session_state.selection_buffer = []
                 st.rerun()
+    else:
+        st.info("💡 Use the Lasso or Box tool on the graph to select points.")
 
 def hard_purge_points(pts, df):
     """
