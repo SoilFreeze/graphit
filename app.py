@@ -83,8 +83,7 @@ service = "🏠 Executive Summary"
 unit_mode = "Fahrenheit"
 unit_label = "°F"
 selected_project = "All Projects"
-# UPDATED: Default set to Pacific [cite: 7, 10]
-display_tz = "US/Pacific"
+display_tz = "US/Pacific" 
 active_refs = [(32.0, "Freezing")]
 
 # --- 2. SIDEBAR WIDGETS ---
@@ -118,26 +117,21 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False):
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
 
-# --- TIMEZONE DISPLAY ---
-# UPDATED: Set index=2 to make "Local (US/Pacific)" the default selection [cite: 7]
-# --- 2. SIDEBAR WIDGETS ---
-tz_options = ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"]
-# Setting index=2 forces "Local (US/Pacific)" as the default on load
-tz_mode = st.sidebar.selectbox("Timezone Display", tz_options, index=2)
-
-# Map the selection to a pytz-compatible string
-display_tz = {
+# Timezone Display - Separation of Label and IANA Key
+tz_lookup = {
     "UTC": "UTC", 
     "Local (US/Eastern)": "US/Eastern", 
     "Local (US/Pacific)": "US/Pacific"
-}[tz_mode]
+}
+tz_mode = st.sidebar.selectbox("Timezone Display", list(tz_lookup.keys()), index=2)
+display_tz = tz_lookup[tz_mode]
 ########################
 #- 4. GRAPHING ENGINE -#
 ########################
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Stabilized Engine: Uses standard Scatter for stability and proper legend grouping.
+    Stabilized Engine: Uses standard Scatter for stability and proper timezone conversion.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -145,6 +139,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df = df.copy()
     
     # 1. TIMEZONE & UNIT CONVERSION
+    if plot_df['timestamp'].dt.tz is None:
+        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
+    
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     now_local = pd.Timestamp.now(tz=display_tz)
     
@@ -154,7 +151,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     else:
         y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
-    # 2. LABELING & SORTING [cite: 6, 9]
+    # 2. LABELING & SORTING
     def get_sort_info(r):
         b = str(r.get('Bank', '')).strip()
         d = str(r.get('Depth', '')).strip()
@@ -173,8 +170,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. TRACE GENERATION
     fig = go.Figure()
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
-    
-    # Identify unique depth/bank groups
     unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
@@ -187,7 +182,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for j, sn in enumerate(sensors):
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # Gap Detection (6h threshold) [cite: 14]
             if not is_surgical:
                 s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
                 gap_mask = s_df['gap_hrs'] > 6.0
@@ -197,13 +191,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                     s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-            # Using standard Scatter (not gl) for better multi-chart stability
             fig.add_trace(go.Scatter(
                 x=s_df['timestamp'], 
                 y=s_df['temperature'], 
                 name=f"{group_lbl} ({sn})", 
                 legendgroup=group_lbl, 
-                showlegend=True if j == 0 else False, # Show only the first sensor of a group in legend
+                showlegend=True if j == 0 else False,
                 mode='lines+markers' if not is_surgical else 'markers',
                 connectgaps=False,
                 line=dict(color=color, width=1.5),
@@ -217,7 +210,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right")
 
-    # RESTORED: Red Vertical 'Now' Line
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
     # 5. GRID HIERARCHY & LAYOUT
@@ -231,24 +223,17 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             range=[start_view, end_view], 
             showline=True, mirror=True, linecolor='black',
             showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1,
-            minor=dict(
-                dtick=6*60*60*1000, 
-                showgrid=True, 
-                gridcolor='Gainsboro', 
-                griddash='dash' 
-            ),
+            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
-            title=f"Temperature ({unit_label})", 
-            range=y_range, dtick=dt_major, 
+            title=f"Temperature ({unit_label})", range=y_range, dtick=dt_major, 
             gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
             minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
         ),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
     
-    # Monday markers
     mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON', tz=display_tz)
     for mon in mondays:
         fig.add_vline(x=mon, line_width=2, line_color="dimgray", layer="below")
@@ -308,17 +293,66 @@ def render_global_overview(selected_project):
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # ... [Query logic] ...
+    # 1. Fuzzy Filter Logic
+    proj_filter = ""
+    if selected_project and selected_project != "All Projects":
+        proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
+
+    summary_q = f"""
+        WITH MappedNodes AS (
+            SELECT TRIM(Project) as Project, NodeNum, Location
+            FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
+            WHERE Project IS NOT NULL {proj_filter}
+        ),
+        RecentReporting AS (
+            SELECT r.NodeNum, MAX(r.timestamp) as last_ping
+            FROM (
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                UNION ALL
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            GROUP BY NodeNum
+        ),
+        HistoricalPings AS (
+            SELECT NodeNum, MAX(timestamp) as ever_ping
+            FROM (
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                UNION ALL
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) GROUP BY NodeNum
+        ),
+        JoinedData AS (
+            SELECT 
+                m.Project, m.Location, m.NodeNum,
+                CASE WHEN r.NodeNum IS NOT NULL THEN 1 ELSE 0 END as is_active,
+                h.ever_ping
+            FROM MappedNodes m
+            LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
+            LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
+        ),
+        LocationStats AS (
+            SELECT Project, Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
+            FROM JoinedData GROUP BY Project, Location
+        ),
+        ProjectTotals AS (
+            SELECT Project, '--- PROJECT TOTAL ---' as Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
+            FROM JoinedData GROUP BY Project
+        )
+        SELECT * FROM ProjectTotals
+        UNION ALL
+        SELECT * FROM LocationStats
+        ORDER BY Project ASC, (Location = '--- PROJECT TOTAL ---') DESC, Location ASC
+    """
     
     try:
         with st.spinner("⚡ Auditing connectivity..."):
             df = client.query(summary_q).to_dataframe()
         
         if df.empty:
-            st.warning("⚠️ No data found.")
+            st.warning("⚠️ No data found. Check if your Metadata table is populated.")
             return
 
-        # FORCE 'now' to the selected timezone
         now_local = pd.Timestamp.now(tz=display_tz)
 
         def process_health_row(row):
@@ -326,13 +360,10 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             last_ts = row['last_up']
             
             if pd.notnull(last_ts):
-                # Ensure the DB timestamp is recognized as UTC, then converted to Pacific
                 if last_ts.tzinfo is None:
                     last_ts = last_ts.tz_localize('UTC')
-                
                 last_ts_local = last_ts.tz_convert(display_tz)
                 gap = round((now_local - last_ts_local).total_seconds() / 3600, 1)
-                
                 icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
                 time_str = f"{gap}h ago {icon}"
             else:
@@ -343,14 +374,24 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 "Location": row['Location'],
                 "Mapped": row['total'],
                 "Active": row['active'],
+                "Ratio": f"{row['active']}/{row['total']}",
+                "Status": "✅ Healthy" if row['total'] == row['active'] else f"⚠️ {row['total'] - row['active']} Offline",
                 "Last Activity": time_str
             })
 
         health_df = df.apply(process_health_row, axis=1)
+
+        totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
+        m1, m2, m3 = st.columns(3)
+        m1.metric("System Nodes", f"{totals_df['total'].sum()}")
+        m2.metric("System Active", f"{totals_df['active'].sum()}")
+        m3.metric("Uptime", f"{round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0}%")
+
+        st.divider()
         st.dataframe(health_df, use_container_width=True, hide_index=True)
 
     except Exception as e:
-        st.error(f"Summary Error: {e}")
+        st.error(f"Executive Summary Error: {e}")
 
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
@@ -930,10 +971,10 @@ def update_records(pts, df, val):
 ###########
 
 if service == "🌐 Global Overview":
-    render_global_overview(selected_project) # Now passing the sidebar variable
+    render_global_overview(selected_project) 
 
 elif service == "🏠 Executive Summary":
-    render_executive_summary(client, selected_project, unit_label, display_tz) # Added display_tz here
+    render_executive_summary(client, selected_project, unit_label, display_tz) 
 
 elif service == "📊 Client Portal":
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
