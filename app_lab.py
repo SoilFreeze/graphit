@@ -10,6 +10,7 @@ import pytz
 import traceback
 import io
 import re
+from streamlit_plotly_events import plotly_events
 
 ##################################
 # - 1. CONFIGURATION & STYLING - #
@@ -1070,16 +1071,16 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Stabilized Surgical Cleaner using the Selection Callback pattern.
-    Ensures lasso data is captured and held in session state reliably.
+    Alternative Stable Cleaner using the 'streamlit-plotly-events' library.
+    This component is highly reliable for capturing Lasso data without losing state.
     """
-    st.subheader("🧨 Surgical Point Cleaner")
+    st.subheader("🧨 Surgical Point Cleaner (Alt-Engine)")
 
-    # 1. SETUP TOGGLES
+    # 1. VIEW & ACTION TOGGLES
     c1, c2 = st.columns(2)
-    view_toggle = c1.radio("Display Mode", ["Engineering (All)", "Client (Approved)"], horizontal=True)
-    delete_method = c2.radio("Action Type", ["Soft Delete (Hide)", "Hard Delete (Purge)"], horizontal=True)
-    v_mode = "engineering" if "Engineering" in view_toggle else "client"
+    view_toggle = c1.radio("Display Mode", ["Engineering", "Client"], horizontal=True)
+    delete_method = c2.radio("Action Type", ["Soft Delete", "Hard Purge"], horizontal=True)
+    v_mode = "engineering" if view_toggle == "Engineering" else "client"
 
     # 2. DATA PREP
     p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
@@ -1090,71 +1091,50 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     sel_loc = st.selectbox("Select Pipe", sorted(p_df['Location'].unique()))
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 3. INITIALIZE BUFFER
-    if "selection_buffer" not in st.session_state:
-        st.session_state.selection_buffer = []
-
-    # 4. BUILD THE GRAPH
+    # 3. BUILD THE GRAPH
     fig_scrub = build_high_speed_graph(
         scrub_df, f"Surgical Scrubbing: {sel_loc}", 
         pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
         pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
         active_refs, unit_mode, unit_label, display_tz=display_tz
     )
-
-    # Enable the lasso/box tools explicitly 
+    
+    # Force the Lasso tool to be active
     fig_scrub.update_layout(dragmode='lasso')
 
-    # Visual feedback: keep points highlighted if they are in the buffer
-    if st.session_state.selection_buffer:
-        indices = [p['point_index'] for p in st.session_state.selection_buffer]
-        fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
-
-    # 5. RENDER THE CHART
-    # We use on_select to trigger a specific update to our buffer
-    chart_key = f"lasso_{sel_loc}_{v_mode}"
-    
-    event_data = st.plotly_chart(
+    # 4. CAPTURE EVENTS (The Library Way)
+    # This replaces st.plotly_chart and returns a list of dictionaries immediately
+    selected_points = plotly_events(
         fig_scrub, 
-        use_container_width=True, 
-        on_select="rerun", # Re-enabled to allow selection capture
-        key=chart_key
+        select_event=True, 
+        key=f"alt_lasso_{sel_loc}_{v_mode}",
+        override_height=600
     )
 
-    # --- THE FIX: SAFE STATE CAPTURE ---
-    # We check if the key exists in session_state safely using .get() 
-    chart_state = st.session_state.get(chart_key)
-    if chart_state and "selection" in chart_state:
-        pts = chart_state["selection"].get("points", [])
-        if pts and pts != st.session_state.selection_buffer:
-            st.session_state.selection_buffer = pts
-            st.rerun()
-
-    # 6. ACTION BUTTONS (Visible only when points are buffered)
-    if st.session_state.selection_buffer:
-        st.divider()
-        st.success(f"📍 {len(st.session_state.selection_buffer)} points locked in buffer.")
+    # 5. ACTION BUTTONS
+    if selected_points:
+        st.success(f"📍 {len(selected_points)} points captured in memory.")
         
         b1, b2, b3, b4 = st.columns(4)
         with b1:
-            if st.button("✅ Approve", use_container_width=True):
-                update_records(st.session_state.selection_buffer, scrub_df, "TRUE") [cite: 11, 12]
+            if st.button("✅ Approve"):
+                # The library returns 'pointNumber' which maps to our index
+                update_records_alt(selected_points, scrub_df, "TRUE")
         with b2:
-            if st.button("🚫 Mask", use_container_width=True):
-                update_records(st.session_state.selection_buffer, scrub_df, "MASKED") [cite: 11, 12]
+            if st.button("🚫 Mask"):
+                update_records_alt(selected_points, scrub_df, "MASKED")
         with b3:
             label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
-            if st.button(label, use_container_width=True, type="primary"):
+            if st.button(label, type="primary"):
                 if "Hard" in delete_method:
-                    hard_purge_points(st.session_state.selection_buffer, scrub_df)
+                    hard_purge_points_alt(selected_points, scrub_df)
                 else:
-                    update_records(st.session_state.selection_buffer, scrub_df, "FALSE") [cite: 11, 12]
+                    update_records_alt(selected_points, scrub_df, "FALSE")
         with b4:
-            if st.button("Clear Selection", use_container_width=True):
-                st.session_state.selection_buffer = []
+            if st.button("Clear Selection"):
                 st.rerun()
     else:
-        st.info("💡 Use the Lasso or Box tool on the graph to select points.")
+        st.info("💡 Draw a Lasso on the graph to capture points for action.")
 
 def hard_purge_points(pts, df):
     """
