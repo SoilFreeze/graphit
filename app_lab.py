@@ -378,7 +378,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # Define the 'query' variable before using it
+    # UPDATED QUERY: Added 'ever_ping_min' to calculate the data range
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location
@@ -396,7 +396,10 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             GROUP BY NodeNum
         ),
         HistoricalPings AS (
-            SELECT NodeNum, MAX(timestamp) as ever_ping
+            SELECT 
+                NodeNum, 
+                MAX(timestamp) as ever_ping_max,
+                MIN(timestamp) as ever_ping_min
             FROM (
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                 UNION ALL
@@ -407,17 +410,30 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 m.Project, m.Location, m.NodeNum,
                 CASE WHEN r.NodeNum IS NOT NULL THEN 1 ELSE 0 END as is_active,
-                h.ever_ping
+                h.ever_ping_max,
+                h.ever_ping_min
             FROM MappedNodes m
             LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
             LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
         ),
         LocationStats AS (
-            SELECT Project, Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
+            SELECT 
+                Project, Location, 
+                COUNT(NodeNum) as total, 
+                SUM(is_active) as active, 
+                MAX(ever_ping_max) as last_up,
+                MIN(ever_ping_min) as first_up,
+                MIN(ever_ping_max) as oldest_last_up  -- The node not seen for the longest time
             FROM JoinedData GROUP BY Project, Location
         ),
         ProjectTotals AS (
-            SELECT Project, '--- PROJECT TOTAL ---' as Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
+            SELECT 
+                Project, '--- PROJECT TOTAL ---' as Location, 
+                COUNT(NodeNum) as total, 
+                SUM(is_active) as active, 
+                MAX(ever_ping_max) as last_up,
+                MIN(ever_ping_min) as first_up,
+                MIN(ever_ping_max) as oldest_last_up
             FROM JoinedData GROUP BY Project
         )
         SELECT * FROM ProjectTotals
@@ -427,26 +443,24 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     """
     
     try:
-        with st.spinner("⚡ Auditing connectivity..."):
-            # Now 'query' is defined
+        with st.spinner("⚡ Auditing connectivity and data ranges..."):
             df = client.query(query).to_dataframe()
         
         if df.empty:
             st.warning("⚠️ No data found. Check if your Metadata table is populated.")
             return
 
-        # Explicitly use display_tz for current time [cite: 7]
         now_local = pd.Timestamp.now(tz=display_tz)
 
         def process_health_row(row):
             is_total = row['Location'] == '--- PROJECT TOTAL ---'
             last_ts = row['last_up']
+            first_ts = row['first_up']
+            oldest_last_ts = row['oldest_last_up']
             
+            # 1. Handle Last Activity Status
             if pd.notnull(last_ts):
-                # Ensure UTC before converting to display_tz [cite: 12]
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.tz_localize('UTC')
-                
+                if last_ts.tzinfo is None: last_ts = last_ts.tz_localize('UTC')
                 last_ts_local = last_ts.tz_convert(display_tz)
                 gap = round((now_local - last_ts_local).total_seconds() / 3600, 1)
                 icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
@@ -454,26 +468,40 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             else:
                 time_str = "Never Seen ⚪"
 
+            # 2. NEW: Calculate Active Range / Stale Node Range
+            if pd.notnull(last_ts) and pd.notnull(first_ts):
+                if first_ts.tzinfo is None: first_ts = first_ts.tz_localize('UTC')
+                # Range from the very first ping to the very last ping in the group
+                total_range_days = round((last_ts - first_ts).total_seconds() / 86400, 1)
+                
+                # Range of "Staleness": How long has the most silent node been quiet?
+                if pd.notnull(oldest_last_ts):
+                    if oldest_last_ts.tzinfo is None: oldest_last_ts = oldest_last_ts.tz_localize('UTC')
+                    stale_gap_hrs = round((now_local - oldest_last_ts.tz_convert(display_tz)).total_seconds() / 3600, 1)
+                    range_str = f"{total_range_days}d total / {stale_gap_hrs}h max lag"
+                else:
+                    range_str = f"{total_range_days}d total"
+            else:
+                range_str = "N/A"
+
             return pd.Series({
                 "Project": f"⭐ {row['Project']}" if is_total else row['Project'],
                 "Location": row['Location'],
                 "Mapped": row['total'],
                 "Active": row['active'],
-                "Ratio": f"{row['active']}/{row['total']}",
                 "Status": "✅ Healthy" if row['total'] == row['active'] else f"⚠️ {row['total'] - row['active']} Offline",
-                "Last Activity": time_str
+                "Last Activity": time_str,
+                "Data Range": range_str # New Column
             })
 
         health_df = df.apply(process_health_row, axis=1)
 
+        # Metrics
         totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
         m1, m2, m3 = st.columns(3)
         m1.metric("System Nodes", f"{totals_df['total'].sum()}")
         m2.metric("System Active", f"{totals_df['active'].sum()}")
-        if totals_df['total'].sum() > 0:
-            uptime = round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1)
-        else:
-            uptime = 0
+        uptime = round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0
         m3.metric("Uptime", f"{uptime}%")
 
         st.divider()
