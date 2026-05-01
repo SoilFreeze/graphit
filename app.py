@@ -116,7 +116,8 @@ service = "🏠 Executive Summary"
 unit_mode = "Fahrenheit"
 unit_label = "°F"
 selected_project = "All Projects"
-display_tz = "UTC"
+# UPDATED: Default set to Pacific [cite: 7, 10]
+display_tz = "US/Pacific"
 active_refs = [(32.0, "Freezing")]
 
 # --- 2. SIDEBAR WIDGETS ---
@@ -128,10 +129,9 @@ service = st.sidebar.selectbox(
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Global Project Selection - Now used by Global Overview, Client Portal, and Node Diagnostics
+# Global Project Selection
 if client is not None:
     try:
-        # Fetch projects from metadata to populate the sidebar [cite: 5]
         proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
         proj_df = client.query(proj_q).to_dataframe()
         proj_list = sorted(proj_df['Project'].dropna().unique())
@@ -151,14 +151,16 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False):
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
 
-# Timezone Display
-tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
+# --- TIMEZONE DISPLAY ---
+# UPDATED: Set index=2 to make "Local (US/Pacific)" the default selection [cite: 7]
+tz_options = ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"]
+tz_mode = st.sidebar.selectbox("Timezone Display", tz_options, index=2)
+
 display_tz = {
     "UTC": "UTC", 
     "Local (US/Eastern)": "US/Eastern", 
     "Local (US/Pacific)": "US/Pacific"
 }[tz_mode]
-
 ########################
 #- 4. GRAPHING ENGINE -#
 ########################
