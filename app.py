@@ -587,31 +587,117 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 ###########
 
 def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    # ... [Data fetching logic remains same] ...
-
-    # UPDATED: Use localized 'now' for the health table
-    now_local = pd.Timestamp.now(tz=display_tz)
+    """
+    Engineering-level view. Shows everything (Pending, Masked, Approved).
+    """
+    st.header(f"📉 Node Diagnostics: {selected_project}")
     
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Select a specific project in the sidebar.")
+        return
+
+    with st.spinner("🔍 Syncing diagnostic streams..."):
+        # Fetching data using the engineering view mode [cite: 16]
+        all_data = get_universal_portal_data(selected_project, view_mode="engineering")
+    
+    if all_data.empty:
+        st.warning(f"No diagnostic data found for project {selected_project}.")
+        return
+
+    # 1. Selection Controls
+    loc_options = sorted(all_data['Location'].dropna().unique())
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options, key="diag_loc_select")
+    with c2:
+        weeks_view = st.sidebar.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
+    with c3:
+        show_profile = st.checkbox("Show Vertical Profile", value=True)
+            
+    # 2. Localize 'Now' and calculate window
+    now_local = pd.Timestamp.now(tz=display_tz)
+    start_view = now_local - timedelta(weeks=weeks_view)
+    
+    # Filter data for the selected Location
+    # Ensure df_diag is defined before any sorting or grouping operations
+    df_diag = all_data[all_data['Location'] == sel_loc].copy()
+    
+    if df_diag.empty:
+        st.info(f"No data points found for location: {sel_loc}")
+        return
+
+    # --- 1. ENGINEERING TIMELINE ---
+    st.subheader("🕒 Engineering Timeline")
+    fig_time = build_high_speed_graph(
+        df_diag, f"Diagnostic Stream: {sel_loc}", 
+        start_view, now_local + timedelta(hours=2), 
+        tuple(active_refs), unit_mode, unit_label, display_tz
+    )
+    st.plotly_chart(fig_time, use_container_width=True)
+
+    # --- 2. VERTICAL PROFILE ---
+    if show_profile:
+        st.divider()
+        st.subheader("📏 Vertical Temperature Profile")
+        df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
+        profile_df = df_diag.dropna(subset=['Depth_Num']).copy()
+
+        if not profile_df.empty:
+            latest_snap = profile_df.sort_values('timestamp').groupby('Depth_Num').last().reset_index()
+            
+            latest_snap['conv_temp'] = latest_snap['temperature'].apply(
+                lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
+            )
+
+            fig_d = go.Figure()
+            fig_d.add_trace(go.Scatter(
+                x=latest_snap['conv_temp'], 
+                y=latest_snap['Depth_Num'], 
+                mode='lines+markers',
+                name="Current State",
+                line=dict(shape='spline', smoothing=0.5, width=3, color='RoyalBlue'),
+                marker=dict(size=10, symbol='diamond')
+            ))
+
+            y_limit = int(((profile_df['Depth_Num'].max() // 10) + 1) * 10)
+            fig_d.update_layout(
+                plot_bgcolor='white', height=600,
+                xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
+                yaxis=dict(title="Depth (ft)", range=[y_limit, 0], gridcolor='Silver')
+            )
+            st.plotly_chart(fig_d, use_container_width=True)
+
+    # --- 3. COMMUNICATION HEALTH TABLE ---
+    st.divider()
     st.subheader("📋 Sensor Communication Health")
+    
+    # Correctly identify latest nodes within the defined df_diag
     latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
     
     summary_rows = []
     for _, row in latest_nodes.iterrows():
-        # Ensure timestamp is converted to the display timezone
-        ts_local = row['timestamp'].tz_convert(display_tz)
+        # Ensure timestamp is localized to Pacific/Selected TZ for math
+        ts_local = row['timestamp'].tz_convert(display_tz) if row['timestamp'].tzinfo else row['timestamp'].tz_localize('UTC').tz_convert(display_tz)
         hrs_ago = int((now_local - ts_local).total_seconds() / 3600)
         
         status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
         
+        db_status = str(row.get('is_approved', 'PENDING')).upper()
+        status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
+
+        conv_temp = (row['temperature'] - 32) * 5/9 if unit_mode == "Celsius" else row['temperature']
+
         summary_rows.append({
             "Node": row['NodeNum'],
-            "Last Value": f"{round(row['temperature'], 1)}{unit_label}", # Logic for C/F handled elsewhere
+            "Last Value": f"{round(conv_temp, 1)}{unit_label}",
             "Last Seen": f"{hrs_ago}h ago {status_icon}",
-            "Admin Status": "✅ Approved" if str(row['is_approved']).upper() == "TRUE" else "⏳ Pending"
+            "Admin Status": status_label
         })
     
     if summary_rows:
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No communication logs available for this selection.")
 ###########
 # - 9. PAGE: DATA INTAKE LAB - #
 ###########
