@@ -83,10 +83,20 @@ service = "🏠 Executive Summary"
 unit_mode = "Fahrenheit"
 unit_label = "°F"
 selected_project = "All Projects"
-display_tz = "US/Pacific" 
 active_refs = [(32.0, "Freezing")]
 
-# --- 2. SIDEBAR WIDGETS ---
+# --- 2. TIMEZONE DEFAULT LOGIC ---
+tz_lookup = {
+    "UTC": "UTC", 
+    "Local (US/Eastern)": "US/Eastern", 
+    "Local (US/Pacific)": "US/Pacific"
+}
+
+# Force Pacific as the initial session state if nothing exists
+if "tz_selection" not in st.session_state:
+    st.session_state["tz_selection"] = "Local (US/Pacific)"
+
+# --- 3. SIDEBAR WIDGETS ---
 service = st.sidebar.selectbox(
     "📂 Page", 
     ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
@@ -94,6 +104,16 @@ service = st.sidebar.selectbox(
 
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+# Timezone Display
+tz_mode = st.sidebar.selectbox(
+    "Timezone Display", 
+    list(tz_lookup.keys()), 
+    index=list(tz_lookup.keys()).index(st.session_state["tz_selection"])
+)
+# Update session state and set the active IANA string
+st.session_state["tz_selection"] = tz_mode
+display_tz = tz_lookup[tz_mode]
 
 # Global Project Selection
 if client is not None:
@@ -116,15 +136,6 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False):
     active_refs.append((26.6, "Type B"))
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
-
-# Timezone Display - Separation of Label and IANA Key
-tz_lookup = {
-    "UTC": "UTC", 
-    "Local (US/Eastern)": "US/Eastern", 
-    "Local (US/Pacific)": "US/Pacific"
-}
-tz_mode = st.sidebar.selectbox("Timezone Display", list(tz_lookup.keys()), index=2)
-display_tz = tz_lookup[tz_mode]
 ########################
 #- 4. GRAPHING ENGINE -#
 ########################
@@ -970,16 +981,21 @@ def update_records(pts, df, val):
 # - 12. MAIN ROUTER - #
 ###########
 
+# Ensure we are passing all required variables to every function
 if service == "🌐 Global Overview":
+    # Passing selected_project and display_tz to ensure alignment
     render_global_overview(selected_project) 
 
 elif service == "🏠 Executive Summary":
+    # Explicitly passing display_tz to fix the 'Now' calculation
     render_executive_summary(client, selected_project, unit_label, display_tz) 
 
 elif service == "📊 Client Portal":
+    # Portal needs all 5 variables defined in Section 7 [cite: 16]
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif service == "📉 Node Diagnostics":
+    # Diagnostics requires engineering-level data access [cite: 16]
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif service == "📤 Data Intake Lab":
