@@ -378,7 +378,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # Updated Query: Counts unique hours of reporting for 24h and 7d periods
+    # Unified Query: Tracks 24h/6h check-ins AND hourly uptime percentages
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
@@ -391,14 +391,16 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             UNION ALL
             SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ),
-        HourlyStats AS (
+        HistoricalStats AS (
             SELECT 
                 NodeNum, 
                 MAX(timestamp) as last_ping,
-                -- Count unique hours in last 24h
+                -- 1/0 flags for seen status
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as active_6h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
+                -- Unique hourly counts for percentages
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
-                -- Count unique hours in last 7 days
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
                     THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
             FROM BaseReporting GROUP BY NodeNum
@@ -407,10 +409,12 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 m.*, 
                 h.last_ping, 
+                COALESCE(h.active_6h, 0) as active_6h,
+                COALESCE(h.active_24h, 0) as active_24h,
                 COALESCE(h.hours_24h, 0) as hours_24h, 
                 COALESCE(h.hours_7d, 0) as hours_7d
             FROM MappedNodes m
-            LEFT JOIN HourlyStats h ON m.NodeNum = h.NodeNum
+            LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
         )
         SELECT * FROM JoinedData
     """
@@ -426,12 +430,15 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         # 1. MAIN SUMMARY TABLE (Location Level)
         summary_df = raw_df.groupby(['Project', 'Location']).agg(
             Nodes=('NodeNum', 'count'),
+            Seen_24h=('active_24h', 'sum'),
+            Seen_6h=('active_6h', 'sum'),
             Latest_Ping=('last_ping', 'max'),
             Oldest_Ping=('last_ping', 'min')
         ).reset_index()
 
         total_df = summary_df.groupby('Project').agg({
-            'Nodes': 'sum', 'Latest_Ping': 'max', 'Oldest_Ping': 'min'
+            'Nodes': 'sum', 'Seen_24h': 'sum', 'Seen_6h': 'sum', 
+            'Latest_Ping': 'max', 'Oldest_Ping': 'min'
         }).reset_index()
         total_df['Location'] = 'PROJECT TOTAL'
 
@@ -455,6 +462,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
             return pd.Series({
                 "Project": row['Project'], "Location": row['Location'], "Nodes": int(row['Nodes']),
+                "Seen (24h)": int(row['Seen_24h']), "Seen (6h)": int(row['Seen_6h']),
                 "Last Seen": last_seen_str, "Max Lag": lag_str
             })
 
@@ -463,7 +471,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             lambda x: ['background-color: #f0f2f6; font-weight: bold'] * len(x) if x['Location'] == 'PROJECT TOTAL' else [''] * len(x), axis=1
         ), use_container_width=True, hide_index=True)
 
-        # 2. SENSOR DRILL-DOWN (With % Active Stats)
+        # 2. SENSOR DRILL-DOWN (With All Columns)
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         
@@ -489,13 +497,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     "Node ID": row['NodeNum'],
                     "Bank": row['Bank'],
                     "Depth": f"{row['Depth']}ft",
+                    "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
+                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
                     "% Active (24h)": f"{pct_24h}%",
                     "% Active (7d)": f"{pct_7d}%",
                     "Status": lag_str
                 })
 
-            detail_display = sensor_df.apply(format_sensor_row, axis=1)
-            st.dataframe(detail_display, use_container_width=True, hide_index=True)
+            st.dataframe(sensor_df.apply(format_sensor_row, axis=1), use_container_width=True, hide_index=True)
 
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
