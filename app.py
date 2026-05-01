@@ -49,29 +49,62 @@ client = get_bq_client()
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    # ... [Query logic] ...
+    """
+    Standardized Data Engine. 
+    Joins Raw Data + Metadata + Manual Rejections[cite: 15].
+    """
+    cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
+    
+    # 1. Define the Query Filter based on View Mode 
+    if view_mode == "client":
+        # Must be explicitly Approved and NOT Masked 
+        query_filter = f"""
+            AND r.timestamp >= '{cutoff}'
+            AND rej.approve = 'TRUE'
+            AND NOT EXISTS (
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.approve = 'MASKED'
+            )
+        """
+    else:
+        # Engineering sees everything except explicit deletions ('FALSE') 
+        query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
+
+    # 2. Assign the 'query' variable explicitly
+    query = f"""
+        SELECT 
+            r.NodeNum, r.timestamp, r.temperature,
+            m.Location, m.Bank, m.Depth, m.Project,
+            rej.approve as is_approved 
+        FROM (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ) AS r
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+            ON r.NodeNum = rej.NodeNum 
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+        WHERE m.Project = '{project_id}'
+        {query_filter}
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        ORDER BY m.Location ASC, r.timestamp ASC
+    """
+    
     try:
         df = client.query(query).to_dataframe()
         
-        # FIX: Ensure 'timestamp' is localized to UTC first, then we can convert it later
+        # Ensure timestamp is UTC-aware immediately to avoid localization crashes
         if not df.empty and 'timestamp' in df.columns:
             if df['timestamp'].dt.tz is None:
                 df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
-        
+                
         return df
     except Exception as e:
-        st.error(f"BQ Error: {e}")
+        st.error(f"BQ Data Engine Error: {e}")
         return pd.DataFrame()
-
-def check_admin_access(service_name):
-    if st.session_state.get("admin_authenticated"): return True
-    st.warning("🔒 Admin Access Required")
-    pwd = st.text_input("Password", type="password", key=f"gate_{service_name}")
-    if st.button("Unlock", key=f"btn_{service_name}"):
-        if pwd == st.secrets["admin_password"]:
-            st.session_state["admin_authenticated"] = True
-            st.rerun()
-    return False
 
 ###########################
 #- 3. SIDEBAR UI & STATE -#
@@ -266,33 +299,43 @@ def render_global_overview(selected_project, display_tz):
     st.header("🌐 Global Project Overview")
     
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar.")
+        st.info("💡 Please select a specific project in the sidebar to begin.")
         return
 
     with st.spinner(f"Syncing {selected_project} (Engineering View)..."):
-        # Engineering view logic from data engine [cite: 16]
+        # Fetch data using the updated engine
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if not p_df.empty:
-        # 2. View Constraints
+        # 1. View Constraints
         lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
-        now_utc = pd.Timestamp.now(tz='UTC')
-        # Snap end view to the upcoming Monday for consistent weekly alignment
-        end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Snap time window to the current Pacific (or selected) time
+        now_local = pd.Timestamp.now(tz=display_tz)
+        end_view = (now_local + pd.Timedelta(days=(7-now_local.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=lookback)
 
-        # 3. Render a graph for every physical location (Pipe/Bank) in the project
-        for loc in sorted(p_df['Location'].unique()):
+        # 2. Render a graph for every physical location (Pipe/Bank) in the project [cite: 6]
+        locations = sorted(p_df['Location'].dropna().unique())
+        
+        for loc in locations:
             with st.expander(f"📍 Location: {loc}", expanded=True):
                 loc_df = p_df[p_df['Location'] == loc]
                 fig = build_high_speed_graph(
-                    loc_df, f"📈 {selected_project} - {loc}", 
-                    start_view, end_view, tuple(active_refs), 
-                    unit_mode, unit_label, display_tz=display_tz
+                    df=loc_df, 
+                    title=f"📈 {selected_project} - {loc}", 
+                    start_view=start_view, 
+                    end_view=end_view, 
+                    active_refs=tuple(active_refs), 
+                    unit_mode=unit_mode, 
+                    unit_label=unit_label, 
+                    display_tz=display_tz
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"ov_{selected_project}_{loc}")
     else:
-        st.info(f"No engineering data found for {selected_project} in the last 84 days.")
+        st.warning(f"No engineering data found for '{selected_project}' in the last 84 days.")
+        st.info("Check if sensors are mapped to this project name in the metadata table[cite: 5].")
+        
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
@@ -987,13 +1030,11 @@ def update_records(pts, df, val):
 ###########
 
 if service == "🌐 Global Overview":
-    # Pass display_tz here as well
     render_global_overview(selected_project, display_tz) 
 
 elif service == "🏠 Executive Summary":
-    # Ensure display_tz is passed
     render_executive_summary(client, selected_project, unit_label, display_tz)
-
+    
 elif service == "📊 Client Portal":
     # Portal needs all 5 variables defined in Section 7 [cite: 16]
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
