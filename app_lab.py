@@ -372,53 +372,60 @@ def render_global_overview(selected_project, display_tz):
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # 1. Fuzzy Filter Logic [cite: 5]
+    # 1. Fuzzy Filter Logic
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # Query tracks total nodes, nodes active in 24h, the latest ping, and the oldest ping 
+    # SQL query tracking 24h activity, 6h activity, and lag endpoints
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
             WHERE Project IS NOT NULL {proj_filter}
         ),
-        RecentReporting AS (
-            SELECT r.NodeNum, MAX(r.timestamp) as last_ping
-            FROM (
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                UNION ALL
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) AS r
-            WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+        BaseReporting AS (
+            SELECT NodeNum, timestamp 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ),
+        RecentReporting24h AS (
+            SELECT NodeNum, 1 as active_24 
+            FROM BaseReporting 
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            GROUP BY NodeNum
+        ),
+        RecentReporting6h AS (
+            SELECT NodeNum, 1 as active_6 
+            FROM BaseReporting 
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
             GROUP BY NodeNum
         ),
         HistoricalPings AS (
             SELECT 
                 NodeNum, 
-                MAX(timestamp) as ever_ping_max,
-                MIN(timestamp) as ever_ping_min
-            FROM (
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                UNION ALL
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) GROUP BY NodeNum
+                MAX(timestamp) as ever_ping_max
+            FROM BaseReporting 
+            GROUP BY NodeNum
         ),
         JoinedData AS (
             SELECT 
                 m.Project, m.Location, m.NodeNum,
-                CASE WHEN r.NodeNum IS NOT NULL THEN 1 ELSE 0 END as is_active,
+                COALESCE(r24.active_24, 0) as is_active_24,
+                COALESCE(r6.active_6, 0) as is_active_6,
                 h.ever_ping_max
             FROM MappedNodes m
-            LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
+            LEFT JOIN RecentReporting24h r24 ON m.NodeNum = r24.NodeNum
+            LEFT JOIN RecentReporting6h r6 ON m.NodeNum = r6.NodeNum
             LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
         ),
         LocationStats AS (
             SELECT 
                 Project, Location, 
                 COUNT(NodeNum) as total, 
-                SUM(is_active) as active_24h, 
+                SUM(is_active_24) as active_24h, 
+                SUM(is_active_6) as active_6h,
                 MAX(ever_ping_max) as last_up,
                 MIN(ever_ping_max) as oldest_node_ping 
             FROM JoinedData GROUP BY Project, Location
@@ -427,7 +434,8 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 Project, 'PROJECT TOTAL' as Location, 
                 COUNT(NodeNum) as total, 
-                SUM(is_active) as active_24h, 
+                SUM(is_active_24) as active_24h, 
+                SUM(is_active_6) as active_6h,
                 MAX(ever_ping_max) as last_up,
                 MIN(ever_ping_max) as oldest_node_ping
             FROM JoinedData GROUP BY Project
@@ -452,7 +460,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             last_ts = row['last_up']
             oldest_ts = row['oldest_node_ping']
             
-            # Last Seen Calculation 
+            # Last Seen Calculation
             if pd.notnull(last_ts):
                 if last_ts.tzinfo is None: last_ts = last_ts.tz_localize('UTC')
                 last_ts_local = last_ts.tz_convert(display_tz)
@@ -461,7 +469,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             else:
                 last_seen_str = "Never"
 
-            # Max Lag Calculation [cite: 12]
+            # Max Lag Calculation
             if pd.notnull(oldest_ts):
                 if oldest_ts.tzinfo is None: oldest_ts = oldest_ts.tz_localize('UTC')
                 oldest_ts_local = oldest_ts.tz_convert(display_tz)
@@ -476,6 +484,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 "Location": row['Location'],
                 "Nodes": row['total'],
                 "Seen (24h)": row['active_24h'],
+                "Seen (6h)": row['active_6h'],  # NEW COLUMN
                 "Last Seen": last_seen_str,
                 "Max Lag": lag_str
             })
@@ -484,7 +493,6 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
         # --- STYLING LOGIC ---
         def style_project_rows(row):
-            # If the Location is the Project Total, return the gray background CSS 
             if row['Location'] == 'PROJECT TOTAL':
                 return ['background-color: #f0f2f6; font-weight: bold'] * len(row)
             return [''] * len(row)
