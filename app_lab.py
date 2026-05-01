@@ -370,17 +370,10 @@ def render_global_overview(selected_project, display_tz):
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-###########
-# - 6. PAGE: EXECUTIVE SUMMARY - #
-###########
-
-###########
-# - 6. PAGE: EXECUTIVE SUMMARY - #
-###########
-
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
+    # 1. DATA GATHERING
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
@@ -415,27 +408,46 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     try:
         raw_df = client.query(query).to_dataframe()
         if raw_df.empty:
-            st.warning("No metadata found for this project.")
+            st.warning("No data found for this project selection.")
             return
 
-        # --- CRITICAL FIX FOR NA ERROR ---
-        # Replace missing activity with 0 so logic doesn't break
+        # Clean up activity columns to prevent "Ambiguous NA" errors
         raw_df['active_6h'] = raw_df['active_6h'].fillna(0).astype(int)
         raw_df['active_24h'] = raw_df['active_24h'].fillna(0).astype(int)
-        
         now_local = pd.Timestamp.now(tz=display_tz)
 
-        # 2. MAIN SUMMARY TABLE
+        # 2. CREATE THE AGGREGATED SUMMARY
         summary_df = raw_df.groupby(['Project', 'Location']).agg(
             Nodes=('NodeNum', 'count'),
             Seen_24h=('active_24h', 'sum'),
             Seen_6h=('active_6h', 'sum'),
+            Latest_Ping=('last_ping', 'max'),
             Oldest_Ping=('last_ping', 'min')
         ).reset_index()
 
-        def format_summary(row):
+        # Create Project Totals for the Gray Rows
+        total_df = summary_df.groupby('Project').agg({
+            'Nodes': 'sum', 'Seen_24h': 'sum', 'Seen_6h': 'sum', 
+            'Latest_Ping': 'max', 'Oldest_Ping': 'min'
+        }).reset_index()
+        total_df['Location'] = 'PROJECT TOTAL'
+
+        # Combine and Sort
+        final_df = pd.concat([total_df, summary_df], ignore_index=True)
+        final_df = final_df.sort_values(['Project', (final_df['Location'] == 'PROJECT TOTAL')], ascending=[True, False])
+
+        def format_summary_table(row):
+            # Last Seen (Most recent in group)
+            latest = row['Latest_Ping']
+            last_seen_str = "Never"
+            if pd.notnull(latest):
+                if latest.tzinfo is None: latest = latest.tz_localize('UTC')
+                l_gap = round((now_local - latest.tz_convert(display_tz)).total_seconds() / 3600, 1)
+                last_seen_str = f"{l_gap}h ago"
+
+            # Max Lag (Longest quiet sensor in group)
             oldest = row['Oldest_Ping']
-            lag_str = "Never Seen ⚪"
+            lag_str = "N/A"
             if pd.notnull(oldest):
                 if oldest.tzinfo is None: oldest = oldest.tz_localize('UTC')
                 lag = round((now_local - oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
@@ -447,12 +459,20 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 "Nodes": row['Nodes'],
                 "Seen (24h)": int(row['Seen_24h']),
                 "Seen (6h)": int(row['Seen_6h']),
+                "Last Seen": last_seen_str,
                 "Max Lag": lag_str
             })
 
+        display_summary = final_df.apply(format_summary_table, axis=1)
+
+        # Apply Gray Styling to 'PROJECT TOTAL'
+        def style_rows(row):
+            if row['Location'] == 'PROJECT TOTAL':
+                return ['background-color: #f0f2f6; font-weight: bold'] * len(row)
+            return [''] * len(row)
+
         st.subheader("📍 Location Overview")
-        display_summary = summary_df.apply(format_summary, axis=1)
-        st.dataframe(display_summary, use_container_width=True, hide_index=True)
+        st.dataframe(display_summary.style.apply(style_rows, axis=1), use_container_width=True, hide_index=True)
 
         # 3. DRILL-DOWN SECTION
         st.divider()
@@ -466,27 +486,22 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             
             def format_sensor_row(row):
                 ping = row['last_ping']
-                lag_str = "Never Seen ⚪"
+                lag_str = "Never Seen"
                 if pd.notnull(ping):
                     if ping.tzinfo is None: ping = ping.tz_localize('UTC')
                     lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
                     lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
 
-                # Safe boolean checking
-                s24 = "✅" if row['active_24h'] == 1 else "❌"
-                s6 = "✅" if row['active_6h'] == 1 else "❌"
-
                 return pd.Series({
                     "Node ID": row['NodeNum'],
                     "Bank": row['Bank'],
                     "Depth": f"{row['Depth']}ft",
-                    "Seen (24h)": s24,
-                    "Seen (6h)": s6,
-                    "Last Seen": lag_str
+                    "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
+                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
+                    "Status": lag_str
                 })
 
             detail_display = sensor_df.apply(format_sensor_row, axis=1)
-            st.write(f"Showing **{len(detail_display)}** sensors for **{selected_loc}**:")
             st.dataframe(detail_display, use_container_width=True, hide_index=True)
 
     except Exception as e:
