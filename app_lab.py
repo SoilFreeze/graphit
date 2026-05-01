@@ -378,7 +378,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # Unified Query: Tracks 24h/6h check-ins AND hourly uptime percentages
+    # Query: Calculates max gaps for both 24h and 7d periods
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
@@ -388,27 +388,44 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         BaseReporting AS (
             SELECT NodeNum, timestamp 
             FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
             UNION ALL
-            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            SELECT NodeNum, timestamp 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+        ),
+        GapAnalysis AS (
+            SELECT 
+                NodeNum,
+                timestamp,
+                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) as prev_ts
+            FROM BaseReporting
         ),
         HistoricalStats AS (
             SELECT 
                 NodeNum, 
                 MAX(timestamp) as last_ping,
-                -- 1/0 flags for seen status
+                -- Max Gap 7D (Look at all data in the window)
+                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
+                -- Max Gap 24H (Only look at gaps where the current point is in the last 24h)
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                    THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
+                -- Seen flags
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as active_6h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
-                -- Unique hourly counts for percentages
+                -- Hourly Uptime Counts
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
                     THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
-            FROM BaseReporting GROUP BY NodeNum
+            FROM GapAnalysis GROUP BY NodeNum
         ),
         JoinedData AS (
             SELECT 
                 m.*, 
                 h.last_ping, 
+                COALESCE(h.gap_24h, 0) as gap_24h,
+                COALESCE(h.gap_7d, 0) as gap_7d,
                 COALESCE(h.active_6h, 0) as active_6h,
                 COALESCE(h.active_24h, 0) as active_24h,
                 COALESCE(h.hours_24h, 0) as hours_24h, 
@@ -432,13 +449,15 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             Nodes=('NodeNum', 'count'),
             Seen_24h=('active_24h', 'sum'),
             Seen_6h=('active_6h', 'sum'),
+            Gap_24h=('gap_24h', 'max'),
+            Gap_7d=('gap_7d', 'max'),
             Latest_Ping=('last_ping', 'max'),
             Oldest_Ping=('last_ping', 'min')
         ).reset_index()
 
         total_df = summary_df.groupby('Project').agg({
             'Nodes': 'sum', 'Seen_24h': 'sum', 'Seen_6h': 'sum', 
-            'Latest_Ping': 'max', 'Oldest_Ping': 'min'
+            'Gap_24h': 'max', 'Gap_7d': 'max', 'Latest_Ping': 'max', 'Oldest_Ping': 'min'
         }).reset_index()
         total_df['Location'] = 'PROJECT TOTAL'
 
@@ -463,7 +482,9 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             return pd.Series({
                 "Project": row['Project'], "Location": row['Location'], "Nodes": int(row['Nodes']),
                 "Seen (24h)": int(row['Seen_24h']), "Seen (6h)": int(row['Seen_6h']),
-                "Last Seen": last_seen_str, "Max Lag": lag_str
+                "Last Seen": last_seen_str, "Max Lag": lag_str,
+                "Max Gap (24h)": f"{int(row['Gap_24h'])}h",
+                "Max Gap (7d)": f"{int(row['Gap_7d'])}h"
             })
 
         st.subheader("📍 Location Overview")
@@ -471,7 +492,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             lambda x: ['background-color: #f0f2f6; font-weight: bold'] * len(x) if x['Location'] == 'PROJECT TOTAL' else [''] * len(x), axis=1
         ), use_container_width=True, hide_index=True)
 
-        # 2. SENSOR DRILL-DOWN (With All Columns)
+        # 2. SENSOR DRILL-DOWN
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         
@@ -483,15 +504,11 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             
             def format_sensor_row(row):
                 ping = row['last_ping']
-                lag_str = "Never Seen"
+                status_str = "Never Seen"
                 if pd.notnull(ping):
                     if ping.tzinfo is None: ping = ping.tz_localize('UTC')
                     lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
-                    lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
-
-                # Calculate Percentages
-                pct_24h = round((row['hours_24h'] / 24) * 100, 1)
-                pct_7d = round((row['hours_7d'] / 168) * 100, 1)
+                    status_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
 
                 return pd.Series({
                     "Node ID": row['NodeNum'],
@@ -499,9 +516,11 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     "Depth": f"{row['Depth']}ft",
                     "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
                     "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
-                    "% Active (24h)": f"{pct_24h}%",
-                    "% Active (7d)": f"{pct_7d}%",
-                    "Status": lag_str
+                    "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%",
+                    "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
+                    "Gap (24h)": f"{int(row['gap_24h'])}h",
+                    "Gap (7d)": f"{int(row['gap_7d'])}h",
+                    "Status": status_str
                 })
 
             st.dataframe(sensor_df.apply(format_sensor_row, axis=1), use_container_width=True, hide_index=True)
