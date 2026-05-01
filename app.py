@@ -962,7 +962,7 @@ if service == "🌐 Global Overview":
     render_global_overview(selected_project) # Now passing the sidebar variable
 
 elif service == "🏠 Executive Summary":
-    render_executive_summary(client, selected_project, unit_label) 
+    render_executive_summary(client, selected_project, unit_label, display_tz) # Added display_tz here
 
 elif service == "📊 Client Portal":
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
