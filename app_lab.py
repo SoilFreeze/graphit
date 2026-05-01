@@ -366,6 +366,7 @@ def render_global_overview(selected_project, display_tz):
     else:
         st.warning(f"No engineering data found for '{selected_project}' in the last 84 days.")
         st.info("Check if sensors are mapped to this project name in the metadata table[cite: 5].")
+
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
@@ -411,7 +412,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             st.warning("No data found for this project selection.")
             return
 
-        # Clean up activity columns to prevent "Ambiguous NA" errors
+        # Clean columns to prevent Ambiguous NA errors
         raw_df['active_6h'] = raw_df['active_6h'].fillna(0).astype(int)
         raw_df['active_24h'] = raw_df['active_24h'].fillna(0).astype(int)
         now_local = pd.Timestamp.now(tz=display_tz)
@@ -432,12 +433,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         }).reset_index()
         total_df['Location'] = 'PROJECT TOTAL'
 
-        # Combine and Sort
+        # FIX: Combine and use a helper column for sorting instead of a boolean expression in sort_values
         final_df = pd.concat([total_df, summary_df], ignore_index=True)
-        final_df = final_df.sort_values(['Project', (final_df['Location'] == 'PROJECT TOTAL')], ascending=[True, False])
+        final_df['is_total'] = (final_df['Location'] == 'PROJECT TOTAL').astype(int)
+        
+        # Sort: Project alphabetically, then "is_total" (1 comes before 0 if descending), then Location
+        final_df = final_df.sort_values(by=['Project', 'is_total', 'Location'], ascending=[True, False, True])
 
         def format_summary_table(row):
-            # Last Seen (Most recent in group)
             latest = row['Latest_Ping']
             last_seen_str = "Never"
             if pd.notnull(latest):
@@ -445,7 +448,6 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 l_gap = round((now_local - latest.tz_convert(display_tz)).total_seconds() / 3600, 1)
                 last_seen_str = f"{l_gap}h ago"
 
-            # Max Lag (Longest quiet sensor in group)
             oldest = row['Oldest_Ping']
             lag_str = "N/A"
             if pd.notnull(oldest):
@@ -456,7 +458,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             return pd.Series({
                 "Project": row['Project'],
                 "Location": row['Location'],
-                "Nodes": row['Nodes'],
+                "Nodes": int(row['Nodes']),
                 "Seen (24h)": int(row['Seen_24h']),
                 "Seen (6h)": int(row['Seen_6h']),
                 "Last Seen": last_seen_str,
@@ -465,7 +467,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
         display_summary = final_df.apply(format_summary_table, axis=1)
 
-        # Apply Gray Styling to 'PROJECT TOTAL'
+        # Style function
         def style_rows(row):
             if row['Location'] == 'PROJECT TOTAL':
                 return ['background-color: #f0f2f6; font-weight: bold'] * len(row)
@@ -478,10 +480,11 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         
-        search_options = ["--- Select a Location to Audit Individual Sensors ---"] + sorted(raw_df['Location'].unique().tolist())
-        selected_loc = st.selectbox("Detailed view for:", search_options)
+        # Pull actual locations (excluding 'PROJECT TOTAL') for the dropdown
+        loc_list = sorted(raw_df['Location'].unique().tolist())
+        selected_loc = st.selectbox("Detailed view for:", ["--- Select Location ---"] + loc_list)
 
-        if selected_loc != search_options[0]:
+        if selected_loc != "--- Select Location ---":
             sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
             
             def format_sensor_row(row):
@@ -505,7 +508,9 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             st.dataframe(detail_display, use_container_width=True, hide_index=True)
 
     except Exception as e:
+        # Improved error reporting
         st.error(f"Executive Summary Error: {e}")
+        
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
