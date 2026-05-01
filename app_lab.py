@@ -50,12 +50,14 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Updated Data Engine: Uses 'approve' column for visibility logic as per schema.
+    Standardized Data Engine. 
+    Joins Raw Data + Metadata + Manual Rejections[cite: 15].
     """
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
+    # 1. Define the Query Filter based on View Mode 
     if view_mode == "client":
-        # Logic: Must be marked 'TRUE' (Approved) AND must NOT be marked 'MASKED'
+        # Must be explicitly Approved and NOT Masked 
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
             AND rej.approve = 'TRUE'
@@ -67,9 +69,10 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             )
         """
     else:
-        # Engineering sees everything except explicit deletions ('FALSE')
+        # Engineering sees everything except explicit deletions ('FALSE') 
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
+    # 2. Assign the 'query' variable explicitly
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -89,23 +92,44 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY m.Location ASC, r.timestamp ASC
     """
+    
     try:
         df = client.query(query).to_dataframe()
+        
+        # Ensure timestamp is UTC-aware immediately to avoid localization crashes
+        if not df.empty and 'timestamp' in df.columns:
+            if df['timestamp'].dt.tz is None:
+                df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
+                
         return df
     except Exception as e:
-        st.error(f"BQ Error: {e}")
+        st.error(f"BQ Data Engine Error: {e}")
         return pd.DataFrame()
 
 def check_admin_access(service_name):
-    if st.session_state.get("admin_authenticated"): return True
-    st.warning("🔒 Admin Access Required")
-    pwd = st.text_input("Password", type="password", key=f"gate_{service_name}")
-    if st.button("Unlock", key=f"btn_{service_name}"):
+    """
+    Restricts access to sensitive pages (Intake and Admin Tools).
+    Requires a password defined in st.secrets["admin_password"].
+    """
+    # 1. Check if the user is already authenticated in this session
+    if st.session_state.get("admin_authenticated"): 
+        return True
+    
+    # 2. Display Lock Screen
+    st.warning(f"🔒 Admin Access Required for {service_name}")
+    pwd = st.text_input("Enter Admin Password", type="password", key=f"gate_{service_name}")
+    
+    if st.button("Unlock Access", key=f"btn_{service_name}"):
+        # Check against streamlit secrets
         if pwd == st.secrets["admin_password"]:
             st.session_state["admin_authenticated"] = True
-            st.rerun()
+            st.success("Access Granted")
+            st.rerun() # Refresh to show the restricted content
+        else:
+            st.error("Incorrect Password")
+            
     return False
-
+    
 ###########################
 #- 3. SIDEBAR UI & STATE -#
 ###########################
@@ -116,10 +140,20 @@ service = "🏠 Executive Summary"
 unit_mode = "Fahrenheit"
 unit_label = "°F"
 selected_project = "All Projects"
-display_tz = "UTC"
 active_refs = [(32.0, "Freezing")]
 
-# --- 2. SIDEBAR WIDGETS ---
+# --- 2. TIMEZONE DEFAULT LOGIC ---
+tz_lookup = {
+    "UTC": "UTC", 
+    "Local (US/Eastern)": "US/Eastern", 
+    "Local (US/Pacific)": "US/Pacific"
+}
+
+# Force Pacific as the initial session state if nothing exists
+if "tz_selection" not in st.session_state:
+    st.session_state["tz_selection"] = "Local (US/Pacific)"
+
+# --- 3. SIDEBAR WIDGETS ---
 service = st.sidebar.selectbox(
     "📂 Page", 
     ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
@@ -128,10 +162,19 @@ service = st.sidebar.selectbox(
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Global Project Selection - Now used by Global Overview, Client Portal, and Node Diagnostics
+# Timezone Display
+tz_mode = st.sidebar.selectbox(
+    "Timezone Display", 
+    list(tz_lookup.keys()), 
+    index=list(tz_lookup.keys()).index(st.session_state["tz_selection"])
+)
+# Update session state and set the active IANA string
+st.session_state["tz_selection"] = tz_mode
+display_tz = tz_lookup[tz_mode]
+
+# Global Project Selection
 if client is not None:
     try:
-        # Fetch projects from metadata to populate the sidebar [cite: 5]
         proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
         proj_df = client.query(proj_q).to_dataframe()
         proj_list = sorted(proj_df['Project'].dropna().unique())
@@ -150,22 +193,14 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False):
     active_refs.append((26.6, "Type B"))
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
-
-# Timezone Display
-tz_mode = st.sidebar.selectbox("Timezone Display", ["UTC", "Local (US/Eastern)", "Local (US/Pacific)"])
-display_tz = {
-    "UTC": "UTC", 
-    "Local (US/Eastern)": "US/Eastern", 
-    "Local (US/Pacific)": "US/Pacific"
-}[tz_mode]
-
 ########################
 #- 4. GRAPHING ENGINE -#
 ########################
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Stabilized Engine: Uses standard Scatter for stability and proper legend grouping.
+    Stabilized Engine: Handles timezone synchronization for start/end endpoints 
+    to prevent AssertionError in pd.date_range.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -173,7 +208,16 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df = df.copy()
     
     # 1. TIMEZONE & UNIT CONVERSION
+    # Ensure the dataframe timestamp is UTC-aware before conversion
+    if plot_df['timestamp'].dt.tz is None:
+        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
+    
+    # Convert dataframe to selected local timezone
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
+    
+    # Convert endpoints to the SAME timezone as display_tz to prevent AssertionError
+    start_local = start_view.tz_convert(display_tz) if start_view.tzinfo else start_view.tz_localize('UTC').tz_convert(display_tz)
+    end_local = end_view.tz_convert(display_tz) if end_view.tzinfo else end_view.tz_localize('UTC').tz_convert(display_tz)
     now_local = pd.Timestamp.now(tz=display_tz)
     
     if unit_mode == "Celsius":
@@ -182,7 +226,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     else:
         y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
-    # 2. LABELING & SORTING [cite: 6, 9]
+    # 2. LABELING & SORTING
     def get_sort_info(r):
         b = str(r.get('Bank', '')).strip()
         d = str(r.get('Depth', '')).strip()
@@ -201,8 +245,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. TRACE GENERATION
     fig = go.Figure()
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
-    
-    # Identify unique depth/bank groups
     unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
@@ -215,7 +257,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for j, sn in enumerate(sensors):
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # Gap Detection (6h threshold) [cite: 14]
             if not is_surgical:
                 s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
                 gap_mask = s_df['gap_hrs'] > 6.0
@@ -225,13 +266,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                     s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-            # Using standard Scatter (not gl) for better multi-chart stability
             fig.add_trace(go.Scatter(
                 x=s_df['timestamp'], 
                 y=s_df['temperature'], 
                 name=f"{group_lbl} ({sn})", 
                 legendgroup=group_lbl, 
-                showlegend=True if j == 0 else False, # Show only the first sensor of a group in legend
+                showlegend=True if j == 0 else False,
                 mode='lines+markers' if not is_surgical else 'markers',
                 connectgaps=False,
                 line=dict(color=color, width=1.5),
@@ -245,39 +285,30 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right")
 
-    # RESTORED: Red Vertical 'Now' Line
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
     # 5. GRID HIERARCHY & LAYOUT
     fig.update_layout(
         title={'text': f"<b>{title}</b>", 'x': 0},
-        plot_bgcolor='white',
-        hovermode="x unified",
-        height=600,
+        plot_bgcolor='white', hovermode="x unified", height=600,
         margin=dict(t=80, l=50, r=180, b=50),
         xaxis=dict(
-            range=[start_view, end_view], 
+            range=[start_local, end_local], 
             showline=True, mirror=True, linecolor='black',
             showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1,
-            minor=dict(
-                dtick=6*60*60*1000, 
-                showgrid=True, 
-                gridcolor='Gainsboro', 
-                griddash='dash' 
-            ),
+            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
-            title=f"Temperature ({unit_label})", 
-            range=y_range, dtick=dt_major, 
+            title=f"Temperature ({unit_label})", range=y_range, dtick=dt_major, 
             gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
             minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
         ),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
     
-    # Monday markers
-    mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON', tz=display_tz)
+    # FIXED: Generate Monday lines using endpoints already converted to display_tz
+    mondays = pd.date_range(start=start_local, end=end_local, freq='W-MON', tz=display_tz)
     for mon in mondays:
         fig.add_vline(x=mon, line_width=2, line_color="dimgray", layer="below")
 
@@ -290,50 +321,56 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 # - 5. PAGE: GLOBAL OVERVIEW - #
 ###########
 
-def render_global_overview(selected_project):
+def render_global_overview(selected_project, display_tz):
     """
-    Shows all pipes/banks for the project selected in the sidebar.
-    Engineering view: shows everything except 'FALSE'[cite: 16].
+    Shows all pipes/banks for a selected project in one scrolling view.
+    Engineering view: shows everything except 'FALSE'.
     """
     st.header("🌐 Global Project Overview")
     
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view the Global Overview.")
+        st.info("💡 Please select a specific project in the sidebar to begin.")
         return
 
-    # Use the project selected from the sidebar
-    target_project = selected_project
-
-    with st.spinner(f"Syncing {target_project} (Engineering View)..."):
-        # Engineering view shows all data not explicitly rejected ('FALSE') [cite: 16]
-        p_df = get_universal_portal_data(target_project, view_mode="engineering")
+    with st.spinner(f"Syncing {selected_project} (Engineering View)..."):
+        # Fetch data using the updated engine
+        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if not p_df.empty:
-        # 2. View Constraints
+        # 1. View Constraints
         lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
-        now_utc = pd.Timestamp.now(tz='UTC')
         
-        # Snap end view to the upcoming Monday for consistent weekly alignment
-        end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        # Snap time window to the current Pacific (or selected) time
+        now_local = pd.Timestamp.now(tz=display_tz)
+        end_view = (now_local + pd.Timedelta(days=(7-now_local.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=lookback)
 
-        # 3. Render a graph for every physical location (Pipe/Bank) in the project [cite: 6]
-        for loc in sorted(p_df['Location'].unique()):
+        # 2. Render a graph for every physical location (Pipe/Bank) in the project [cite: 6]
+        locations = sorted(p_df['Location'].dropna().unique())
+        
+        for loc in locations:
             with st.expander(f"📍 Location: {loc}", expanded=True):
                 loc_df = p_df[p_df['Location'] == loc]
                 fig = build_high_speed_graph(
-                    loc_df, f"📈 {target_project} - {loc}", 
-                    start_view, end_view, tuple(active_refs), 
-                    unit_mode, unit_label, display_tz=display_tz
+                    df=loc_df, 
+                    title=f"📈 {selected_project} - {loc}", 
+                    start_view=start_view, 
+                    end_view=end_view, 
+                    active_refs=tuple(active_refs), 
+                    unit_mode=unit_mode, 
+                    unit_label=unit_label, 
+                    display_tz=display_tz
                 )
-                st.plotly_chart(fig, use_container_width=True, key=f"ov_{target_project}_{loc}")
+                st.plotly_chart(fig, use_container_width=True, key=f"ov_{selected_project}_{loc}")
     else:
-        st.info(f"No engineering data found for {target_project} in the last 84 days.")
+        st.warning(f"No engineering data found for '{selected_project}' in the last 84 days.")
+        st.info("Check if sensors are mapped to this project name in the metadata table[cite: 5].")
+        
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
-def render_executive_summary(client, selected_project, unit_label):
+def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
     # 1. Fuzzy Filter Logic
@@ -341,7 +378,8 @@ def render_executive_summary(client, selected_project, unit_label):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    summary_q = f"""
+    # Define the 'query' variable before using it
+    query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
@@ -389,22 +427,28 @@ def render_executive_summary(client, selected_project, unit_label):
     """
     
     try:
-        with st.spinner("⚡ Auditing connectivity for all projects..."):
-            df = client.query(summary_q).to_dataframe()
+        with st.spinner("⚡ Auditing connectivity..."):
+            # Now 'query' is defined
+            df = client.query(query).to_dataframe()
         
         if df.empty:
             st.warning("⚠️ No data found. Check if your Metadata table is populated.")
             return
 
-        now_utc = pd.Timestamp.now(tz=pytz.UTC)
+        # Explicitly use display_tz for current time [cite: 7]
+        now_local = pd.Timestamp.now(tz=display_tz)
 
         def process_health_row(row):
             is_total = row['Location'] == '--- PROJECT TOTAL ---'
             last_ts = row['last_up']
             
             if pd.notnull(last_ts):
-                last_ts = last_ts.tz_convert(pytz.UTC)
-                gap = round((now_utc - last_ts).total_seconds() / 3600, 1)
+                # Ensure UTC before converting to display_tz [cite: 12]
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.tz_localize('UTC')
+                
+                last_ts_local = last_ts.tz_convert(display_tz)
+                gap = round((now_local - last_ts_local).total_seconds() / 3600, 1)
                 icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
                 time_str = f"{gap}h ago {icon}"
             else:
@@ -422,18 +466,21 @@ def render_executive_summary(client, selected_project, unit_label):
 
         health_df = df.apply(process_health_row, axis=1)
 
-        # Metrics based on Project Totals rows only
         totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
         m1, m2, m3 = st.columns(3)
         m1.metric("System Nodes", f"{totals_df['total'].sum()}")
         m2.metric("System Active", f"{totals_df['active'].sum()}")
-        m3.metric("Uptime", f"{round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0}%")
+        if totals_df['total'].sum() > 0:
+            uptime = round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1)
+        else:
+            uptime = 0
+        m3.metric("Uptime", f"{uptime}%")
 
         st.divider()
         st.dataframe(health_df, use_container_width=True, hide_index=True)
 
     except Exception as e:
-        st.error(f"Executive Summary Error: {traceback.format_exc()}")
+        st.error(f"Executive Summary Error: {e}")
 
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
@@ -566,7 +613,6 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
     Engineering-level view. Shows everything (Pending, Masked, Approved).
-    Restored: Time Series, Vertical Profile, and Communication Health Table.
     """
     st.header(f"📉 Node Diagnostics: {selected_project}")
     
@@ -575,6 +621,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
         return
 
     with st.spinner("🔍 Syncing diagnostic streams..."):
+        # Fetching data using the engineering view mode [cite: 16]
         all_data = get_universal_portal_data(selected_project, view_mode="engineering")
     
     if all_data.empty:
@@ -587,38 +634,41 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
     with c1:
         sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options, key="diag_loc_select")
     with c2:
-        weeks_view = st.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
+        weeks_view = st.sidebar.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
     with c3:
         show_profile = st.checkbox("Show Vertical Profile", value=True)
             
-    # Filter data for the selected Location and Timeframe
-    now_utc = pd.Timestamp.now(tz='UTC')
-    start_view = now_utc - timedelta(weeks=weeks_view)
+    # 2. Localize 'Now' and calculate window
+    now_local = pd.Timestamp.now(tz=display_tz)
+    start_view = now_local - timedelta(weeks=weeks_view)
+    
+    # Filter data for the selected Location
+    # Ensure df_diag is defined before any sorting or grouping operations
     df_diag = all_data[all_data['Location'] == sel_loc].copy()
-    df_filtered = df_diag[(df_diag['timestamp'] >= start_view) & (df_diag['timestamp'] <= now_utc)]
+    
+    if df_diag.empty:
+        st.info(f"No data points found for location: {sel_loc}")
+        return
 
     # --- 1. ENGINEERING TIMELINE ---
     st.subheader("🕒 Engineering Timeline")
     fig_time = build_high_speed_graph(
-        df_filtered, f"Diagnostic Stream: {sel_loc}", 
-        start_view, now_utc + timedelta(hours=2), 
+        df_diag, f"Diagnostic Stream: {sel_loc}", 
+        start_view, now_local + timedelta(hours=2), 
         tuple(active_refs), unit_mode, unit_label, display_tz
     )
     st.plotly_chart(fig_time, use_container_width=True)
 
-    # --- 2. VERTICAL PROFILE (Depth vs Temp) ---
+    # --- 2. VERTICAL PROFILE ---
     if show_profile:
         st.divider()
         st.subheader("📏 Vertical Temperature Profile")
         df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
         profile_df = df_diag.dropna(subset=['Depth_Num']).copy()
 
-        if profile_df.empty:
-            st.info("No numeric depth data found for this location.")
-        else:
+        if not profile_df.empty:
             latest_snap = profile_df.sort_values('timestamp').groupby('Depth_Num').last().reset_index()
             
-            # Using Lambda to avoid convert_val NameError
             latest_snap['conv_temp'] = latest_snap['temperature'].apply(
                 lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
             )
@@ -641,29 +691,25 @@ def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label,
             )
             st.plotly_chart(fig_d, use_container_width=True)
 
-    # --- 3. COMMUNICATION HEALTH TABLE (Restored) ---
+    # --- 3. COMMUNICATION HEALTH TABLE ---
     st.divider()
     st.subheader("📋 Sensor Communication Health")
     
-    # We use the raw df_diag to check the latest overall reporting time
+    # Correctly identify latest nodes within the defined df_diag
     latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
     
     summary_rows = []
     for _, row in latest_nodes.iterrows():
-        # Handle timestamp localization safely
-        ts = row['timestamp'].tz_localize('UTC') if row['timestamp'].tzinfo is None else row['timestamp']
-        hrs_ago = int((now_utc - ts).total_seconds() / 3600)
+        # Ensure timestamp is localized to Pacific/Selected TZ for math
+        ts_local = row['timestamp'].tz_convert(display_tz) if row['timestamp'].tzinfo else row['timestamp'].tz_localize('UTC').tz_convert(display_tz)
+        hrs_ago = int((now_local - ts_local).total_seconds() / 3600)
         
-        # Status Logic: Green < 6h, Yellow < 24h, Red > 24h
         status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
         
-        # Map database 'is_approved' column to human-readable status
-        db_status = str(row['is_approved']).upper()
+        db_status = str(row.get('is_approved', 'PENDING')).upper()
         status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
 
-        # Temperature Conversion Lambda for table display
-        f_temp = row['temperature']
-        conv_temp = (f_temp - 32) * 5/9 if unit_mode == "Celsius" else f_temp
+        conv_temp = (row['temperature'] - 32) * 5/9 if unit_mode == "Celsius" else row['temperature']
 
         summary_rows.append({
             "Node": row['NodeNum'],
@@ -1100,21 +1146,27 @@ def update_records(pts, df, val):
 ###########
 
 if service == "🌐 Global Overview":
-    render_global_overview(selected_project) # Now passing the sidebar variable
+    # Pass both project and timezone for rendering
+    render_global_overview(selected_project, display_tz) 
 
 elif service == "🏠 Executive Summary":
-    render_executive_summary(client, selected_project, unit_label) 
+    # Ensure client and timezone are passed for health audit [cite: 6]
+    render_executive_summary(client, selected_project, unit_label, display_tz) 
 
 elif service == "📊 Client Portal":
+    # Handles timeline and depth profile tabs [cite: 7]
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif service == "📉 Node Diagnostics":
+    # Engineering view for sensor communication health 
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif service == "📤 Data Intake Lab":
+    # Gatekept by admin check 
     if check_admin_access(service):
         render_data_intake_page(selected_project)
 
 elif service == "🛠️ Admin Tools":
+    # Gatekept by admin check 
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
