@@ -365,7 +365,6 @@ def render_global_overview(selected_project, display_tz):
     else:
         st.warning(f"No engineering data found for '{selected_project}' in the last 84 days.")
         st.info("Check if sensors are mapped to this project name in the metadata table[cite: 5].")
-        
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
@@ -373,12 +372,12 @@ def render_global_overview(selected_project, display_tz):
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # 1. Fuzzy Filter Logic for Project Selection
+    # 1. Fuzzy Filter Logic
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # SQL logic to find the node within each group that hasn't been seen for the longest time
+    # SQL logic to find the node within each group that hasn't been seen for the longest time 
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location
@@ -404,7 +403,6 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 Project, Location, 
                 COUNT(NodeNum) as total, 
-                -- Finding the node that was last seen the furthest back in time
                 MIN(ever_ping) as oldest_node_ping 
             FROM JoinedData GROUP BY Project, Location
         ),
@@ -429,7 +427,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             st.warning("⚠️ No data found. Check your Metadata and Project selection.")
             return
 
-        # Localized 'now' for accurate hour calculation [cite: 7, 12]
+        # Localized 'now' for accurate hour calculation relative to Pacific Time
         now_local = pd.Timestamp.now(tz=display_tz)
 
         def process_health_row(row):
@@ -437,15 +435,15 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             oldest_ts = row['oldest_node_ping']
             
             if pd.notnull(oldest_ts):
-                # Ensure the DB timestamp is recognized as UTC before conversion
+                # Ensure the DB timestamp is recognized as UTC before conversion [cite: 8]
                 if oldest_ts.tzinfo is None:
                     oldest_ts = oldest_ts.tz_localize('UTC')
                 
-                # Convert to Pacific/Selected TZ and calculate difference
+                # Convert to selected TZ and calculate difference
                 oldest_ts_local = oldest_ts.tz_convert(display_tz)
                 max_lag_hrs = round((now_local - oldest_ts_local).total_seconds() / 3600, 1)
                 
-                # Visual Status based on the worst-performing node in the group
+                # Visual Status based on the worst-performing node in the group 
                 icon = "🔴" if max_lag_hrs > 24 else ("🟡" if max_lag_hrs > 6 else "🟢")
                 lag_str = f"{max_lag_hrs}h {icon}"
             else:
@@ -465,7 +463,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         m1, m2 = st.columns(2)
         m1.metric("Total System Nodes", f"{totals_df['total'].sum()}")
         
-        # Calculate overall system lag (the single oldest node in the entire system)
+        # Calculate overall system lag
         system_oldest = totals_df['oldest_node_ping'].min()
         if pd.notnull(system_oldest):
              if system_oldest.tzinfo is None: system_oldest = system_oldest.tz_localize('UTC')
