@@ -10,6 +10,7 @@ import pytz
 import traceback
 import io
 import re
+from streamlit_plotly_events import plotly_events
 
 ##################################
 # - 1. CONFIGURATION & STYLING - #
@@ -365,7 +366,7 @@ def render_global_overview(selected_project, display_tz):
     else:
         st.warning(f"No engineering data found for '{selected_project}' in the last 84 days.")
         st.info("Check if sensors are mapped to this project name in the metadata table[cite: 5].")
-        
+
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
@@ -373,115 +374,160 @@ def render_global_overview(selected_project, display_tz):
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # 1. Fuzzy Filter Logic
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # Define the 'query' variable before using it
+    # Query: Calculates max gaps for both 24h and 7d periods
     query = f"""
         WITH MappedNodes AS (
-            SELECT TRIM(Project) as Project, NodeNum, Location
+            SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
             WHERE Project IS NOT NULL {proj_filter}
         ),
-        RecentReporting AS (
-            SELECT r.NodeNum, MAX(r.timestamp) as last_ping
-            FROM (
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                UNION ALL
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) AS r
-            WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-            GROUP BY NodeNum
+        BaseReporting AS (
+            SELECT NodeNum, timestamp 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+            UNION ALL
+            SELECT NodeNum, timestamp 
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
         ),
-        HistoricalPings AS (
-            SELECT NodeNum, MAX(timestamp) as ever_ping
-            FROM (
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                UNION ALL
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) GROUP BY NodeNum
+        GapAnalysis AS (
+            SELECT 
+                NodeNum,
+                timestamp,
+                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) as prev_ts
+            FROM BaseReporting
+        ),
+        HistoricalStats AS (
+            SELECT 
+                NodeNum, 
+                MAX(timestamp) as last_ping,
+                -- Max Gap 7D (Look at all data in the window)
+                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
+                -- Max Gap 24H (Only look at gaps where the current point is in the last 24h)
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                    THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
+                -- Seen flags
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as active_6h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
+                -- Hourly Uptime Counts
+                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
+                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
+                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
+            FROM GapAnalysis GROUP BY NodeNum
         ),
         JoinedData AS (
             SELECT 
-                m.Project, m.Location, m.NodeNum,
-                CASE WHEN r.NodeNum IS NOT NULL THEN 1 ELSE 0 END as is_active,
-                h.ever_ping
+                m.*, 
+                h.last_ping, 
+                COALESCE(h.gap_24h, 0) as gap_24h,
+                COALESCE(h.gap_7d, 0) as gap_7d,
+                COALESCE(h.active_6h, 0) as active_6h,
+                COALESCE(h.active_24h, 0) as active_24h,
+                COALESCE(h.hours_24h, 0) as hours_24h, 
+                COALESCE(h.hours_7d, 0) as hours_7d
             FROM MappedNodes m
-            LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
-            LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
-        ),
-        LocationStats AS (
-            SELECT Project, Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
-            FROM JoinedData GROUP BY Project, Location
-        ),
-        ProjectTotals AS (
-            SELECT Project, '--- PROJECT TOTAL ---' as Location, COUNT(NodeNum) as total, SUM(is_active) as active, MAX(ever_ping) as last_up
-            FROM JoinedData GROUP BY Project
+            LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
         )
-        SELECT * FROM ProjectTotals
-        UNION ALL
-        SELECT * FROM LocationStats
-        ORDER BY Project ASC, (Location = '--- PROJECT TOTAL ---') DESC, Location ASC
+        SELECT * FROM JoinedData
     """
     
     try:
-        with st.spinner("⚡ Auditing connectivity..."):
-            # Now 'query' is defined
-            df = client.query(query).to_dataframe()
-        
-        if df.empty:
-            st.warning("⚠️ No data found. Check if your Metadata table is populated.")
+        raw_df = client.query(query).to_dataframe()
+        if raw_df.empty:
+            st.warning("No data found for this project selection.")
             return
 
-        # Explicitly use display_tz for current time [cite: 7]
         now_local = pd.Timestamp.now(tz=display_tz)
 
-        def process_health_row(row):
-            is_total = row['Location'] == '--- PROJECT TOTAL ---'
-            last_ts = row['last_up']
-            
-            if pd.notnull(last_ts):
-                # Ensure UTC before converting to display_tz [cite: 12]
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.tz_localize('UTC')
-                
-                last_ts_local = last_ts.tz_convert(display_tz)
-                gap = round((now_local - last_ts_local).total_seconds() / 3600, 1)
-                icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
-                time_str = f"{gap}h ago {icon}"
-            else:
-                time_str = "Never Seen ⚪"
+        # 1. MAIN SUMMARY TABLE (Location Level)
+        summary_df = raw_df.groupby(['Project', 'Location']).agg(
+            Nodes=('NodeNum', 'count'),
+            Seen_24h=('active_24h', 'sum'),
+            Seen_6h=('active_6h', 'sum'),
+            Gap_24h=('gap_24h', 'max'),
+            Gap_7d=('gap_7d', 'max'),
+            Latest_Ping=('last_ping', 'max'),
+            Oldest_Ping=('last_ping', 'min')
+        ).reset_index()
+
+        total_df = summary_df.groupby('Project').agg({
+            'Nodes': 'sum', 'Seen_24h': 'sum', 'Seen_6h': 'sum', 
+            'Gap_24h': 'max', 'Gap_7d': 'max', 'Latest_Ping': 'max', 'Oldest_Ping': 'min'
+        }).reset_index()
+        total_df['Location'] = 'PROJECT TOTAL'
+
+        final_df = pd.concat([total_df, summary_df], ignore_index=True)
+        final_df['is_total'] = (final_df['Location'] == 'PROJECT TOTAL').astype(int)
+        final_df = final_df.sort_values(by=['Project', 'is_total', 'Location'], ascending=[True, False, True])
+
+        def format_summary_table(row):
+            latest = row['Latest_Ping']
+            last_seen_str = "Never"
+            if pd.notnull(latest):
+                if latest.tzinfo is None: latest = latest.tz_localize('UTC')
+                last_seen_str = f"{round((now_local - latest.tz_convert(display_tz)).total_seconds() / 3600, 1)}h ago"
+
+            oldest = row['Oldest_Ping']
+            lag_str = "N/A"
+            if pd.notnull(oldest):
+                if oldest.tzinfo is None: oldest = oldest.tz_localize('UTC')
+                lag = round((now_local - oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
+                lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
 
             return pd.Series({
-                "Project": f"⭐ {row['Project']}" if is_total else row['Project'],
-                "Location": row['Location'],
-                "Mapped": row['total'],
-                "Active": row['active'],
-                "Ratio": f"{row['active']}/{row['total']}",
-                "Status": "✅ Healthy" if row['total'] == row['active'] else f"⚠️ {row['total'] - row['active']} Offline",
-                "Last Activity": time_str
+                "Project": row['Project'], "Location": row['Location'], "Nodes": int(row['Nodes']),
+                "Seen (24h)": int(row['Seen_24h']), "Seen (6h)": int(row['Seen_6h']),
+                "Last Seen": last_seen_str, "Max Lag": lag_str,
+                "Max Gap (24h)": f"{int(row['Gap_24h'])}h",
+                "Max Gap (7d)": f"{int(row['Gap_7d'])}h"
             })
 
-        health_df = df.apply(process_health_row, axis=1)
+        st.subheader("📍 Location Overview")
+        st.dataframe(final_df.apply(format_summary_table, axis=1).style.apply(
+            lambda x: ['background-color: #f0f2f6; font-weight: bold'] * len(x) if x['Location'] == 'PROJECT TOTAL' else [''] * len(x), axis=1
+        ), use_container_width=True, hide_index=True)
 
-        totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
-        m1, m2, m3 = st.columns(3)
-        m1.metric("System Nodes", f"{totals_df['total'].sum()}")
-        m2.metric("System Active", f"{totals_df['active'].sum()}")
-        if totals_df['total'].sum() > 0:
-            uptime = round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1)
-        else:
-            uptime = 0
-        m3.metric("Uptime", f"{uptime}%")
-
+        # 2. SENSOR DRILL-DOWN
         st.divider()
-        st.dataframe(health_df, use_container_width=True, hide_index=True)
+        st.subheader("🔍 Sensor Drill-Down")
+        
+        loc_list = sorted(raw_df['Location'].unique().tolist())
+        selected_loc = st.selectbox("Detailed view for:", ["--- Select Location ---"] + loc_list)
+
+        if selected_loc != "--- Select Location ---":
+            sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
+            
+            def format_sensor_row(row):
+                ping = row['last_ping']
+                status_str = "Never Seen"
+                if pd.notnull(ping):
+                    if ping.tzinfo is None: ping = ping.tz_localize('UTC')
+                    lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
+                    status_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
+
+                return pd.Series({
+                    "Node ID": row['NodeNum'],
+                    "Bank": row['Bank'],
+                    "Depth": f"{row['Depth']}ft",
+                    "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
+                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
+                    "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%",
+                    "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
+                    "Gap (24h)": f"{int(row['gap_24h'])}h",
+                    "Gap (7d)": f"{int(row['gap_7d'])}h",
+                    "Status": status_str
+                })
+
+            st.dataframe(sensor_df.apply(format_sensor_row, axis=1), use_container_width=True, hide_index=True)
 
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
-
+        
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
@@ -1047,100 +1093,152 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 ###########
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Handles the Plotly Lasso tool to Approve, Mask, or Delete specific data points.
-    """
-    # 1. Fetch Engineering-level data
-    p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+    st.subheader("🧨 Surgical Point Cleaner")
+
+    # 1. INITIALIZE PERSISTENT LOCK
+    if "surgical_lock" not in st.session_state:
+        st.session_state.surgical_lock = []
+
+    # 2. VIEW & ACTION TOGGLES
+    c1, c2 = st.columns(2)
+    view_toggle = c1.radio("Display Mode", ["Engineering", "Client"], horizontal=True, key="v_toggle")
+    delete_method = c2.radio("Action Type", ["Soft Delete", "Hard Purge"], horizontal=True, key="d_method")
+    v_mode = "engineering" if view_toggle == "Engineering" else "client"
+
+    # 3. DATA PREP
+    p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
     if p_df.empty:
-        st.info("No data available to scrub.")
+        st.info("No data available.")
         return
 
-    # 2. Location Selection
-    loc_options = sorted(p_df['Location'].dropna().unique())
-    sel_loc = st.selectbox("Select Pipe to Clean", loc_options, key="surgical_loc_select")
-    
-    # Reset index so 'point_index' from Plotly aligns with the dataframe rows
+    sel_loc = st.selectbox("Select Pipe", sorted(p_df['Location'].unique()), key="s_loc")
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 3. Persistent State for Selection
-    if "locked_selection" not in st.session_state:
-        st.session_state.locked_selection = None
-
-    # 4. Build Marker Graph for Selection
+    # 4. THE CHART
     fig_scrub = build_high_speed_graph(
         scrub_df, f"Surgical Scrubbing: {sel_loc}", 
-        pd.Timestamp.now(tz='UTC') - timedelta(days=14), 
-        pd.Timestamp.now(tz='UTC') + timedelta(hours=6), 
-        tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
+        pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
+        pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
+        active_refs, unit_mode, unit_label, display_tz=display_tz
     )
+    fig_scrub.update_layout(dragmode='lasso', clickmode='event+select')
 
-    # Highlight previously selected points
-    if st.session_state.locked_selection:
-        indices = [p['point_index'] for p in st.session_state.locked_selection]
+    # If we have points locked, keep them highlighted
+    if st.session_state.surgical_lock:
+        indices = [p['point_index'] for p in st.session_state.surgical_lock]
         fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
 
-    # 5. Render Plot and Capture Selection Event
-    event_data = st.plotly_chart(fig_scrub, use_container_width=True, on_select="rerun", key=f"scrub_{sel_loc}")
+    # 5. RENDER WITH CAPTURE
+    chart_key = f"scrub_chart_{sel_loc}_{v_mode}"
+    event_data = st.plotly_chart(
+        fig_scrub, 
+        use_container_width=True, 
+        on_select="rerun", # Mandatory for the 'event_data' variable to populate
+        key=chart_key
+    )
 
+    # --- THE LOCKING LOGIC ---
+    # We catch the event immediately. If it's empty but our lock isn't, we keep our lock.
     if event_data and "selection" in event_data:
-        pts = event_data["selection"].get("points", [])
-        if len(pts) > 0:
-            st.session_state.locked_selection = pts
+        new_pts = event_data["selection"].get("points", [])
+        if new_pts:
+            st.session_state.surgical_lock = new_pts
+            # We do NOT rerun here to prevent the flicker. 
+            # The buttons below will now see 'surgical_lock'.
 
-    # 6. Action Buttons
-    if st.session_state.locked_selection:
-        st.success(f"📍 {len(st.session_state.locked_selection)} points selected.")
-        c1, c2, c3, c4 = st.columns(4)
+    # 6. ACTION BUTTONS
+    if st.session_state.surgical_lock:
+        st.success(f"📍 {len(st.session_state.surgical_lock)} points captured.")
         
-        with c1:
-            if st.button("✅ APPROVE (Client)", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "TRUE")
-        with c2:
-            if st.button("🚫 MASK (Internal)", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "MASKED")
-        with c3:
-            if st.button("🗑️ DELETE (Full Reject)", type="primary", use_container_width=True):
-                update_records(st.session_state.locked_selection, scrub_df, "FALSE")
-        with c4:
-            if st.button("Clear Selection", use_container_width=True):
-                st.session_state.locked_selection = None
-                st.rerun()
+        b1, b2, b3, b4 = st.columns(4)
+        
+        if b1.button("✅ Approve", use_container_width=True):
+            update_records(st.session_state.surgical_lock, scrub_df, "TRUE")
+            st.session_state.surgical_lock = [] # Clear after action
+            st.rerun()
 
-###########
+        if b2.button("🚫 Mask", use_container_width=True):
+            update_records(st.session_state.surgical_lock, scrub_df, "MASKED")
+            st.session_state.surgical_lock = []
+            st.rerun()
+
+        label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
+        if b3.button(label, type="primary", use_container_width=True):
+            if "Hard" in delete_method:
+                hard_purge_points(st.session_state.surgical_lock, scrub_df)
+            else:
+                update_records(st.session_state.surgical_lock, scrub_df, "FALSE")
+            st.session_state.surgical_lock = []
+            st.rerun()
+
+        if b4.button("Clear Selection", use_container_width=True):
+            st.session_state.surgical_lock = []
+            st.rerun()
+    else:
+        st.info("💡 Lasso points on the graph to begin.")
+
+def hard_purge_points(pts, df):
+    """
+    Permanently deletes lassoed points from the raw BigQuery tables.
+    """
+    with st.spinner("Executing permanent purge..."):
+        for p in pts:
+            try:
+                node = df.iloc[p['point_index']]['NodeNum']
+                ts = p['x'] 
+                
+                table = "raw_lord" if "-" in str(node) else "raw_sensorpush"
+                id_col = "NodeNum" if "lord" in table else "sensor_id"
+                
+                # Permanent SQL deletion
+                delete_sql = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` WHERE {id_col} = '{node}' AND timestamp = '{ts}'"
+                client.query(delete_sql).result()
+            except:
+                continue
+    
+    st.session_state.locked_selection = []
+    st.cache_data.clear()
+    st.success("Points purged from raw source tables.")
+    st.rerun()
+
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
 
 def update_records(pts, df, val):
     """
-    Updated: Writes status updates into the 'approve' column.
-    Matches updated schema: NodeNum (STRING), timestamp (TIMESTAMP), approve (STRING).
+    Writes status updates (TRUE, FALSE, MASKED) to the manual_rejections table.
     """
     recs = []
     for p in pts:
-        # Snap timestamp to the hour to match master/raw intervals [cite: 15]
-        ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
-        node = df.iloc[p['point_index']]['NodeNum']
-        
-        recs.append({
-            "NodeNum": str(node), 
-            "timestamp": ts, 
-            "approve": val  # Using 'approve' column for TRUE, FALSE, or MASKED [cite: 13]
-        })
+        try:
+            # Snap timestamp to the hour for database alignment [cite: 14]
+            ts = pd.to_datetime(p['x']).tz_convert('UTC').floor('h')
+            node = df.iloc[p['point_index']]['NodeNum']
+            
+            recs.append({
+                "NodeNum": str(node), 
+                "timestamp": ts, 
+                "approve": val 
+            })
+        except Exception:
+            continue
     
     if recs:
+        # Deduplicate to prevent multiple entries for the same hour [cite: 15]
         status_df = pd.DataFrame(recs).drop_duplicates(subset=['NodeNum', 'timestamp'])
         try:
+            # Load updates into BigQuery [cite: 1, 11]
             job = client.load_table_from_dataframe(status_df, OVERRIDE_TABLE)
             job.result() 
-            st.session_state.locked_selection = None
+            
+            # Reset state and clear cache to reflect changes immediately [cite: 15]
+            st.session_state.locked_selection = []
             st.cache_data.clear()
-            st.success(f"Successfully marked {len(recs)} points as {val}")
+            st.success(f"Successfully marked {len(status_df)} records as {val}")
             time.sleep(1) 
             st.rerun()
         except Exception as e:
-            st.error(f"Failed to update records: {e}")
-
+            st.error(f"Database Error: {e}")
 ###########
 # - 12. MAIN ROUTER - #
 ###########
