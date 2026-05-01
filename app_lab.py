@@ -1159,25 +1159,19 @@ def hard_purge_points(pts, df):
                 node = df.iloc[p['point_index']]['NodeNum']
                 ts = p['x'] 
                 
-                # Determine table and ID column [cite: 2, 3]
                 table = "raw_lord" if "-" in str(node) else "raw_sensorpush"
                 id_col = "NodeNum" if "lord" in table else "sensor_id"
                 
-                # Permanent DELETE query 
-                delete_sql = f"""
-                    DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` 
-                    WHERE {id_col} = '{node}' 
-                    AND timestamp = '{ts}'
-                """
+                # Permanent SQL deletion
+                delete_sql = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` WHERE {id_col} = '{node}' AND timestamp = '{ts}'"
                 client.query(delete_sql).result()
             except:
                 continue
     
     st.session_state.locked_selection = []
-    st.cache_data.clear() # 
-    st.success("Points purged. Database sync complete.")
+    st.cache_data.clear()
+    st.success("Points purged from raw source tables.")
     st.rerun()
-
 
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
