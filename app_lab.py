@@ -1070,18 +1070,18 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Stabilized Surgical Cleaner with Session State locking and View Mode toggles.
+    Stabilized Surgical Cleaner. 
+    Uses a 'capture-first' logic to prevent lasso selections from disappearing.
     """
     st.subheader("🧨 Surgical Point Cleaner")
 
-    # 1. VIEW MODE TOGGLE
+    # 1. VIEW MODE TOGGLE 
     view_toggle = st.radio(
         "Display Mode", 
         ["Engineering (All Points)", "Client (Approved Only)"], 
         horizontal=True,
         key="surgical_view_selection"
     )
-    # Map selection to view_mode logic 
     v_mode = "engineering" if "Engineering" in view_toggle else "client"
 
     # 2. DATA FETCHING
@@ -1094,10 +1094,10 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     loc_options = sorted(p_df['Location'].dropna().unique())
     sel_loc = st.selectbox("Select Pipe to Clean", loc_options, key="surgical_loc_select")
     
-    # reset_index is critical: ensures Plotly point_index matches Dataframe row index
+    # reset_index ensures Plotly point_index matches Dataframe row index
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 4. PERSISTENT STATE INITIALIZATION
+    # 4. INITIALIZE SESSION STATE
     if "locked_selection" not in st.session_state:
         st.session_state.locked_selection = []
 
@@ -1108,10 +1108,10 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         f"Surgical Scrubbing: {sel_loc} ({view_toggle})", 
         pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
         pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
-        tuple(active_refs), unit_mode, unit_label, display_tz=display_tz
+        active_refs, unit_mode, unit_label, display_tz=display_tz
     )
 
-    # Highlight previously selected points so they stay selected after rerun
+    # If we have a locked selection, force Plotly to highlight those points
     if st.session_state.locked_selection:
         indices = [p['point_index'] for p in st.session_state.locked_selection]
         fig_scrub.update_traces(
@@ -1120,25 +1120,24 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         )
 
     # 6. RENDER & CAPTURE
-    # We use 'rerun' to catch the lasso event immediately
+    # Use a unique key for every location/view combination to prevent state mixing
+    chart_key = f"scrub_chart_{sel_loc}_{v_mode}"
     event_data = st.plotly_chart(
         fig_scrub, 
         use_container_width=True, 
         on_select="rerun", 
-        key=f"scrub_chart_{sel_loc}_{v_mode}"
+        key=chart_key
     )
 
-    # --- CRITICAL: IMMEDIATE STATE LOCKING ---
-    # If the user just lassoed points, we grab them and save them to session_state
-    # before the next line of code runs.
-    if event_data and "selection" in event_data:
-        new_pts = event_data["selection"].get("points", [])
-        if new_pts:
-            st.session_state.locked_selection = new_pts
-            # Force a rerun to ensure the buttons appear and points stay highlighted
-            st.rerun()
+    # --- THE FIX: CAPTURE AND LOCK SELECTION ---
+    # Check if the chart itself has a selection in its state
+    current_selection = st.session_state.get(chart_key, {}).get("selection", {}).get("points", [])
+    
+    if current_selection and current_selection != st.session_state.locked_selection:
+        st.session_state.locked_selection = current_selection
+        st.rerun()
 
-    # 7. ACTION BUTTONS
+    # 7. ACTION BUTTONS 
     if st.session_state.locked_selection:
         num_pts = len(st.session_state.locked_selection)
         st.success(f"📍 {num_pts} points selected.")
@@ -1179,7 +1178,7 @@ def update_records(pts, df, val):
                 "timestamp": ts, 
                 "approve": val 
             })
-        except Exception as e:
+        except Exception:
             continue
     
     if recs:
