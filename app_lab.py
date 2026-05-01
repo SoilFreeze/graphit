@@ -1072,68 +1072,87 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.subheader("🧨 Surgical Point Cleaner")
 
-    # 1. VIEW MODE & ACTION TOGGLES
-    c1, c2 = st.columns(2)
-    view_toggle = c1.radio("Display Mode", ["Engineering (All)", "Client (Approved)"], horizontal=True)
-    delete_method = c2.radio("Action Type", ["Soft Delete (Hide)", "Hard Delete (Purge)"], horizontal=True)
-    v_mode = "engineering" if "Engineering" in view_toggle else "client"
+    # 1. INITIALIZE PERSISTENT LOCK
+    if "surgical_lock" not in st.session_state:
+        st.session_state.surgical_lock = []
 
-    # 2. DATA PREP
+    # 2. VIEW & ACTION TOGGLES
+    c1, c2 = st.columns(2)
+    view_toggle = c1.radio("Display Mode", ["Engineering", "Client"], horizontal=True, key="v_toggle")
+    delete_method = c2.radio("Action Type", ["Soft Delete", "Hard Purge"], horizontal=True, key="d_method")
+    v_mode = "engineering" if view_toggle == "Engineering" else "client"
+
+    # 3. DATA PREP
     p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
     if p_df.empty:
-        st.info("No data available to scrub.")
+        st.info("No data available.")
         return
 
-    sel_loc = st.selectbox("Select Pipe to Clean", sorted(p_df['Location'].unique()))
+    sel_loc = st.selectbox("Select Pipe", sorted(p_df['Location'].unique()), key="s_loc")
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 3. THE CHART (Placed outside the form for interactivity)
-    # We use a static key so the chart doesn't reset when you click buttons
-    chart_key = f"scrub_chart_{sel_loc}"
-    
+    # 4. THE CHART
     fig_scrub = build_high_speed_graph(
-        scrub_df, f"Scrubbing: {sel_loc}", 
+        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
         pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
         pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
         active_refs, unit_mode, unit_label, display_tz=display_tz
     )
     fig_scrub.update_layout(dragmode='lasso', clickmode='event+select')
 
-    # IMPORTANT: Do NOT use on_select="rerun" here. Let the form handle the submission.
-    st.plotly_chart(fig_scrub, use_container_width=True, key=chart_key)
+    # If we have points locked, keep them highlighted
+    if st.session_state.surgical_lock:
+        indices = [p['point_index'] for p in st.session_state.surgical_lock]
+        fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
 
-    # 4. THE ACTION FORM
-    # This "packages" the selection so it doesn't disappear
-    with st.form(key=f"scrub_form_{sel_loc}"):
-        st.write("### 🛠️ Step 2: Choose Action")
-        st.info("Lasso your points on the graph above, then click one of these buttons.")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        submit_approve = col1.form_submit_button("✅ APPROVE (Client)")
-        submit_mask = col2.form_submit_button("🚫 MASK (Internal)")
-        
-        # Hard vs Soft Delete logic based on the radio button above
-        del_label = "🔥 PERMANENT PURGE" if "Hard" in delete_method else "🗑️ DELETE (Hide)"
-        submit_delete = col3.form_submit_button(del_label)
+    # 5. RENDER WITH CAPTURE
+    chart_key = f"scrub_chart_{sel_loc}_{v_mode}"
+    event_data = st.plotly_chart(
+        fig_scrub, 
+        use_container_width=True, 
+        on_select="rerun", # Mandatory for the 'event_data' variable to populate
+        key=chart_key
+    )
 
-        if submit_approve or submit_mask or submit_delete:
-            # PULL THE DATA FROM THE CHART STATE
-            widget_state = st.session_state.get(chart_key)
-            selection = widget_state.get("selection", {}).get("points", []) if widget_state else []
+    # --- THE LOCKING LOGIC ---
+    # We catch the event immediately. If it's empty but our lock isn't, we keep our lock.
+    if event_data and "selection" in event_data:
+        new_pts = event_data["selection"].get("points", [])
+        if new_pts:
+            st.session_state.surgical_lock = new_pts
+            # We do NOT rerun here to prevent the flicker. 
+            # The buttons below will now see 'surgical_lock'.
 
-            if not selection:
-                st.error("No points found in selection. Ensure the lasso is visible on the chart.")
+    # 6. ACTION BUTTONS
+    if st.session_state.surgical_lock:
+        st.success(f"📍 {len(st.session_state.surgical_lock)} points captured.")
+        
+        b1, b2, b3, b4 = st.columns(4)
+        
+        if b1.button("✅ Approve", use_container_width=True):
+            update_records(st.session_state.surgical_lock, scrub_df, "TRUE")
+            st.session_state.surgical_lock = [] # Clear after action
+            st.rerun()
+
+        if b2.button("🚫 Mask", use_container_width=True):
+            update_records(st.session_state.surgical_lock, scrub_df, "MASKED")
+            st.session_state.surgical_lock = []
+            st.rerun()
+
+        label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
+        if b3.button(label, type="primary", use_container_width=True):
+            if "Hard" in delete_method:
+                hard_purge_points(st.session_state.surgical_lock, scrub_df)
             else:
-                if submit_approve:
-                    update_records(selection, scrub_df, "TRUE")
-                elif submit_mask:
-                    update_records(selection, scrub_df, "MASKED")
-                elif submit_delete:
-                    if "Hard" in delete_method:
-                        hard_purge_points(selection, scrub_df)
-                    else:
-                        update_records(selection, scrub_df, "FALSE")
+                update_records(st.session_state.surgical_lock, scrub_df, "FALSE")
+            st.session_state.surgical_lock = []
+            st.rerun()
+
+        if b4.button("Clear Selection", use_container_width=True):
+            st.session_state.surgical_lock = []
+            st.rerun()
+    else:
+        st.info("💡 Lasso points on the graph to begin.")
 
 def hard_purge_points(pts, df):
     """
