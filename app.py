@@ -258,45 +258,41 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 # - 5. PAGE: GLOBAL OVERVIEW - #
 ###########
 
-def render_global_overview(selected_project):
+def render_global_overview(selected_project, display_tz):
     """
-    Shows all pipes/banks for the project selected in the sidebar.
-    Engineering view: shows everything except 'FALSE'[cite: 16].
+    Shows all pipes/banks for a selected project in one scrolling view.
+    Engineering view: shows everything except 'FALSE'.
     """
     st.header("🌐 Global Project Overview")
     
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view the Global Overview.")
+        st.info("💡 Please select a specific project in the sidebar.")
         return
 
-    # Use the project selected from the sidebar
-    target_project = selected_project
-
-    with st.spinner(f"Syncing {target_project} (Engineering View)..."):
-        # Engineering view shows all data not explicitly rejected ('FALSE') [cite: 16]
-        p_df = get_universal_portal_data(target_project, view_mode="engineering")
+    with st.spinner(f"Syncing {selected_project} (Engineering View)..."):
+        # Engineering view logic from data engine [cite: 16]
+        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if not p_df.empty:
         # 2. View Constraints
         lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
         now_utc = pd.Timestamp.now(tz='UTC')
-        
         # Snap end view to the upcoming Monday for consistent weekly alignment
         end_view = (now_utc + pd.Timedelta(days=(7-now_utc.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=lookback)
 
-        # 3. Render a graph for every physical location (Pipe/Bank) in the project [cite: 6]
+        # 3. Render a graph for every physical location (Pipe/Bank) in the project
         for loc in sorted(p_df['Location'].unique()):
             with st.expander(f"📍 Location: {loc}", expanded=True):
                 loc_df = p_df[p_df['Location'] == loc]
                 fig = build_high_speed_graph(
-                    loc_df, f"📈 {target_project} - {loc}", 
+                    loc_df, f"📈 {selected_project} - {loc}", 
                     start_view, end_view, tuple(active_refs), 
                     unit_mode, unit_label, display_tz=display_tz
                 )
-                st.plotly_chart(fig, use_container_width=True, key=f"ov_{target_project}_{loc}")
+                st.plotly_chart(fig, use_container_width=True, key=f"ov_{selected_project}_{loc}")
     else:
-        st.info(f"No engineering data found for {target_project} in the last 84 days.")
+        st.info(f"No engineering data found for {selected_project} in the last 84 days.")
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
@@ -309,7 +305,8 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    summary_q = f"""
+    # Define the 'query' variable before using it
+    query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
@@ -358,12 +355,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     
     try:
         with st.spinner("⚡ Auditing connectivity..."):
-            df = client.query(summary_q).to_dataframe()
+            # Now 'query' is defined
+            df = client.query(query).to_dataframe()
         
         if df.empty:
             st.warning("⚠️ No data found. Check if your Metadata table is populated.")
             return
 
+        # Explicitly use display_tz for current time [cite: 7]
         now_local = pd.Timestamp.now(tz=display_tz)
 
         def process_health_row(row):
@@ -371,8 +370,10 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             last_ts = row['last_up']
             
             if pd.notnull(last_ts):
+                # Ensure UTC before converting to display_tz [cite: 12]
                 if last_ts.tzinfo is None:
                     last_ts = last_ts.tz_localize('UTC')
+                
                 last_ts_local = last_ts.tz_convert(display_tz)
                 gap = round((now_local - last_ts_local).total_seconds() / 3600, 1)
                 icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
@@ -396,7 +397,11 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         m1, m2, m3 = st.columns(3)
         m1.metric("System Nodes", f"{totals_df['total'].sum()}")
         m2.metric("System Active", f"{totals_df['active'].sum()}")
-        m3.metric("Uptime", f"{round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0}%")
+        if totals_df['total'].sum() > 0:
+            uptime = round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1)
+        else:
+            uptime = 0
+        m3.metric("Uptime", f"{uptime}%")
 
         st.divider()
         st.dataframe(health_df, use_container_width=True, hide_index=True)
@@ -981,14 +986,13 @@ def update_records(pts, df, val):
 # - 12. MAIN ROUTER - #
 ###########
 
-# Ensure we are passing all required variables to every function
 if service == "🌐 Global Overview":
-    # Passing selected_project and display_tz to ensure alignment
-    render_global_overview(selected_project) 
+    # Pass display_tz here as well
+    render_global_overview(selected_project, display_tz) 
 
 elif service == "🏠 Executive Summary":
-    # Explicitly passing display_tz to fix the 'Now' calculation
-    render_executive_summary(client, selected_project, unit_label, display_tz) 
+    # Ensure display_tz is passed
+    render_executive_summary(client, selected_project, unit_label, display_tz)
 
 elif service == "📊 Client Portal":
     # Portal needs all 5 variables defined in Section 7 [cite: 16]
