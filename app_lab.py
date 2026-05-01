@@ -1070,12 +1070,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Stabilized Surgical Cleaner. 
-    Uses a 'capture-first' logic to prevent lasso selections from disappearing.
+    Final Stabilized Surgical Cleaner.
+    Uses persistent session state to lock lasso selections across reruns.
     """
     st.subheader("🧨 Surgical Point Cleaner")
 
-    # 1. VIEW MODE TOGGLE 
+    # 1. VIEW MODE TOGGLE [cite: 13, 16]
     view_toggle = st.radio(
         "Display Mode", 
         ["Engineering (All Points)", "Client (Approved Only)"], 
@@ -1084,7 +1084,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     )
     v_mode = "engineering" if "Engineering" in view_toggle else "client"
 
-    # 2. DATA FETCHING
+    # 2. DATA FETCHING [cite: 13, 15]
     p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
     if p_df.empty:
         st.info("No data available to scrub in this view.")
@@ -1094,15 +1094,15 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     loc_options = sorted(p_df['Location'].dropna().unique())
     sel_loc = st.selectbox("Select Pipe to Clean", loc_options, key="surgical_loc_select")
     
-    # reset_index ensures Plotly point_index matches Dataframe row index
+    # reset_index is required for Plotly point_index to match dataframe row index
     scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
 
-    # 4. INITIALIZE SESSION STATE
+    # 4. INITIALIZE PERSISTENT STATE
     if "locked_selection" not in st.session_state:
         st.session_state.locked_selection = []
 
     # 5. BUILD THE GRAPH
-    # Using 'Scatter' (SVG) instead of 'Scattergl' for more reliable Lasso capture
+    # Using 'Scatter' (SVG) for more reliable selection handling than WebGL
     fig_scrub = build_high_speed_graph(
         scrub_df, 
         f"Surgical Scrubbing: {sel_loc} ({view_toggle})", 
@@ -1111,7 +1111,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         active_refs, unit_mode, unit_label, display_tz=display_tz
     )
 
-    # If we have a locked selection, force Plotly to highlight those points
+    # If points were already locked, force the graph to keep them highlighted
     if st.session_state.locked_selection:
         indices = [p['point_index'] for p in st.session_state.locked_selection]
         fig_scrub.update_traces(
@@ -1119,9 +1119,10 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
             unselected=dict(marker=dict(opacity=0.2))
         )
 
-    # 6. RENDER & CAPTURE
-    # Use a unique key for every location/view combination to prevent state mixing
-    chart_key = f"scrub_chart_{sel_loc}_{v_mode}"
+    # 6. RENDER AND CAPTURE SELECTION
+    # Unique key combined with project/location to prevent state collisions
+    chart_key = f"surgical_chart_{selected_project}_{sel_loc}_{v_mode}"
+    
     event_data = st.plotly_chart(
         fig_scrub, 
         use_container_width=True, 
@@ -1129,15 +1130,15 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         key=chart_key
     )
 
-    # --- THE FIX: CAPTURE AND LOCK SELECTION ---
-    # Check if the chart itself has a selection in its state
-    current_selection = st.session_state.get(chart_key, {}).get("selection", {}).get("points", [])
-    
-    if current_selection and current_selection != st.session_state.locked_selection:
-        st.session_state.locked_selection = current_selection
-        st.rerun()
+    # --- CRITICAL FIX: RE-CAPTURE SELECTION FROM WIDGET STATE ---
+    # Streamlit saves the selection inside the session_state key of the widget
+    if chart_key in st.session_state:
+        current_selection = st.session_state[chart_key].get("selection", {}).get("points", [])
+        if current_selection and current_selection != st.session_state.locked_selection:
+            st.session_state.locked_selection = current_selection
+            st.rerun()
 
-    # 7. ACTION BUTTONS 
+    # 7. ACTION BUTTONS [cite: 12, 13]
     if st.session_state.locked_selection:
         num_pts = len(st.session_state.locked_selection)
         st.success(f"📍 {num_pts} points selected.")
@@ -1150,21 +1151,22 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
             if st.button("🚫 MASK (Internal)", use_container_width=True):
                 update_records(st.session_state.locked_selection, scrub_df, "MASKED")
         with c3:
-            if st.button("🗑️ DELETE (Reject)", use_container_width=True):
+            if st.button("🗑️ DELETE (Full Reject)", use_container_width=True):
                 update_records(st.session_state.locked_selection, scrub_df, "FALSE")
         with c4:
             if st.button("Clear Selection", use_container_width=True):
                 st.session_state.locked_selection = []
                 st.rerun()
     else:
-        st.info("💡 Use the Lasso or Box tool on the graph to select points.")
-###########
+        st.info("💡 Use the Lasso or Box tool on the graph above to select data points.")
+
+
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
 
 def update_records(pts, df, val):
     """
-    Writes status updates (TRUE, FALSE, MASKED) to the manual_rejections table. 
+    Writes status updates (TRUE, FALSE, MASKED) to the manual_rejections table.
     """
     recs = []
     for p in pts:
@@ -1182,13 +1184,14 @@ def update_records(pts, df, val):
             continue
     
     if recs:
+        # Deduplicate to prevent multiple entries for the same hour [cite: 15]
         status_df = pd.DataFrame(recs).drop_duplicates(subset=['NodeNum', 'timestamp'])
         try:
-            # Load into BigQuery manual_rejections table [cite: 11]
+            # Load updates into BigQuery [cite: 1, 11]
             job = client.load_table_from_dataframe(status_df, OVERRIDE_TABLE)
             job.result() 
             
-            # Clear selection and cache after success
+            # Reset state and clear cache to reflect changes immediately [cite: 15]
             st.session_state.locked_selection = []
             st.cache_data.clear()
             st.success(f"Successfully marked {len(status_df)} records as {val}")
