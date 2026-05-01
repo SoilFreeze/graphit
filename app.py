@@ -106,6 +106,30 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         st.error(f"BQ Data Engine Error: {e}")
         return pd.DataFrame()
 
+def check_admin_access(service_name):
+    """
+    Restricts access to sensitive pages (Intake and Admin Tools).
+    Requires a password defined in st.secrets["admin_password"].
+    """
+    # 1. Check if the user is already authenticated in this session
+    if st.session_state.get("admin_authenticated"): 
+        return True
+    
+    # 2. Display Lock Screen
+    st.warning(f"🔒 Admin Access Required for {service_name}")
+    pwd = st.text_input("Enter Admin Password", type="password", key=f"gate_{service_name}")
+    
+    if st.button("Unlock Access", key=f"btn_{service_name}"):
+        # Check against streamlit secrets
+        if pwd == st.secrets["admin_password"]:
+            st.session_state["admin_authenticated"] = True
+            st.success("Access Granted")
+            st.rerun() # Refresh to show the restricted content
+        else:
+            st.error("Incorrect Password")
+            
+    return False
+    
 ###########################
 #- 3. SIDEBAR UI & STATE -#
 ###########################
@@ -1122,23 +1146,27 @@ def update_records(pts, df, val):
 ###########
 
 if service == "🌐 Global Overview":
+    # Pass both project and timezone for rendering
     render_global_overview(selected_project, display_tz) 
 
 elif service == "🏠 Executive Summary":
-    render_executive_summary(client, selected_project, unit_label, display_tz)
-    
+    # Ensure client and timezone are passed for health audit [cite: 6]
+    render_executive_summary(client, selected_project, unit_label, display_tz) 
+
 elif service == "📊 Client Portal":
-    # Portal needs all 5 variables defined in Section 7 [cite: 16]
+    # Handles timeline and depth profile tabs [cite: 7]
     render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif service == "📉 Node Diagnostics":
-    # Diagnostics requires engineering-level data access [cite: 16]
+    # Engineering view for sensor communication health 
     render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif service == "📤 Data Intake Lab":
+    # Gatekept by admin check 
     if check_admin_access(service):
         render_data_intake_page(selected_project)
 
 elif service == "🛠️ Admin Tools":
+    # Gatekept by admin check 
     if check_admin_access(service):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
