@@ -370,10 +370,14 @@ def render_global_overview(selected_project, display_tz):
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
 
+###########
+# - 6. PAGE: EXECUTIVE SUMMARY - #
+###########
+
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # 1. DATA QUERY (Same robust logic as before)
+    # 1. DATA GATHERING
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
@@ -411,27 +415,23 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             st.warning("No metadata found for this project.")
             return
 
-        # 2. GROUP DATA FOR SUMMARY TABLE
+        now_local = pd.Timestamp.now(tz=display_tz)
+
+        # 2. RENDER MAIN SUMMARY TABLE (BY LOCATION)
         summary_df = raw_df.groupby(['Project', 'Location']).agg(
             Nodes=('NodeNum', 'count'),
             Seen_24h=('active_24h', 'sum'),
             Seen_6h=('active_6h', 'sum'),
-            Oldest_Ping=('last_ping', 'min'),
-            Latest_Ping=('last_ping', 'max')
+            Oldest_Ping=('last_ping', 'min')
         ).reset_index()
 
-        # 3. RENDER SUMMARY TABLE
-        now_local = pd.Timestamp.now(tz=display_tz)
-
         def format_summary(row):
-            # Calculate Max Lag
             oldest = row['Oldest_Ping']
+            lag_str = "N/A"
             if pd.notnull(oldest):
                 if oldest.tzinfo is None: oldest = oldest.tz_localize('UTC')
                 lag = round((now_local - oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
-                lag_str = f"{lag}h {'🔴' if lag > 24 else '🟢'}"
-            else:
-                lag_str = "N/A"
+                lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
 
             return pd.Series({
                 "Project": row['Project'],
@@ -442,49 +442,47 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 "Max Lag": lag_str
             })
 
-        display_df = summary_df.apply(format_summary, axis=1)
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-        # 4. DRILL-DOWN SECTION
-        st.divider()
-        st.subheader("🔍 Location Drill-Down")
+        st.subheader("📍 Location Overview")
+        display_summary = summary_df.apply(format_summary, axis=1)
         
-        # Filterable dropdown to select a specific location
-        search_options = ["--- Select a Location to see individual sensors ---"] + sorted(raw_df['Location'].unique().tolist())
-        selected_loc = st.selectbox("View Sensor Details for:", search_options)
+        # Apply the gray styling for PROJECT TOTAL rows if they exist in your union
+        st.dataframe(display_summary, use_container_width=True, hide_index=True)
+
+        # 3. DRILL-DOWN SECTION (BY SENSOR)
+        st.divider()
+        st.subheader("🔍 Sensor Drill-Down")
+        
+        search_options = ["--- Select a Location to Audit Individual Sensors ---"] + sorted(raw_df['Location'].unique().tolist())
+        selected_loc = st.selectbox("Detailed view for:", search_options)
 
         if selected_loc != search_options[0]:
-            st.info(f"Showing all sensors for: **{selected_loc}**")
+            # Filter for the specific location
+            sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
             
-            # Filter raw data for this specific pipe/bank
-            detail_df = raw_df[raw_df['Location'] == selected_loc].copy()
-            
-            # Create a grid of "Sensor Cards"
-            cols = st.columns(3)
-            for i, (_, node) in enumerate(detail_df.iterrows()):
-                with cols[i % 3]:
-                    # Calculate individual lag
-                    ping = node['last_ping']
-                    if pd.notnull(ping):
-                        if ping.tzinfo is None: ping = ping.tz_localize('UTC')
-                        node_lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
-                        status_color = "green" if node_lag < 6 else ("orange" if node_lag < 24 else "red")
-                        time_label = f"{node_lag}h ago"
-                    else:
-                        status_color = "gray"
-                        time_label = "Never Seen"
+            def format_sensor_row(row):
+                ping = row['last_ping']
+                lag_str = "Never Seen"
+                if pd.notnull(ping):
+                    if ping.tzinfo is None: ping = ping.tz_localize('UTC')
+                    lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
+                    lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
 
-                    # Display individual Node Card
-                    st.markdown(f"""
-                    <div style="padding:15px; border-radius:10px; border:2px solid {status_color}; margin-bottom:10px">
-                        <h4 style="margin:0; color:{status_color}">Node {node['NodeNum']}</h4>
-                        <p style="margin:5px 0"><b>Position:</b> {node['Bank']} / {node['Depth']}ft</p>
-                        <p style="margin:0; font-size:0.9em"><b>Last Seen:</b> {time_label}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
+                return pd.Series({
+                    "Node ID": row['NodeNum'],
+                    "Bank": row['Bank'],
+                    "Depth": f"{row['Depth']}ft",
+                    "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
+                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
+                    "Last Seen": lag_str
+                })
+
+            detail_display = sensor_df.apply(format_sensor_row, axis=1)
+            
+            st.write(f"Showing **{len(detail_display)}** sensors for **{selected_loc}**:")
+            st.dataframe(detail_display, use_container_width=True, hide_index=True)
 
     except Exception as e:
-        st.error(f"Drill-down Error: {e}")
+        st.error(f"Executive Summary Error: {e}")
 
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
