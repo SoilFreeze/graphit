@@ -373,33 +373,20 @@ def render_global_overview(selected_project, display_tz):
 def render_executive_summary(client, selected_project, unit_label, display_tz):
     st.header(f"🏠 Executive Summary: Health Monitor")
     
-    # 1. Fuzzy Filter Logic
+    # 1. Fuzzy Filter Logic for Project Selection
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # UPDATED QUERY: Added 'ever_ping_min' to calculate the data range
+    # SQL logic to find the node within each group that hasn't been seen for the longest time
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location
             FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
             WHERE Project IS NOT NULL {proj_filter}
         ),
-        RecentReporting AS (
-            SELECT r.NodeNum, MAX(r.timestamp) as last_ping
-            FROM (
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                UNION ALL
-                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) AS r
-            WHERE r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-            GROUP BY NodeNum
-        ),
         HistoricalPings AS (
-            SELECT 
-                NodeNum, 
-                MAX(timestamp) as ever_ping_max,
-                MIN(timestamp) as ever_ping_min
+            SELECT NodeNum, MAX(timestamp) as ever_ping
             FROM (
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
                 UNION ALL
@@ -409,31 +396,23 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         JoinedData AS (
             SELECT 
                 m.Project, m.Location, m.NodeNum,
-                CASE WHEN r.NodeNum IS NOT NULL THEN 1 ELSE 0 END as is_active,
-                h.ever_ping_max,
-                h.ever_ping_min
+                h.ever_ping
             FROM MappedNodes m
-            LEFT JOIN RecentReporting r ON m.NodeNum = r.NodeNum
             LEFT JOIN HistoricalPings h ON m.NodeNum = h.NodeNum
         ),
         LocationStats AS (
             SELECT 
                 Project, Location, 
                 COUNT(NodeNum) as total, 
-                SUM(is_active) as active, 
-                MAX(ever_ping_max) as last_up,
-                MIN(ever_ping_min) as first_up,
-                MIN(ever_ping_max) as oldest_last_up  -- The node not seen for the longest time
+                -- Finding the node that was last seen the furthest back in time
+                MIN(ever_ping) as oldest_node_ping 
             FROM JoinedData GROUP BY Project, Location
         ),
         ProjectTotals AS (
             SELECT 
                 Project, '--- PROJECT TOTAL ---' as Location, 
                 COUNT(NodeNum) as total, 
-                SUM(is_active) as active, 
-                MAX(ever_ping_max) as last_up,
-                MIN(ever_ping_min) as first_up,
-                MIN(ever_ping_max) as oldest_last_up
+                MIN(ever_ping) as oldest_node_ping
             FROM JoinedData GROUP BY Project
         )
         SELECT * FROM ProjectTotals
@@ -443,66 +422,57 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     """
     
     try:
-        with st.spinner("⚡ Auditing connectivity and data ranges..."):
+        with st.spinner("⚡ Calculating maximum sensor lag..."):
             df = client.query(query).to_dataframe()
         
         if df.empty:
-            st.warning("⚠️ No data found. Check if your Metadata table is populated.")
+            st.warning("⚠️ No data found. Check your Metadata and Project selection.")
             return
 
+        # Localized 'now' for accurate hour calculation [cite: 7, 12]
         now_local = pd.Timestamp.now(tz=display_tz)
 
         def process_health_row(row):
             is_total = row['Location'] == '--- PROJECT TOTAL ---'
-            last_ts = row['last_up']
-            first_ts = row['first_up']
-            oldest_last_ts = row['oldest_last_up']
+            oldest_ts = row['oldest_node_ping']
             
-            # 1. Handle Last Activity Status
-            if pd.notnull(last_ts):
-                if last_ts.tzinfo is None: last_ts = last_ts.tz_localize('UTC')
-                last_ts_local = last_ts.tz_convert(display_tz)
-                gap = round((now_local - last_ts_local).total_seconds() / 3600, 1)
-                icon = "🟢" if gap < 2 else ("🟡" if gap < 8 else "🔴")
-                time_str = f"{gap}h ago {icon}"
-            else:
-                time_str = "Never Seen ⚪"
-
-            # 2. NEW: Calculate Active Range / Stale Node Range
-            if pd.notnull(last_ts) and pd.notnull(first_ts):
-                if first_ts.tzinfo is None: first_ts = first_ts.tz_localize('UTC')
-                # Range from the very first ping to the very last ping in the group
-                total_range_days = round((last_ts - first_ts).total_seconds() / 86400, 1)
+            if pd.notnull(oldest_ts):
+                # Ensure the DB timestamp is recognized as UTC before conversion
+                if oldest_ts.tzinfo is None:
+                    oldest_ts = oldest_ts.tz_localize('UTC')
                 
-                # Range of "Staleness": How long has the most silent node been quiet?
-                if pd.notnull(oldest_last_ts):
-                    if oldest_last_ts.tzinfo is None: oldest_last_ts = oldest_last_ts.tz_localize('UTC')
-                    stale_gap_hrs = round((now_local - oldest_last_ts.tz_convert(display_tz)).total_seconds() / 3600, 1)
-                    range_str = f"{total_range_days}d total / {stale_gap_hrs}h max lag"
-                else:
-                    range_str = f"{total_range_days}d total"
+                # Convert to Pacific/Selected TZ and calculate difference
+                oldest_ts_local = oldest_ts.tz_convert(display_tz)
+                max_lag_hrs = round((now_local - oldest_ts_local).total_seconds() / 3600, 1)
+                
+                # Visual Status based on the worst-performing node in the group
+                icon = "🔴" if max_lag_hrs > 24 else ("🟡" if max_lag_hrs > 6 else "🟢")
+                lag_str = f"{max_lag_hrs}h {icon}"
             else:
-                range_str = "N/A"
+                lag_str = "Never Seen ⚪"
 
             return pd.Series({
                 "Project": f"⭐ {row['Project']}" if is_total else row['Project'],
                 "Location": row['Location'],
-                "Mapped": row['total'],
-                "Active": row['active'],
-                "Status": "✅ Healthy" if row['total'] == row['active'] else f"⚠️ {row['total'] - row['active']} Offline",
-                "Last Activity": time_str,
-                "Data Range": range_str # New Column
+                "Total Nodes": row['total'],
+                "Max Lag (Worst Node)": lag_str
             })
 
         health_df = df.apply(process_health_row, axis=1)
 
-        # Metrics
+        # High-level Metrics
         totals_df = df[df['Location'] == '--- PROJECT TOTAL ---']
-        m1, m2, m3 = st.columns(3)
-        m1.metric("System Nodes", f"{totals_df['total'].sum()}")
-        m2.metric("System Active", f"{totals_df['active'].sum()}")
-        uptime = round((totals_df['active'].sum()/totals_df['total'].sum())*100, 1) if totals_df['total'].sum() > 0 else 0
-        m3.metric("Uptime", f"{uptime}%")
+        m1, m2 = st.columns(2)
+        m1.metric("Total System Nodes", f"{totals_df['total'].sum()}")
+        
+        # Calculate overall system lag (the single oldest node in the entire system)
+        system_oldest = totals_df['oldest_node_ping'].min()
+        if pd.notnull(system_oldest):
+             if system_oldest.tzinfo is None: system_oldest = system_oldest.tz_localize('UTC')
+             sys_lag = round((now_local - system_oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
+             m2.metric("System-Wide Max Lag", f"{sys_lag}h")
+        else:
+             m2.metric("System-Wide Max Lag", "N/A")
 
         st.divider()
         st.dataframe(health_df, use_container_width=True, hide_index=True)
