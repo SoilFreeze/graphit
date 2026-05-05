@@ -1098,12 +1098,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.subheader("🧨 Multi-Level Surgical Cleaner")
-    st.write("Target data for deletion or masking by Project, Location, or specific Node.")
+    st.write("Target data for deletion or masking by Project, Location, Node, or Temperature Threshold.")
 
     # 1. SCOPE SELECTION
     scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
     
-    # Fetch Metadata for Selectors [cite: 5, 11]
+    # Fetch Metadata for Selectors [cite: 5, 6]
     meta_q = f"SELECT NodeNum, Location FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}'"
     meta_df = client.query(meta_q).to_dataframe()
     
@@ -1119,19 +1119,29 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
 
     # 2. TIME WINDOW SELECTION
     st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
+    tc1, tc2 = st.columns(2)
+    with tc1:
         s_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=1))
         s_time = st.time_input("Start Time", value=datetime.time(datetime(2026, 1, 1, 0, 0)))
-    with c2:
+    with tc2:
         e_date = st.date_input("End Date", value=datetime.now())
         e_time = st.time_input("End Time", value=datetime.time(datetime.now()))
     
     start_dt = datetime.combine(s_date, s_time).strftime('%Y-%m-%d %H:%M:%S')
     end_dt = datetime.combine(e_date, e_time).strftime('%Y-%m-%d %H:%M:%S')
 
-    # 3. CONSTRUCT TARGET FILTER
-    # Logic defines which nodes are affected based on scope [cite: 13, 15]
+    # 3. THRESHOLD LOGIC
+    st.divider()
+    st.write("🌡️ **Temperature Threshold Filter**")
+    thr_col1, thr_col2 = st.columns([1, 2])
+    operator = thr_col1.selectbox("Filter Logic", ["No Threshold", "Greater Than (>)", "Less Than (<)"])
+    
+    # Convert input back to Fahrenheit for BigQuery if user is viewing in Celsius 
+    thresh_val_input = thr_col2.number_input(f"Threshold Value ({unit_label})", value=100.0)
+    thresh_val_f = (thresh_val_input * 9/5) + 32 if unit_mode == "Celsius" else thresh_val_input
+
+    # 4. CONSTRUCT SQL FILTERS
+    # Node Scope [cite: 5, 6]
     if scope == "Project Wide":
         where_clause = f"NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')"
         target_desc = f"ALL nodes in {selected_project}"
@@ -1142,9 +1152,16 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         where_clause = f"NodeNum = '{target_node}'"
         target_desc = f"Node {target_node}"
 
-    st.warning(f"⚠️ Action will affect **{target_desc}** between **{start_dt}** and **{end_dt}**.")
+    # Threshold Scope 
+    threshold_clause = ""
+    if operator == "Greater Than (>)":
+        threshold_clause = f"AND temperature > {thresh_val_f}"
+    elif operator == "Less Than (<)":
+        threshold_clause = f"AND temperature < {thresh_val_f}"
 
-    # 4. EXECUTION BUTTONS
+    st.warning(f"⚠️ Action will affect **{target_desc}** between **{start_dt}** and **{end_dt}** where temp is {operator} {thresh_val_input}{unit_label}.")
+
+    # 5. EXECUTION BUTTONS
     b1, b2, b3 = st.columns(3)
     
     # MASK DATA (Soft Delete via manual_rejections) [cite: 11, 12, 16]
@@ -1154,11 +1171,12 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
                 INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                 SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'FALSE'
                 FROM (
-                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
                     UNION ALL 
-                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
                 ) AS r
                 WHERE {where_clause}
+                {threshold_clause}
                 AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
                 AND NOT EXISTS (
                     SELECT 1 FROM `{OVERRIDE_TABLE}` x 
@@ -1169,19 +1187,19 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
             st.success(f"Successfully masked data for {target_desc}.")
             st.cache_data.clear()
 
-    # HARD PURGE (Delete from raw tables) 
+    # HARD PURGE (Delete from raw tables) [cite: 1, 14]
     if b2.button("🔥 HARD PURGE (Permanent)", type="primary", use_container_width=True):
         with st.spinner("Executing permanent deletion..."):
-            # We must purge from both possible raw sources [cite: 13]
             for table in ["raw_sensorpush", "raw_lord"]:
                 purge_sql = f"""
                     DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}`
                     WHERE {where_clause}
+                    {threshold_clause}
                     AND timestamp >= '{start_dt}' AND timestamp <= '{end_dt}'
                 """
                 client.query(purge_sql).result()
             
-            # Also clear any overrides for these points [cite: 11]
+            # Clear associated overrides [cite: 11]
             clear_ov_sql = f"DELETE FROM `{OVERRIDE_TABLE}` WHERE {where_clause} AND timestamp >= '{start_dt}' AND timestamp <= '{end_dt}'"
             client.query(clear_ov_sql).result()
             
