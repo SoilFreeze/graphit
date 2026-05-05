@@ -1103,7 +1103,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     # 1. SCOPE SELECTION
     scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
     
-    # Fetch Metadata for Selectors [cite: 5, 6]
+    # Fetch Metadata for Selectors
     meta_q = f"SELECT NodeNum, Location FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}'"
     meta_df = client.query(meta_q).to_dataframe()
     
@@ -1136,12 +1136,11 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     thr_col1, thr_col2 = st.columns([1, 2])
     operator = thr_col1.selectbox("Filter Logic", ["No Threshold", "Greater Than (>)", "Less Than (<)"])
     
-    # Convert input back to Fahrenheit for BigQuery if user is viewing in Celsius 
+    # Convert input back to Fahrenheit for BigQuery if user is viewing in Celsius
     thresh_val_input = thr_col2.number_input(f"Threshold Value ({unit_label})", value=100.0)
     thresh_val_f = (thresh_val_input * 9/5) + 32 if unit_mode == "Celsius" else thresh_val_input
 
     # 4. CONSTRUCT SQL FILTERS
-    # Node Scope [cite: 5, 6]
     if scope == "Project Wide":
         where_clause = f"NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')"
         target_desc = f"ALL nodes in {selected_project}"
@@ -1152,19 +1151,40 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         where_clause = f"NodeNum = '{target_node}'"
         target_desc = f"Node {target_node}"
 
-    # Threshold Scope 
     threshold_clause = ""
     if operator == "Greater Than (>)":
         threshold_clause = f"AND temperature > {thresh_val_f}"
     elif operator == "Less Than (<)":
         threshold_clause = f"AND temperature < {thresh_val_f}"
 
+    # 5. VERIFICATION / PREVIEW BUTTON
+    if st.button("🔍 Verify: Preview Match Count", use_container_width=True):
+        with st.spinner("Counting matching records in database..."):
+            count_q = f"""
+                SELECT COUNT(*) as total FROM (
+                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                    UNION ALL 
+                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                ) AS r
+                WHERE {where_clause}
+                {threshold_clause}
+                AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
+            """
+            try:
+                result = client.query(count_q).to_dataframe()
+                match_count = result['total'].iloc[0]
+                if match_count > 0:
+                    st.success(f"✅ Verification Complete: Found **{match_count}** data points matching these criteria.")
+                else:
+                    st.warning("ℹ️ No data points found matching these criteria. Adjust your filters.")
+            except Exception as e:
+                st.error(f"Verification Error: {e}")
+
     st.warning(f"⚠️ Action will affect **{target_desc}** between **{start_dt}** and **{end_dt}** where temp is {operator} {thresh_val_input}{unit_label}.")
 
-    # 5. EXECUTION BUTTONS
+    # 6. EXECUTION BUTTONS
     b1, b2, b3 = st.columns(3)
     
-    # MASK DATA (Soft Delete via manual_rejections) [cite: 11, 12, 16]
     if b1.button("🚫 Mask (Soft Delete)", use_container_width=True):
         with st.spinner("Applying masks..."):
             mask_sql = f"""
@@ -1187,7 +1207,6 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
             st.success(f"Successfully masked data for {target_desc}.")
             st.cache_data.clear()
 
-    # HARD PURGE (Delete from raw tables) [cite: 1, 14]
     if b2.button("🔥 HARD PURGE (Permanent)", type="primary", use_container_width=True):
         with st.spinner("Executing permanent deletion..."):
             for table in ["raw_sensorpush", "raw_lord"]:
@@ -1199,7 +1218,6 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
                 """
                 client.query(purge_sql).result()
             
-            # Clear associated overrides [cite: 11]
             clear_ov_sql = f"DELETE FROM `{OVERRIDE_TABLE}` WHERE {where_clause} AND timestamp >= '{start_dt}' AND timestamp <= '{end_dt}'"
             client.query(clear_ov_sql).result()
             
