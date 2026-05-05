@@ -1187,19 +1187,24 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
             GROUP BY status
         """
         res_df = client.query(status_q).to_dataframe()
+        # Save the result to session state so it survives the rerun
         st.session_state["purge_staged_df"] = res_df
 
+    # Check if the staged dataframe exists in session state
     if "purge_staged_df" in st.session_state:
         staged_df = st.session_state["purge_staged_df"]
-        total_to_purge = staged_df['point_count'].sum()
+        
+        # FIX: Define total_to_purge here so it is available for the code below
+        total_to_purge = staged_df['point_count'].sum() if not staged_df.empty else 0
 
         if total_to_purge > 0:
             st.error(f"### 🛑 PERMANENT PURGE WARNING")
+            # This line will no longer throw a NameError
             st.write(f"You are about to **IRREVERSIBLY DELETE {total_to_purge} records** from the source tables.") [cite: 11, 14]
-            st.write(f"**Target:** {target_desc}")
+            st.write(f"**Target:** {target_desc}") [cite: 5, 6]
             st.write(f"**Window:** {s_dt} to {e_dt}")
             
-            st.table(staged_df.set_index('status'))
+            st.table(staged_df.set_index('status')) [cite: 12, 15]
             
             confirmed = st.checkbox(f"I verify that I want to PERMANENTLY delete these {total_to_purge} points.", value=False)
             
@@ -1212,13 +1217,13 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
                             WHERE EXISTS (SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.metadata` m WHERE r.NodeNum = m.NodeNum AND {where_clause})
                             {threshold_clause} AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
                         """
-                        client.query(purge_sql).result() [cite: 11]
+                        client.query(purge_sql).result() [cite: 1, 11]
                     
                     # Also clean up any overrides for these purged records
-                    client.query(f"DELETE FROM `{OVERRIDE_TABLE}` WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE {where_clause}) AND timestamp BETWEEN '{s_dt}' AND '{e_dt}'").result()
+                    client.query(f"DELETE FROM `{OVERRIDE_TABLE}` WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE {where_clause}) AND timestamp BETWEEN '{s_dt}' AND '{e_dt}'").result() [cite: 11]
                     
                     st.success("Hard Purge complete.")
-                    del st.session_state["purge_staged_df"]
+                    del st.session_state["purge_staged_df"] # Clear staging after success
                     st.cache_data.clear()
                     st.rerun()
             
