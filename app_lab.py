@@ -1086,7 +1086,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # --- TAB 4: SURGICAL CLEANER ---
     with tab_surgical:
-        st.subheader("🧨 Surgical Point Cleaner")
         if not selected_project or selected_project == "All Projects":
             st.warning("Please select a specific project in the sidebar.")
         else:
@@ -1129,10 +1128,13 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     # 3. SQL FILTER CONSTRUCTION
     if scope == "Project Wide":
         where_clause = f"m.Project = '{selected_project}'"
+        target_desc = f"all nodes in project '{selected_project}'"
     elif scope == "Specific Location":
         where_clause = f"m.Project = '{selected_project}' AND m.Location = '{target_loc}'"
+        target_desc = f"all nodes in location '{target_loc}'"
     else:
         where_clause = f"r.NodeNum = '{target_node}'"
+        target_desc = f"Node ID: {target_node}"
 
     threshold_clause = ""
     if operator == "Greater Than (>)":
@@ -1140,8 +1142,9 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     elif operator == "Less Than (<)":
         threshold_clause = f"AND r.temperature < {thresh_val_f}"
 
-    # 4. VERIFICATION
-    if st.button("🔍 Verify Status & Match Count", use_container_width=True):
+    # 4. SAFETY GATE: VERIFICATION & STAGING
+    st.divider()
+    if st.button("🔍 Step 1: Verify & Stage Deletion", use_container_width=True):
         status_q = f"""
             SELECT COALESCE(rej.approve, 'PENDING') as status, COUNT(*) as point_count
             FROM (
@@ -1156,55 +1159,74 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
             GROUP BY status
         """
         res_df = client.query(status_q).to_dataframe()
-        if not res_df.empty:
-            st.table(res_df.set_index('status'))
+        st.session_state["staged_points"] = res_df
+
+    # 5. DYNAMIC WARNING & CONFIRMATION
+    if "staged_points" in st.session_state:
+        staged_df = st.session_state["staged_points"]
+        total_points = staged_df['point_count'].sum()
+
+        if total_points > 0:
+            st.error(f"### 🛑 FINAL WARNING: DELETION STAGED")
+            st.write(f"You are about to modify **{total_points}** data points for **{target_desc}**.")
+            st.write(f"**Window:** {s_dt} to {e_dt}")
+            if operator != "No Threshold":
+                st.write(f"**Filter:** Temperature {operator} {thresh_val_input}{unit_label}")
+            
+            st.table(staged_df.set_index('status'))
+            
+            confirmed = st.checkbox(f"I verify that I want to delete/mask these {total_points} points.", value=False)
+            
+            if confirmed:
+                b1, b2, b3 = st.columns(3)
+                
+                # MASK LOGIC (UPSERT)
+                if b1.button("🚫 Execute Soft Mask", use_container_width=True):
+                    with st.spinner("Forcing points to FALSE..."):
+                        upsert_sql = f"""
+                            MERGE `{OVERRIDE_TABLE}` T
+                            USING (
+                                SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
+                                FROM (
+                                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                                    UNION ALL 
+                                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                                ) AS r
+                                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                                WHERE {where_clause} {threshold_clause}
+                                AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
+                            ) S
+                            ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
+                            WHEN MATCHED THEN UPDATE SET approve = 'FALSE'
+                            WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'FALSE')
+                        """
+                        client.query(upsert_sql).result()
+                        st.success("Soft Mask complete.")
+                        del st.session_state["staged_points"]
+                        st.cache_data.clear()
+                        st.rerun()
+
+                # PURGE LOGIC
+                if b2.button("🔥 Execute HARD PURGE", type="primary", use_container_width=True):
+                    with st.spinner("Executing permanent deletion..."):
+                        for table in ["raw_sensorpush", "raw_lord"]:
+                            purge_sql = f"""
+                                DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` r
+                                WHERE EXISTS (SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.metadata` m WHERE r.NodeNum = m.NodeNum AND {where_clause})
+                                {threshold_clause} AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
+                            """
+                            client.query(purge_sql).result()
+                        client.query(f"DELETE FROM `{OVERRIDE_TABLE}` WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE {where_clause}) AND timestamp BETWEEN '{s_dt}' AND '{e_dt}'").result()
+                        st.success("Hard Purge complete.")
+                        del st.session_state["staged_points"]
+                        st.cache_data.clear()
+                        st.rerun()
+                
+                if b3.button("❌ Cancel Action", use_container_width=True):
+                    del st.session_state["staged_points"]
+                    st.rerun()
         else:
-            st.warning("No matching points found.")
-
-    # 5. EXECUTION: MERGE (UPSERT) LOGIC
-    st.divider()
-    b1, b2, b3 = st.columns(3)
-    
-    if b1.button("🚫 Mask (Force FALSE)", use_container_width=True):
-        with st.spinner("Updating statuses to FALSE..."):
-            # MERGE allows us to update existing TRUE records to FALSE 
-            upsert_sql = f"""
-                MERGE `{OVERRIDE_TABLE}` T
-                USING (
-                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
-                    FROM (
-                        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                        UNION ALL 
-                        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                    ) AS r
-                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                    WHERE {where_clause} {threshold_clause}
-                    AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
-                ) S
-                ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
-                WHEN MATCHED THEN
-                    UPDATE SET approve = 'FALSE'
-                WHEN NOT MATCHED THEN
-                    INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'FALSE')
-            """
-            client.query(upsert_sql).result()
-            st.success("Successfully forced matching points to FALSE.")
-            st.cache_data.clear()
-
-    if b2.button("🔥 HARD PURGE (Permanent)", type="primary", use_container_width=True):
-        for table in ["raw_sensorpush", "raw_lord"]:
-            purge_sql = f"""
-                DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` r
-                WHERE EXISTS (SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.metadata` m WHERE r.NodeNum = m.NodeNum AND {where_clause})
-                {threshold_clause} AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
-            """
-            client.query(purge_sql).result()
-        client.query(f"DELETE FROM `{OVERRIDE_TABLE}` WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE {where_clause}) AND timestamp BETWEEN '{s_dt}' AND '{e_dt}'").result()
-        st.success("Permanent purge complete.")
-        st.cache_data.clear()
-
-    if b3.button("🔄 Refresh View", use_container_width=True):
-        st.rerun()
+            st.warning("No data points found matching these specific criteria. Try adjusting your window or threshold.")
 
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
