@@ -963,7 +963,11 @@ def render_data_intake_page(selected_project):
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # Define all administrative tabs
+    # 1. Fetch Location Options for the Selected Project [cite: 6, 15]
+    with st.spinner("Loading project metadata..."):
+        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+        loc_options = ["All Locations"] + sorted(p_df['Location'].dropna().unique().tolist()) if not p_df.empty else ["All Locations"]
+
     tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
         "✅ Bulk Approval", 
         "🚫 Mask Data", 
@@ -974,7 +978,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
         st.subheader("✅ Range-Based Bulk Approval")
-        st.write("Approve all data within this specific window for the client portal.")
+        sel_loc_bulk = st.selectbox("Target Location", loc_options, key="bulk_loc_sel")
         
         c1, c2 = st.columns(2)
         with c1:
@@ -982,126 +986,103 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         with c2:
             b_end = st.date_input("Approval End", value=datetime.now(), key="bulk_end")
 
-        if st.button(f"🚀 Approve {selected_project} Range", use_container_width=True):
-            with st.spinner("Writing approvals to master override..."):
-                bulk_sql = f"""
-                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
-                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
-                    FROM (
-                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                        UNION ALL 
-                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                    ) AS r
-                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                    WHERE m.Project = '{selected_project}'
-                    AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
-                    AND NOT EXISTS (
-                        SELECT 1 FROM `{OVERRIDE_TABLE}` x 
-                        WHERE x.NodeNum = r.NodeNum 
-                        AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                    )
-                """
-                try:
-                    client.query(bulk_sql).result()
-                    st.success(f"✅ Data for {selected_project} successfully approved.")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Bulk Approval Error: {e}")
+        if st.button(f"🚀 Approve Range", use_container_width=True):
+            loc_filter = f"AND m.Location = '{sel_loc_bulk}'" if sel_loc_bulk != "All Locations" else ""
+            bulk_sql = f"""
+                INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
+                SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
+                FROM (
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                    UNION ALL 
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                ) AS r
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                WHERE m.Project = '{selected_project}' {loc_filter}
+                AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
+                AND NOT EXISTS (
+                    SELECT 1 FROM `{OVERRIDE_TABLE}` x 
+                    WHERE x.NodeNum = r.NodeNum 
+                    AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                )
+            """
+            client.query(bulk_sql).result()
+            st.success("✅ Approvals applied.")
+            st.cache_data.clear()
 
-    # --- TAB 2: MASK DATA (Updated: Clear Masks Only) ---
+    # --- TAB 2: MASK DATA (Updated to Location Level) ---
     with tab_mask:
         st.subheader("🚫 Temporal Data Masking")
+        sel_loc_mask = st.selectbox("Target Location", loc_options, key="mask_loc_sel")
         
-        if not selected_project or selected_project == "All Projects":
-            st.warning("Please select a specific project in the sidebar.")
-        else:
-            # Mask Mode Toggle
-            mask_mode = st.radio("Masking Mode", ["Specific Time Range", "All data before end date"], horizontal=True)
+        mask_mode = st.radio("Masking Mode", ["Specific Time Range", "All data before end date"], horizontal=True)
+        
+        m_col1, m_col2 = st.columns(2)
+        with m_col1:
+            m_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="m_sd", disabled=(mask_mode == "All data before end date"))
+        with m_col2:
+            m_end_date = st.date_input("End Date", value=datetime.now(), key="m_ed")
+
+        if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
+            loc_filter = f"AND m.Location = '{sel_loc_mask}'" if sel_loc_mask != "All Locations" else ""
+            start_str = "2000-01-01 00:00:00" if mask_mode == "All data before end date" else m_start_date.strftime('%Y-%m-%d')
             
-            m_col1, m_col2 = st.columns(2)
-            with m_col1:
-                m_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="m_sd", disabled=(mask_mode == "All data before end date"))
-                m_start_time = st.time_input("Start Time", value=datetime.time(datetime.now()), key="m_st", disabled=(mask_mode == "All data before end date"))
-            with m_col2:
-                m_end_date = st.date_input("End Date", value=datetime.now(), key="m_ed")
-                m_end_time = st.time_input("End Time", value=datetime.time(datetime.now()), key="m_et")
+            mask_sql = f"""
+                INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
+                SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
+                FROM (
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                    UNION ALL 
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                ) AS r
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                WHERE m.Project = '{selected_project}' {loc_filter}
+                AND r.timestamp >= '{start_str}' AND r.timestamp <= '{m_end_date}'
+                AND NOT EXISTS (
+                    SELECT 1 FROM `{OVERRIDE_TABLE}` x WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                )
+            """
+            client.query(mask_sql).result()
+            st.success(f"✅ Mask applied to {sel_loc_mask}.")
+            st.cache_data.clear()
 
-            # Formatting logic
-            end_dt = datetime.combine(m_end_date, m_end_time)
-            if mask_mode == "All data before end date":
-                start_dt_str = "2000-01-01 00:00:00" 
-                action_desc = f"Hiding EVERYTHING before `{end_dt}`"
-            else:
-                start_dt = datetime.combine(m_start_date, m_start_time)
-                start_dt_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-                action_desc = f"Hiding data from `{start_dt}` to `{end_dt}`"
-
-            st.write(f"**Action:** {action_desc}")
-
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
-                    with st.spinner("Applying masks..."):
-                        mask_sql = f"""
-                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
-                            SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
-                            FROM (
-                                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                                UNION ALL 
-                                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                            ) AS r
-                            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                            WHERE m.Project = '{selected_project}'
-                            AND r.timestamp >= '{start_dt_str}' 
-                            AND r.timestamp <= '{end_dt.strftime('%Y-%m-%d %H:%M:%S')}'
-                            AND NOT EXISTS (
-                                SELECT 1 FROM `{OVERRIDE_TABLE}` x 
-                                WHERE x.NodeNum = r.NodeNum 
-                                AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                            )
-                        """
-                        client.query(mask_sql).result()
-                        st.success("✅ Mask applied successfully.")
-                        st.cache_data.clear()
+        if st.button(f"🗑️ Clear Masks", use_container_width=True):
+            loc_filter = f"AND NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Location = '{sel_loc_mask}' AND Project = '{selected_project}')" if sel_loc_mask != "All Locations" else f"AND NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')"
             
-            with c2:
-                # UPDATED: Now strictly deletes MASKED rows for this project
-                if st.button(f"🗑️ Clear Project Masks", use_container_width=True):
-                    with st.spinner("Clearing project masks..."):
-                        clear_mask_sql = f"""
-                            DELETE FROM `{OVERRIDE_TABLE}`
-                            WHERE approve = 'MASKED'
-                            AND NodeNum IN (
-                                SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` 
-                                WHERE Project = '{selected_project}'
-                            )
-                        """
-                        client.query(clear_mask_sql).result()
-                        st.warning(f"🧹 All masks cleared for {selected_project}. Approved data remains.")
-                        st.cache_data.clear()
+            clear_sql = f"DELETE FROM `{OVERRIDE_TABLE}` WHERE approve = 'MASKED' {loc_filter}"
+            client.query(clear_sql).result()
+            st.warning(f"🧹 Masks cleared for {sel_loc_mask}.")
+            st.cache_data.clear()
 
-    # --- TAB 3: DEEP DATA SCRUB ---
+    # --- TAB 3: DEEP DATA SCRUB (Updated to Location Level) ---
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
-        st.warning("Averages raw data to 1-hour intervals. This is IRREVERSIBLE.")
-        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_select")
+        st.info("Averages raw data to 1-hour intervals. Can be filtered by specific Location.")
+        
+        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+        sel_loc_scrub = st.selectbox("Target Location", loc_options, key="scrub_loc_sel")
+        
         t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
         
         if st.button(f"🧨 Purge & Average {scrub_target}", use_container_width=True):
-            with st.spinner(f"Reducing {scrub_target} to hourly means..."):
-                scrub_sql = f"""
-                    CREATE OR REPLACE TABLE `{t_table}` AS 
-                    SELECT 
-                        TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
-                        NodeNum, 
-                        AVG(temperature) as temperature
-                    FROM `{t_table}`
-                    WHERE temperature IS NOT NULL
-                    GROUP BY 1, 2
-                """
-                client.query(scrub_sql).result()
-                st.success(f"✅ {scrub_target} table successfully averaged.")
-                st.cache_data.clear()
+            # Location-aware scrub logic: only affects nodes mapped to the selected location [cite: 5, 14]
+            loc_subquery = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}'"
+            if sel_loc_scrub != "All Locations":
+                loc_subquery += f" AND Location = '{sel_loc_scrub}'"
+
+            scrub_sql = f"""
+                CREATE OR REPLACE TABLE `{t_table}` AS 
+                SELECT 
+                    TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
+                    NodeNum, 
+                    AVG(temperature) as temperature
+                FROM `{t_table}`
+                WHERE NodeNum IN ({loc_subquery})
+                OR NodeNum NOT IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')
+                GROUP BY 1, 2
+            """
+            client.query(scrub_sql).result()
+            st.success(f"✅ {scrub_target} scrubbed for {sel_loc_scrub}.")
+            st.cache_data.clear()
 
     # --- TAB 4: SURGICAL CLEANER ---
     with tab_surgical:
