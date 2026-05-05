@@ -378,7 +378,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # UPDATED QUERY: Added temperature metrics (Latest, Max, Min) [cite: 8, 9]
+    # 1. DATA ENGINE: Fetches 7 days for gaps, but isolates 24h for temperature extremes
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
@@ -412,14 +412,12 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     THEN temperature ELSE NULL END) as low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN temperature ELSE NULL END) as high_24h,
-                -- Max Gaps
+                -- Communication Metrics
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
-                -- Seen flags
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as active_6h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
-                -- Hourly Uptime Counts
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
@@ -450,20 +448,34 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
         now_local = pd.Timestamp.now(tz=display_tz)
 
-        # 1. MAIN SUMMARY TABLE (Location Level)
+        # Helper for unit-aware temperature formatting
+        def fmt_temp(val):
+            if pd.isnull(val): return "N/A"
+            c_val = (val - 32) * 5/9 if unit_label == "°C" else val
+            return f"{round(c_val, 1)}{unit_label}"
+
+        # 2. TABLE: LOCATION OVERVIEW (Project by Pipe/Bank)
         summary_df = raw_df.groupby(['Project', 'Location']).agg(
             Nodes=('NodeNum', 'count'),
             Seen_24h=('active_24h', 'sum'),
             Seen_6h=('active_6h', 'sum'),
+            Sum_Hrs_24=('hours_24h', 'sum'),
+            Sum_Hrs_7d=('hours_7d', 'sum'),
             Gap_24h=('gap_24h', 'max'),
             Gap_7d=('gap_7d', 'max'),
+            Min_24h_All=('low_24h', 'min'), # Coldest sensor in pipe
+            Max_24h_All=('high_24h', 'max'), # Warmest sensor in pipe
             Latest_Ping=('last_ping', 'max'),
             Oldest_Ping=('last_ping', 'min')
         ).reset_index()
 
+        # Project Total Row Logic
         total_df = summary_df.groupby('Project').agg({
             'Nodes': 'sum', 'Seen_24h': 'sum', 'Seen_6h': 'sum', 
-            'Gap_24h': 'max', 'Gap_7d': 'max', 'Latest_Ping': 'max', 'Oldest_Ping': 'min'
+            'Sum_Hrs_24': 'sum', 'Sum_Hrs_7d': 'sum',
+            'Gap_24h': 'max', 'Gap_7d': 'max', 
+            'Min_24h_All': 'min', 'Max_24h_All': 'max', 
+            'Latest_Ping': 'max', 'Oldest_Ping': 'min'
         }).reset_index()
         total_df['Location'] = 'PROJECT TOTAL'
 
@@ -478,19 +490,21 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 if latest.tzinfo is None: latest = latest.tz_localize('UTC')
                 last_seen_str = f"{round((now_local - latest.tz_convert(display_tz)).total_seconds() / 3600, 1)}h ago"
 
-            oldest = row['Oldest_Ping']
-            lag_str = "N/A"
-            if pd.notnull(oldest):
-                if oldest.tzinfo is None: oldest = oldest.tz_localize('UTC')
-                lag = round((now_local - oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
-                lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
+            # Calculate average location-wide uptime percentage [cite: 6]
+            avg_24h = (row['Sum_Hrs_24'] / (row['Nodes'] * 24)) * 100
+            avg_7d = (row['Sum_Hrs_7d'] / (row['Nodes'] * 168)) * 100
 
             return pd.Series({
-                "Project": row['Project'], "Location": row['Location'], "Nodes": int(row['Nodes']),
-                "Seen (24h)": int(row['Seen_24h']), "Seen (6h)": int(row['Seen_6h']),
-                "Last Seen": last_seen_str, "Max Lag": lag_str,
-                "Max Gap (24h)": f"{int(row['Gap_24h'])}h",
-                "Max Gap (7d)": f"{int(row['Gap_7d'])}h"
+                "Project": row['Project'], 
+                "Location": row['Location'], 
+                "Min (24h)": fmt_temp(row['Min_24h_All']),
+                "Max (24h)": fmt_temp(row['Max_24h_All']),
+                "Nodes": int(row['Nodes']),
+                "Seen (24h)": int(row['Seen_24h']),
+                "% Active (24h)": f"{round(avg_24h, 1)}%",
+                "% Active (7d)": f"{round(avg_7d, 1)}%",
+                "Last Seen": last_seen_str,
+                "Max Gap (24h)": f"{int(row['Gap_24h'])}h"
             })
 
         st.subheader("📍 Location Overview")
@@ -498,7 +512,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             lambda x: ['background-color: #f0f2f6; font-weight: bold'] * len(x) if x['Location'] == 'PROJECT TOTAL' else [''] * len(x), axis=1
         ), use_container_width=True, hide_index=True)
 
-        # 2. SENSOR DRILL-DOWN (Updated with Temperature Metrics)
+        # 3. TABLE: SENSOR DRILL-DOWN
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         
@@ -516,21 +530,19 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
                     status_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
 
-                # Unit Conversion Helper 
-                def convert(val):
-                    if pd.isnull(val): return "N/A"
-                    c_val = (val - 32) * 5/9 if unit_label == "°C" else val
-                    return f"{round(c_val, 1)}{unit_label}"
-
                 return pd.Series({
                     "Node ID": row['NodeNum'],
                     "Bank": row['Bank'],
                     "Depth": f"{row['Depth']}ft",
-                    "Current Temp": convert(row['current_temp']),
-                    "High (24h)": convert(row['high_24h']),
-                    "Low (24h)": convert(row['low_24h']),
+                    "Current Temp": fmt_temp(row['current_temp']),
+                    "High (24h)": fmt_temp(row['high_24h']),
+                    "Low (24h)": fmt_temp(row['low_24h']),
+                    "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
+                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
                     "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%",
+                    "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
                     "Gap (24h)": f"{int(row['gap_24h'])}h",
+                    "Gap (7d)": f"{int(row['gap_7d'])}h",
                     "Status": status_str
                 })
 
@@ -951,7 +963,11 @@ def render_data_intake_page(selected_project):
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # Define all administrative tabs
+    # 1. Fetch Location Options for the Selected Project [cite: 6, 15]
+    with st.spinner("Loading project metadata..."):
+        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+        loc_options = ["All Locations"] + sorted(p_df['Location'].dropna().unique().tolist()) if not p_df.empty else ["All Locations"]
+
     tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
         "✅ Bulk Approval", 
         "🚫 Mask Data", 
@@ -962,7 +978,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
         st.subheader("✅ Range-Based Bulk Approval")
-        st.write("Approve all data within this specific window for the client portal.")
+        sel_loc_bulk = st.selectbox("Target Location", loc_options, key="bulk_loc_sel")
         
         c1, c2 = st.columns(2)
         with c1:
@@ -970,130 +986,106 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         with c2:
             b_end = st.date_input("Approval End", value=datetime.now(), key="bulk_end")
 
-        if st.button(f"🚀 Approve {selected_project} Range", use_container_width=True):
-            with st.spinner("Writing approvals to master override..."):
-                bulk_sql = f"""
-                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
-                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
-                    FROM (
-                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                        UNION ALL 
-                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                    ) AS r
-                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                    WHERE m.Project = '{selected_project}'
-                    AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
-                    AND NOT EXISTS (
-                        SELECT 1 FROM `{OVERRIDE_TABLE}` x 
-                        WHERE x.NodeNum = r.NodeNum 
-                        AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                    )
-                """
-                try:
-                    client.query(bulk_sql).result()
-                    st.success(f"✅ Data for {selected_project} successfully approved.")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Bulk Approval Error: {e}")
+        if st.button(f"🚀 Approve Range", use_container_width=True):
+            loc_filter = f"AND m.Location = '{sel_loc_bulk}'" if sel_loc_bulk != "All Locations" else ""
+            bulk_sql = f"""
+                INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
+                SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
+                FROM (
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                    UNION ALL 
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                ) AS r
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                WHERE m.Project = '{selected_project}' {loc_filter}
+                AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
+                AND NOT EXISTS (
+                    SELECT 1 FROM `{OVERRIDE_TABLE}` x 
+                    WHERE x.NodeNum = r.NodeNum 
+                    AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                )
+            """
+            client.query(bulk_sql).result()
+            st.success("✅ Approvals applied.")
+            st.cache_data.clear()
 
-    # --- TAB 2: MASK DATA (Updated: Clear Masks Only) ---
+    # --- TAB 2: MASK DATA (Updated to Location Level) ---
     with tab_mask:
         st.subheader("🚫 Temporal Data Masking")
+        sel_loc_mask = st.selectbox("Target Location", loc_options, key="mask_loc_sel")
         
-        if not selected_project or selected_project == "All Projects":
-            st.warning("Please select a specific project in the sidebar.")
-        else:
-            # Mask Mode Toggle
-            mask_mode = st.radio("Masking Mode", ["Specific Time Range", "All data before end date"], horizontal=True)
+        mask_mode = st.radio("Masking Mode", ["Specific Time Range", "All data before end date"], horizontal=True)
+        
+        m_col1, m_col2 = st.columns(2)
+        with m_col1:
+            m_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="m_sd", disabled=(mask_mode == "All data before end date"))
+        with m_col2:
+            m_end_date = st.date_input("End Date", value=datetime.now(), key="m_ed")
+
+        if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
+            loc_filter = f"AND m.Location = '{sel_loc_mask}'" if sel_loc_mask != "All Locations" else ""
+            start_str = "2000-01-01 00:00:00" if mask_mode == "All data before end date" else m_start_date.strftime('%Y-%m-%d')
             
-            m_col1, m_col2 = st.columns(2)
-            with m_col1:
-                m_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="m_sd", disabled=(mask_mode == "All data before end date"))
-                m_start_time = st.time_input("Start Time", value=datetime.time(datetime.now()), key="m_st", disabled=(mask_mode == "All data before end date"))
-            with m_col2:
-                m_end_date = st.date_input("End Date", value=datetime.now(), key="m_ed")
-                m_end_time = st.time_input("End Time", value=datetime.time(datetime.now()), key="m_et")
+            mask_sql = f"""
+                INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
+                SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
+                FROM (
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                    UNION ALL 
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                ) AS r
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                WHERE m.Project = '{selected_project}' {loc_filter}
+                AND r.timestamp >= '{start_str}' AND r.timestamp <= '{m_end_date}'
+                AND NOT EXISTS (
+                    SELECT 1 FROM `{OVERRIDE_TABLE}` x WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                )
+            """
+            client.query(mask_sql).result()
+            st.success(f"✅ Mask applied to {sel_loc_mask}.")
+            st.cache_data.clear()
 
-            # Formatting logic
-            end_dt = datetime.combine(m_end_date, m_end_time)
-            if mask_mode == "All data before end date":
-                start_dt_str = "2000-01-01 00:00:00" 
-                action_desc = f"Hiding EVERYTHING before `{end_dt}`"
-            else:
-                start_dt = datetime.combine(m_start_date, m_start_time)
-                start_dt_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-                action_desc = f"Hiding data from `{start_dt}` to `{end_dt}`"
-
-            st.write(f"**Action:** {action_desc}")
-
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
-                    with st.spinner("Applying masks..."):
-                        mask_sql = f"""
-                            INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
-                            SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
-                            FROM (
-                                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                                UNION ALL 
-                                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                            ) AS r
-                            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                            WHERE m.Project = '{selected_project}'
-                            AND r.timestamp >= '{start_dt_str}' 
-                            AND r.timestamp <= '{end_dt.strftime('%Y-%m-%d %H:%M:%S')}'
-                            AND NOT EXISTS (
-                                SELECT 1 FROM `{OVERRIDE_TABLE}` x 
-                                WHERE x.NodeNum = r.NodeNum 
-                                AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                            )
-                        """
-                        client.query(mask_sql).result()
-                        st.success("✅ Mask applied successfully.")
-                        st.cache_data.clear()
+        if st.button(f"🗑️ Clear Masks", use_container_width=True):
+            loc_filter = f"AND NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Location = '{sel_loc_mask}' AND Project = '{selected_project}')" if sel_loc_mask != "All Locations" else f"AND NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')"
             
-            with c2:
-                # UPDATED: Now strictly deletes MASKED rows for this project
-                if st.button(f"🗑️ Clear Project Masks", use_container_width=True):
-                    with st.spinner("Clearing project masks..."):
-                        clear_mask_sql = f"""
-                            DELETE FROM `{OVERRIDE_TABLE}`
-                            WHERE approve = 'MASKED'
-                            AND NodeNum IN (
-                                SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` 
-                                WHERE Project = '{selected_project}'
-                            )
-                        """
-                        client.query(clear_mask_sql).result()
-                        st.warning(f"🧹 All masks cleared for {selected_project}. Approved data remains.")
-                        st.cache_data.clear()
+            clear_sql = f"DELETE FROM `{OVERRIDE_TABLE}` WHERE approve = 'MASKED' {loc_filter}"
+            client.query(clear_sql).result()
+            st.warning(f"🧹 Masks cleared for {sel_loc_mask}.")
+            st.cache_data.clear()
 
-    # --- TAB 3: DEEP DATA SCRUB ---
+    # --- TAB 3: DEEP DATA SCRUB (Updated to Location Level) ---
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
-        st.warning("Averages raw data to 1-hour intervals. This is IRREVERSIBLE.")
-        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="admin_scrub_select")
+        st.info("Averages raw data to 1-hour intervals. Can be filtered by specific Location.")
+        
+        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
+        sel_loc_scrub = st.selectbox("Target Location", loc_options, key="scrub_loc_sel")
+        
         t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
         
         if st.button(f"🧨 Purge & Average {scrub_target}", use_container_width=True):
-            with st.spinner(f"Reducing {scrub_target} to hourly means..."):
-                scrub_sql = f"""
-                    CREATE OR REPLACE TABLE `{t_table}` AS 
-                    SELECT 
-                        TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
-                        NodeNum, 
-                        AVG(temperature) as temperature
-                    FROM `{t_table}`
-                    WHERE temperature IS NOT NULL
-                    GROUP BY 1, 2
-                """
-                client.query(scrub_sql).result()
-                st.success(f"✅ {scrub_target} table successfully averaged.")
-                st.cache_data.clear()
+            # Location-aware scrub logic: only affects nodes mapped to the selected location [cite: 5, 14]
+            loc_subquery = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}'"
+            if sel_loc_scrub != "All Locations":
+                loc_subquery += f" AND Location = '{sel_loc_scrub}'"
+
+            scrub_sql = f"""
+                CREATE OR REPLACE TABLE `{t_table}` AS 
+                SELECT 
+                    TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, 
+                    NodeNum, 
+                    AVG(temperature) as temperature
+                FROM `{t_table}`
+                WHERE NodeNum IN ({loc_subquery})
+                OR NodeNum NOT IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')
+                GROUP BY 1, 2
+            """
+            client.query(scrub_sql).result()
+            st.success(f"✅ {scrub_target} scrubbed for {sel_loc_scrub}.")
+            st.cache_data.clear()
 
     # --- TAB 4: SURGICAL CLEANER ---
     with tab_surgical:
-        st.subheader("🧨 Surgical Point Cleaner")
         if not selected_project or selected_project == "All Projects":
             st.warning("Please select a specific project in the sidebar.")
         else:
@@ -1104,113 +1096,139 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 ###########
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    st.subheader("🧨 Surgical Point Cleaner")
-
-    # 1. INITIALIZE PERSISTENT LOCK
-    if "surgical_lock" not in st.session_state:
-        st.session_state.surgical_lock = []
-
-    # 2. VIEW & ACTION TOGGLES
-    c1, c2 = st.columns(2)
-    view_toggle = c1.radio("Display Mode", ["Engineering", "Client"], horizontal=True, key="v_toggle")
-    delete_method = c2.radio("Action Type", ["Soft Delete", "Hard Purge"], horizontal=True, key="d_method")
-    v_mode = "engineering" if view_toggle == "Engineering" else "client"
-
-    # 3. DATA PREP
-    p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
-    if p_df.empty:
-        st.info("No data available.")
-        return
-
-    sel_loc = st.selectbox("Select Pipe", sorted(p_df['Location'].unique()), key="s_loc")
-    scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
-
-    # 4. THE CHART
-    fig_scrub = build_high_speed_graph(
-        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
-        pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
-        pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
-        active_refs, unit_mode, unit_label, display_tz=display_tz
-    )
-    fig_scrub.update_layout(dragmode='lasso', clickmode='event+select')
-
-    # If we have points locked, keep them highlighted
-    if st.session_state.surgical_lock:
-        indices = [p['point_index'] for p in st.session_state.surgical_lock]
-        fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
-
-    # 5. RENDER WITH CAPTURE
-    chart_key = f"scrub_chart_{sel_loc}_{v_mode}"
-    event_data = st.plotly_chart(
-        fig_scrub, 
-        use_container_width=True, 
-        on_select="rerun", # Mandatory for the 'event_data' variable to populate
-        key=chart_key
-    )
-
-    # --- THE LOCKING LOGIC ---
-    # We catch the event immediately. If it's empty but our lock isn't, we keep our lock.
-    if event_data and "selection" in event_data:
-        new_pts = event_data["selection"].get("points", [])
-        if new_pts:
-            st.session_state.surgical_lock = new_pts
-            # We do NOT rerun here to prevent the flicker. 
-            # The buttons below will now see 'surgical_lock'.
-
-    # 6. ACTION BUTTONS
-    if st.session_state.surgical_lock:
-        st.success(f"📍 {len(st.session_state.surgical_lock)} points captured.")
-        
-        b1, b2, b3, b4 = st.columns(4)
-        
-        if b1.button("✅ Approve", use_container_width=True):
-            update_records(st.session_state.surgical_lock, scrub_df, "TRUE")
-            st.session_state.surgical_lock = [] # Clear after action
-            st.rerun()
-
-        if b2.button("🚫 Mask", use_container_width=True):
-            update_records(st.session_state.surgical_lock, scrub_df, "MASKED")
-            st.session_state.surgical_lock = []
-            st.rerun()
-
-        label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
-        if b3.button(label, type="primary", use_container_width=True):
-            if "Hard" in delete_method:
-                hard_purge_points(st.session_state.surgical_lock, scrub_df)
-            else:
-                update_records(st.session_state.surgical_lock, scrub_df, "FALSE")
-            st.session_state.surgical_lock = []
-            st.rerun()
-
-        if b4.button("Clear Selection", use_container_width=True):
-            st.session_state.surgical_lock = []
-            st.rerun()
-    else:
-        st.info("💡 Lasso points on the graph to begin.")
-
-def hard_purge_points(pts, df):
-    """
-    Permanently deletes lassoed points from the raw BigQuery tables.
-    """
-    with st.spinner("Executing permanent purge..."):
-        for p in pts:
-            try:
-                node = df.iloc[p['point_index']]['NodeNum']
-                ts = p['x'] 
-                
-                table = "raw_lord" if "-" in str(node) else "raw_sensorpush"
-                id_col = "NodeNum" if "lord" in table else "sensor_id"
-                
-                # Permanent SQL deletion
-                delete_sql = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` WHERE {id_col} = '{node}' AND timestamp = '{ts}'"
-                client.query(delete_sql).result()
-            except:
-                continue
+    st.subheader("🧨 Multi-Level Surgical Cleaner")
     
-    st.session_state.locked_selection = []
-    st.cache_data.clear()
-    st.success("Points purged from raw source tables.")
-    st.rerun()
+    # 1. SCOPE SELECTION
+    scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
+    
+    meta_q = f"SELECT NodeNum, Location FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}'"
+    meta_df = client.query(meta_q).to_dataframe()
+    
+    target_node, target_loc = None, None
+    if scope == "Specific Location":
+        target_loc = st.selectbox("Select Location", sorted(meta_df['Location'].unique()))
+    elif scope == "Specific Node":
+        target_node = st.selectbox("Select Node ID", sorted(meta_df['NodeNum'].unique()))
+
+    # 2. TIME & THRESHOLD
+    st.divider()
+    tc1, tc2 = st.columns(2)
+    with tc1:
+        s_dt = datetime.combine(st.date_input("Start Date", value=datetime.now() - timedelta(days=1)), 
+                                st.time_input("Start Time", value=datetime.time(datetime(2026,1,1,0,0))))
+    with tc2:
+        e_dt = datetime.combine(st.date_input("End Date", value=datetime.now()), 
+                                st.time_input("End Time", value=datetime.time(datetime.now())))
+    
+    thr_col1, thr_col2 = st.columns([1, 2])
+    operator = thr_col1.selectbox("Filter Logic", ["No Threshold", "Greater Than (>)", "Less Than (<)"])
+    thresh_val_input = thr_col2.number_input(f"Threshold Value ({unit_label})", value=100.0)
+    thresh_val_f = (thresh_val_input * 9/5) + 32 if unit_mode == "Celsius" else thresh_val_input
+
+    # 3. SQL FILTER CONSTRUCTION
+    if scope == "Project Wide":
+        where_clause = f"m.Project = '{selected_project}'"
+        target_desc = f"all nodes in project '{selected_project}'"
+    elif scope == "Specific Location":
+        where_clause = f"m.Project = '{selected_project}' AND m.Location = '{target_loc}'"
+        target_desc = f"all nodes in location '{target_loc}'"
+    else:
+        where_clause = f"r.NodeNum = '{target_node}'"
+        target_desc = f"Node ID: {target_node}"
+
+    threshold_clause = ""
+    if operator == "Greater Than (>)":
+        threshold_clause = f"AND r.temperature > {thresh_val_f}"
+    elif operator == "Less Than (<)":
+        threshold_clause = f"AND r.temperature < {thresh_val_f}"
+
+    # 4. IMMEDIATE ACTION: SOFT MASK
+    st.divider()
+    st.write("### 🚫 Soft Actions")
+    if st.button("🚫 Execute Soft Mask (Force FALSE)", use_container_width=True):
+        with st.spinner("Forcing points to FALSE..."):
+            upsert_sql = f"""
+                MERGE `{OVERRIDE_TABLE}` T
+                USING (
+                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
+                    FROM (
+                        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                        UNION ALL 
+                        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                    ) AS r
+                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                    WHERE {where_clause} {threshold_clause}
+                    AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
+                ) S
+                ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
+                WHEN MATCHED THEN UPDATE SET approve = 'FALSE'
+                WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'FALSE')
+            """
+            client.query(upsert_sql).result()
+            st.success("Soft Mask complete.")
+            st.cache_data.clear()
+
+    # 5. PROTECTED ACTION: HARD PURGE
+    st.divider()
+    st.write("### 🔥 Permanent Actions")
+    
+    # This button triggers the check and saves the dataframe to session_state
+    if st.button("🔍 Step 1: Verify Status & Stage Permanent Purge", use_container_width=True):
+        status_q = f"""
+            SELECT COALESCE(rej.approve, 'PENDING') as status, COUNT(*) as point_count
+            FROM (
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                UNION ALL 
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+            LEFT JOIN `{OVERRIDE_TABLE}` AS rej ON r.NodeNum = rej.NodeNum AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+            WHERE {where_clause} {threshold_clause}
+            AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
+            GROUP BY status
+        """
+        st.session_state["purge_staged_df"] = client.query(status_q).to_dataframe()
+
+    # Renders ONLY if the verification has been run
+    if "purge_staged_df" in st.session_state:
+        staged_df = st.session_state["purge_staged_df"]
+        total_to_purge = staged_df['point_count'].sum() if not staged_df.empty else 0
+
+        if total_to_purge > 0:
+            st.error(f"### 🛑 PERMANENT PURGE WARNING")
+            st.write(f"You are about to **IRREVERSIBLY DELETE {total_to_purge} records** from the source tables.")
+            st.write(f"**Target:** {target_desc}")
+            st.write(f"**Window:** {s_dt} to {e_dt}")
+            
+            # Displays the current status breakdown (FALSE, TRUE, PENDING)
+            st.table(staged_df.set_index('status'))
+            
+            confirmed = st.checkbox(f"I verify that I want to PERMANENTLY delete these {total_to_purge} points.", value=False)
+            
+            pc1, pc2 = st.columns(2)
+            if pc1.button("🔥 EXECUTE HARD PURGE", type="primary", use_container_width=True, disabled=not confirmed):
+                with st.spinner("Executing permanent deletion..."):
+                    for table in ["raw_sensorpush", "raw_lord"]:
+                        purge_sql = f"""
+                            DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` r
+                            WHERE EXISTS (SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.metadata` m WHERE r.NodeNum = m.NodeNum AND {where_clause})
+                            {threshold_clause} AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
+                        """
+                        client.query(purge_sql).result()
+                    
+                    # Clean up overrides [cite: 11]
+                    client.query(f"DELETE FROM `{OVERRIDE_TABLE}` WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE {where_clause}) AND timestamp BETWEEN '{s_dt}' AND '{e_dt}'").result()
+                    
+                    st.success("Hard Purge complete.")
+                    del st.session_state["purge_staged_df"]
+                    st.cache_data.clear()
+                    st.rerun()
+            
+            if pc2.button("❌ Cancel", use_container_width=True):
+                del st.session_state["purge_staged_df"]
+                st.rerun()
+        else:
+            st.warning("No data points found matching these criteria for a purge.")
 
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
