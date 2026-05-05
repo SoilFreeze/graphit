@@ -1136,57 +1136,70 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     thr_col1, thr_col2 = st.columns([1, 2])
     operator = thr_col1.selectbox("Filter Logic", ["No Threshold", "Greater Than (>)", "Less Than (<)"])
     
-    # Convert input back to Fahrenheit for BigQuery if user is viewing in Celsius
     thresh_val_input = thr_col2.number_input(f"Threshold Value ({unit_label})", value=100.0)
     thresh_val_f = (thresh_val_input * 9/5) + 32 if unit_mode == "Celsius" else thresh_val_input
 
     # 4. CONSTRUCT SQL FILTERS
     if scope == "Project Wide":
-        where_clause = f"NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')"
-        target_desc = f"ALL nodes in {selected_project}"
+        where_clause = f"m.Project = '{selected_project}'"
     elif scope == "Specific Location":
-        where_clause = f"NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}' AND Location = '{target_loc}')"
-        target_desc = f"all nodes in {target_loc}"
+        where_clause = f"m.Project = '{selected_project}' AND m.Location = '{target_loc}'"
     else:
-        where_clause = f"NodeNum = '{target_node}'"
-        target_desc = f"Node {target_node}"
+        where_clause = f"r.NodeNum = '{target_node}'"
 
     threshold_clause = ""
     if operator == "Greater Than (>)":
-        threshold_clause = f"AND temperature > {thresh_val_f}"
+        threshold_clause = f"AND r.temperature > {thresh_val_f}"
     elif operator == "Less Than (<)":
-        threshold_clause = f"AND temperature < {thresh_val_f}"
+        threshold_clause = f"AND r.temperature < {thresh_val_f}"
 
-    # 5. VERIFICATION / PREVIEW BUTTON
-    if st.button("🔍 Verify: Preview Match Count", use_container_width=True):
-        with st.spinner("Counting matching records in database..."):
-            count_q = f"""
-                SELECT COUNT(*) as total FROM (
+    # 5. VERIFICATION: Status Breakdown logic 
+    if st.button("🔍 Verify Status & Match Count", use_container_width=True):
+        with st.spinner("Analyzing point status in BigQuery..."):
+            # Joins Raw Data with Metadata and Overrides to see current 'FALSE' status 
+            status_q = f"""
+                SELECT 
+                    COALESCE(rej.approve, 'PENDING') as status,
+                    COUNT(*) as point_count
+                FROM (
                     SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
                     UNION ALL 
                     SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
                 ) AS r
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+                    ON r.NodeNum = rej.NodeNum 
+                    AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
                 WHERE {where_clause}
                 {threshold_clause}
                 AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
+                GROUP BY status
             """
             try:
-                result = client.query(count_q).to_dataframe()
-                match_count = result['total'].iloc[0]
-                if match_count > 0:
-                    st.success(f"✅ Verification Complete: Found **{match_count}** data points matching these criteria.")
+                res_df = client.query(status_q).to_dataframe()
+                if not res_df.empty:
+                    st.write("### 📊 Verification Breakdown")
+                    total = res_df['point_count'].sum()
+                    st.info(f"Found **{total}** total matching records.")
+                    
+                    # Display breakdown as a table for clarity
+                    st.table(res_df.set_index('status'))
+                    
+                    masked_count = res_df[res_df['status'] == 'FALSE']['point_count'].sum()
+                    if masked_count > 0:
+                        st.warning(f"⚠️ Note: **{masked_count}** of these points are already marked as FALSE (Masked).")
                 else:
-                    st.warning("ℹ️ No data points found matching these criteria. Adjust your filters.")
+                    st.warning("No data points found matching these criteria.")
             except Exception as e:
                 st.error(f"Verification Error: {e}")
 
-    st.warning(f"⚠️ Action will affect **{target_desc}** between **{start_dt}** and **{end_dt}** where temp is {operator} {thresh_val_input}{unit_label}.")
-
     # 6. EXECUTION BUTTONS
+    st.divider()
     b1, b2, b3 = st.columns(3)
     
     if b1.button("🚫 Mask (Soft Delete)", use_container_width=True):
         with st.spinner("Applying masks..."):
+            # Logic for Soft Delete [cite: 16]
             mask_sql = f"""
                 INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                 SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'FALSE'
@@ -1195,6 +1208,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
                     UNION ALL 
                     SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
                 ) AS r
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
                 WHERE {where_clause}
                 {threshold_clause}
                 AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
@@ -1204,24 +1218,24 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
                 )
             """
             client.query(mask_sql).result()
-            st.success(f"Successfully masked data for {target_desc}.")
+            st.success("Soft delete applied.")
             st.cache_data.clear()
 
     if b2.button("🔥 HARD PURGE (Permanent)", type="primary", use_container_width=True):
+        # Implementation for Hard Purge [cite: 13, 14]
         with st.spinner("Executing permanent deletion..."):
             for table in ["raw_sensorpush", "raw_lord"]:
                 purge_sql = f"""
-                    DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}`
-                    WHERE {where_clause}
+                    DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` r
+                    WHERE EXISTS (
+                        SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.metadata` m
+                        WHERE r.NodeNum = m.NodeNum AND {where_clause}
+                    )
                     {threshold_clause}
-                    AND timestamp >= '{start_dt}' AND timestamp <= '{end_dt}'
+                    AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
                 """
                 client.query(purge_sql).result()
-            
-            clear_ov_sql = f"DELETE FROM `{OVERRIDE_TABLE}` WHERE {where_clause} AND timestamp >= '{start_dt}' AND timestamp <= '{end_dt}'"
-            client.query(clear_ov_sql).result()
-            
-            st.success(f"PERMANENTLY deleted data for {target_desc}.")
+            st.success("Data permanently removed from source tables.")
             st.cache_data.clear()
 
     if b3.button("🔄 Refresh View", use_container_width=True):
