@@ -403,27 +403,28 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # 1. DATA ENGINE: Fetches 7 days for gaps, but isolates 24h for temperature extremes
+    # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes + Registry Integration
     query = f"""
         WITH MappedNodes AS (
-            SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
-            FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot`
-            WHERE Project IS NOT NULL {proj_filter}
+            SELECT Project, NodeNum, Location, Bank, Depth, StartDate, EndDate
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
+            WHERE ProjectStatus = 'Active' {proj_filter}
         ),
         BaseReporting AS (
-            SELECT NodeNum, timestamp, temperature 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature 
-            FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+            SELECT r.NodeNum, r.timestamp, r.temperature, m.StartDate
+            FROM (
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                UNION ALL
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            INNER JOIN MappedNodes m ON r.NodeNum = m.NodeNum
+            -- CRITICAL: Only pull data from the assigned project start date
+            WHERE r.timestamp >= m.StartDate
+            AND (r.timestamp <= m.EndDate OR m.EndDate IS NULL)
         ),
         GapAnalysis AS (
             SELECT 
-                NodeNum,
-                timestamp,
-                temperature,
+                NodeNum, timestamp, temperature,
                 LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) as prev_ts
             FROM BaseReporting
         ),
@@ -431,17 +432,16 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 NodeNum, 
                 MAX(timestamp) as last_ping,
-                -- Temperature Metrics
+                -- Temperature Data (24H window)
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN temperature ELSE NULL END) as low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN temperature ELSE NULL END) as high_24h,
-                -- Communication Metrics
+                -- Communication & Gap Data
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as active_6h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
@@ -451,14 +451,10 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         ),
         JoinedData AS (
             SELECT 
-                m.*, 
-                h.last_ping, h.current_temp, h.low_24h, h.high_24h,
-                COALESCE(h.gap_24h, 0) as gap_24h,
-                COALESCE(h.gap_7d, 0) as gap_7d,
-                COALESCE(h.active_6h, 0) as active_6h,
+                m.*, h.last_ping, h.current_temp, h.low_24h, h.high_24h,
+                COALESCE(h.gap_24h, 0) as gap_24h, COALESCE(h.gap_7d, 0) as gap_7d,
                 COALESCE(h.active_24h, 0) as active_24h,
-                COALESCE(h.hours_24h, 0) as hours_24h, 
-                COALESCE(h.hours_7d, 0) as hours_7d
+                COALESCE(h.hours_24h, 0) as hours_24h, COALESCE(h.hours_7d, 0) as hours_7d
             FROM MappedNodes m
             LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
         )
@@ -468,7 +464,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     try:
         raw_df = client.query(query).to_dataframe()
         if raw_df.empty:
-            st.warning("No data found for this project selection.")
+            st.warning("No data found for this project in the registry.")
             return
 
         now_local = pd.Timestamp.now(tz=display_tz)
@@ -479,28 +475,21 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             c_val = (val - 32) * 5/9 if unit_label == "°C" else val
             return f"{round(c_val, 1)}{unit_label}"
 
-        # 2. TABLE: LOCATION OVERVIEW (Project by Pipe/Bank)
+        # 1. MAIN SUMMARY TABLE (Location Level)
         summary_df = raw_df.groupby(['Project', 'Location']).agg(
             Nodes=('NodeNum', 'count'),
             Seen_24h=('active_24h', 'sum'),
-            Seen_6h=('active_6h', 'sum'),
             Sum_Hrs_24=('hours_24h', 'sum'),
             Sum_Hrs_7d=('hours_7d', 'sum'),
             Gap_24h=('gap_24h', 'max'),
-            Gap_7d=('gap_7d', 'max'),
             Min_24h_All=('low_24h', 'min'), # Coldest sensor in pipe
             Max_24h_All=('high_24h', 'max'), # Warmest sensor in pipe
-            Latest_Ping=('last_ping', 'max'),
-            Oldest_Ping=('last_ping', 'min')
+            Latest_Ping=('last_ping', 'max')
         ).reset_index()
 
-        # Project Total Row Logic
         total_df = summary_df.groupby('Project').agg({
-            'Nodes': 'sum', 'Seen_24h': 'sum', 'Seen_6h': 'sum', 
-            'Sum_Hrs_24': 'sum', 'Sum_Hrs_7d': 'sum',
-            'Gap_24h': 'max', 'Gap_7d': 'max', 
-            'Min_24h_All': 'min', 'Max_24h_All': 'max', 
-            'Latest_Ping': 'max', 'Oldest_Ping': 'min'
+            'Nodes': 'sum', 'Seen_24h': 'sum', 'Sum_Hrs_24': 'sum', 'Sum_Hrs_7d': 'sum',
+            'Gap_24h': 'max', 'Min_24h_All': 'min', 'Max_24h_All': 'max', 'Latest_Ping': 'max'
         }).reset_index()
         total_df['Location'] = 'PROJECT TOTAL'
 
@@ -515,21 +504,15 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 if latest.tzinfo is None: latest = latest.tz_localize('UTC')
                 last_seen_str = f"{round((now_local - latest.tz_convert(display_tz)).total_seconds() / 3600, 1)}h ago"
 
-            # Calculate average location-wide uptime percentage [cite: 6]
             avg_24h = (row['Sum_Hrs_24'] / (row['Nodes'] * 24)) * 100
             avg_7d = (row['Sum_Hrs_7d'] / (row['Nodes'] * 168)) * 100
 
             return pd.Series({
-                "Project": row['Project'], 
-                "Location": row['Location'], 
-                "Min (24h)": fmt_temp(row['Min_24h_All']),
-                "Max (24h)": fmt_temp(row['Max_24h_All']),
-                "Nodes": int(row['Nodes']),
-                "Seen (24h)": int(row['Seen_24h']),
-                "% Active (24h)": f"{round(avg_24h, 1)}%",
-                "% Active (7d)": f"{round(avg_7d, 1)}%",
-                "Last Seen": last_seen_str,
-                "Max Gap (24h)": f"{int(row['Gap_24h'])}h"
+                "Project": row['Project'], "Location": row['Location'], 
+                "Min (24h)": fmt_temp(row['Min_24h_All']), "Max (24h)": fmt_temp(row['Max_24h_All']),
+                "Nodes": int(row['Nodes']), "Seen (24h)": int(row['Seen_24h']),
+                "% Active (24h)": f"{round(avg_24h, 1)}%", "% Active (7d)": f"{round(avg_7d, 1)}%",
+                "Last Seen": last_seen_str, "Max Gap": f"{int(row['Gap_24h'])}h"
             })
 
         st.subheader("📍 Location Overview")
@@ -537,16 +520,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             lambda x: ['background-color: #f0f2f6; font-weight: bold'] * len(x) if x['Location'] == 'PROJECT TOTAL' else [''] * len(x), axis=1
         ), use_container_width=True, hide_index=True)
 
-        # 3. TABLE: SENSOR DRILL-DOWN
+        # 2. SENSOR DRILL-DOWN
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
-        
         loc_list = sorted(raw_df['Location'].unique().tolist())
         selected_loc = st.selectbox("Detailed view for:", ["--- Select Location ---"] + loc_list)
 
         if selected_loc != "--- Select Location ---":
             sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
-            
             def format_sensor_row(row):
                 ping = row['last_ping']
                 status_str = "Never Seen"
@@ -554,27 +535,17 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     if ping.tzinfo is None: ping = ping.tz_localize('UTC')
                     lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
                     status_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
-
                 return pd.Series({
-                    "Node ID": row['NodeNum'],
-                    "Bank": row['Bank'],
-                    "Depth": f"{row['Depth']}ft",
-                    "Current Temp": fmt_temp(row['current_temp']),
-                    "High (24h)": fmt_temp(row['high_24h']),
-                    "Low (24h)": fmt_temp(row['low_24h']),
+                    "Node ID": row['NodeNum'], "Bank": row['Bank'], "Depth": f"{row['Depth']}ft",
+                    "Current Temp": fmt_temp(row['current_temp']), "High (24h)": fmt_temp(row['high_24h']), "Low (24h)": fmt_temp(row['low_24h']),
                     "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
-                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
-                    "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%",
+                    "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%", 
                     "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
-                    "Gap (24h)": f"{int(row['gap_24h'])}h",
-                    "Gap (7d)": f"{int(row['gap_7d'])}h",
-                    "Status": status_str
+                    "Gap (24h)": f"{int(row['gap_24h'])}h", "Status": status_str
                 })
-
             st.dataframe(sensor_df.apply(format_sensor_row, axis=1), use_container_width=True, hide_index=True)
-
     except Exception as e:
-        st.error(f"Executive Summary Error: {e}")
+        st.error(f"Executive Summary Registry Error: {e}")
         
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
@@ -1183,30 +1154,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         else:
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
-def render_project_admin_manager(selected_project):
-    st.subheader("📋 Project & Hardware Manager")
-    
-    # 1. Individual Hardware Swap Logic
-    with st.expander("🔄 Individual Sensor Swap / Assignment", expanded=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            target_loc = st.text_input("Location Name (e.g., Pipe 12)")
-            new_node = st.text_input("New NodeNum")
-        with c2:
-            # Dual assignment logic
-            assign_type = st.radio("Assignment Type", ["Depth (ft)", "Bank Label"])
-            if assign_type == "Depth (ft)":
-                val = st.number_input("Depth Value", value=0.0, step=0.5)
-                depth_val, bank_val = val, None
-            else:
-                val = st.text_input("Bank Label (e.g., Bank A)")
-                depth_val, bank_val = None, val
-
-        if st.button("🚀 Confirm Hardware Swap"):
-            # Logic: Close old entry, Open new entry
-            # Note: This logic assumes 'ProjectStatus' and 'SensorStatus' 
-            # are managed here to keep the registry clean.
-            st.success(f"Successfully mapped {new_node} to {target_loc} at {val}.")
 
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
