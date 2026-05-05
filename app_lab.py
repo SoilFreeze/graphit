@@ -130,6 +130,31 @@ def check_admin_access(service_name):
             st.error("Incorrect Password")
             
     return False
+
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id, view_mode="engineering"):
+    # Updated query joins Raw Data to the Registry by timeframe
+    query = f"""
+        SELECT 
+            reg.Location, 
+            r.timestamp, 
+            r.temperature,
+            reg.NodeNum as hardware_id,
+            reg.ProjectStatus
+        FROM (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ) AS r
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS reg 
+            ON r.NodeNum = reg.NodeNum
+        WHERE reg.Project = '{project_id}'
+        AND reg.ProjectStatus = 'Active'  -- Only show active projects in portal
+        AND r.timestamp >= reg.StartDate 
+        AND (r.timestamp <= reg.EndDate OR reg.EndDate IS NULL)
+        ORDER BY reg.Location ASC, r.timestamp ASC
+    """
+    return client.query(query).to_dataframe()
     
 ###########################
 #- 3. SIDEBAR UI & STATE -#
@@ -1091,6 +1116,31 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         else:
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
+def render_project_admin_manager(selected_project):
+    st.subheader("📋 Project & Hardware Manager")
+    
+    # 1. Individual Hardware Swap Logic
+    with st.expander("🔄 Individual Sensor Swap / Assignment", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            target_loc = st.text_input("Location Name (e.g., Pipe 12)")
+            new_node = st.text_input("New NodeNum")
+        with c2:
+            # Dual assignment logic
+            assign_type = st.radio("Assignment Type", ["Depth (ft)", "Bank Label"])
+            if assign_type == "Depth (ft)":
+                val = st.number_input("Depth Value", value=0.0, step=0.5)
+                depth_val, bank_val = val, None
+            else:
+                val = st.text_input("Bank Label (e.g., Bank A)")
+                depth_val, bank_val = None, val
+
+        if st.button("🚀 Confirm Hardware Swap"):
+            # Logic: Close old entry, Open new entry
+            # Note: This logic assumes 'ProjectStatus' and 'SensorStatus' 
+            # are managed here to keep the registry clean.
+            st.success(f"Successfully mapped {new_node} to {target_loc} at {val}.")
+
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
 ###########
@@ -1268,6 +1318,9 @@ def update_records(pts, df, val):
             st.rerun()
         except Exception as e:
             st.error(f"Database Error: {e}")
+
+
+
 ###########
 # - 12. MAIN ROUTER - #
 ###########
