@@ -1097,113 +1097,99 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 ###########
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    st.subheader("🧨 Surgical Point Cleaner")
+    st.subheader("🧨 Multi-Level Surgical Cleaner")
+    st.write("Target data for deletion or masking by Project, Location, or specific Node.")
 
-    # 1. INITIALIZE PERSISTENT LOCK
-    if "surgical_lock" not in st.session_state:
-        st.session_state.surgical_lock = []
-
-    # 2. VIEW & ACTION TOGGLES
-    c1, c2 = st.columns(2)
-    view_toggle = c1.radio("Display Mode", ["Engineering", "Client"], horizontal=True, key="v_toggle")
-    delete_method = c2.radio("Action Type", ["Soft Delete", "Hard Purge"], horizontal=True, key="d_method")
-    v_mode = "engineering" if view_toggle == "Engineering" else "client"
-
-    # 3. DATA PREP
-    p_df = get_universal_portal_data(selected_project, view_mode=v_mode)
-    if p_df.empty:
-        st.info("No data available.")
-        return
-
-    sel_loc = st.selectbox("Select Pipe", sorted(p_df['Location'].unique()), key="s_loc")
-    scrub_df = p_df[p_df['Location'] == sel_loc].copy().reset_index(drop=True)
-
-    # 4. THE CHART
-    fig_scrub = build_high_speed_graph(
-        scrub_df, f"Surgical Scrubbing: {sel_loc}", 
-        pd.Timestamp.now(tz=display_tz) - timedelta(days=14), 
-        pd.Timestamp.now(tz=display_tz) + timedelta(hours=6), 
-        active_refs, unit_mode, unit_label, display_tz=display_tz
-    )
-    fig_scrub.update_layout(dragmode='lasso', clickmode='event+select')
-
-    # If we have points locked, keep them highlighted
-    if st.session_state.surgical_lock:
-        indices = [p['point_index'] for p in st.session_state.surgical_lock]
-        fig_scrub.update_traces(selectedpoints=indices, unselected=dict(marker=dict(opacity=0.2)))
-
-    # 5. RENDER WITH CAPTURE
-    chart_key = f"scrub_chart_{sel_loc}_{v_mode}"
-    event_data = st.plotly_chart(
-        fig_scrub, 
-        use_container_width=True, 
-        on_select="rerun", # Mandatory for the 'event_data' variable to populate
-        key=chart_key
-    )
-
-    # --- THE LOCKING LOGIC ---
-    # We catch the event immediately. If it's empty but our lock isn't, we keep our lock.
-    if event_data and "selection" in event_data:
-        new_pts = event_data["selection"].get("points", [])
-        if new_pts:
-            st.session_state.surgical_lock = new_pts
-            # We do NOT rerun here to prevent the flicker. 
-            # The buttons below will now see 'surgical_lock'.
-
-    # 6. ACTION BUTTONS
-    if st.session_state.surgical_lock:
-        st.success(f"📍 {len(st.session_state.surgical_lock)} points captured.")
-        
-        b1, b2, b3, b4 = st.columns(4)
-        
-        if b1.button("✅ Approve", use_container_width=True):
-            update_records(st.session_state.surgical_lock, scrub_df, "TRUE")
-            st.session_state.surgical_lock = [] # Clear after action
-            st.rerun()
-
-        if b2.button("🚫 Mask", use_container_width=True):
-            update_records(st.session_state.surgical_lock, scrub_df, "MASKED")
-            st.session_state.surgical_lock = []
-            st.rerun()
-
-        label = "🔥 PURGE" if "Hard" in delete_method else "🗑️ Delete"
-        if b3.button(label, type="primary", use_container_width=True):
-            if "Hard" in delete_method:
-                hard_purge_points(st.session_state.surgical_lock, scrub_df)
-            else:
-                update_records(st.session_state.surgical_lock, scrub_df, "FALSE")
-            st.session_state.surgical_lock = []
-            st.rerun()
-
-        if b4.button("Clear Selection", use_container_width=True):
-            st.session_state.surgical_lock = []
-            st.rerun()
-    else:
-        st.info("💡 Lasso points on the graph to begin.")
-
-def hard_purge_points(pts, df):
-    """
-    Permanently deletes lassoed points from the raw BigQuery tables.
-    """
-    with st.spinner("Executing permanent purge..."):
-        for p in pts:
-            try:
-                node = df.iloc[p['point_index']]['NodeNum']
-                ts = p['x'] 
-                
-                table = "raw_lord" if "-" in str(node) else "raw_sensorpush"
-                id_col = "NodeNum" if "lord" in table else "sensor_id"
-                
-                # Permanent SQL deletion
-                delete_sql = f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` WHERE {id_col} = '{node}' AND timestamp = '{ts}'"
-                client.query(delete_sql).result()
-            except:
-                continue
+    # 1. SCOPE SELECTION
+    scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
     
-    st.session_state.locked_selection = []
-    st.cache_data.clear()
-    st.success("Points purged from raw source tables.")
-    st.rerun()
+    # Fetch Metadata for Selectors [cite: 5, 11]
+    meta_q = f"SELECT NodeNum, Location FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}'"
+    meta_df = client.query(meta_q).to_dataframe()
+    
+    target_node = None
+    target_loc = None
+    
+    if scope == "Specific Location":
+        loc_list = sorted(meta_df['Location'].unique())
+        target_loc = st.selectbox("Select Location", loc_list)
+    elif scope == "Specific Node":
+        node_list = sorted(meta_df['NodeNum'].unique())
+        target_node = st.selectbox("Select Node ID", node_list)
+
+    # 2. TIME WINDOW SELECTION
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        s_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=1))
+        s_time = st.time_input("Start Time", value=datetime.time(datetime(2026, 1, 1, 0, 0)))
+    with c2:
+        e_date = st.date_input("End Date", value=datetime.now())
+        e_time = st.time_input("End Time", value=datetime.time(datetime.now()))
+    
+    start_dt = datetime.combine(s_date, s_time).strftime('%Y-%m-%d %H:%M:%S')
+    end_dt = datetime.combine(e_date, e_time).strftime('%Y-%m-%d %H:%M:%S')
+
+    # 3. CONSTRUCT TARGET FILTER
+    # Logic defines which nodes are affected based on scope [cite: 13, 15]
+    if scope == "Project Wide":
+        where_clause = f"NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')"
+        target_desc = f"ALL nodes in {selected_project}"
+    elif scope == "Specific Location":
+        where_clause = f"NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}' AND Location = '{target_loc}')"
+        target_desc = f"all nodes in {target_loc}"
+    else:
+        where_clause = f"NodeNum = '{target_node}'"
+        target_desc = f"Node {target_node}"
+
+    st.warning(f"⚠️ Action will affect **{target_desc}** between **{start_dt}** and **{end_dt}**.")
+
+    # 4. EXECUTION BUTTONS
+    b1, b2, b3 = st.columns(3)
+    
+    # MASK DATA (Soft Delete via manual_rejections) [cite: 11, 12, 16]
+    if b1.button("🚫 Mask (Soft Delete)", use_container_width=True):
+        with st.spinner("Applying masks..."):
+            mask_sql = f"""
+                INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
+                SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'FALSE'
+                FROM (
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                    UNION ALL 
+                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                ) AS r
+                WHERE {where_clause}
+                AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
+                AND NOT EXISTS (
+                    SELECT 1 FROM `{OVERRIDE_TABLE}` x 
+                    WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                )
+            """
+            client.query(mask_sql).result()
+            st.success(f"Successfully masked data for {target_desc}.")
+            st.cache_data.clear()
+
+    # HARD PURGE (Delete from raw tables) 
+    if b2.button("🔥 HARD PURGE (Permanent)", type="primary", use_container_width=True):
+        with st.spinner("Executing permanent deletion..."):
+            # We must purge from both possible raw sources [cite: 13]
+            for table in ["raw_sensorpush", "raw_lord"]:
+                purge_sql = f"""
+                    DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}`
+                    WHERE {where_clause}
+                    AND timestamp >= '{start_dt}' AND timestamp <= '{end_dt}'
+                """
+                client.query(purge_sql).result()
+            
+            # Also clear any overrides for these points [cite: 11]
+            clear_ov_sql = f"DELETE FROM `{OVERRIDE_TABLE}` WHERE {where_clause} AND timestamp >= '{start_dt}' AND timestamp <= '{end_dt}'"
+            client.query(clear_ov_sql).result()
+            
+            st.success(f"PERMANENTLY deleted data for {target_desc}.")
+            st.cache_data.clear()
+
+    if b3.button("🔄 Refresh View", use_container_width=True):
+        st.rerun()
 
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
