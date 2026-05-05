@@ -378,7 +378,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # UPDATED QUERY: Capturing temperature extremes and latest values [cite: 2, 3, 8]
+    # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes [cite: 6, 8, 9]
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
@@ -406,13 +406,13 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 NodeNum, 
                 MAX(timestamp) as last_ping,
-                -- Sensor Level Metrics [cite: 14]
+                -- Temperature Data
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN temperature ELSE NULL END) as low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN temperature ELSE NULL END) as high_24h,
-                -- Uptime Metrics
+                -- Communication & Gap Data 
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
@@ -448,26 +448,29 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
         now_local = pd.Timestamp.now(tz=display_tz)
 
-        # Helper for temperature string formatting [cite: 8, 9]
+        # Helper for temperature formatting
         def fmt_temp(val):
             if pd.isnull(val): return "N/A"
             c_val = (val - 32) * 5/9 if unit_label == "°C" else val
             return f"{round(c_val, 1)}{unit_label}"
 
-        # 1. MAIN SUMMARY TABLE (Location Level) [cite: 6, 9]
-        # Aggregating extremes across all nodes in a pipe/location
+        # 1. MAIN SUMMARY TABLE (Location Level) 
         summary_df = raw_df.groupby(['Project', 'Location']).agg(
             Nodes=('NodeNum', 'count'),
             Seen_24h=('active_24h', 'sum'),
+            Seen_6h=('active_6h', 'sum'),
             Gap_24h=('gap_24h', 'max'),
-            Min_Temp=('low_24h', 'min'),
-            Max_Temp=('high_24h', 'max'),
-            Latest_Ping=('last_ping', 'max')
+            Gap_7d=('gap_7d', 'max'),
+            Min_24h_All=('low_24h', 'min'),
+            Max_24h_All=('high_24h', 'max'),
+            Latest_Ping=('last_ping', 'max'),
+            Oldest_Ping=('last_ping', 'min')
         ).reset_index()
 
         total_df = summary_df.groupby('Project').agg({
-            'Nodes': 'sum', 'Seen_24h': 'sum', 'Gap_24h': 'max', 
-            'Min_Temp': 'min', 'Max_Temp': 'max', 'Latest_Ping': 'max'
+            'Nodes': 'sum', 'Seen_24h': 'sum', 'Seen_6h': 'sum', 
+            'Gap_24h': 'max', 'Gap_7d': 'max', 'Min_24h_All': 'min', 
+            'Max_24h_All': 'max', 'Latest_Ping': 'max', 'Oldest_Ping': 'min'
         }).reset_index()
         total_df['Location'] = 'PROJECT TOTAL'
 
@@ -482,15 +485,25 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 if latest.tzinfo is None: latest = latest.tz_localize('UTC')
                 last_seen_str = f"{round((now_local - latest.tz_convert(display_tz)).total_seconds() / 3600, 1)}h ago"
 
+            oldest = row['Oldest_Ping']
+            lag_str = "N/A"
+            if pd.notnull(oldest):
+                if oldest.tzinfo is None: oldest = oldest.tz_localize('UTC')
+                lag = round((now_local - oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
+                lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
+
             return pd.Series({
                 "Project": row['Project'], 
                 "Location": row['Location'], 
                 "Nodes": int(row['Nodes']),
-                "Min (24h)": fmt_temp(row['Min_Temp']),
-                "Max (24h)": fmt_temp(row['Max_Temp']),
-                "Seen (24h)": int(row['Seen_24h']),
-                "Last Seen": last_seen_str,
-                "Max Lag": f"{int(row['Gap_24h'])}h"
+                "Min (24h)": fmt_temp(row['Min_24h_All']),
+                "Max (24h)": fmt_temp(row['Max_24h_All']),
+                "Seen (24h)": int(row['Seen_24h']), 
+                "Seen (6h)": int(row['Seen_6h']),
+                "Last Seen": last_seen_str, 
+                "Max Lag": lag_str,
+                "Max Gap (24h)": f"{int(row['Gap_24h'])}h",
+                "Max Gap (7d)": f"{int(row['Gap_7d'])}h"
             })
 
         st.subheader("📍 Location Overview")
@@ -498,7 +511,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             lambda x: ['background-color: #f0f2f6; font-weight: bold'] * len(x) if x['Location'] == 'PROJECT TOTAL' else [''] * len(x), axis=1
         ), use_container_width=True, hide_index=True)
 
-        # 2. SENSOR DRILL-DOWN [cite: 6, 12]
+        # 2. SENSOR DRILL-DOWN 
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         
@@ -523,8 +536,12 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     "Current Temp": fmt_temp(row['current_temp']),
                     "High (24h)": fmt_temp(row['high_24h']),
                     "Low (24h)": fmt_temp(row['low_24h']),
+                    "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
+                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
                     "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%",
+                    "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
                     "Gap (24h)": f"{int(row['gap_24h'])}h",
+                    "Gap (7d)": f"{int(row['gap_7d'])}h",
                     "Status": status_str
                 })
 
