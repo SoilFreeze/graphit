@@ -1098,48 +1098,35 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.subheader("🧨 Multi-Level Surgical Cleaner")
-    st.write("Target data for deletion or masking by Project, Location, Node, or Temperature Threshold.")
-
+    
     # 1. SCOPE SELECTION
     scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
     
-    # Fetch Metadata for Selectors
     meta_q = f"SELECT NodeNum, Location FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}'"
     meta_df = client.query(meta_q).to_dataframe()
     
-    target_node = None
-    target_loc = None
-    
+    target_node, target_loc = None, None
     if scope == "Specific Location":
-        loc_list = sorted(meta_df['Location'].unique())
-        target_loc = st.selectbox("Select Location", loc_list)
+        target_loc = st.selectbox("Select Location", sorted(meta_df['Location'].unique()))
     elif scope == "Specific Node":
-        node_list = sorted(meta_df['NodeNum'].unique())
-        target_node = st.selectbox("Select Node ID", node_list)
+        target_node = st.selectbox("Select Node ID", sorted(meta_df['NodeNum'].unique()))
 
-    # 2. TIME WINDOW SELECTION
+    # 2. TIME & THRESHOLD
     st.divider()
     tc1, tc2 = st.columns(2)
     with tc1:
-        s_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=1))
-        s_time = st.time_input("Start Time", value=datetime.time(datetime(2026, 1, 1, 0, 0)))
+        s_dt = datetime.combine(st.date_input("Start Date", value=datetime.now() - timedelta(days=1)), 
+                                st.time_input("Start Time", value=datetime.time(datetime(2026,1,1,0,0))))
     with tc2:
-        e_date = st.date_input("End Date", value=datetime.now())
-        e_time = st.time_input("End Time", value=datetime.time(datetime.now()))
+        e_dt = datetime.combine(st.date_input("End Date", value=datetime.now()), 
+                                st.time_input("End Time", value=datetime.time(datetime.now())))
     
-    start_dt = datetime.combine(s_date, s_time).strftime('%Y-%m-%d %H:%M:%S')
-    end_dt = datetime.combine(e_date, e_time).strftime('%Y-%m-%d %H:%M:%S')
-
-    # 3. THRESHOLD LOGIC
-    st.divider()
-    st.write("🌡️ **Temperature Threshold Filter**")
     thr_col1, thr_col2 = st.columns([1, 2])
     operator = thr_col1.selectbox("Filter Logic", ["No Threshold", "Greater Than (>)", "Less Than (<)"])
-    
     thresh_val_input = thr_col2.number_input(f"Threshold Value ({unit_label})", value=100.0)
     thresh_val_f = (thresh_val_input * 9/5) + 32 if unit_mode == "Celsius" else thresh_val_input
 
-    # 4. CONSTRUCT SQL FILTERS
+    # 3. SQL FILTER CONSTRUCTION
     if scope == "Project Wide":
         where_clause = f"m.Project = '{selected_project}'"
     elif scope == "Specific Location":
@@ -1153,90 +1140,68 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     elif operator == "Less Than (<)":
         threshold_clause = f"AND r.temperature < {thresh_val_f}"
 
-    # 5. VERIFICATION: Status Breakdown logic 
+    # 4. VERIFICATION
     if st.button("🔍 Verify Status & Match Count", use_container_width=True):
-        with st.spinner("Analyzing point status in BigQuery..."):
-            # Joins Raw Data with Metadata and Overrides to see current 'FALSE' status 
-            status_q = f"""
-                SELECT 
-                    COALESCE(rej.approve, 'PENDING') as status,
-                    COUNT(*) as point_count
-                FROM (
-                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                    UNION ALL 
-                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                ) AS r
-                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
-                    ON r.NodeNum = rej.NodeNum 
-                    AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-                WHERE {where_clause}
-                {threshold_clause}
-                AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
-                GROUP BY status
-            """
-            try:
-                res_df = client.query(status_q).to_dataframe()
-                if not res_df.empty:
-                    st.write("### 📊 Verification Breakdown")
-                    total = res_df['point_count'].sum()
-                    st.info(f"Found **{total}** total matching records.")
-                    
-                    # Display breakdown as a table for clarity
-                    st.table(res_df.set_index('status'))
-                    
-                    masked_count = res_df[res_df['status'] == 'FALSE']['point_count'].sum()
-                    if masked_count > 0:
-                        st.warning(f"⚠️ Note: **{masked_count}** of these points are already marked as FALSE (Masked).")
-                else:
-                    st.warning("No data points found matching these criteria.")
-            except Exception as e:
-                st.error(f"Verification Error: {e}")
+        status_q = f"""
+            SELECT COALESCE(rej.approve, 'PENDING') as status, COUNT(*) as point_count
+            FROM (
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                UNION ALL 
+                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+            LEFT JOIN `{OVERRIDE_TABLE}` AS rej ON r.NodeNum = rej.NodeNum AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+            WHERE {where_clause} {threshold_clause}
+            AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
+            GROUP BY status
+        """
+        res_df = client.query(status_q).to_dataframe()
+        if not res_df.empty:
+            st.table(res_df.set_index('status'))
+        else:
+            st.warning("No matching points found.")
 
-    # 6. EXECUTION BUTTONS
+    # 5. EXECUTION: MERGE (UPSERT) LOGIC
     st.divider()
     b1, b2, b3 = st.columns(3)
     
-    if b1.button("🚫 Mask (Soft Delete)", use_container_width=True):
-        with st.spinner("Applying masks..."):
-            # Logic for Soft Delete [cite: 16]
-            mask_sql = f"""
-                INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
-                SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'FALSE'
-                FROM (
-                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                    UNION ALL 
-                    SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                ) AS r
-                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                WHERE {where_clause}
-                {threshold_clause}
-                AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
-                AND NOT EXISTS (
-                    SELECT 1 FROM `{OVERRIDE_TABLE}` x 
-                    WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                )
+    if b1.button("🚫 Mask (Force FALSE)", use_container_width=True):
+        with st.spinner("Updating statuses to FALSE..."):
+            # MERGE allows us to update existing TRUE records to FALSE 
+            upsert_sql = f"""
+                MERGE `{OVERRIDE_TABLE}` T
+                USING (
+                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
+                    FROM (
+                        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                        UNION ALL 
+                        SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                    ) AS r
+                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                    WHERE {where_clause} {threshold_clause}
+                    AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
+                ) S
+                ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
+                WHEN MATCHED THEN
+                    UPDATE SET approve = 'FALSE'
+                WHEN NOT MATCHED THEN
+                    INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'FALSE')
             """
-            client.query(mask_sql).result()
-            st.success("Soft delete applied.")
+            client.query(upsert_sql).result()
+            st.success("Successfully forced matching points to FALSE.")
             st.cache_data.clear()
 
     if b2.button("🔥 HARD PURGE (Permanent)", type="primary", use_container_width=True):
-        # Implementation for Hard Purge [cite: 13, 14]
-        with st.spinner("Executing permanent deletion..."):
-            for table in ["raw_sensorpush", "raw_lord"]:
-                purge_sql = f"""
-                    DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` r
-                    WHERE EXISTS (
-                        SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.metadata` m
-                        WHERE r.NodeNum = m.NodeNum AND {where_clause}
-                    )
-                    {threshold_clause}
-                    AND r.timestamp >= '{start_dt}' AND r.timestamp <= '{end_dt}'
-                """
-                client.query(purge_sql).result()
-            st.success("Data permanently removed from source tables.")
-            st.cache_data.clear()
+        for table in ["raw_sensorpush", "raw_lord"]:
+            purge_sql = f"""
+                DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` r
+                WHERE EXISTS (SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.metadata` m WHERE r.NodeNum = m.NodeNum AND {where_clause})
+                {threshold_clause} AND r.timestamp BETWEEN '{s_dt}' AND '{e_dt}'
+            """
+            client.query(purge_sql).result()
+        client.query(f"DELETE FROM `{OVERRIDE_TABLE}` WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE {where_clause}) AND timestamp BETWEEN '{s_dt}' AND '{e_dt}'").result()
+        st.success("Permanent purge complete.")
+        st.cache_data.clear()
 
     if b3.button("🔄 Refresh View", use_container_width=True):
         st.rerun()
