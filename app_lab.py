@@ -959,86 +959,120 @@ def render_data_intake_page(selected_project):
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # --- FIX: STABLE LOCATION FETCHING ---
-    # Fetch registry data first to ensure loc_options exists for all tabs
-    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}'"
-    reg_df = client.query(reg_q).to_dataframe()
+    # Global Registry Fetch for Selectors
+    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
+    full_reg_df = client.query(reg_q).to_dataframe()
     
-    # Fallback: If registry is empty, provide a default list to prevent NameError
-    if not reg_df.empty:
-        loc_options = ["All Locations"] + sorted(reg_df['Location'].dropna().unique().tolist())
-    else:
-        loc_options = ["All Locations"]
+    # Helper: Get currently active sensors for the selected project
+    active_project_df = full_reg_df[(full_reg_df['Project'] == selected_project) & (full_reg_df['EndDate'].isna())]
+    loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
-    # Define administrative tabs
-    tab_reg, tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
-        "📋 Registry Manager",
-        "✅ Bulk Approval", 
-        "🚫 Mask Data", 
-        "🧹 Scrub", 
-        "🧨 Surgical"
+    tab_reg, tab_bulk, tab_mask, tab_surgical = st.tabs([
+        "📋 Registry Manager", "✅ Bulk Approval", "🚫 Mask Data", "🧨 Surgical"
     ])
 
-    # --- TAB 0: REGISTRY MANAGER ---
     with tab_reg:
-        st.subheader("📋 Project & Hardware Registry")
-        reg_sub_1, reg_sub_2 = st.tabs(["🔄 Hardware Swap", "📂 Project Lifecycle"])
-        
-        with reg_sub_1:
-            st.write("### 🔄 Assign New Sensor to Location")
-            if not reg_df.empty:
-                target_loc = st.selectbox("Select Location to Update", sorted(reg_df['Location'].unique()), key="reg_swap_loc")
-                new_node = st.text_input("New Sensor Node ID (NodeNum)", key="reg_swap_node")
-                
-                c1, c2 = st.columns(2)
-                assign_type = c1.radio("Assignment Type", ["Depth (ft)", "Bank Label"], horizontal=True)
-                if assign_type == "Depth (ft)":
-                    depth_val = c2.number_input("Depth Value", value=0.0, step=0.5)
-                    bank_val = None
-                else:
-                    bank_val = c2.text_input("Bank Label (e.g., Bank E)")
-                    depth_val = None
-                
-                batt_date = st.date_input("Battery Change Date", value=datetime.now())
+        reg_mode = st.radio("Registry Action", ["🔄 Replace Sensor", "🛑 Retire System", "📥 Register New Hardware"], horizontal=True)
+        st.divider()
 
-                if st.button("🚀 Execute Hardware Swap", use_container_width=True):
-                    with st.spinner("Updating Registry..."):
-                        # Close the current active sensor (EndDate = NULL) [cite: 11]
-                        close_sql = f"""
-                            UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
-                            SET EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Swapped'
-                            WHERE Location = '{target_loc}' 
-                            AND Project = '{selected_project}' 
-                            AND EndDate IS NULL
-                        """
-                        # Insert new sensor with StartDate = Now [cite: 13]
-                        insert_sql = f"""
-                            INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-                            (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, BatteryChange, ProjectStatus)
-                            VALUES (
-                                '{selected_project}', '{target_loc}', '{new_node}', 
-                                {'NULL' if bank_val is None else f"'{bank_val}'"}, 
-                                {'NULL' if depth_val is None else depth_val}, 
-                                CURRENT_TIMESTAMP(), 'Active', '{batt_date}', 'Active'
-                            )
-                        """
-                        client.query(close_sql).result()
-                        client.query(insert_sql).result()
-                        st.success(f"Hardware Swap Complete for {target_loc}.")
-                        st.cache_data.clear()
-                        st.rerun()
+        # --- MODE 1: REPLACE SENSOR ---
+        if reg_mode == "🔄 Replace Sensor":
+            st.subheader("🔄 Hardware Swap")
+            if not active_project_df.empty:
+                # 1. Choose Location
+                target_loc = st.selectbox("Select Location (Pipe)", sorted(active_project_df['Location'].unique()))
+                
+                # 2. Choose Depth (filtered by that location)
+                loc_depths = active_project_df[active_project_df['Location'] == target_loc]
+                target_depth_row = st.selectbox(
+                    "Select Depth to Swap", 
+                    loc_depths.to_dict('records'), 
+                    format_func=lambda x: f"{x['Depth']}ft (Current ID: {x['NodeNum']})"
+                )
+                
+                old_node = target_depth_row['NodeNum']
+                depth_val = target_depth_row['Depth']
+                bank_val = target_depth_row['Bank']
+
+                # 3. Choose New Sensor (Available sensors = not in any active EndDate IS NULL slot)
+                active_nodes = full_reg_df[full_reg_df['EndDate'].isna()]['NodeNum'].tolist()
+                # Assuming you have a 'hardware_inventory' table or unique list of registered nodes
+                all_registered_q = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.hardware_inventory`"
+                try:
+                    inventory_df = client.query(all_registered_q).to_dataframe()
+                    available_nodes = inventory_df[~inventory_df['NodeNum'].isin(active_nodes)]['NodeNum'].tolist()
+                except:
+                    available_nodes = [] # Fallback if inventory table doesn't exist yet
+
+                new_node = st.selectbox("Select New (Unassigned) Sensor", available_nodes if available_nodes else ["No available sensors found"])
+                
+                if st.button("🚀 Execute Swap"):
+                    # SQL: Close old sensor and open new one 
+                    swap_sql = f"""
+                        BEGIN TRANSACTION;
+                        -- Close current sensor assignment
+                        UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
+                        SET EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Swapped'
+                        WHERE NodeNum = '{old_node}' AND Location = '{target_loc}' AND EndDate IS NULL;
+
+                        -- Open new sensor assignment at same location/depth
+                        INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                        (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus)
+                        VALUES ('{selected_project}', '{target_loc}', '{new_node}', '{bank_val}', {depth_val}, CURRENT_TIMESTAMP(), 'Active', 'Active');
+                        COMMIT;
+                    """
+                    client.query(swap_sql).result()
+                    st.success(f"Successfully swapped {old_node} with {new_node} at {target_loc} ({depth_val}ft).")
+                    st.cache_data.clear()
             else:
-                st.info("No locations found in the registry for this project.")
+                st.info("No active sensors found for this project.")
 
-        with reg_sub_2:
-            st.write("### 📂 Project Visibility")
-            current_status = reg_df['ProjectStatus'].iloc[0] if not reg_df.empty else "Unknown"
-            new_status = st.radio(f"Update status (Current: {current_status})", ["Active", "Archived"], horizontal=True)
-            if st.button(f"Update {selected_project} status"):
-                client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus = '{new_status}' WHERE Project = '{selected_project}'").result()
-                st.success("Project status updated.")
+        # --- MODE 2: RETIRE SYSTEM ---
+        elif reg_mode == "🛑 Retire System":
+            st.subheader("🛑 Archive Project & Release Sensors")
+            st.warning(f"This will archive **{selected_project}** and mark all sensors at its locations as available.")
+            
+            if st.button(f"🔥 Retire {selected_project}"):
+                retire_sql = f"""
+                    BEGIN TRANSACTION;
+                    -- Archive the project status
+                    UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
+                    SET ProjectStatus = 'Archived', EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Available'
+                    WHERE Project = '{selected_project}' AND EndDate IS NULL;
+                    COMMIT;
+                """
+                client.query(retire_sql).result()
+                st.success(f"Project {selected_project} retired. Sensors released to inventory.")
                 st.cache_data.clear()
-                st.rerun()
+
+        # --- MODE 3: REGISTER NEW HARDWARE ---
+        elif reg_mode == "📥 Register New Hardware":
+            st.subheader("📥 Hardware Registration")
+            st.write("Add new physical sensors to the inventory system.")
+            
+            reg_type = st.radio("Registration Type", ["Single Sensor", "Bulk Upload (CSV)"], horizontal=True)
+            
+            if reg_type == "Single Sensor":
+                c1, c2 = st.columns(2)
+                raw_id = c1.text_input("Long Hardware ID (e.g. SensorPush Long ID)")
+                friendly_id = c2.text_input("New Friendly Name (e.g. SP-101)")
+                
+                if st.button("💾 Register Hardware"):
+                    reg_sql = f"""
+                        INSERT INTO `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` (RawID, NodeNum, DateAdded)
+                        VALUES ('{raw_id}', '{friendly_id}', CURRENT_DATE())
+                    """
+                    client.query(reg_sql).result()
+                    st.success(f"Registered {friendly_id} (Internal ID: {raw_id})")
+            
+            else:
+                u_file = st.file_uploader("Upload Hardware CSV (Columns: RawID, NodeNum)", type=['csv'])
+                if u_file:
+                    h_df = pd.read_csv(u_file)
+                    st.dataframe(h_df.head())
+                    if st.button("📤 Upload Inventory"):
+                        client.load_table_from_dataframe(h_df, f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory").result()
+                        st.success("Hardware inventory updated.")
 
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
