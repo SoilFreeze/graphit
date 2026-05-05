@@ -985,17 +985,20 @@ def render_data_intake_page(selected_project):
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
 
-###########
-# - 10. PAGE: ADMIN TOOLS - #
-###########
-
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # Fetch Registry Data for the selected project to populate selectors
+    # --- FIX: STABLE LOCATION FETCHING ---
+    # Fetch registry data first to ensure loc_options exists for all tabs
     reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}'"
     reg_df = client.query(reg_q).to_dataframe()
     
+    # Fallback: If registry is empty, provide a default list to prevent NameError
+    if not reg_df.empty:
+        loc_options = ["All Locations"] + sorted(reg_df['Location'].dropna().unique().tolist())
+    else:
+        loc_options = ["All Locations"]
+
     # Define administrative tabs
     tab_reg, tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
         "📋 Registry Manager",
@@ -1005,17 +1008,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         "🧨 Surgical"
     ])
 
-    # --- TAB 0: REGISTRY MANAGER (New Location-Centric Logic) ---
+    # --- TAB 0: REGISTRY MANAGER ---
     with tab_reg:
         st.subheader("📋 Project & Hardware Registry")
-        st.write(f"Manage sensor assignments and lifecycle for **{selected_project}**.")
-        
         reg_sub_1, reg_sub_2 = st.tabs(["🔄 Hardware Swap", "📂 Project Lifecycle"])
         
         with reg_sub_1:
             st.write("### 🔄 Assign New Sensor to Location")
             if not reg_df.empty:
-                # Target an existing location from the registry
                 target_loc = st.selectbox("Select Location to Update", sorted(reg_df['Location'].unique()), key="reg_swap_loc")
                 new_node = st.text_input("New Sensor Node ID (NodeNum)", key="reg_swap_node")
                 
@@ -1031,8 +1031,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 batt_date = st.date_input("Battery Change Date", value=datetime.now())
 
                 if st.button("🚀 Execute Hardware Swap", use_container_width=True):
-                    with st.spinner("Updating Registry and Archives..."):
-                        # 1. Close the current active sensor for this location
+                    with st.spinner("Updating Registry..."):
+                        # Close the current active sensor (EndDate = NULL) [cite: 11]
                         close_sql = f"""
                             UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
                             SET EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Swapped'
@@ -1040,7 +1040,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             AND Project = '{selected_project}' 
                             AND EndDate IS NULL
                         """
-                        # 2. Insert the new hardware assignment
+                        # Insert new sensor with StartDate = Now [cite: 13]
                         insert_sql = f"""
                             INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
                             (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, BatteryChange, ProjectStatus)
@@ -1051,44 +1051,33 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 CURRENT_TIMESTAMP(), 'Active', '{batt_date}', 'Active'
                             )
                         """
-                        try:
-                            client.query(close_sql).result()
-                            client.query(insert_sql).result()
-                            st.success(f"✅ Hardware Swap Complete: {target_loc} is now assigned to {new_node}.")
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Registry Update Failed: {e}")
+                        client.query(close_sql).result()
+                        client.query(insert_sql).result()
+                        st.success(f"Hardware Swap Complete for {target_loc}.")
+                        st.cache_data.clear()
+                        st.rerun()
             else:
-                st.info("No existing locations found in registry. Use 'Data Intake' or manual SQL to seed the project.")
+                st.info("No locations found in the registry for this project.")
 
         with reg_sub_2:
             st.write("### 📂 Project Visibility")
             current_status = reg_df['ProjectStatus'].iloc[0] if not reg_df.empty else "Unknown"
-            st.write(f"Current Status: **{current_status}**")
-            
-            new_status = st.radio("Update Project Status", ["Active", "Archived"], horizontal=True)
-            if st.button(f"Update {selected_project} to {new_status}"):
-                update_p = f"""
-                    UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
-                    SET ProjectStatus = '{new_status}'
-                    WHERE Project = '{selected_project}'
-                """
-                client.query(update_p).result()
-                st.success(f"Project visibility updated to {new_status}.")
+            new_status = st.radio(f"Update status (Current: {current_status})", ["Active", "Archived"], horizontal=True)
+            if st.button(f"Update {selected_project} status"):
+                client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus = '{new_status}' WHERE Project = '{selected_project}'").result()
+                st.success("Project status updated.")
                 st.cache_data.clear()
                 st.rerun()
 
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
         st.subheader("✅ Range-Based Bulk Approval")
+        # Fixed: sel_loc_bulk now safely uses the loc_options defined at the top
         sel_loc_bulk = st.selectbox("Target Location", loc_options, key="bulk_loc_sel")
         
         c1, c2 = st.columns(2)
-        with c1:
-            b_start = st.date_input("Approval Start", value=datetime.now() - timedelta(days=7), key="bulk_start")
-        with c2:
-            b_end = st.date_input("Approval End", value=datetime.now(), key="bulk_end")
+        b_start = c1.date_input("Approval Start", value=datetime.now() - timedelta(days=7), key="bulk_start")
+        b_end = c2.date_input("Approval End", value=datetime.now(), key="bulk_end")
 
         if st.button(f"🚀 Approve Range", use_container_width=True):
             loc_filter = f"AND m.Location = '{sel_loc_bulk}'" if sel_loc_bulk != "All Locations" else ""
@@ -1100,17 +1089,16 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     UNION ALL 
                     SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
                 ) AS r
-                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS m ON r.NodeNum = m.NodeNum
                 WHERE m.Project = '{selected_project}' {loc_filter}
                 AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
                 AND NOT EXISTS (
                     SELECT 1 FROM `{OVERRIDE_TABLE}` x 
-                    WHERE x.NodeNum = r.NodeNum 
-                    AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                    WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
                 )
             """
             client.query(bulk_sql).result()
-            st.success("✅ Approvals applied.")
+            st.success(f"Data approved for {sel_loc_bulk}.")
             st.cache_data.clear()
 
     # --- TAB 2: MASK DATA (Updated to Location Level) ---
