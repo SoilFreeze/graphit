@@ -378,7 +378,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # Query: Calculates max gaps for both 24h and 7d periods
+    # UPDATED QUERY: Added temperature metrics (Latest, Max, Min) [cite: 8, 9]
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
@@ -386,11 +386,11 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             WHERE Project IS NOT NULL {proj_filter}
         ),
         BaseReporting AS (
-            SELECT NodeNum, timestamp 
+            SELECT NodeNum, timestamp, temperature 
             FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
             UNION ALL
-            SELECT NodeNum, timestamp 
+            SELECT NodeNum, timestamp, temperature 
             FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
         ),
@@ -398,6 +398,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 NodeNum,
                 timestamp,
+                temperature,
                 LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) as prev_ts
             FROM BaseReporting
         ),
@@ -405,9 +406,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 NodeNum, 
                 MAX(timestamp) as last_ping,
-                -- Max Gap 7D (Look at all data in the window)
+                -- Temperature Metrics
+                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                    THEN temperature ELSE NULL END) as low_24h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                    THEN temperature ELSE NULL END) as high_24h,
+                -- Max Gaps
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
-                -- Max Gap 24H (Only look at gaps where the current point is in the last 24h)
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
                 -- Seen flags
@@ -423,7 +429,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         JoinedData AS (
             SELECT 
                 m.*, 
-                h.last_ping, 
+                h.last_ping, h.current_temp, h.low_24h, h.high_24h,
                 COALESCE(h.gap_24h, 0) as gap_24h,
                 COALESCE(h.gap_7d, 0) as gap_7d,
                 COALESCE(h.active_6h, 0) as active_6h,
@@ -492,7 +498,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             lambda x: ['background-color: #f0f2f6; font-weight: bold'] * len(x) if x['Location'] == 'PROJECT TOTAL' else [''] * len(x), axis=1
         ), use_container_width=True, hide_index=True)
 
-        # 2. SENSOR DRILL-DOWN
+        # 2. SENSOR DRILL-DOWN (Updated with Temperature Metrics)
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         
@@ -510,16 +516,21 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
                     status_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
 
+                # Unit Conversion Helper 
+                def convert(val):
+                    if pd.isnull(val): return "N/A"
+                    c_val = (val - 32) * 5/9 if unit_label == "°C" else val
+                    return f"{round(c_val, 1)}{unit_label}"
+
                 return pd.Series({
                     "Node ID": row['NodeNum'],
                     "Bank": row['Bank'],
                     "Depth": f"{row['Depth']}ft",
-                    "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
-                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
+                    "Current Temp": convert(row['current_temp']),
+                    "High (24h)": convert(row['high_24h']),
+                    "Low (24h)": convert(row['low_24h']),
                     "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%",
-                    "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
                     "Gap (24h)": f"{int(row['gap_24h'])}h",
-                    "Gap (7d)": f"{int(row['gap_7d'])}h",
                     "Status": status_str
                 })
 
