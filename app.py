@@ -378,7 +378,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     if selected_project and selected_project != "All Projects":
         proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
 
-    # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes [cite: 6, 8, 9]
+    # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes [cite: 6, 8, 15]
     query = f"""
         WITH MappedNodes AS (
             SELECT TRIM(Project) as Project, NodeNum, Location, Bank, Depth
@@ -412,7 +412,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     THEN temperature ELSE NULL END) as low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN temperature ELSE NULL END) as high_24h,
-                -- Communication & Gap Data 
+                -- Communication & Gap Data
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
@@ -459,6 +459,8 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             Nodes=('NodeNum', 'count'),
             Seen_24h=('active_24h', 'sum'),
             Seen_6h=('active_6h', 'sum'),
+            Sum_Hrs_24=('hours_24h', 'sum'),
+            Sum_Hrs_7d=('hours_7d', 'sum'),
             Gap_24h=('gap_24h', 'max'),
             Gap_7d=('gap_7d', 'max'),
             Min_24h_All=('low_24h', 'min'),
@@ -469,6 +471,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
         total_df = summary_df.groupby('Project').agg({
             'Nodes': 'sum', 'Seen_24h': 'sum', 'Seen_6h': 'sum', 
+            'Sum_Hrs_24': 'sum', 'Sum_Hrs_7d': 'sum',
             'Gap_24h': 'max', 'Gap_7d': 'max', 'Min_24h_All': 'min', 
             'Max_24h_All': 'max', 'Latest_Ping': 'max', 'Oldest_Ping': 'min'
         }).reset_index()
@@ -485,23 +488,19 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 if latest.tzinfo is None: latest = latest.tz_localize('UTC')
                 last_seen_str = f"{round((now_local - latest.tz_convert(display_tz)).total_seconds() / 3600, 1)}h ago"
 
-            oldest = row['Oldest_Ping']
-            lag_str = "N/A"
-            if pd.notnull(oldest):
-                if oldest.tzinfo is None: oldest = oldest.tz_localize('UTC')
-                lag = round((now_local - oldest.tz_convert(display_tz)).total_seconds() / 3600, 1)
-                lag_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
+            # Calculate average uptime for the location 
+            avg_24h = (row['Sum_Hrs_24'] / (row['Nodes'] * 24)) * 100
+            avg_7d = (row['Sum_Hrs_7d'] / (row['Nodes'] * 168)) * 100
 
             return pd.Series({
                 "Project": row['Project'], 
                 "Location": row['Location'], 
-                "Nodes": int(row['Nodes']),
                 "Min (24h)": fmt_temp(row['Min_24h_All']),
                 "Max (24h)": fmt_temp(row['Max_24h_All']),
                 "Seen (24h)": int(row['Seen_24h']), 
-                "Seen (6h)": int(row['Seen_6h']),
+                "% Active (24h)": f"{round(avg_24h, 1)}%",
+                "% Active (7d)": f"{round(avg_7d, 1)}%",
                 "Last Seen": last_seen_str, 
-                "Max Lag": lag_str,
                 "Max Gap (24h)": f"{int(row['Gap_24h'])}h",
                 "Max Gap (7d)": f"{int(row['Gap_7d'])}h"
             })
@@ -537,7 +536,6 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     "High (24h)": fmt_temp(row['high_24h']),
                     "Low (24h)": fmt_temp(row['low_24h']),
                     "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
-                    "Seen (6h)": "✅" if row['active_6h'] == 1 else "❌",
                     "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%",
                     "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
                     "Gap (24h)": f"{int(row['gap_24h'])}h",
