@@ -985,20 +985,99 @@ def render_data_intake_page(selected_project):
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
 
+###########
+# - 10. PAGE: ADMIN TOOLS - #
+###########
+
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # 1. Fetch Location Options for the Selected Project [cite: 6, 15]
-    with st.spinner("Loading project metadata..."):
-        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
-        loc_options = ["All Locations"] + sorted(p_df['Location'].dropna().unique().tolist()) if not p_df.empty else ["All Locations"]
-
-    tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
+    # Fetch Registry Data for the selected project to populate selectors
+    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}'"
+    reg_df = client.query(reg_q).to_dataframe()
+    
+    # Define administrative tabs
+    tab_reg, tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
+        "📋 Registry Manager",
         "✅ Bulk Approval", 
         "🚫 Mask Data", 
         "🧹 Scrub", 
         "🧨 Surgical"
     ])
+
+    # --- TAB 0: REGISTRY MANAGER (New Location-Centric Logic) ---
+    with tab_reg:
+        st.subheader("📋 Project & Hardware Registry")
+        st.write(f"Manage sensor assignments and lifecycle for **{selected_project}**.")
+        
+        reg_sub_1, reg_sub_2 = st.tabs(["🔄 Hardware Swap", "📂 Project Lifecycle"])
+        
+        with reg_sub_1:
+            st.write("### 🔄 Assign New Sensor to Location")
+            if not reg_df.empty:
+                # Target an existing location from the registry
+                target_loc = st.selectbox("Select Location to Update", sorted(reg_df['Location'].unique()), key="reg_swap_loc")
+                new_node = st.text_input("New Sensor Node ID (NodeNum)", key="reg_swap_node")
+                
+                c1, c2 = st.columns(2)
+                assign_type = c1.radio("Assignment Type", ["Depth (ft)", "Bank Label"], horizontal=True)
+                if assign_type == "Depth (ft)":
+                    depth_val = c2.number_input("Depth Value", value=0.0, step=0.5)
+                    bank_val = None
+                else:
+                    bank_val = c2.text_input("Bank Label (e.g., Bank E)")
+                    depth_val = None
+                
+                batt_date = st.date_input("Battery Change Date", value=datetime.now())
+
+                if st.button("🚀 Execute Hardware Swap", use_container_width=True):
+                    with st.spinner("Updating Registry and Archives..."):
+                        # 1. Close the current active sensor for this location
+                        close_sql = f"""
+                            UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
+                            SET EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Swapped'
+                            WHERE Location = '{target_loc}' 
+                            AND Project = '{selected_project}' 
+                            AND EndDate IS NULL
+                        """
+                        # 2. Insert the new hardware assignment
+                        insert_sql = f"""
+                            INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                            (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, BatteryChange, ProjectStatus)
+                            VALUES (
+                                '{selected_project}', '{target_loc}', '{new_node}', 
+                                {'NULL' if bank_val is None else f"'{bank_val}'"}, 
+                                {'NULL' if depth_val is None else depth_val}, 
+                                CURRENT_TIMESTAMP(), 'Active', '{batt_date}', 'Active'
+                            )
+                        """
+                        try:
+                            client.query(close_sql).result()
+                            client.query(insert_sql).result()
+                            st.success(f"✅ Hardware Swap Complete: {target_loc} is now assigned to {new_node}.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Registry Update Failed: {e}")
+            else:
+                st.info("No existing locations found in registry. Use 'Data Intake' or manual SQL to seed the project.")
+
+        with reg_sub_2:
+            st.write("### 📂 Project Visibility")
+            current_status = reg_df['ProjectStatus'].iloc[0] if not reg_df.empty else "Unknown"
+            st.write(f"Current Status: **{current_status}**")
+            
+            new_status = st.radio("Update Project Status", ["Active", "Archived"], horizontal=True)
+            if st.button(f"Update {selected_project} to {new_status}"):
+                update_p = f"""
+                    UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
+                    SET ProjectStatus = '{new_status}'
+                    WHERE Project = '{selected_project}'
+                """
+                client.query(update_p).result()
+                st.success(f"Project visibility updated to {new_status}.")
+                st.cache_data.clear()
+                st.rerun()
 
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
