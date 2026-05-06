@@ -1011,16 +1011,34 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 new_node = st.selectbox("Select New (Available) Sensor", available if available else ["No hardware available"])
                 
                 if st.button("🚀 Execute Swap", use_container_width=True):
+                    # Create clean SQL values for Depth and Bank
+                    # If the value is NaN or None, it becomes the SQL keyword NULL (no quotes)
+                    sql_bank = f"'{target_row['Bank']}'" if pd.notnull(target_row['Bank']) else "NULL"
+                    sql_depth = str(target_row['Depth']) if pd.notnull(target_row['Depth']) else "NULL"
+                    
                     swap_sql = f"""
                         BEGIN TRANSACTION;
+                        -- 1. End the tenure of the old sensor
                         UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
-                        SET EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Swapped'
-                        WHERE NodeNum = '{target_row['NodeNum']}' AND Location = '{target_loc}' AND EndDate IS NULL;
-
+                        SET EndDate = CURRENT_TIMESTAMP(), 
+                            SensorStatus = 'Swapped'
+                        WHERE NodeNum = '{target_row['NodeNum']}' 
+                          AND Location = '{target_loc}' 
+                          AND EndDate IS NULL;
+                    
+                        -- 2. Open tenure for the new sensor
                         INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
                         (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus)
-                        VALUES ('{selected_project}', '{target_loc}', '{new_node}', 
-                                '{target_row['Bank']}', {target_row['Depth']}, CURRENT_TIMESTAMP(), 'Active', 'Active');
+                        VALUES (
+                            '{selected_project}', 
+                            '{target_loc}', 
+                            '{new_node}', 
+                            {sql_bank}, 
+                            {sql_depth}, 
+                            CURRENT_TIMESTAMP(), 
+                            'Active', 
+                            'Active'
+                        );
                         COMMIT;
                     """
                     client.query(swap_sql).result()
