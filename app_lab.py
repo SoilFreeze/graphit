@@ -1333,39 +1333,86 @@ def update_records(pts, df, val):
 ###########
 
 def render_depth_charts(selected_project, unit_label, display_tz):
-    st.header(f"📏 Vertical Depth Profiles: {selected_project}")
+    st.header(f"📏 Weekly Depth Profiles: {selected_project}")
+    st.write("Vertical snapshots captured every Monday at 6:00 AM.")
     
-    # Using your original portal data function to keep logic consistent
+    # Fetch engineering data (includes all nodes not explicitly deleted)
     df = get_universal_portal_data(selected_project, view_mode="engineering")
     
     if df.empty:
         st.warning("No data found for this project.")
         return
 
-    # Filter for nodes with numeric depth
-    depth_df = df[df['Depth'].notnull()].copy()
+    # Filter for nodes with numeric depth assignments
+    df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
+    depth_only = df.dropna(subset=['Depth_Num', 'Location']).copy()
     
-    if depth_df.empty:
-        st.info("No sensors with depth assignments found.")
+    if depth_only.empty:
+        st.info("No sensors with depth assignments found in the registry.")
         return
 
-    lookback = st.slider("Lookback Window (Hours)", 1, 72, 24)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback)
-    plot_df = depth_df[depth_df['timestamp'] >= cutoff].copy()
+    # 1. GROUP BY LOCATION (Pipe/Bank)
+    locations = sorted(depth_only['Location'].unique())
+    
+    for loc in locations:
+        with st.expander(f"📍 Location: {loc}", expanded=True):
+            loc_data = depth_only[depth_only['Location'] == loc].copy()
+            fig_d = go.Figure()
+            
+            # 2. GENERATE SNAPSHOTS (Last 6 Mondays)
+            # This follows your exact client portal logic for consistency
+            mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
+            
+            for m_date in mondays:
+                target_ts = m_date.replace(hour=6, minute=0, second=0)
+                # 12-hour window to find the closest reading to 6 AM
+                window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                 (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                
+                if not window.empty:
+                    # Find the single closest reading for each NodeNum
+                    snap_df = (
+                        window.assign(diff=(window['timestamp'] - target_ts).abs())
+                        .sort_values(['NodeNum', 'diff'])
+                        .drop_duplicates('NodeNum')
+                        .sort_values('Depth_Num')
+                    )
+                    
+                    # Convert temperature based on unit selection
+                    conv_temps = snap_df['temperature'].apply(
+                        lambda x: (x - 32) * 5/9 if unit_label == "°C" else x
+                    )
+                    
+                    fig_d.add_trace(go.Scatter(
+                        x=conv_temps, 
+                        y=snap_df['Depth_Num'], 
+                        mode='lines+markers', 
+                        name=target_ts.strftime('%m/%d/%y'),
+                        line=dict(shape='spline', smoothing=0.5),
+                        hovertemplate=f"Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                    ))
 
-    fig = px.scatter(
-        plot_df,
-        x='temperature',
-        y='Depth',
-        color='Location',
-        hover_data=['NodeNum', 'timestamp'],
-        title=f"Temperature vs. Depth (Last {lookback}h)",
-        labels={'temperature': f'Temp ({unit_label})', 'Depth': 'Depth (ft)'}
-    )
+            # 3. STYLING (Inverted Y-Axis for Depth)
+            y_max = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
+            
+            fig_d.update_layout(
+                plot_bgcolor='white', 
+                height=700,
+                xaxis=dict(title=f"Temperature ({unit_label})", gridcolor='Gainsboro', zeroline=False),
+                yaxis=dict(
+                    title="Depth (ft) below Surface", 
+                    range=[y_max, 0], # Surface at top
+                    dtick=10, 
+                    gridcolor='Silver',
+                    zeroline=False
+                ),
+                legend=dict(title="Snapshot Date", orientation="h", y=-0.15),
+                margin=dict(l=40, r=40, t=40, b=100)
+            )
+            
+            st.plotly_chart(fig_d, use_container_width=True, key=f"depth_snapshot_{loc}")
 
-    fig.update_yaxes(autorange="reversed", gridcolor='LightGray')
-    fig.update_layout(height=800)
-    st.plotly_chart(fig, use_container_width=True)
+
 ###########
 # - 12. MAIN ROUTER - #
 ###########
