@@ -139,7 +139,9 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             reg.Location, 
             r.timestamp, 
             r.temperature,
-            reg.NodeNum as hardware_id,
+            reg.NodeNum,
+            reg.Bank,
+            reg.Depth,
             reg.ProjectStatus
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
@@ -254,17 +256,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # 2. LABELING & SORTING
     def get_sort_info(r):
-        b = str(r.get('Bank', '')).strip()
-        d = str(r.get('Depth', '')).strip()
-        if b and b.lower() not in ['nan', 'none', '']: 
-            return f"Bank {b}", 0.0
-        if d and d.lower() not in ['nan', 'none', '']:
-            try:
-                num = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
-                return f"{d}ft", num
-            except: 
-                return f"{d}ft", 999.0
-        return f"Node {r['NodeNum']}", 1000.0
+    # Try to find the node identifier under common names
+        node_id = r.get('NodeNum') or r.get('node_id') or r.get('hardware_id') or "Unknown"
+        
+        if pd.notnull(r.get('Depth')):
+            return f"{r['Depth']}ft", float(r['Depth'])
+        if pd.notnull(r.get('Bank')):
+            return f"Bank {r['Bank']}", 999.0
+        
+        return f"Node {node_id}", 1000.0
 
     plot_df[['depth_label', 'sort_val']] = plot_df.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
     
