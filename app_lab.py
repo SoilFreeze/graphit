@@ -1197,17 +1197,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 # - 11. SURGICAL CLEANER FUNCTIONS - #
 ###########
 
-###########
-# - 11. SURGICAL CLEANER FUNCTIONS - #
-###########
-
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.subheader("🧨 Multi-Level Surgical Cleaner")
     
     # 1. SCOPE SELECTION (Pulls from Registry)
     scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
     
-    # Updated query to pull from registry instead of metadata
+    # Fetch registry to populate dropdowns
     reg_q = f"SELECT NodeNum, Location FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}'"
     reg_df = client.query(reg_q).to_dataframe()
     
@@ -1217,7 +1213,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     elif scope == "Specific Node":
         target_node = st.selectbox("Select Node ID", sorted(reg_df['NodeNum'].unique()))
 
-    # 2. TIME & THRESHOLD
+    # 2. TIME & THRESHOLD SETUP
     st.divider()
     tc1, tc2 = st.columns(2)
     with tc1:
@@ -1232,16 +1228,20 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     thresh_val_input = thr_col2.number_input(f"Threshold Value ({unit_label})", value=100.0)
     thresh_val_f = (thresh_val_input * 9/5) + 32 if unit_mode == "Celsius" else thresh_val_input
 
-    # 3. SQL FILTER CONSTRUCTION (Registry Aligned)
+    # 3. SQL LOGIC CONSTRUCTION
+    # where_clause: used for JOINs (requires m. or r. prefix)
+    # sub_where: used for simple subqueries (no prefix to avoid BadRequest errors)
     if scope == "Project Wide":
         where_clause = f"m.Project = '{selected_project}'"
+        sub_where = f"Project = '{selected_project}'"
         target_desc = f"all nodes in project '{selected_project}'"
     elif scope == "Specific Location":
         where_clause = f"m.Project = '{selected_project}' AND m.Location = '{target_loc}'"
+        sub_where = f"Project = '{selected_project}' AND Location = '{target_loc}'"
         target_desc = f"all nodes in location '{target_loc}'"
     else:
-        # Note: r refers to raw data, m refers to registry
         where_clause = f"r.NodeNum = '{target_node}'"
+        sub_where = f"NodeNum = '{target_node}'"
         target_desc = f"Node ID: {target_node}"
 
     threshold_clause = ""
@@ -1250,9 +1250,13 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     elif operator == "Less Than (<)":
         threshold_clause = f"AND r.temperature < {thresh_val_f}"
 
-    # 4. STEP 1: VERIFY STATUS & MATCH COUNT
+    # Format timestamps for BigQuery strings
+    s_str = s_dt.strftime('%Y-%m-%d %H:%M:%S')
+    e_str = e_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    # 4. STEP 1: VERIFICATION GATE
     st.divider()
-    if st.button("🔍 Step 1: Verify & Stage Deletion", use_container_width=True):
+    if st.button("🔍 Step 1: Verify Status & Match Count", use_container_width=True):
         status_q = f"""
             SELECT COALESCE(rej.approve, 'PENDING') as status, COUNT(*) as point_count
             FROM (
@@ -1263,12 +1267,12 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS m ON r.NodeNum = m.NodeNum
             LEFT JOIN `{OVERRIDE_TABLE}` AS rej ON r.NodeNum = rej.NodeNum AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
             WHERE {where_clause} {threshold_clause}
-            AND r.timestamp BETWEEN '{s_dt.strftime('%Y-%m-%d %H:%M:%S')}' AND '{e_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+            AND r.timestamp BETWEEN '{s_str}' AND '{e_str}'
             GROUP BY status
         """
         st.session_state["purge_staged_df"] = client.query(status_q).to_dataframe()
 
-    # 5. STEP 2: DYNAMIC WARNING & EXECUTION
+    # 5. STEP 2: DYNAMIC WARNING & ACTIONS
     if "purge_staged_df" in st.session_state:
         staged_df = st.session_state["purge_staged_df"]
         total_points = staged_df['point_count'].sum() if not staged_df.empty else 0
@@ -1276,17 +1280,16 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         if total_points > 0:
             st.error(f"### 🛑 FINAL WARNING: DELETION STAGED")
             st.write(f"You are about to modify **{total_points}** records for **{target_desc}**.")
-            st.write(f"**Window:** {s_dt} to {e_dt}")
-            
+            st.write(f"**Window:** {s_str} to {e_str}")
             st.table(staged_df.set_index('status'))
             
             confirmed = st.checkbox(f"I verify that I want to delete/mask these {total_points} points.", value=False)
             
             b1, b2, b3 = st.columns(3)
             
-            # --- SOFT MASK (Surgical) ---
+            # SOFT MASK: MERGE logic to force FALSE status
             if b1.button("🚫 Soft Mask (FALSE)", use_container_width=True):
-                with st.spinner("Updating statuses..."):
+                with st.spinner("Applying soft mask..."):
                     upsert_sql = f"""
                         MERGE `{OVERRIDE_TABLE}` T
                         USING (
@@ -1298,49 +1301,55 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
                             ) AS r
                             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS m ON r.NodeNum = m.NodeNum
                             WHERE {where_clause} {threshold_clause}
-                            AND r.timestamp BETWEEN '{s_dt.strftime('%Y-%m-%d %H:%M:%S')}' AND '{e_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+                            AND r.timestamp BETWEEN '{s_str}' AND '{e_str}'
                         ) S
                         ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
                         WHEN MATCHED THEN UPDATE SET approve = 'FALSE'
                         WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'FALSE')
                     """
                     client.query(upsert_sql).result()
-                    st.success("Soft mask applied.")
+                    st.success("Soft mask complete.")
                     del st.session_state["purge_staged_df"]
                     st.cache_data.clear()
                     st.rerun()
 
-            # --- HARD PURGE (Permanent) ---
+            # HARD PURGE: Permanent deletion
             if b2.button("🔥 HARD PURGE", type="primary", use_container_width=True, disabled=not confirmed):
                 with st.spinner("Executing permanent deletion..."):
-                    # Delete from raw tables
+                    # 1. Purge raw sensor tables
                     for table in ["raw_sensorpush", "raw_lord"]:
                         purge_sql = f"""
                             DELETE FROM `{PROJECT_ID}.{DATASET_ID}.{table}` r
-                            WHERE EXISTS (SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` m WHERE r.NodeNum = m.NodeNum AND {where_clause})
-                            {threshold_clause} AND r.timestamp BETWEEN '{s_dt.strftime('%Y-%m-%d %H:%M:%S')}' AND '{e_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+                            WHERE EXISTS (
+                                SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` m 
+                                WHERE r.NodeNum = m.NodeNum AND {where_clause}
+                            )
+                            {threshold_clause} 
+                            AND r.timestamp BETWEEN '{s_str}' AND '{e_str}'
                         """
                         client.query(purge_sql).result()
                     
-                    # Delete from overrides
+                    # 2. Purge override (approvals) table using clean sub_where
                     override_purge_sql = f"""
                         DELETE FROM `{OVERRIDE_TABLE}` 
-                        WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE {where_clause}) 
-                        AND timestamp BETWEEN '{s_dt.strftime('%Y-%m-%d %H:%M:%S')}' AND '{e_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+                        WHERE NodeNum IN (
+                            SELECT DISTINCT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                            WHERE {sub_where}
+                        ) 
+                        AND timestamp BETWEEN '{s_str}' AND '{e_str}'
                     """
                     client.query(override_purge_sql).result()
                     
-                    st.success("Permanent purge complete.")
+                    st.success("Data permanently purged.")
                     del st.session_state["purge_staged_df"]
                     st.cache_data.clear()
                     st.rerun()
             
-            if b3.button("❌ Cancel", use_container_width=True):
+            if b3.button("❌ Cancel Action", use_container_width=True):
                 del st.session_state["purge_staged_df"]
                 st.rerun()
         else:
             st.warning("No data points found matching these criteria.")
-
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
 
