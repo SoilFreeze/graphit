@@ -685,15 +685,11 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 
 def render_node_diagnostics(selected_project, display_tz):
     st.header(f"📡 Real-Time Commissioning: {selected_project}")
-    st.write("Checking sensor latency in 15-minute increments.")
+    st.write("Nodes categorized by check-in freshness (15-minute increments).")
 
-    # Fetch latest ping for every node in the registry
-    query = f"""
+    diag_q = f"""
         SELECT 
-            reg.Location, 
-            reg.NodeNum, 
-            reg.Depth, 
-            reg.Bank,
+            reg.Location, reg.NodeNum, reg.Depth, reg.Bank,
             MAX(r.timestamp) as last_ping
         FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` reg
         LEFT JOIN (
@@ -704,49 +700,29 @@ def render_node_diagnostics(selected_project, display_tz):
         WHERE reg.Project = '{selected_project}' AND reg.ProjectStatus = 'Active'
         GROUP BY 1, 2, 3, 4
     """
-    df = client.query(query).to_dataframe()
+    df = client.query(diag_q).to_dataframe()
     
     if df.empty:
-        st.warning("No nodes found in registry for this project.")
+        st.warning("No nodes found for this project.")
         return
 
     now = pd.Timestamp.now(tz='UTC')
 
-    def calculate_latency_category(ping):
-        if pd.isnull(ping):
-            return "❌ Never Seen"
-        
-        # Ensure ping is UTC for comparison
+    def get_latency_cat(ping):
+        if pd.isnull(ping): return "❌ Never Seen"
         if ping.tzinfo is None: ping = ping.tz_localize('UTC')
-        diff_mins = (now - ping).total_seconds() / 60
+        diff = (now - ping).total_seconds() / 60
+        if diff <= 15: return "🟢 0-15 Mins"
+        if diff <= 30: return "🟡 15-30 Mins"
+        if diff <= 45: return "🟠 30-45 Mins"
+        if diff <= 60: return "🔴 45-60 Mins"
+        return "⏳ > 1 Hour"
 
-        if diff_mins <= 15: return "🟢 0-15 Mins"
-        if diff_mins <= 30: return "🟡 15-30 Mins"
-        if diff_mins <= 45: return "🟠 30-45 Mins"
-        if diff_mins <= 60: return "🔴 45-60 Mins"
-        if diff_mins <= 1440: return "⏳ 1-24 Hours"
-        return "💀 > 24 Hours"
-
-    df['Latency Status'] = df['last_ping'].apply(calculate_latency_category)
+    df['Status'] = df['last_ping'].apply(get_latency_cat)
+    order = ["🟢 0-15 Mins", "🟡 15-30 Mins", "🟠 30-45 Mins", "🔴 45-60 Mins", "⏳ > 1 Hour", "❌ Never Seen"]
+    df['Status'] = pd.Categorical(df['Status'], categories=order, ordered=True)
     
-    # Sort by Latency (Freshness)
-    category_order = ["🟢 0-15 Mins", "🟡 15-30 Mins", "🟠 30-45 Mins", "🔴 45-60 Mins", "⏳ 1-24 Hours", "💀 > 24 Hours", "❌ Never Seen"]
-    df['Latency Status'] = pd.Categorical(df['Latency Status'], categories=category_order, ordered=True)
-    df = df.sort_values('Latency Status')
-
-    # Display Formatting
-    def color_latency(val):
-        color = 'white'
-        if "🟢" in val: color = '#d4edda'
-        elif "🟡" in val: color = '#fff3cd'
-        elif "🔴" in val: color = '#f8d7da'
-        return f'background-color: {color}'
-
-    st.dataframe(
-        df.style.applymap(color_latency, subset=['Latency Status']),
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(df.sort_values('Status'), use_container_width=True, hide_index=True)
     
 ###########
 # - 9. PAGE: DATA INTAKE LAB - #
@@ -1359,26 +1335,24 @@ def update_records(pts, df, val):
 def render_depth_charts(selected_project, unit_label, display_tz):
     st.header(f"📏 Vertical Depth Profiles: {selected_project}")
     
-    # Fetch registry-linked data
+    # Using your original portal data function to keep logic consistent
     df = get_universal_portal_data(selected_project, view_mode="engineering")
     
     if df.empty:
         st.warning("No data found for this project.")
         return
 
-    # Filter for nodes that actually have depth assignments
+    # Filter for nodes with numeric depth
     depth_df = df[df['Depth'].notnull()].copy()
     
     if depth_df.empty:
-        st.info("No sensors with depth assignments found in this project.")
+        st.info("No sensors with depth assignments found.")
         return
 
-    # User Control: Time Window
     lookback = st.slider("Lookback Window (Hours)", 1, 72, 24)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback)
     plot_df = depth_df[depth_df['timestamp'] >= cutoff].copy()
 
-    # Create the Plotly Figure
     fig = px.scatter(
         plot_df,
         x='temperature',
@@ -1389,12 +1363,9 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         labels={'temperature': f'Temp ({unit_label})', 'Depth': 'Depth (ft)'}
     )
 
-    # Invert Y-axis to represent ground depth (Surface at top)
-    fig.update_yaxes(autorange="reversed", gridcolor='LightPink')
-    fig.update_layout(height=800, legend_title_text='Pipe/Location')
-    
+    fig.update_yaxes(autorange="reversed", gridcolor='LightGray')
+    fig.update_layout(height=800)
     st.plotly_chart(fig, use_container_width=True)
-
 ###########
 # - 12. MAIN ROUTER - #
 ###########
