@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go  # This defines 'go'
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytz
 import traceback
 import io
@@ -197,16 +197,16 @@ st.sidebar.divider()
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
-# Update session state and set the active IANA string
-st.session_state["tz_selection"] = tz_mode
-display_tz = tz_lookup[tz_mode]
-
-# Timezone Display
+# 1. Define the widget first so 'tz_mode' exists
 tz_mode = st.sidebar.selectbox(
     "Timezone Display", 
     list(tz_lookup.keys()), 
     index=list(tz_lookup.keys()).index(st.session_state["tz_selection"])
 )
+
+# 2. Now you can use 'tz_mode' safely
+st.session_state["tz_selection"] = tz_mode
+display_tz = tz_lookup[tz_mode]
 
 # Global Project Selection
 if client is not None:
@@ -1393,7 +1393,7 @@ elif page == "Client Portal":
     render_client_portal(selected_project, unit_label, display_tz)
 
 elif page == "Data Intake Lab":
-    render_intake_lab()
+    render_data_intake_page(selected_project) # Use the correct function name
 
 elif page == "Admin Tools":
     # Using your original authentication flow
