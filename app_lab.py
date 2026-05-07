@@ -182,13 +182,24 @@ if "tz_selection" not in st.session_state:
     st.session_state["tz_selection"] = "Local (US/Pacific)"
 
 # --- 3. SIDEBAR WIDGETS ---
-service = st.sidebar.selectbox(
-    "📂 Page", 
-    ["🏠 Executive Summary", "🌐 Global Overview", "📊 Client Portal", "📉 Node Diagnostics", "📤 Data Intake Lab", "🛠️ Admin Tools"]
-)
+page = st.sidebar.selectbox("Navigate To:", [
+    "Executive Summary", 
+    "Global Overview", 
+    "Depth Charts",        # New Page
+    "Node Diagnostics",     # Updated to 15-min table
+    "Client Portal", 
+    "Data Intake Lab", 
+    "Admin Tools"
+])
+
+st.sidebar.divider()
 
 unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
+# Update session state and set the active IANA string
+st.session_state["tz_selection"] = tz_mode
+display_tz = tz_lookup[tz_mode]
 
 # Timezone Display
 tz_mode = st.sidebar.selectbox(
@@ -196,9 +207,6 @@ tz_mode = st.sidebar.selectbox(
     list(tz_lookup.keys()), 
     index=list(tz_lookup.keys()).index(st.session_state["tz_selection"])
 )
-# Update session state and set the active IANA string
-st.session_state["tz_selection"] = tz_mode
-display_tz = tz_lookup[tz_mode]
 
 # Global Project Selection
 if client is not None:
@@ -1395,58 +1403,33 @@ def render_depth_charts(selected_project, unit_label, display_tz):
 # - 3. MAIN NAVIGATION & EXECUTION - #
 ###########
 
-def main():
-    # ... (Keep your existing sidebar project/unit selectors here)
+# 2. PAGE EXECUTION LOGIC
+if page == "Executive Summary":
+    render_executive_summary(client, selected_project, unit_label, display_tz)
 
-    # 1. DEFINE THE NAVIGATION MENU
-    # Added "Depth Charts" to the list
-    page = st.sidebar.selectbox("Navigate To:", [
-        "🏠 Executive Summary", 
-        "🌍 Global Overview", 
-        "📏 Depth Charts",        # New Page
-        "📡 Node Diagnostics",     # Updated Table View
-        "📊 Client Portal", 
-        "📥 Data Intake Lab", 
-        "🛠️ Admin Tools"
-    ])
+elif page == "Global Overview":
+    render_global_overview(selected_project, display_tz)
 
-    st.sidebar.divider()
-    st.sidebar.caption(f"Logged in as: {st.session_state.get('user_email', 'Admin')}")
+elif page == "Depth Charts":
+    # New function call using your standard variables
+    render_depth_charts(selected_project, unit_label, display_tz)
 
-    # 2. EXECUTE THE SELECTED PAGE
-    if page == "🏠 Executive Summary":
-        render_executive_summary(client, selected_project, unit_label, display_tz)
+elif page == "Node Diagnostics":
+    # Updated function call for the 15-minute diagnostic table
+    render_node_diagnostics(selected_project, display_tz)
 
-    elif page == "🌍 Global Overview":
-        # Ensure your global overview is pointing to the new registry-linked data
-        render_global_overview(selected_project, display_tz)
+elif page == "Client Portal":
+    render_client_portal(selected_project, unit_label, display_tz)
 
-    elif page == "📏 Depth Charts":
-        # Loads the new vertical profile view
-        render_depth_charts(selected_project, unit_label, display_tz)
+elif page == "Data Intake Lab":
+    render_intake_lab()
 
-    elif page == "📡 Node Diagnostics":
-        # Loads the new 15-minute resolution table for site setup
-        render_node_diagnostics(selected_project, display_tz)
-
-    elif page == "📊 Client Portal":
-        # Your portal code that only shows "Approved = TRUE" data
-        render_client_portal(selected_project, unit_label, display_tz)
-
-    elif page == "📥 Data Intake Lab":
-        render_intake_lab()
-
-    elif page == "🛠️ Admin Tools":
-        # The password-protected section for registry swaps and purging
-        if st.session_state.get('authenticated', False):
-            render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
-        else:
-            # Simple password gate for admin access
-            pwd = st.text_input("Enter Admin Password", type="password")
-            if pwd == st.secrets["admin_password"]:
-                st.session_state['authenticated'] = True
-                st.rerun()
-
-# Execute the app
-if __name__ == "__main__":
-    main()
+elif page == "Admin Tools":
+    # Using your original authentication flow
+    if st.session_state.get('authenticated', False):
+        render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    else:
+        pwd = st.text_input("Enter Admin Password", type="password")
+        if pwd == st.secrets["admin_password"]:
+            st.session_state['authenticated'] = True
+            st.rerun()
