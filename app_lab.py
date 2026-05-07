@@ -1336,7 +1336,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     st.header(f"📏 Weekly Depth Profiles: {selected_project}")
     st.write("Vertical snapshots captured every Monday at 6:00 AM.")
     
-    # Fetch engineering data (includes all nodes not explicitly deleted)
+    # Fetch data using the standard engine
     df = get_universal_portal_data(selected_project, view_mode="engineering")
     
     if df.empty:
@@ -1351,7 +1351,18 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         st.info("No sensors with depth assignments found in the registry.")
         return
 
-    # 1. GROUP BY LOCATION (Pipe/Bank)
+    # --- 1. AXIS RANGE & REFERENCE LINE CONFIGURATION ---
+    # Define values in Fahrenheit first
+    x_min_f, x_max_f, ref_f = -20, 60, 32.0
+    
+    # Convert if the user has selected Celsius
+    if unit_label == "°C":
+        x_min = (x_min_f - 32) * 5/9
+        x_max = (x_max_f - 32) * 5/9
+        ref_val = (ref_f - 32) * 5/9
+    else:
+        x_min, x_max, ref_val = x_min_f, x_max_f, ref_f
+
     locations = sorted(depth_only['Location'].unique())
     
     for loc in locations:
@@ -1359,18 +1370,15 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             loc_data = depth_only[depth_only['Location'] == loc].copy()
             fig_d = go.Figure()
             
-            # 2. GENERATE SNAPSHOTS (Last 6 Mondays)
-            # This follows your exact client portal logic for consistency
+            # 2. GENERATE WEEKLY SNAPSHOTS
             mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
             
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
-                # 12-hour window to find the closest reading to 6 AM
                 window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                  (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                 
                 if not window.empty:
-                    # Find the single closest reading for each NodeNum
                     snap_df = (
                         window.assign(diff=(window['timestamp'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
@@ -1378,7 +1386,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         .sort_values('Depth_Num')
                     )
                     
-                    # Convert temperature based on unit selection
                     conv_temps = snap_df['temperature'].apply(
                         lambda x: (x - 32) * 5/9 if unit_label == "°C" else x
                     )
@@ -1392,16 +1399,31 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         hovertemplate=f"Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
-            # 3. STYLING (Inverted Y-Axis for Depth)
+            # --- 3. ADD THE 32° LINE ---
+            fig_d.add_vline(
+                x=ref_val, 
+                line_dash="dash", 
+                line_color="RoyalBlue", 
+                annotation_text="Freezing", 
+                annotation_position="top right"
+            )
+
+            # --- 4. STYLING & AXIS LIMITS ---
             y_max = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
             
             fig_d.update_layout(
                 plot_bgcolor='white', 
-                height=700,
-                xaxis=dict(title=f"Temperature ({unit_label})", gridcolor='Gainsboro', zeroline=False),
+                height=750,
+                xaxis=dict(
+                    title=f"Temperature ({unit_label})", 
+                    gridcolor='Gainsboro', 
+                    zeroline=False,
+                    range=[x_min, x_max],  # Fixed Temp Range
+                    fixedrange=False
+                ),
                 yaxis=dict(
                     title="Depth (ft) below Surface", 
-                    range=[y_max, 0], # Surface at top
+                    range=[y_max, 0], # Inverted Surface-Down View
                     dtick=10, 
                     gridcolor='Silver',
                     zeroline=False
