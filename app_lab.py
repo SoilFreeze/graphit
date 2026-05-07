@@ -672,121 +672,74 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
         )
             
 ###########
-# - 8. PAGE: NODE DIAGNOSTICS - #
+# - 7. PAGE: NODE DIAGNOSTICS - #
 ###########
 
-def render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs):
+def render_node_diagnostics(selected_project, display_tz):
+    st.header(f"📡 Real-Time Commissioning: {selected_project}")
+    st.write("Checking sensor latency in 15-minute increments.")
+
+    # Fetch latest ping for every node in the registry
+    query = f"""
+        SELECT 
+            reg.Location, 
+            reg.NodeNum, 
+            reg.Depth, 
+            reg.Bank,
+            MAX(r.timestamp) as last_ping
+        FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` reg
+        LEFT JOIN (
+            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ) r ON reg.NodeNum = r.NodeNum
+        WHERE reg.Project = '{selected_project}' AND reg.ProjectStatus = 'Active'
+        GROUP BY 1, 2, 3, 4
     """
-    Engineering-level view. Shows everything (Pending, Masked, Approved).
-    """
-    st.header(f"📉 Node Diagnostics: {selected_project}")
+    df = client.query(query).to_dataframe()
     
-    if not selected_project or selected_project == "All Projects":
-        st.info("💡 Select a specific project in the sidebar.")
+    if df.empty:
+        st.warning("No nodes found in registry for this project.")
         return
 
-    with st.spinner("🔍 Syncing diagnostic streams..."):
-        # Fetching data using the engineering view mode [cite: 16]
-        all_data = get_universal_portal_data(selected_project, view_mode="engineering")
-    
-    if all_data.empty:
-        st.warning(f"No diagnostic data found for project {selected_project}.")
-        return
+    now = pd.Timestamp.now(tz='UTC')
 
-    # 1. Selection Controls
-    loc_options = sorted(all_data['Location'].dropna().unique())
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        sel_loc = st.selectbox("Select Pipe / Bank to Analyze", loc_options, key="diag_loc_select")
-    with c2:
-        weeks_view = st.sidebar.slider("Lookback (Weeks)", 1, 12, 2, key="diag_weeks_slider")
-    with c3:
-        show_profile = st.checkbox("Show Vertical Profile", value=True)
-            
-    # 2. Localize 'Now' and calculate window
-    now_local = pd.Timestamp.now(tz=display_tz)
-    start_view = now_local - timedelta(weeks=weeks_view)
-    
-    # Filter data for the selected Location
-    # Ensure df_diag is defined before any sorting or grouping operations
-    df_diag = all_data[all_data['Location'] == sel_loc].copy()
-    
-    if df_diag.empty:
-        st.info(f"No data points found for location: {sel_loc}")
-        return
+    def calculate_latency_category(ping):
+        if pd.isnull(ping):
+            return "❌ Never Seen"
+        
+        # Ensure ping is UTC for comparison
+        if ping.tzinfo is None: ping = ping.tz_localize('UTC')
+        diff_mins = (now - ping).total_seconds() / 60
 
-    # --- 1. ENGINEERING TIMELINE ---
-    st.subheader("🕒 Engineering Timeline")
-    fig_time = build_high_speed_graph(
-        df_diag, f"Diagnostic Stream: {sel_loc}", 
-        start_view, now_local + timedelta(hours=2), 
-        tuple(active_refs), unit_mode, unit_label, display_tz
+        if diff_mins <= 15: return "🟢 0-15 Mins"
+        if diff_mins <= 30: return "🟡 15-30 Mins"
+        if diff_mins <= 45: return "🟠 30-45 Mins"
+        if diff_mins <= 60: return "🔴 45-60 Mins"
+        if diff_mins <= 1440: return "⏳ 1-24 Hours"
+        return "💀 > 24 Hours"
+
+    df['Latency Status'] = df['last_ping'].apply(calculate_latency_category)
+    
+    # Sort by Latency (Freshness)
+    category_order = ["🟢 0-15 Mins", "🟡 15-30 Mins", "🟠 30-45 Mins", "🔴 45-60 Mins", "⏳ 1-24 Hours", "💀 > 24 Hours", "❌ Never Seen"]
+    df['Latency Status'] = pd.Categorical(df['Latency Status'], categories=category_order, ordered=True)
+    df = df.sort_values('Latency Status')
+
+    # Display Formatting
+    def color_latency(val):
+        color = 'white'
+        if "🟢" in val: color = '#d4edda'
+        elif "🟡" in val: color = '#fff3cd'
+        elif "🔴" in val: color = '#f8d7da'
+        return f'background-color: {color}'
+
+    st.dataframe(
+        df.style.applymap(color_latency, subset=['Latency Status']),
+        use_container_width=True,
+        hide_index=True
     )
-    st.plotly_chart(fig_time, use_container_width=True)
-
-    # --- 2. VERTICAL PROFILE ---
-    if show_profile:
-        st.divider()
-        st.subheader("📏 Vertical Temperature Profile")
-        df_diag['Depth_Num'] = pd.to_numeric(df_diag['Depth'], errors='coerce')
-        profile_df = df_diag.dropna(subset=['Depth_Num']).copy()
-
-        if not profile_df.empty:
-            latest_snap = profile_df.sort_values('timestamp').groupby('Depth_Num').last().reset_index()
-            
-            latest_snap['conv_temp'] = latest_snap['temperature'].apply(
-                lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
-            )
-
-            fig_d = go.Figure()
-            fig_d.add_trace(go.Scatter(
-                x=latest_snap['conv_temp'], 
-                y=latest_snap['Depth_Num'], 
-                mode='lines+markers',
-                name="Current State",
-                line=dict(shape='spline', smoothing=0.5, width=3, color='RoyalBlue'),
-                marker=dict(size=10, symbol='diamond')
-            ))
-
-            y_limit = int(((profile_df['Depth_Num'].max() // 10) + 1) * 10)
-            fig_d.update_layout(
-                plot_bgcolor='white', height=600,
-                xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
-                yaxis=dict(title="Depth (ft)", range=[y_limit, 0], gridcolor='Silver')
-            )
-            st.plotly_chart(fig_d, use_container_width=True)
-
-    # --- 3. COMMUNICATION HEALTH TABLE ---
-    st.divider()
-    st.subheader("📋 Sensor Communication Health")
     
-    # Correctly identify latest nodes within the defined df_diag
-    latest_nodes = df_diag.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-    
-    summary_rows = []
-    for _, row in latest_nodes.iterrows():
-        # Ensure timestamp is localized to Pacific/Selected TZ for math
-        ts_local = row['timestamp'].tz_convert(display_tz) if row['timestamp'].tzinfo else row['timestamp'].tz_localize('UTC').tz_convert(display_tz)
-        hrs_ago = int((now_local - ts_local).total_seconds() / 3600)
-        
-        status_icon = "🔴" if hrs_ago > 24 else ("🟢" if hrs_ago < 6 else "🟡")
-        
-        db_status = str(row.get('is_approved', 'PENDING')).upper()
-        status_label = "✅ Approved" if db_status == "TRUE" else ("🚫 Masked" if db_status == "MASKED" else "⏳ Pending")
-
-        conv_temp = (row['temperature'] - 32) * 5/9 if unit_mode == "Celsius" else row['temperature']
-
-        summary_rows.append({
-            "Node": row['NodeNum'],
-            "Last Value": f"{round(conv_temp, 1)}{unit_label}",
-            "Last Seen": f"{hrs_ago}h ago {status_icon}",
-            "Admin Status": status_label
-        })
-    
-    if summary_rows:
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-    else:
-        st.info("No communication logs available for this selection.")
 ###########
 # - 9. PAGE: DATA INTAKE LAB - #
 ###########
@@ -1350,6 +1303,8 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
                 st.rerun()
         else:
             st.warning("No data points found matching these criteria.")
+            
+###########
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
 
@@ -1389,34 +1344,109 @@ def update_records(pts, df, val):
         except Exception as e:
             st.error(f"Database Error: {e}")
 
+###########
+# - 12. PAGE: DEPTH CHARTS - #
+###########
 
+def render_depth_charts(selected_project, unit_label, display_tz):
+    st.header(f"📏 Vertical Depth Profiles: {selected_project}")
+    
+    # Fetch registry-linked data
+    df = get_universal_portal_data(selected_project, view_mode="engineering")
+    
+    if df.empty:
+        st.warning("No data found for this project.")
+        return
+
+    # Filter for nodes that actually have depth assignments
+    depth_df = df[df['Depth'].notnull()].copy()
+    
+    if depth_df.empty:
+        st.info("No sensors with depth assignments found in this project.")
+        return
+
+    # User Control: Time Window
+    lookback = st.slider("Lookback Window (Hours)", 1, 72, 24)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback)
+    plot_df = depth_df[depth_df['timestamp'] >= cutoff].copy()
+
+    # Create the Plotly Figure
+    fig = px.scatter(
+        plot_df,
+        x='temperature',
+        y='Depth',
+        color='Location',
+        hover_data=['NodeNum', 'timestamp'],
+        title=f"Temperature vs. Depth (Last {lookback}h)",
+        labels={'temperature': f'Temp ({unit_label})', 'Depth': 'Depth (ft)'}
+    )
+
+    # Invert Y-axis to represent ground depth (Surface at top)
+    fig.update_yaxes(autorange="reversed", gridcolor='LightPink')
+    fig.update_layout(height=800, legend_title_text='Pipe/Location')
+    
+    st.plotly_chart(fig, use_container_width=True)
 
 ###########
 # - 12. MAIN ROUTER - #
 ###########
 
-if service == "🌐 Global Overview":
-    # Pass both project and timezone for rendering
-    render_global_overview(selected_project, display_tz) 
+###########
+# - 3. MAIN NAVIGATION & EXECUTION - #
+###########
 
-elif service == "🏠 Executive Summary":
-    # Ensure client and timezone are passed for health audit [cite: 6]
-    render_executive_summary(client, selected_project, unit_label, display_tz) 
+def main():
+    # ... (Keep your existing sidebar project/unit selectors here)
 
-elif service == "📊 Client Portal":
-    # Handles timeline and depth profile tabs [cite: 7]
-    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    # 1. DEFINE THE NAVIGATION MENU
+    # Added "Depth Charts" to the list
+    page = st.sidebar.selectbox("Navigate To:", [
+        "🏠 Executive Summary", 
+        "🌍 Global Overview", 
+        "📏 Depth Charts",        # New Page
+        "📡 Node Diagnostics",     # Updated Table View
+        "📊 Client Portal", 
+        "📥 Data Intake Lab", 
+        "🛠️ Admin Tools"
+    ])
 
-elif service == "📉 Node Diagnostics":
-    # Engineering view for sensor communication health 
-    render_node_diagnostics(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    st.sidebar.divider()
+    st.sidebar.caption(f"Logged in as: {st.session_state.get('user_email', 'Admin')}")
 
-elif service == "📤 Data Intake Lab":
-    # Gatekept by admin check 
-    if check_admin_access(service):
-        render_data_intake_page(selected_project)
+    # 2. EXECUTE THE SELECTED PAGE
+    if page == "🏠 Executive Summary":
+        render_executive_summary(client, selected_project, unit_label, display_tz)
 
-elif service == "🛠️ Admin Tools":
-    # Gatekept by admin check 
-    if check_admin_access(service):
-        render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    elif page == "🌍 Global Overview":
+        # Ensure your global overview is pointing to the new registry-linked data
+        render_global_overview(selected_project, display_tz)
+
+    elif page == "📏 Depth Charts":
+        # Loads the new vertical profile view
+        render_depth_charts(selected_project, unit_label, display_tz)
+
+    elif page == "📡 Node Diagnostics":
+        # Loads the new 15-minute resolution table for site setup
+        render_node_diagnostics(selected_project, display_tz)
+
+    elif page == "📊 Client Portal":
+        # Your portal code that only shows "Approved = TRUE" data
+        render_client_portal(selected_project, unit_label, display_tz)
+
+    elif page == "📥 Data Intake Lab":
+        render_intake_lab()
+
+    elif page == "🛠️ Admin Tools":
+        # The password-protected section for registry swaps and purging
+        if st.session_state.get('authenticated', False):
+            render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+        else:
+            # Simple password gate for admin access
+            pwd = st.text_input("Enter Admin Password", type="password")
+            if pwd == st.secrets["admin_password"]:
+                st.session_state['authenticated'] = True
+                st.rerun()
+
+# Execute the app
+if __name__ == "__main__":
+    main()
