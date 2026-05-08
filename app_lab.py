@@ -568,43 +568,28 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
         return
     
     with st.spinner("Loading approved data..."):
-        # The portal specifically filters for manual_rejections.status = 'TRUE' [cite: 15, 16]
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
-    # DEBUG: Help identify if data exists but is being filtered out later
-    if not p_df.empty:
-        st.caption(f"✅ Found {len(p_df)} approved records for {selected_project}.")
-    else:
-        st.warning(f"⚠️ No data marked as 'Approved' found for {selected_project}. Check the Admin Tools.")
+    if p_df.empty:
+        st.warning(f"⚠️ No data marked as 'Approved' found for {selected_project}.")
         return
 
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
     with tab_time:
         weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
-        end_view = pd.Timestamp.now(tz='UTC')
-        start_view = end_view - timedelta(weeks=weeks_view)
+        now_utc = pd.Timestamp.now(tz='UTC')
+        start_view = now_utc - timedelta(weeks=weeks_view)
         
-        # Performance: Pre-sort locations
         locations = sorted(p_df['Location'].dropna().unique())
-        
-        if not locations:
-            st.error("Data loaded, but no 'Location' metadata was found to group the charts.")
-        
         for loc in locations:
             with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
                 loc_data = p_df[p_df['Location'] == loc].copy()
-                
-                # Check if this specific location has data in the selected time window
-                if loc_data.empty:
-                    st.write("No data available for this specific location.")
-                    continue
-
                 fig = build_high_speed_graph(
                     df=loc_data, 
                     title=f"{loc} Approved Data", 
                     start_view=start_view, 
-                    end_view=end_view, 
+                    end_view=now_utc, 
                     active_refs=tuple(active_refs), 
                     unit_mode=unit_mode, 
                     unit_label=unit_label, 
@@ -614,7 +599,14 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
-        # Ensure Depth is numeric for proper Y-axis scaling [cite: 6, 9]
+        
+        # --- 1. AXIS CONFIGURATION (Matching Engineering Depth Charts) ---
+        x_min_f, x_max_f, ref_f = -20, 60, 32.0
+        if unit_label == "°C":
+            x_min, x_max, ref_val = (x_min_f-32)*5/9, (x_max_f-32)*5/9, 0.0
+        else:
+            x_min, x_max, ref_val = x_min_f, x_max_f, ref_f
+
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
         
@@ -623,12 +615,12 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                 loc_data = depth_only[depth_only['Location'] == loc].copy()
                 fig_d = go.Figure()
                 
+                # Snapshot Logic: Last 6 Mondays at 6 AM
                 mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
-                
                 for m_date in mondays:
                     target_ts = m_date.replace(hour=6, minute=0, second=0)
                     window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                      (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                                     (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                     
                     if not window.empty:
                         snap_df = (
@@ -650,33 +642,31 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                             line=dict(shape='spline', smoothing=0.5)
                         ))
 
+                # Add 32 degree line
+                fig_d.add_vline(x=ref_val, line_dash="dash", line_color="RoyalBlue", 
+                                annotation_text="Freezing", annotation_position="top right")
+
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
                 fig_d.update_layout(
                     plot_bgcolor='white', height=600,
-                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
+                    xaxis=dict(title=f"Temp ({unit_label})", range=[x_min, x_max], gridcolor='Gainsboro'),
                     yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver'),
                     legend=dict(orientation="h", y=-0.2)
                 )
-                st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
+                st.plotly_chart(fig_d, use_container_width=True, key=f"portal_depth_{loc}")
 
     with tab_table:
-        # Latest Snapshot Table (Fastest way to group latest data)
         latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        
-        # Efficient vector conversion
         latest['Current Temp'] = latest['temperature'].apply(
             lambda x: f"{round((x - 32) * 5/9 if unit_mode == 'Celsius' else x, 1)}{unit_label}"
         )
-        
         latest['Position'] = latest.apply(
             lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" 
             else f"{r.get('Depth', '??')} ft", axis=1
         )
-        
         st.dataframe(
             latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), 
-            use_container_width=True, 
-            hide_index=True
+            use_container_width=True, hide_index=True
         )
             
 ###########
