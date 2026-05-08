@@ -188,8 +188,9 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False):
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Stabilized Engine: Optimized for Mobile with bottom-horizontal legends 
-    and a 1-day X-axis buffer.
+    Unified Responsive Engine: 
+    - Desktop: Side legend, wide margins.
+    - Mobile: Bottom legend via CSS, narrow margins, 1-day X-axis buffer.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -199,15 +200,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 1. TIMEZONE & UNIT CONVERSION
     if plot_df['timestamp'].dt.tz is None:
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
-    
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Timezone-aware endpoints
     start_local = start_view.tz_convert(display_tz) if start_view.tzinfo else start_view.tz_localize('UTC').tz_convert(display_tz)
     end_local = end_view.tz_convert(display_tz) if end_view.tzinfo else end_view.tz_localize('UTC').tz_convert(display_tz)
     now_local = pd.Timestamp.now(tz=display_tz)
     
-    # Apply 1-day buffer for visual spacing
+    # 1-day buffer for visual comfort
     range_start = start_local - pd.Timedelta(days=1)
     range_end = end_local + pd.Timedelta(days=1)
     
@@ -219,7 +218,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # 2. LABELING & SORTING
     def get_sort_info(r):
-        node_id = r.get('NodeNum') or r.get('node_id') or "Unknown"
+        node_id = r.get('NodeNum') or "Unknown"
         if pd.notnull(r.get('Depth')):
             return f"{r['Depth']}ft", float(r['Depth'])
         if pd.notnull(r.get('Bank')):
@@ -244,7 +243,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
             if not is_surgical:
-                # Gap handling: break lines if > 6 hours
                 s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
                 gap_mask = s_df['gap_hrs'] > 6.0
                 if gap_mask.any():
@@ -266,23 +264,20 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 hovertemplate=f"<b>{group_lbl} ({sn})</b>: %{{y:.1f}}{unit_label}<extra></extra>"
             ))
 
-    # 4. REFERENCE LINES & NOW MARKER
+    # 4. REFERENCE LINES
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right")
-
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 5. MOBILE-OPTIMIZED LAYOUT
+    # 5. LAYOUT (Defaulting to Desktop View)
     fig.update_layout(
         title={'text': f"<b>{title}</b>", 'x': 0},
-        plot_bgcolor='white', 
-        hovermode="x unified", 
-        height=650, # Slightly taller to accommodate bottom legend
-        margin=dict(t=80, l=50, r=20, b=120), # Large bottom margin for legend
+        plot_bgcolor='white', hovermode="x unified", height=600,
+        margin=dict(t=80, l=50, r=160, b=50), # Large right margin for desktop legend
         xaxis=dict(
-            range=[range_start, range_end], # 1-day buffer applied here
+            range=[range_start, range_end], 
             showline=True, mirror=True, linecolor='black',
             showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1,
             minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
@@ -293,18 +288,39 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
             minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
         ),
-        # LEGEND: Bottom-horizontal for Mobile
         legend=dict(
-            orientation="h",
+            orientation="v",
+            x=1.02, 
+            y=1,
+            xanchor="left",
             yanchor="top",
-            y=-0.2, 
-            xanchor="center",
-            x=0.5,
             title="Sensors"
         )
     )
+
+    # 6. INJECT RESPONSIVE CSS
+    # This forces the Plotly legend to the bottom on screens smaller than 768px
+    st.markdown("""
+        <style>
+        @media (max-width: 768px) {
+            /* Force the plot to take full width */
+            .main .block-container {
+                padding-left: 1rem !important;
+                padding-right: 1rem !important;
+            }
+            /* Target Plotly legend container */
+            .js-plotly-plot .legend {
+                transform: translate(0px, 120px) !important; /* Push below graph */
+            }
+            /* Adjust the plot margin for mobile via the SVG container if needed */
+            .js-plotly-plot .main-svg {
+                margin-bottom: 100px !important;
+            }
+        }
+        </style>
+    """, unsafe_allow_html=True)
     
-    # Add vertical Monday lines
+    # Add Monday lines
     mondays = pd.date_range(start=range_start, end=range_end, freq='W-MON', tz=display_tz)
     for mon in mondays:
         fig.add_vline(x=mon, line_width=2, line_color="dimgray", layer="below")
