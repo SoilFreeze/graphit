@@ -188,8 +188,8 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False):
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Stabilized Engine: Handles timezone synchronization for start/end endpoints 
-    to prevent AssertionError in pd.date_range.
+    Stabilized Engine: Optimized for Mobile with bottom-horizontal legends 
+    and a 1-day X-axis buffer.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -197,17 +197,19 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df = df.copy()
     
     # 1. TIMEZONE & UNIT CONVERSION
-    # Ensure the dataframe timestamp is UTC-aware before conversion
     if plot_df['timestamp'].dt.tz is None:
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
     
-    # Convert dataframe to selected local timezone
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Convert endpoints to the SAME timezone as display_tz to prevent AssertionError
+    # Timezone-aware endpoints
     start_local = start_view.tz_convert(display_tz) if start_view.tzinfo else start_view.tz_localize('UTC').tz_convert(display_tz)
     end_local = end_view.tz_convert(display_tz) if end_view.tzinfo else end_view.tz_localize('UTC').tz_convert(display_tz)
     now_local = pd.Timestamp.now(tz=display_tz)
+    
+    # Apply 1-day buffer for visual spacing
+    range_start = start_local - pd.Timedelta(days=1)
+    range_end = end_local + pd.Timedelta(days=1)
     
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
@@ -217,14 +219,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # 2. LABELING & SORTING
     def get_sort_info(r):
-    # Try to find the node identifier under common names
-        node_id = r.get('NodeNum') or r.get('node_id') or r.get('hardware_id') or "Unknown"
-        
+        node_id = r.get('NodeNum') or r.get('node_id') or "Unknown"
         if pd.notnull(r.get('Depth')):
             return f"{r['Depth']}ft", float(r['Depth'])
         if pd.notnull(r.get('Bank')):
             return f"Bank {r['Bank']}", 999.0
-        
         return f"Node {node_id}", 1000.0
 
     plot_df[['depth_label', 'sort_val']] = plot_df.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
@@ -245,6 +244,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
             if not is_surgical:
+                # Gap handling: break lines if > 6 hours
                 s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
                 gap_mask = s_df['gap_hrs'] > 6.0
                 if gap_mask.any():
@@ -274,13 +274,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 5. GRID HIERARCHY & LAYOUT
+    # 5. MOBILE-OPTIMIZED LAYOUT
     fig.update_layout(
         title={'text': f"<b>{title}</b>", 'x': 0},
-        plot_bgcolor='white', hovermode="x unified", height=600,
-        margin=dict(t=80, l=50, r=180, b=50),
+        plot_bgcolor='white', 
+        hovermode="x unified", 
+        height=650, # Slightly taller to accommodate bottom legend
+        margin=dict(t=80, l=50, r=20, b=120), # Large bottom margin for legend
         xaxis=dict(
-            range=[start_local, end_local], 
+            range=[range_start, range_end], # 1-day buffer applied here
             showline=True, mirror=True, linecolor='black',
             showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1,
             minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
@@ -291,11 +293,19 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
             minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
         ),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
+        # LEGEND: Bottom-horizontal for Mobile
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.2, 
+            xanchor="center",
+            x=0.5,
+            title="Sensors"
+        )
     )
     
-    # FIXED: Generate Monday lines using endpoints already converted to display_tz
-    mondays = pd.date_range(start=start_local, end=end_local, freq='W-MON', tz=display_tz)
+    # Add vertical Monday lines
+    mondays = pd.date_range(start=range_start, end=range_end, freq='W-MON', tz=display_tz)
     for mon in mondays:
         fig.add_vline(x=mon, line_width=2, line_color="dimgray", layer="below")
 
