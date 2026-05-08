@@ -52,21 +52,20 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Standardized Data Engine for all pages. 
-    Joins Raw Data + Project Registry + Manual Rejections.
+    Unified Data Engine: Joins Raw Data + Registry + Manual Rejections.
     """
-    # 1. Determine Visibility Cutoff
+    # 1. Get visibility mask for the project
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    # 2. Define Query Filter based on User Role
+    # 2. DEFINE THE FILTER (Crucial: This must happen before the query string)
     if view_mode == "client":
-        # Client sees only explicitly Approved (TRUE) data after the mask cutoff
+        # Client sees only explicitly Approved (TRUE) data after the cutoff
         query_filter = f"AND rej.approve = 'TRUE' AND r.timestamp >= '{cutoff}'"
     else:
-        # Engineering/Admin sees everything except explicit deletions (FALSE)
+        # Engineering sees everything except explicit deletions (FALSE)
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
-    # 3. Construct the Registry-Centric Query
+    # 3. CONSTRUCT THE REGISTRY-CENTRIC QUERY
     query = f"""
         SELECT 
             reg.Location, 
@@ -81,6 +80,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
+        -- JOIN TO REGISTRY INSTEAD OF METADATA
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS reg 
             ON r.NodeNum = reg.NodeNum
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
@@ -88,7 +88,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE reg.Project = '{project_id}'
         {query_filter}
-        -- Historical Integrity: Ensure the sensor was actually at this location at this time
+        -- Time-Fence Logic: Match data to the window the sensor was at this spot
         AND r.timestamp >= reg.StartDate 
         AND (r.timestamp <= reg.EndDate OR reg.EndDate IS NULL)
         ORDER BY reg.Location ASC, r.timestamp ASC
@@ -98,19 +98,17 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         df = client.query(query).to_dataframe()
         
         if not df.empty:
-            # --- CRITICAL: DATA CLEANING ---
-            # Ensure Depth is a number (float) or NULL, never a string
+            # Force numeric types to prevent "str vs float" errors later in the app
             df['Depth'] = pd.to_numeric(df['Depth'], errors='coerce')
-            # Ensure temperature is a number
             df['temperature'] = pd.to_numeric(df['temperature'], errors='coerce')
             
-            # Ensure timestamp is UTC-aware for the graphing engine
+            # Localize to UTC if not already aware
             if df['timestamp'].dt.tz is None:
                 df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
                 
         return df
     except Exception as e:
-        st.error(f"Universal Data Engine Error: {e}")
+        st.error(f"Registry Engine Error: {e}")
         return pd.DataFrame()
         
 def check_admin_access(service_name):
