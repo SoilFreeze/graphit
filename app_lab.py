@@ -114,45 +114,74 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 ###########################
 #- 3. SIDEBAR UI & STATE -#
 ###########################
+###########################
+#- 3. SIDEBAR UI & STATE -#
+###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# --- 1. INITIALIZE FALLBACKS ---
-service = "🏠 Executive Summary"
-unit_mode = "Fahrenheit"
-unit_label = "°F"
-selected_project = "All Projects"
-active_refs = [(32.0, "Freezing")]
-
-# --- 3. SIDEBAR WIDGETS ---
+# --- 1. NAVIGATION (The "Where am I?") ---
 page = st.sidebar.selectbox("Navigate To:", [
     "Executive Summary", 
     "Global Overview", 
-    "Depth Charts",        # New Page
-    "Node Diagnostics",     # Updated to 15-min table
+    "Depth Charts", 
+    "Node Diagnostics", 
     "Client Portal", 
     "Data Intake Lab", 
     "Admin Tools"
 ])
 
 st.sidebar.divider()
-# Global Project Selection
+
+# --- 2. CORE FILTERS (The "What am I looking at?") ---
+# Fetch Project list from BigQuery
+selected_project = "All Projects" # Fallback
 if client is not None:
     try:
-        proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project IS NOT NULL"
+        # Note: Updated to use project_registry as your source of truth
+        proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus = 'Active'"
         proj_df = client.query(proj_q).to_dataframe()
         proj_list = sorted(proj_df['Project'].dropna().unique())
-        options = ["All Projects"] + proj_list
-        selected_project = st.sidebar.selectbox("🎯 Active Project", options, index=0, key="sidebar_proj_picker_global")
+        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"] + proj_list, key="sidebar_proj_picker_global")
     except Exception as e:
         st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
-        selected_project = "All Projects"
 
-# In Sidebar UI
+# Unit Selection
+unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], horizontal=True)
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
 st.sidebar.divider()
-st.sidebar.subheader("📱 Display Settings")
-mobile_optimized = st.sidebar.toggle("Mobile Layout", value=False, help="Moves legend to bottom and expands graph width")
 
-# Reference Lines
+# --- 3. DISPLAY SETTINGS (The "How does it look?") ---
+st.sidebar.subheader("📱 Display & Time")
+
+# Timezone Logic
+tz_lookup = {
+    "UTC": "UTC", 
+    "Local (US/Eastern)": "US/Eastern", 
+    "Local (US/Pacific)": "US/Pacific"
+}
+
+# 1. Create the selectbox for tz_mode
+tz_mode = st.sidebar.selectbox(
+    "Timezone Display", 
+    list(tz_lookup.keys()), 
+    index=2 # Default to Pacific
+)
+
+# 2. Assign the actual timezone string to display_tz
+display_tz = tz_lookup[tz_mode]
+st.session_state["tz_selection"] = tz_mode # Store for session persistence
+
+# Mobile Layout Toggle
+mobile_optimized = st.sidebar.toggle(
+    "Mobile Layout", 
+    value=False, 
+    help="Moves legend to bottom and expands graph width for small screens"
+)
+
+st.sidebar.divider()
+
+# --- 4. GRAPH ANNOTATIONS (The "Safety Lines") ---
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
 if st.sidebar.checkbox("Freezing (32°F)", value=True): 
@@ -161,26 +190,6 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False):
     active_refs.append((26.6, "Type B"))
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
-
-st.sidebar.divider()
-# --- 2. TIMEZONE DEFAULT LOGIC ---
-tz_lookup = {
-    "UTC": "UTC", 
-    "Local (US/Eastern)": "US/Eastern", 
-    "Local (US/Pacific)": "US/Pacific"
-}
-# 2. Now you can use 'tz_mode' safely
-st.session_state["tz_selection"] = tz_mode
-display_tz = tz_lookup[tz_mode]
-
-# Force Pacific as the initial session state if nothing exists
-if "tz_selection" not in st.session_state:
-    st.session_state["tz_selection"] = "Local (US/Pacific)"
-
-st.sidebar.divider()
-
-unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
-unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 
 ########################
 #- 4. GRAPHING ENGINE -#
