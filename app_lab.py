@@ -188,9 +188,10 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False):
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
     """
-    Unified Responsive Engine: 
-    - Desktop: Side legend, wide margins.
-    - Mobile: Bottom legend via CSS, narrow margins, 1-day X-axis buffer.
+    Stabilized Responsive Engine:
+    - Uses a bottom-horizontal legend that works on all devices.
+    - Prevents overlap by using a large bottom margin.
+    - Includes 1-day X-axis buffer.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -271,11 +272,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                       annotation_text=ref_label, annotation_position="top right")
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 5. LAYOUT (Defaulting to Desktop View)
+    # 5. UNIFIED RESPONSIVE LAYOUT
     fig.update_layout(
         title={'text': f"<b>{title}</b>", 'x': 0},
-        plot_bgcolor='white', hovermode="x unified", height=600,
-        margin=dict(t=80, l=50, r=160, b=50), # Large right margin for desktop legend
+        plot_bgcolor='white', 
+        hovermode="x unified", 
+        height=700,  # Increased height to make room for bottom legend
+        # Narrow right margin (20) to use full width. Large bottom margin (180) for legend.
+        margin=dict(t=80, l=50, r=20, b=180), 
         xaxis=dict(
             range=[range_start, range_end], 
             showline=True, mirror=True, linecolor='black',
@@ -288,37 +292,17 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
             minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
         ),
+        # LEGEND: Bottom-Horizontal configuration
         legend=dict(
-            orientation="v",
-            x=1.02, 
-            y=1,
-            xanchor="left",
+            orientation="h",
             yanchor="top",
-            title="Sensors"
+            y=-0.25,        # Pushes legend significantly below the X-axis
+            xanchor="center",
+            x=0.5,
+            title="Sensors",
+            font=dict(size=10) # Smaller font helps with mobile wrapping
         )
     )
-
-    # 6. INJECT RESPONSIVE CSS
-    # This forces the Plotly legend to the bottom on screens smaller than 768px
-    st.markdown("""
-        <style>
-        @media (max-width: 768px) {
-            /* Force the plot to take full width */
-            .main .block-container {
-                padding-left: 1rem !important;
-                padding-right: 1rem !important;
-            }
-            /* Target Plotly legend container */
-            .js-plotly-plot .legend {
-                transform: translate(0px, 120px) !important; /* Push below graph */
-            }
-            /* Adjust the plot margin for mobile via the SVG container if needed */
-            .js-plotly-plot .main-svg {
-                margin-bottom: 100px !important;
-            }
-        }
-        </style>
-    """, unsafe_allow_html=True)
     
     # Add Monday lines
     mondays = pd.date_range(start=range_start, end=range_end, freq='W-MON', tz=display_tz)
