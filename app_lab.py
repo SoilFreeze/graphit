@@ -1459,13 +1459,12 @@ elif page == "Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz)
 
 elif page == "Client Portal":
-    render_client_portal(selected_project, unit_label, display_tz)
+    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif page == "Data Intake Lab":
     render_data_intake_page(selected_project) # Use the correct function name
 
 elif page == "Admin Tools":
-    # Using your original authentication flow
     if st.session_state.get('authenticated', False):
         render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
     else:
