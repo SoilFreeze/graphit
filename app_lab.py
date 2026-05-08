@@ -1114,12 +1114,15 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
         if direction == "Between Range":
             sc1, sc2 = st.columns(2)
             s_dt = datetime.combine(sc1.date_input("Start Date", value=datetime.now() - timedelta(days=7)), dt_time(0,0))
-            e_dt = datetime.combine(sc2.date_input("End Date", value=datetime.now()), datetime.time(23,59))
+            e_dt = datetime.combine(sc2.date_input("End Date", value=datetime.now()), dt_time(23,59))
         else:
-            anchor_dt = datetime.combine(st.date_input("Anchor Date", value=datetime.now()), st.time_input("Anchor Time", value=datetime.time(6,0)))
+            anchor_dt = datetime.combine(
+                st.date_input("Anchor Date"), 
+                st.time_input("Anchor Time", value=dt_time(6,0)))
             # Set virtual range for SQL
             s_dt = datetime(2000, 1, 1) if direction == "Everything Older Than" else anchor_dt
             e_dt = anchor_dt if direction == "Everything Older Than" else datetime(2100, 1, 1)
+
 
     # 3. THRESHOLD
     thr_col1, thr_col2 = st.columns([1, 2])
