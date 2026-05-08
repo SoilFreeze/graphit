@@ -874,11 +874,11 @@ proj_search = st.selectbox("Select Project to View", ["All"] + sorted(available_
             if proj_search != "All":
                 search_df = search_df[search_df['Project'] == proj_search]
         # Updated Node Search (Line 874 approx)
-            elif lookup_mode == "Node ID":
-                node_search = st.text_input("Enter Node ID")
-                if node_search:
-                    # Using .fillna('') prevents crashes during the string search
-                    search_df = search_df[search_df['NodeNum'].fillna('').str.contains(node_search, na=False, case=False)]
+        elif lookup_mode == "Node ID":
+            node_search = st.text_input("Enter Node ID")
+            if node_search:
+                # Using .fillna('') prevents crashes during the string search
+                search_df = search_df[search_df['NodeNum'].fillna('').str.contains(node_search, na=False, case=False)]
         else:
             loc_search = st.text_input("Enter Location Name (e.g. Pipe 12)")
             if loc_search:
