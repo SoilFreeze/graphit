@@ -5,12 +5,13 @@ import plotly.express as px
 import plotly.graph_objects as go  # This defines 'go'
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta, timezone, time as dt_timef
+from datetime import datetime, timedelta, timezone, time as dt_time
 import pytz
 import traceback
 import io
 import re
 from streamlit_plotly_events import plotly_events
+
 
 ##################################
 # - 1. CONFIGURATION & STYLING - #
@@ -1112,11 +1113,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.success(f"✅ {scrub_target} scrubbed for {sel_loc_scrub}.")
             st.cache_data.clear()
 
-    # --- TAB 4: SURGICAL CLEANER ---
+# --- TAB 4: SURGICAL & MASK ---
     with tab_surgical:
         if not selected_project or selected_project == "All Projects":
             st.warning("Please select a specific project in the sidebar.")
         else:
+            # This now handles both Hard Purges and Soft Masking
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 
