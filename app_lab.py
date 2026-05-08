@@ -52,21 +52,21 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Registry-Native Data Engine. 
-    Joins Raw Data + Registry + Manual Rejections.
+    Standardized Data Engine for all pages. 
+    Joins Raw Data + Project Registry + Manual Rejections.
     """
-    # 1. Get visibility cutoff from your masks
+    # 1. Determine Visibility Cutoff
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    # 2. DEFINE THE FILTER FIRST (Fixes the NameError)
+    # 2. Define Query Filter based on User Role
     if view_mode == "client":
-        # Client sees only explicitly Approved (TRUE) data
+        # Client sees only explicitly Approved (TRUE) data after the mask cutoff
         query_filter = f"AND rej.approve = 'TRUE' AND r.timestamp >= '{cutoff}'"
     else:
-        # Engineering sees everything except explicit deletions (FALSE)
+        # Engineering/Admin sees everything except explicit deletions (FALSE)
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
-    # 3. CONSTRUCT THE REGISTRY QUERY
+    # 3. Construct the Registry-Centric Query
     query = f"""
         SELECT 
             reg.Location, 
@@ -88,7 +88,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE reg.Project = '{project_id}'
         {query_filter}
-        -- Historical Alignment: Only pull data for the time the sensor was at this spot
+        -- Historical Integrity: Ensure the sensor was actually at this location at this time
         AND r.timestamp >= reg.StartDate 
         AND (r.timestamp <= reg.EndDate OR reg.EndDate IS NULL)
         ORDER BY reg.Location ASC, r.timestamp ASC
@@ -97,14 +97,20 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     try:
         df = client.query(query).to_dataframe()
         
-        # Ensure timestamp is UTC-aware to prevent graphing crashes
-        if not df.empty and 'timestamp' in df.columns:
+        if not df.empty:
+            # --- CRITICAL: DATA CLEANING ---
+            # Ensure Depth is a number (float) or NULL, never a string
+            df['Depth'] = pd.to_numeric(df['Depth'], errors='coerce')
+            # Ensure temperature is a number
+            df['temperature'] = pd.to_numeric(df['temperature'], errors='coerce')
+            
+            # Ensure timestamp is UTC-aware for the graphing engine
             if df['timestamp'].dt.tz is None:
                 df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
                 
         return df
     except Exception as e:
-        st.error(f"Registry Query Failed: {e}")
+        st.error(f"Universal Data Engine Error: {e}")
         return pd.DataFrame()
         
 def check_admin_access(service_name):
@@ -427,7 +433,6 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             ) AS r
             INNER JOIN MappedNodes m ON r.NodeNum = m.NodeNum
-            -- CRITICAL: Only pull data from the assigned project start date
             WHERE r.timestamp >= m.StartDate
             AND (r.timestamp <= m.EndDate OR m.EndDate IS NULL)
         ),
@@ -441,13 +446,11 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT 
                 NodeNum, 
                 MAX(timestamp) as last_ping,
-                -- Temperature Data (24H window)
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN temperature ELSE NULL END) as low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN temperature ELSE NULL END) as high_24h,
-                -- Communication & Gap Data
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                     THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
@@ -457,17 +460,13 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
                     THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
             FROM GapAnalysis GROUP BY NodeNum
-        ),
-        JoinedData AS (
-            SELECT 
-                m.*, h.last_ping, h.current_temp, h.low_24h, h.high_24h,
-                COALESCE(h.gap_24h, 0) as gap_24h, COALESCE(h.gap_7d, 0) as gap_7d,
-                COALESCE(h.active_24h, 0) as active_24h,
-                COALESCE(h.hours_24h, 0) as hours_24h, COALESCE(h.hours_7d, 0) as hours_7d
-            FROM MappedNodes m
-            LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
         )
-        SELECT * FROM JoinedData
+        SELECT m.*, h.last_ping, h.current_temp, h.low_24h, h.high_24h,
+               COALESCE(h.gap_24h, 0) as gap_24h, COALESCE(h.gap_7d, 0) as gap_7d,
+               COALESCE(h.active_24h, 0) as active_24h,
+               COALESCE(h.hours_24h, 0) as hours_24h, COALESCE(h.hours_7d, 0) as hours_7d
+        FROM MappedNodes m
+        LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
     """
     
     try:
@@ -475,6 +474,13 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         if raw_df.empty:
             st.warning("No data found for this project in the registry.")
             return
+
+        # --- CRITICAL: FORCE NUMERIC TYPES ---
+        # This prevents the '<' not supported between str and float error
+        raw_df['Depth'] = pd.to_numeric(raw_df['Depth'], errors='coerce')
+        raw_df['low_24h'] = pd.to_numeric(raw_df['low_24h'], errors='coerce')
+        raw_df['high_24h'] = pd.to_numeric(raw_df['high_24h'], errors='coerce')
+        raw_df['current_temp'] = pd.to_numeric(raw_df['current_temp'], errors='coerce')
 
         now_local = pd.Timestamp.now(tz=display_tz)
 
@@ -491,11 +497,12 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             Sum_Hrs_24=('hours_24h', 'sum'),
             Sum_Hrs_7d=('hours_7d', 'sum'),
             Gap_24h=('gap_24h', 'max'),
-            Min_24h_All=('low_24h', 'min'), # Coldest sensor in pipe
-            Max_24h_All=('high_24h', 'max'), # Warmest sensor in pipe
+            Min_24h_All=('low_24h', 'min'), 
+            Max_24h_All=('high_24h', 'max'), 
             Latest_Ping=('last_ping', 'max')
         ).reset_index()
 
+        # Add a "Project Total" row for the top of the table
         total_df = summary_df.groupby('Project').agg({
             'Nodes': 'sum', 'Seen_24h': 'sum', 'Sum_Hrs_24': 'sum', 'Sum_Hrs_7d': 'sum',
             'Gap_24h': 'max', 'Min_24h_All': 'min', 'Max_24h_All': 'max', 'Latest_Ping': 'max'
@@ -511,7 +518,8 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             last_seen_str = "Never"
             if pd.notnull(latest):
                 if latest.tzinfo is None: latest = latest.tz_localize('UTC')
-                last_seen_str = f"{round((now_local - latest.tz_convert(display_tz)).total_seconds() / 3600, 1)}h ago"
+                lag_hrs = (now_local - latest.tz_convert(display_tz)).total_seconds() / 3600
+                last_seen_str = f"{round(lag_hrs, 1)}h ago"
 
             avg_24h = (row['Sum_Hrs_24'] / (row['Nodes'] * 24)) * 100
             avg_7d = (row['Sum_Hrs_7d'] / (row['Nodes'] * 168)) * 100
@@ -544,17 +552,21 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                     if ping.tzinfo is None: ping = ping.tz_localize('UTC')
                     lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
                     status_str = f"{lag}h {'🔴' if lag > 24 else ('🟡' if lag > 6 else '🟢')}"
+                
+                # Handling NULL Bank/Depth for display
+                pos = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else (f"Bank {row['Bank']}" if pd.notnull(row['Bank']) else "N/A")
+
                 return pd.Series({
-                    "Node ID": row['NodeNum'], "Bank": row['Bank'], "Depth": f"{row['Depth']}ft",
+                    "Node ID": row['NodeNum'], "Position": pos,
                     "Current Temp": fmt_temp(row['current_temp']), "High (24h)": fmt_temp(row['high_24h']), "Low (24h)": fmt_temp(row['low_24h']),
                     "Seen (24h)": "✅" if row['active_24h'] == 1 else "❌",
                     "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%", 
-                    "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
                     "Gap (24h)": f"{int(row['gap_24h'])}h", "Status": status_str
                 })
             st.dataframe(sensor_df.apply(format_sensor_row, axis=1), use_container_width=True, hide_index=True)
+            
     except Exception as e:
-        st.error(f"Executive Summary Registry Error: {e}")
+        st.error(f"Executive Summary Error: {e}")
         
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
@@ -887,14 +899,14 @@ def render_data_intake_page(selected_project):
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # Global Registry Fetch for Selectors
+    # 1. Global Registry Fetch for Selectors
     reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
     try:
         full_reg_df = client.query(reg_q).to_dataframe()
     except:
         full_reg_df = pd.DataFrame()
     
-    # Identify Active Sensors for the current project
+    # Identify Active Sensors for the current project (EndDate IS NULL)
     active_project_df = pd.DataFrame()
     if not full_reg_df.empty:
         active_project_df = full_reg_df[(full_reg_df['Project'] == selected_project) & (full_reg_df['EndDate'].isna())]
@@ -902,7 +914,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # Stable Location list for other tabs
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
-    # Ensure this matches exactly: 4 names = 4 variables
+    # --- TABS DEFINITION ---
     tab_reg, tab_bulk, tab_scrub, tab_surgical = st.tabs([
         "📋 Registry Manager", 
         "✅ Bulk Approval", 
@@ -921,16 +933,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 # 1. Select Pipe/Location
                 target_loc = st.selectbox("Select Location (Pipe)", sorted(active_project_df['Location'].unique()))
                 
-                # 2. Select specific Depth in that pipe
+                # 2. Select specific Depth/Node in that pipe
                 loc_depths = active_project_df[active_project_df['Location'] == target_loc]
                 target_row = st.selectbox(
-                    "Select Depth to Swap", 
+                    "Select Position to Swap", 
                     loc_depths.to_dict('records'), 
-                    format_func=lambda x: f"{x['Depth']}ft (Current: {x['NodeNum']})"
+                    format_func=lambda x: f"{x['Depth']}ft (Current: {x['NodeNum']})" if pd.notnull(x['Depth']) else f"Bank {x['Bank']} (Current: {x['NodeNum']})"
                 )
                 
                 # 3. Choose New Hardware (Registered but not currently in the ground)
-                # Query the new inventory table for unassigned sensors
                 inv_q = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.hardware_inventory`"
                 try:
                     inventory = client.query(inv_q).to_dataframe()['NodeNum'].tolist()
@@ -942,8 +953,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 new_node = st.selectbox("Select New (Available) Sensor", available if available else ["No hardware available"])
                 
                 if st.button("🚀 Execute Swap", use_container_width=True):
-                    # Create clean SQL values for Depth and Bank
-                    # If the value is NaN or None, it becomes the SQL keyword NULL (no quotes)
                     sql_bank = f"'{target_row['Bank']}'" if pd.notnull(target_row['Bank']) else "NULL"
                     sql_depth = str(target_row['Depth']) if pd.notnull(target_row['Depth']) else "NULL"
                     
@@ -1012,7 +1021,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
         st.subheader("✅ Range-Based Bulk Approval")
-        # Fixed: sel_loc_bulk now safely uses the loc_options defined at the top
         sel_loc_bulk = st.selectbox("Target Location", loc_options, key="bulk_loc_sel")
         
         c1, c2 = st.columns(2)
@@ -1041,7 +1049,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.success(f"Data approved for {sel_loc_bulk}.")
             st.cache_data.clear()
 
-    # --- TAB 3: DEEP DATA SCRUB (Updated to Location Level) ---
+    # --- TAB 2: DEEP DATA SCRUB ---
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
         st.info("Averages raw data to 1-hour intervals. Can be filtered by specific Location.")
@@ -1049,11 +1057,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
         sel_loc_scrub = st.selectbox("Target Location", loc_options, key="scrub_loc_sel")
         
-        t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
-        
         if st.button(f"🧨 Purge & Average {scrub_target}", use_container_width=True):
-            # Location-aware scrub logic: only affects nodes mapped to the selected location [cite: 5, 14]
-            loc_subquery = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}'"
+            t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
+            # Registry-aware scrub logic
+            loc_subquery = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}'"
             if sel_loc_scrub != "All Locations":
                 loc_subquery += f" AND Location = '{sel_loc_scrub}'"
 
@@ -1065,21 +1072,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     AVG(temperature) as temperature
                 FROM `{t_table}`
                 WHERE NodeNum IN ({loc_subquery})
-                OR NodeNum NOT IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')
+                OR NodeNum NOT IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}')
                 GROUP BY 1, 2
             """
             client.query(scrub_sql).result()
             st.success(f"✅ {scrub_target} scrubbed for {sel_loc_scrub}.")
             st.cache_data.clear()
 
-# --- TAB 4: SURGICAL & MASK ---
+    # --- TAB 3: SURGICAL & MASK ---
     with tab_surgical:
         if not selected_project or selected_project == "All Projects":
             st.warning("Please select a specific project in the sidebar.")
         else:
-            # This function now handles both Purging and Masking
+            # Calls the unified Directional Mask/Purge tool
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
-
 
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
