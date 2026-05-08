@@ -869,8 +869,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         search_df = full_reg_df.copy()
         if lookup_mode == "Project":
             # Drop nulls and convert to list before sorting
-available_projects = full_reg_df['Project'].dropna().unique().tolist()
-proj_search = st.selectbox("Select Project to View", ["All"] + sorted(available_projects))
+            available_projects = full_reg_df['Project'].dropna().unique().tolist()
+            proj_search = st.selectbox("Select Project to View", ["All"] + sorted(available_projects))
             if proj_search != "All":
                 search_df = search_df[search_df['Project'] == proj_search]
         # Updated Node Search (Line 874 approx)
