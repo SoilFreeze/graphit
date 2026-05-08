@@ -52,14 +52,14 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Unified Data Engine: Joins Raw Data + Registry + Manual Rejections.
+    Unified Data Engine: Joins Raw Data + Project Registry + Manual Rejections.
     """
-    # 1. Get visibility mask for the project
+    # 1. Get visibility cutoff from your masks
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     # 2. DEFINE THE FILTER (Crucial: This must happen before the query string)
     if view_mode == "client":
-        # Client sees only explicitly Approved (TRUE) data after the cutoff
+        # Client sees only explicitly Approved (TRUE) data after the mask cutoff
         query_filter = f"AND rej.approve = 'TRUE' AND r.timestamp >= '{cutoff}'"
     else:
         # Engineering sees everything except explicit deletions (FALSE)
@@ -80,7 +80,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
-        -- JOIN TO REGISTRY INSTEAD OF METADATA
+        -- JOIN TO REGISTRY INSTEAD OF OLD METADATA
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS reg 
             ON r.NodeNum = reg.NodeNum
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
@@ -98,11 +98,11 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         df = client.query(query).to_dataframe()
         
         if not df.empty:
-            # Force numeric types to prevent "str vs float" errors later in the app
+            # Force numeric types to prevent "str vs float" errors in math/graphing
             df['Depth'] = pd.to_numeric(df['Depth'], errors='coerce')
             df['temperature'] = pd.to_numeric(df['temperature'], errors='coerce')
             
-            # Localize to UTC if not already aware
+            # Ensure timestamp is UTC-aware for the graphing engine
             if df['timestamp'].dt.tz is None:
                 df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
                 
@@ -110,30 +110,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     except Exception as e:
         st.error(f"Registry Engine Error: {e}")
         return pd.DataFrame()
-        
-def check_admin_access(service_name):
-    """
-    Restricts access to sensitive pages (Intake and Admin Tools).
-    Requires a password defined in st.secrets["admin_password"].
-    """
-    # 1. Check if the user is already authenticated in this session
-    if st.session_state.get("admin_authenticated"): 
-        return True
-    
-    # 2. Display Lock Screen
-    st.warning(f"🔒 Admin Access Required for {service_name}")
-    pwd = st.text_input("Enter Admin Password", type="password", key=f"gate_{service_name}")
-    
-    if st.button("Unlock Access", key=f"btn_{service_name}"):
-        # Check against streamlit secrets
-        if pwd == st.secrets["admin_password"]:
-            st.session_state["admin_authenticated"] = True
-            st.success("Access Granted")
-            st.rerun() # Refresh to show the restricted content
-        else:
-            st.error("Incorrect Password")
-            
-    return False
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
