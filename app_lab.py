@@ -106,7 +106,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     except Exception as e:
         st.error(f"Registry Query Failed: {e}")
         return pd.DataFrame()
-
+        
 def check_admin_access(service_name):
     """
     Restricts access to sensitive pages (Intake and Admin Tools).
