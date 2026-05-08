@@ -146,21 +146,6 @@ page = st.sidebar.selectbox("Navigate To:", [
 ])
 
 st.sidebar.divider()
-
-unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
-unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
-
-# 1. Define the widget first so 'tz_mode' exists
-tz_mode = st.sidebar.selectbox(
-    "Timezone Display", 
-    list(tz_lookup.keys()), 
-    index=list(tz_lookup.keys()).index(st.session_state["tz_selection"])
-)
-
-# 2. Now you can use 'tz_mode' safely
-st.session_state["tz_selection"] = tz_mode
-display_tz = tz_lookup[tz_mode]
-
 # Global Project Selection
 if client is not None:
     try:
@@ -173,6 +158,11 @@ if client is not None:
         st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
         selected_project = "All Projects"
 
+# In Sidebar UI
+st.sidebar.divider()
+st.sidebar.subheader("📱 Display Settings")
+mobile_optimized = st.sidebar.toggle("Mobile Layout", value=False, help="Moves legend to bottom and expands graph width")
+
 # Reference Lines
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
@@ -183,10 +173,22 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False):
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
 
-# In Sidebar UI
 st.sidebar.divider()
-st.sidebar.subheader("📱 Display Settings")
-mobile_optimized = st.sidebar.toggle("Mobile Layout", value=False, help="Moves legend to bottom and expands graph width")
+# --- 2. TIMEZONE DEFAULT LOGIC ---
+tz_lookup = {
+    "UTC": "UTC", 
+    "Local (US/Eastern)": "US/Eastern", 
+    "Local (US/Pacific)": "US/Pacific"
+}
+# 2. Now you can use 'tz_mode' safely
+st.session_state["tz_selection"] = tz_mode
+display_tz = tz_lookup[tz_mode]
+
+st.sidebar.divider()
+
+unit_mode = st.sidebar.radio("Unit", ["Fahrenheit", "Celsius"])
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+
 ########################
 #- 4. GRAPHING ENGINE -#
 ########################
