@@ -182,16 +182,21 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False):
     active_refs.append((26.6, "Type B"))
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
+
+# In Sidebar UI
+st.sidebar.divider()
+st.sidebar.subheader("📱 Display Settings")
+mobile_optimized = st.sidebar.toggle("Mobile Layout", value=False, help="Moves legend to bottom and expands graph width")
 ########################
 #- 4. GRAPHING ENGINE -#
 ########################
 
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC"):
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", mobile_mode=False):
     """
-    Stabilized Responsive Engine:
-    - Uses a bottom-horizontal legend that works on all devices.
-    - Prevents overlap by using a large bottom margin.
-    - Includes 1-day X-axis buffer.
+    Smart Responsive Engine:
+    - Side Legend + Right Margins for PC.
+    - Bottom Legend + Wide View for Mobile.
+    - 1-Day Buffer on X-Axis.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -242,7 +247,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         
         for j, sn in enumerate(sensors):
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
-            
             if not is_surgical:
                 s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
                 gap_mask = s_df['gap_hrs'] > 6.0
@@ -253,36 +257,32 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
             fig.add_trace(go.Scatter(
-                x=s_df['timestamp'], 
-                y=s_df['temperature'], 
-                name=f"{group_lbl} ({sn})", 
-                legendgroup=group_lbl, 
+                x=s_df['timestamp'], y=s_df['temperature'], 
+                name=f"{group_lbl} ({sn})", legendgroup=group_lbl, 
                 showlegend=True if j == 0 else False,
                 mode='lines+markers' if not is_surgical else 'markers',
-                connectgaps=False,
-                line=dict(color=color, width=1.5),
+                connectgaps=False, line=dict(color=color, width=1.5),
                 marker=dict(size=4, opacity=0.8),
                 hovertemplate=f"<b>{group_lbl} ({sn})</b>: %{{y:.1f}}{unit_label}<extra></extra>"
             ))
 
-    # 4. REFERENCE LINES
-    for val, ref_label in active_refs:
-        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-        fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
-                      annotation_text=ref_label, annotation_position="top right")
-    fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
+    # 4. CONDITIONAL LAYOUT LOGIC
+    if mobile_mode:
+        # Pushes legend to the bottom and expands graph to edges
+        legend_cfg = dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5)
+        margin_cfg = dict(t=80, l=40, r=20, b=160)
+    else:
+        # Keeps legend on the right for PC
+        legend_cfg = dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
+        margin_cfg = dict(t=80, l=50, r=160, b=50)
 
-    # 5. UNIFIED RESPONSIVE LAYOUT
     fig.update_layout(
         title={'text': f"<b>{title}</b>", 'x': 0},
-        plot_bgcolor='white', 
-        hovermode="x unified", 
-        height=700,  # Increased height to make room for bottom legend
-        # Narrow right margin (20) to use full width. Large bottom margin (180) for legend.
-        margin=dict(t=80, l=50, r=20, b=180), 
+        plot_bgcolor='white', hovermode="x unified", height=600,
+        margin=margin_cfg,
+        legend=legend_cfg,
         xaxis=dict(
-            range=[range_start, range_end], 
-            showline=True, mirror=True, linecolor='black',
+            range=[range_start, range_end], showline=True, mirror=True, linecolor='black',
             showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1,
             minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
             tickformat='%b %d\n%H:%M'
@@ -291,20 +291,16 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             title=f"Temperature ({unit_label})", range=y_range, dtick=dt_major, 
             gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
             minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
-        ),
-        # LEGEND: Bottom-Horizontal configuration
-        legend=dict(
-            orientation="h",
-            yanchor="top",
-            y=-0.25,        # Pushes legend significantly below the X-axis
-            xanchor="center",
-            x=0.5,
-            title="Sensors",
-            font=dict(size=10) # Smaller font helps with mobile wrapping
         )
     )
     
-    # Add Monday lines
+    # 5. REFERENCE LINES & MONDAYS
+    for val, ref_label in active_refs:
+        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+        fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
+                      annotation_text=ref_label, annotation_position="top right")
+    fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
+
     mondays = pd.date_range(start=range_start, end=range_end, freq='W-MON', tz=display_tz)
     for mon in mondays:
         fig.add_vline(x=mon, line_width=2, line_color="dimgray", layer="below")
@@ -322,8 +318,13 @@ def render_global_overview(selected_project, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
     Engineering view: shows everything except 'FALSE'.
+    Passes mobile_mode to the graphing engine to reposition legends.
     """
     st.header("🌐 Global Project Overview")
+    
+    # 1. Access the mobile toggle from session state or sidebar logic
+    # Make sure 'mobile_optimized' matches the key used in your sidebar toggle
+    mobile_mode = st.session_state.get("mobile_optimized", False)
     
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to begin.")
@@ -334,20 +335,24 @@ def render_global_overview(selected_project, display_tz):
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if not p_df.empty:
-        # 1. View Constraints
+        # 2. View Constraints
         lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
         
         # Snap time window to the current Pacific (or selected) time
         now_local = pd.Timestamp.now(tz=display_tz)
+        # End view snaps to the upcoming Monday at midnight
         end_view = (now_local + pd.Timedelta(days=(7-now_local.weekday())%7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_view = end_view - timedelta(weeks=lookback)
 
-        # 2. Render a graph for every physical location (Pipe/Bank) in the project [cite: 6]
+        # 3. Render a graph for every physical location (Pipe/Bank) in the project
+        # We sort alphabetically so Pipe 1 is always above Pipe 2
         locations = sorted(p_df['Location'].dropna().unique())
         
         for loc in locations:
             with st.expander(f"📍 Location: {loc}", expanded=True):
                 loc_df = p_df[p_df['Location'] == loc]
+                
+                # Call the build function with the new mobile_mode parameter
                 fig = build_high_speed_graph(
                     df=loc_df, 
                     title=f"📈 {selected_project} - {loc}", 
@@ -356,13 +361,14 @@ def render_global_overview(selected_project, display_tz):
                     active_refs=tuple(active_refs), 
                     unit_mode=unit_mode, 
                     unit_label=unit_label, 
-                    display_tz=display_tz
+                    display_tz=display_tz,
+                    mobile_mode=mobile_mode  # <-- Crucial: This triggers the bottom legend
                 )
+                
                 st.plotly_chart(fig, use_container_width=True, key=f"ov_{selected_project}_{loc}")
     else:
-        st.warning(f"No engineering data found for '{selected_project}' in the last 84 days.")
-        st.info("Check if sensors are mapped to this project name in the metadata table[cite: 5].")
-
+        st.warning(f"No engineering data found for '{selected_project}' in the registry.")
+        st.info("Verify that sensors are mapped to this project and currently 'Active' in Admin Tools.")
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
