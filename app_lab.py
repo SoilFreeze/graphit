@@ -902,9 +902,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # Stable Location list for other tabs
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
-    # --- FIX: ASSIGN ALL 5 VARIABLES ---
+    # Ensure this matches exactly: 4 names = 4 variables
     tab_reg, tab_bulk, tab_scrub, tab_surgical = st.tabs([
-        "📋 Registry Manager", "✅ Bulk Approval", "🧹 Scrub", "🧨 Surgical"
+        "📋 Registry Manager", 
+        "✅ Bulk Approval", 
+        "🧹 Scrub", 
+        "🧨 Surgical & Mask"
     ])
 
     # --- TAB 0: REGISTRY MANAGER ---
@@ -1038,50 +1041,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.success(f"Data approved for {sel_loc_bulk}.")
             st.cache_data.clear()
 
-    # --- TAB 2: MASK DATA (Updated to Location Level) ---
-    with tab_mask:
-        st.subheader("🚫 Temporal Data Masking")
-        sel_loc_mask = st.selectbox("Target Location", loc_options, key="mask_loc_sel")
-        
-        mask_mode = st.radio("Masking Mode", ["Specific Time Range", "All data before end date"], horizontal=True)
-        
-        m_col1, m_col2 = st.columns(2)
-        with m_col1:
-            m_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="m_sd", disabled=(mask_mode == "All data before end date"))
-        with m_col2:
-            m_end_date = st.date_input("End Date", value=datetime.now(), key="m_ed")
-
-        if st.button(f"🚫 Apply Mask", type="primary", use_container_width=True):
-            loc_filter = f"AND m.Location = '{sel_loc_mask}'" if sel_loc_mask != "All Locations" else ""
-            start_str = "2000-01-01 00:00:00" if mask_mode == "All data before end date" else m_start_date.strftime('%Y-%m-%d')
-            
-            mask_sql = f"""
-                INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
-                SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'MASKED'
-                FROM (
-                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                    UNION ALL 
-                    SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                ) AS r
-                INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
-                WHERE m.Project = '{selected_project}' {loc_filter}
-                AND r.timestamp >= '{start_str}' AND r.timestamp <= '{m_end_date}'
-                AND NOT EXISTS (
-                    SELECT 1 FROM `{OVERRIDE_TABLE}` x WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                )
-            """
-            client.query(mask_sql).result()
-            st.success(f"✅ Mask applied to {sel_loc_mask}.")
-            st.cache_data.clear()
-
-        if st.button(f"🗑️ Clear Masks", use_container_width=True):
-            loc_filter = f"AND NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Location = '{sel_loc_mask}' AND Project = '{selected_project}')" if sel_loc_mask != "All Locations" else f"AND NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.metadata` WHERE Project = '{selected_project}')"
-            
-            clear_sql = f"DELETE FROM `{OVERRIDE_TABLE}` WHERE approve = 'MASKED' {loc_filter}"
-            client.query(clear_sql).result()
-            st.warning(f"🧹 Masks cleared for {sel_loc_mask}.")
-            st.cache_data.clear()
-
     # --- TAB 3: DEEP DATA SCRUB (Updated to Location Level) ---
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
@@ -1118,7 +1077,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         if not selected_project or selected_project == "All Projects":
             st.warning("Please select a specific project in the sidebar.")
         else:
-            # This now handles both Hard Purges and Soft Masking
+            # This function now handles both Purging and Masking
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 
