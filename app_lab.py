@@ -123,17 +123,6 @@ unit_label = "°F"
 selected_project = "All Projects"
 active_refs = [(32.0, "Freezing")]
 
-# --- 2. TIMEZONE DEFAULT LOGIC ---
-tz_lookup = {
-    "UTC": "UTC", 
-    "Local (US/Eastern)": "US/Eastern", 
-    "Local (US/Pacific)": "US/Pacific"
-}
-
-# Force Pacific as the initial session state if nothing exists
-if "tz_selection" not in st.session_state:
-    st.session_state["tz_selection"] = "Local (US/Pacific)"
-
 # --- 3. SIDEBAR WIDGETS ---
 page = st.sidebar.selectbox("Navigate To:", [
     "Executive Summary", 
@@ -183,6 +172,10 @@ tz_lookup = {
 # 2. Now you can use 'tz_mode' safely
 st.session_state["tz_selection"] = tz_mode
 display_tz = tz_lookup[tz_mode]
+
+# Force Pacific as the initial session state if nothing exists
+if "tz_selection" not in st.session_state:
+    st.session_state["tz_selection"] = "Local (US/Pacific)"
 
 st.sidebar.divider()
 
