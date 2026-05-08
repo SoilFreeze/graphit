@@ -110,7 +110,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     except Exception as e:
         st.error(f"Registry Engine Error: {e}")
         return pd.DataFrame()
-
+        
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     # ... (Keep your cutoff logic) ...
