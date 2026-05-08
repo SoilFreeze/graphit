@@ -887,40 +887,64 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             f_col1, f_col2, f_col3 = st.columns(3)
             
             with f_col1:
-                # Filter by Status
-                raw_statuses = full_reg_df['ProjectStatus'].dropna().unique().tolist()
-                status_list = ["All Statuses"] + sorted(raw_statuses)
-                status_sel = st.selectbox("Filter by Status:", status_list, key="intel_status_filter")
+                # 1. Filter by SENSOR STATUS (Active, Swapped, Available, Template)
+                # This helps you find hardware that needs attention
+                raw_sens_statuses = full_reg_df['SensorStatus'].dropna().unique().tolist()
+                sens_status_list = ["All Sensor Statuses"] + sorted(raw_sens_statuses)
+                sens_status_sel = st.selectbox("Filter by Sensor Status:", sens_status_list, key="intel_sens_status_filter")
             
             with f_col2:
-                # Search Mode
-                intel_mode = st.selectbox("Search Mode:", ["By Project", "By Node ID"], key="intel_mode_filter")
+                # 2. Filter by PROJECT STATUS (Active vs Archived)
+                raw_proj_statuses = full_reg_df['ProjectStatus'].dropna().unique().tolist()
+                proj_status_list = ["All Project Statuses"] + sorted(raw_proj_statuses)
+                proj_status_sel = st.selectbox("Filter by Project Status:", proj_status_list, key="intel_proj_status_filter")
             
-            # Apply Initial Status Filter
+            # Apply Initial Filters
             search_df = full_reg_df.copy()
-            if status_sel != "All Statuses":
-                search_df = search_df[search_df['ProjectStatus'] == status_sel]
+            if sens_status_sel != "All Sensor Statuses":
+                search_df = search_df[search_df['SensorStatus'] == sens_status_sel]
+            if proj_status_sel != "All Project Statuses":
+                search_df = search_df[search_df['ProjectStatus'] == proj_status_sel]
 
             with f_col3:
+                # 3. Drill-down Search
+                intel_mode = st.radio("Search Mode:", ["By Project", "By Node ID"], horizontal=True, key="intel_mode_filter")
+                
                 if intel_mode == "By Project":
-                    # Dropna to prevent sorted() TypeError
-                    raw_projs = search_df['Project'].dropna().unique().tolist()
-                    proj_list = ["All Projects"] + sorted(raw_projs)
+                    proj_list = ["All Projects"] + sorted(search_df['Project'].dropna().unique().tolist())
                     proj_sel = st.selectbox("Select Project:", proj_list, key="intel_proj_filter")
-                    
                     if proj_sel != "All Projects":
                         search_df = search_df[search_df['Project'] == proj_sel]
-                        # Secondary Drill-down for Location
-                        raw_locs = search_df['Location'].dropna().unique().tolist()
-                        loc_list = ["All Locations"] + sorted(raw_locs)
-                        loc_sel = st.selectbox("Filter by Location:", loc_list, key="intel_loc_filter")
-                        if loc_sel != "All Locations":
-                            search_df = search_df[search_df['Location'] == loc_sel]
                 else:
                     node_search = st.text_input("Enter Node ID (Partial OK)", key="intel_node_search_input")
                     if node_search:
                         search_df = search_df[search_df['NodeNum'].fillna('').str.contains(node_search, na=False, case=False)]
 
+            st.divider()
+            st.write(f"Found **{len(search_df)}** matching sensor records.")
+            
+            # SORTING LOGIC: We sort by SensorStatus first so "Active" sensors float to the top
+            search_df = search_df.sort_values(by=['SensorStatus', 'Project', 'Location'], ascending=[True, True, True])
+            
+            # SPREADSHEET EDITOR
+            edit_enabled = st.checkbox("✍️ Enable Manual Spreadsheet Edits", key="intel_edit_toggle")
+            if edit_enabled:
+                st.info("💡 **Admin Note:** You can manually change a status to 'Active' or 'Swapped' here.")
+                edited_df = st.data_editor(search_df, num_rows="dynamic", key="intel_data_editor_widget", use_container_width=True)
+                
+                if st.button("💾 Push Changes to BigQuery", key="intel_save_btn", use_container_width=True):
+                    with st.spinner("Syncing Registry..."):
+                        final_sync_df = full_reg_df.copy()
+                        final_sync_df.update(edited_df)
+                        
+                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                        client.load_table_from_dataframe(final_sync_df, f"{PROJECT_ID}.{DATASET_ID}.project_registry", job_config=job_config).result()
+                        
+                        st.success("✅ Registry Synchronized.")
+                        st.cache_data.clear()
+                        st.rerun()
+            else:
+                st.dataframe(search_df, use_container_width=True, hide_index=True)
             st.write(f"Found **{len(search_df)}** matching assignments.")
             
             # SPREADSHEET EDITOR
