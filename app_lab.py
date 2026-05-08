@@ -913,29 +913,71 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             horizontal=True)
         st.divider()
 
-        # --- MODE A: GLOBAL LOOKUP & SPREADSHEET EDITOR ---
+        # --- MODE A: GLOBAL LOOKUP, SEARCH & EDIT ---
         if reg_mode == "🔍 Global Lookup & Search":
             st.subheader("🔍 Registry Intelligence")
-            l_col1, l_col2 = st.columns([1, 2])
             
-            with l_col1:
-                lookup_type = st.selectbox("Search By:", ["Project", "Node ID", "Location Name"])
+            # 1. TOP LEVEL FILTERS
+            f_col1, f_col2, f_col3 = st.columns(3)
             
-            # Filter Logic
+            with f_col1:
+                # Filter by Status (Active, Archived, Swapped, Template)
+                all_statuses = ["All Statuses"] + sorted(full_reg_df['ProjectStatus'].dropna().unique().tolist())
+                status_sel = st.selectbox("Filter by Status:", all_statuses)
+            
+            with f_col2:
+                # Filter by Project or ID Mode
+                lookup_type = st.selectbox("Search Mode:", ["By Project", "By Node ID"])
+            
+            # 2. DRILL-DOWN LOGIC
             search_df = full_reg_df.copy()
-            with l_col2:
-                if lookup_type == "Project":
-                    proj_search = st.selectbox("Select Project", ["All"] + sorted(full_reg_df['Project'].unique().tolist()))
-                    if proj_search != "All":
-                        search_df = search_df[search_df['Project'] == proj_search]
-                elif lookup_type == "Node ID":
-                    node_search = st.text_input("Enter Node ID (e.g. 58014-ch1)")
-                    if node_search:
-                        search_df = search_df[search_df['NodeNum'].str.contains(node_search, na=False, case=False)]
+            
+            # Apply Status Filter First
+            if status_sel != "All Statuses":
+                search_df = search_df[search_df['ProjectStatus'] == status_sel]
+
+            with f_col3:
+                if lookup_type == "By Project":
+                    # Fix for the sorting crash: dropna() before sorted()
+                    proj_list = ["All Projects"] + sorted(search_df['Project'].dropna().unique().tolist())
+                    proj_sel = st.selectbox("Select Project:", proj_list)
+                    
+                    if proj_sel != "All Projects":
+                        search_df = search_df[search_df['Project'] == proj_sel]
+                        # Show Location breakdown ONLY after a project is selected
+                        loc_list = ["All Locations"] + sorted(search_df['Location'].dropna().unique().tolist())
+                        loc_sel = st.selectbox("Filter by Location:", loc_list)
+                        if loc_sel != "All Locations":
+                            search_df = search_df[search_df['Location'] == loc_sel]
+                
                 else:
-                    loc_search = st.text_input("Enter Location Name (e.g. Pipe 12)")
-                    if loc_search:
-                        search_df = search_df[search_df['Location'].str.contains(loc_search, na=False, case=False)]
+                    node_search = st.text_input("Enter Node ID (Partial OK)")
+                    if node_search:
+                        search_df = search_df[search_df['NodeNum'].fillna('').str.contains(node_search, na=False, case=False)]
+
+            # 3. DISPLAY & EDITOR
+            st.divider()
+            st.write(f"Found **{len(search_df)}** matching sensor assignments.")
+            
+            edit_enabled = st.checkbox("✍️ Enable Manual Spreadsheet Edits")
+            if edit_enabled:
+                st.info("💡 **Admin Note:** Edits made here will sync back to the master registry. Be careful with 'Project' and 'NodeNum' names.")
+                edited_df = st.data_editor(search_df, num_rows="dynamic", key="reg_editor_v3", use_container_width=True)
+                
+                if st.button("💾 Push Changes to BigQuery"):
+                    with st.spinner("Syncing..."):
+                        # Merge local edits back into the full registry to prevent accidental deletion
+                        final_to_save = full_reg_df.copy()
+                        final_to_save.update(edited_df)
+                        
+                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                        client.load_table_from_dataframe(final_to_save, f"{PROJECT_ID}.{DATASET_ID}.project_registry", job_config=job_config).result()
+                        
+                        st.success("✅ Database Synchronized.")
+                        st.cache_data.clear()
+                        st.rerun()
+            else:
+                st.dataframe(search_df.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
 
             # Table Display & Manual Editing
             st.write(f"Displaying **{len(search_df)}** records:")
