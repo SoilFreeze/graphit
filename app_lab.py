@@ -57,9 +57,9 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     # 1. Get visibility cutoff from your masks
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    # 2. DEFINE THE FILTER (Crucial: This must happen before the query string)
+    # 2. DEFINE THE FILTER (MUST happen before the query string is built)
     if view_mode == "client":
-        # Client sees only explicitly Approved (TRUE) data after the mask cutoff
+        # Client sees only Approved (TRUE) data after the mask cutoff
         query_filter = f"AND rej.approve = 'TRUE' AND r.timestamp >= '{cutoff}'"
     else:
         # Engineering sees everything except explicit deletions (FALSE)
@@ -88,7 +88,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE reg.Project = '{project_id}'
         {query_filter}
-        -- Time-Fence Logic: Match data to the window the sensor was at this spot
+        -- Match data to the specific window the sensor was at this location
         AND r.timestamp >= reg.StartDate 
         AND (r.timestamp <= reg.EndDate OR reg.EndDate IS NULL)
         ORDER BY reg.Location ASC, r.timestamp ASC
