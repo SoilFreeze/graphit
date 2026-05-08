@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go  # This defines 'go'
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dt_timef
 import pytz
 import traceback
 import io
@@ -902,8 +902,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
     # --- FIX: ASSIGN ALL 5 VARIABLES ---
-    tab_reg, tab_bulk, tab_mask, tab_scrub, tab_surgical = st.tabs([
-        "📋 Registry Manager", "✅ Bulk Approval", "🚫 Mask Data", "🧹 Scrub", "🧨 Surgical"
+    tab_reg, tab_bulk, tab_scrub, tab_surgical = st.tabs([
+        "📋 Registry Manager", "✅ Bulk Approval", "🧹 Scrub", "🧨 Surgical"
     ])
 
     # --- TAB 0: REGISTRY MANAGER ---
@@ -1152,7 +1152,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label,
     with t_col2:
         if direction == "Between Range":
             sc1, sc2 = st.columns(2)
-            s_dt = datetime.combine(sc1.date_input("Start Date", value=datetime.now() - timedelta(days=7)), datetime.time(0,0))
+            s_dt = datetime.combine(sc1.date_input("Start Date", value=datetime.now() - timedelta(days=7)), dt_time(0,0))
             e_dt = datetime.combine(sc2.date_input("End Date", value=datetime.now()), datetime.time(23,59))
         else:
             anchor_dt = datetime.combine(st.date_input("Anchor Date", value=datetime.now()), st.time_input("Anchor Time", value=datetime.time(6,0)))
@@ -1381,10 +1381,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
 
 ###########
 # - 12. MAIN ROUTER - #
-###########
-
-###########
-# - 3. MAIN NAVIGATION & EXECUTION - #
 ###########
 
 # 2. PAGE EXECUTION LOGIC
