@@ -868,13 +868,17 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         
         search_df = full_reg_df.copy()
         if lookup_mode == "Project":
-            proj_search = st.selectbox("Select Project to View", ["All"] + sorted(full_reg_df['Project'].unique().tolist()))
+            # Drop nulls and convert to list before sorting
+available_projects = full_reg_df['Project'].dropna().unique().tolist()
+proj_search = st.selectbox("Select Project to View", ["All"] + sorted(available_projects))
             if proj_search != "All":
                 search_df = search_df[search_df['Project'] == proj_search]
-        elif lookup_mode == "Node ID":
-            node_search = st.text_input("Enter Node ID (e.g. 58014-ch1)")
-            if node_search:
-                search_df = search_df[search_df['NodeNum'].str.contains(node_search, na=False, case=False)]
+        # Updated Node Search (Line 874 approx)
+            elif lookup_mode == "Node ID":
+                node_search = st.text_input("Enter Node ID")
+                if node_search:
+                    # Using .fillna('') prevents crashes during the string search
+                    search_df = search_df[search_df['NodeNum'].fillna('').str.contains(node_search, na=False, case=False)]
         else:
             loc_search = st.text_input("Enter Location Name (e.g. Pipe 12)")
             if loc_search:
