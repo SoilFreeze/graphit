@@ -114,9 +114,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 ###########################
 #- 3. SIDEBAR UI & STATE -#
 ###########################
-###########################
-#- 3. SIDEBAR UI & STATE -#
-###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
 # --- 1. NAVIGATION (The "Where am I?") ---
