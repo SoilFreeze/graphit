@@ -52,59 +52,60 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Registry-Native Data Engine. 
-    Joins Raw Data + Registry + Manual Rejections.
+    Standardized Data Engine. 
+    Joins Raw Data + Metadata + Manual Rejections[cite: 15].
     """
-    # 1. Get visibility cutoff from your masks
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    # 2. DEFINE THE FILTER FIRST (Fixes the NameError)
+    # 1. Define the Query Filter based on View Mode 
     if view_mode == "client":
-        # Client sees only explicitly Approved (TRUE) data
-        query_filter = f"AND rej.approve = 'TRUE' AND r.timestamp >= '{cutoff}'"
+        # Must be explicitly Approved and NOT Masked 
+        query_filter = f"""
+            AND r.timestamp >= '{cutoff}'
+            AND rej.approve = 'TRUE'
+            AND NOT EXISTS (
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.approve = 'MASKED'
+            )
+        """
     else:
-        # Engineering sees everything except explicit deletions (FALSE)
+        # Engineering sees everything except explicit deletions ('FALSE') 
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
-    # 3. CONSTRUCT THE REGISTRY QUERY
+    # 2. Assign the 'query' variable explicitly
     query = f"""
         SELECT 
-            reg.Location, 
-            r.timestamp, 
-            r.temperature,
-            reg.NodeNum,
-            reg.Bank,
-            reg.Depth,
-            reg.Project
+            r.NodeNum, r.timestamp, r.temperature,
+            m.Location, m.Bank, m.Depth, m.Project,
+            rej.approve as is_approved 
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS reg 
-            ON r.NodeNum = reg.NodeNum
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE reg.Project = '{project_id}'
+        WHERE m.Project = '{project_id}'
         {query_filter}
-        -- Historical Alignment: Only pull data for the time the sensor was at this spot
-        AND r.timestamp >= reg.StartDate 
-        AND (r.timestamp <= reg.EndDate OR reg.EndDate IS NULL)
-        ORDER BY reg.Location ASC, r.timestamp ASC
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        ORDER BY m.Location ASC, r.timestamp ASC
     """
     
     try:
         df = client.query(query).to_dataframe()
         
-        # Ensure timestamp is UTC-aware to prevent graphing crashes
+        # Ensure timestamp is UTC-aware immediately to avoid localization crashes
         if not df.empty and 'timestamp' in df.columns:
             if df['timestamp'].dt.tz is None:
                 df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
                 
         return df
     except Exception as e:
-        st.error(f"Registry Query Failed: {e}")
+        st.error(f"BQ Data Engine Error: {e}")
         return pd.DataFrame()
 
 def check_admin_access(service_name):
@@ -133,26 +134,25 @@ def check_admin_access(service_name):
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    # ... (Keep your cutoff logic) ...
-
+    # Updated query joins Raw Data to the Registry by timeframe
     query = f"""
         SELECT 
-            reg.Location, r.timestamp, r.temperature,
-            reg.NodeNum, reg.Bank, reg.Depth, reg.Project
+            reg.Location, 
+            r.timestamp, 
+            r.temperature,
+            reg.NodeNum,
+            reg.Bank,
+            reg.Depth,
+            reg.ProjectStatus
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
-        -- JOIN TO REGISTRY INSTEAD OF METADATA
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS reg 
             ON r.NodeNum = reg.NodeNum
-        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
-            ON r.NodeNum = rej.NodeNum 
-            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE reg.Project = '{project_id}'
-        {query_filter}
-        -- ONLY PULL DATA FROM THE TIME THE SENSOR WAS AT THIS LOCATION
+        AND reg.ProjectStatus = 'Active'  -- Only show active projects in portal
         AND r.timestamp >= reg.StartDate 
         AND (r.timestamp <= reg.EndDate OR reg.EndDate IS NULL)
         ORDER BY reg.Location ASC, r.timestamp ASC
