@@ -134,25 +134,26 @@ def check_admin_access(service_name):
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    # Updated query joins Raw Data to the Registry by timeframe
+    # ... (Keep your cutoff logic) ...
+
     query = f"""
         SELECT 
-            reg.Location, 
-            r.timestamp, 
-            r.temperature,
-            reg.NodeNum,
-            reg.Bank,
-            reg.Depth,
-            reg.ProjectStatus
+            reg.Location, r.timestamp, r.temperature,
+            reg.NodeNum, reg.Bank, reg.Depth, reg.Project
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
+        -- JOIN TO REGISTRY INSTEAD OF METADATA
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS reg 
             ON r.NodeNum = reg.NodeNum
+        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+            ON r.NodeNum = rej.NodeNum 
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE reg.Project = '{project_id}'
-        AND reg.ProjectStatus = 'Active'  -- Only show active projects in portal
+        {query_filter}
+        -- ONLY PULL DATA FROM THE TIME THE SENSOR WAS AT THIS LOCATION
         AND r.timestamp >= reg.StartDate 
         AND (r.timestamp <= reg.EndDate OR reg.EndDate IS NULL)
         ORDER BY reg.Location ASC, r.timestamp ASC
