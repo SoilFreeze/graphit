@@ -176,7 +176,7 @@ st.session_state["tz_selection"] = tz_mode # Store for session persistence
 mobile_optimized = st.sidebar.toggle(
     "Mobile Layout", 
     value=False, 
-    help="Moves legend to bottom and expands graph width for small screens"
+    key="mobile_optimized"
 )
 
 st.sidebar.divider()
@@ -328,7 +328,7 @@ def render_global_overview(selected_project, display_tz):
     
     # 1. Access the mobile toggle from session state or sidebar logic
     # Make sure 'mobile_optimized' matches the key used in your sidebar toggle
-    mobile_mode = st.session_state.get("mobile_optimized", False)
+    mobile_mode = mobile_optimized
     
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to begin.")
