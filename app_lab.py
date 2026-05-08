@@ -863,11 +863,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
     
     # --- 3. TABS DEFINITION ---
-    , tab_bulk, tab_scrub, tab_surgical = st.tabs([
-        "📋 Registry Manager", "✅ Bulk Approval", "🧹 Scrub", "🧨 Surgical & Mask"
+    # Ensure 4 variables are present to match the 4 labels in the list
+    tab_reg, tab_bulk, tab_scrub, tab_surgical = st.tabs([
+        "📋 Registry Manager", 
+        "✅ Bulk Approval", 
+        "🧹 Scrub", 
+        "🧨 Surgical & Mask"
     ])
-
-   # --- TAB 0: REGISTRY MANAGER ---
+    
     # --- TAB 0: REGISTRY MANAGER ---
     with tab_reg:
         # 1. PRIMARY ACTION SELECTOR
