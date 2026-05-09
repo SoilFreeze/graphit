@@ -961,27 +961,42 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # --- TAB 3: PROJECT SETTINGS (UPDATE INFO & NOTES) ---
     with tab_settings:
-        st.subheader(f"⚙️ Project Settings: {selected_project}")
+        st.subheader(f"⚙️ Settings: {selected_project}")
+        
         if selected_project == "All Projects":
             st.info("Select a specific project in the sidebar to update settings.")
         else:
-            # Extract current metadata for this project
-            proj_data = full_reg_df[full_reg_df['Project'] == selected_project].iloc[0] if not active_project_df.empty else None
+            # 1. Row Selection
+            proj_rows = full_reg_df[full_reg_df['Project'] == selected_project]
+            proj_data = proj_rows.iloc[0] if not proj_rows.empty else None
             
+            # 2. Safety Helper: Get value if column exists, else return empty string
+            def get_val(col_name):
+                if proj_data is not None and col_name in proj_data:
+                    return proj_data[col_name] if pd.notnull(proj_data[col_name]) else ""
+                return ""
+
             with st.form("update_settings_form"):
+                st.info("💡 Note: Updating these fields will synchronize metadata across all sensors in this project.")
+                
                 c1, c2 = st.columns(2)
-                u_name = c1.text_input("Project Name", value=proj_data['ProjectName'] if proj_data is not None else "")
-                u_city = c2.text_input("Location/City", value=proj_data['City'] if proj_data is not None else "")
+                u_name = c1.text_input("Project Name", value=get_val('ProjectName'))
+                u_city = c2.text_input("Location/City", value=get_val('City'))
                 
                 c3, c4 = st.columns(2)
-                u_tz = c3.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"], 
-                                    index=["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"].index(proj_data['Timezone']) if proj_data is not None else 0)
-                u_asbuilt = c4.text_input("As-Built Image File", value=proj_data['AsBuiltFile'] if proj_data is not None else "")
+                # Timezone logic with fallback index
+                tz_options = ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"]
+                current_tz = get_val('Timezone')
+                tz_index = tz_options.index(current_tz) if current_tz in tz_options else 0
                 
-                u_upload = st.text_input("Upload Note", value=proj_data['UploadNote'] if proj_data is not None else "")
-                u_notes = st.text_area("Engineering Notes", value=proj_data['EngNotes'] if proj_data is not None else "", height=150)
+                u_tz = c3.selectbox("Timezone", tz_options, index=tz_index)
+                u_asbuilt = c4.text_input("As-Built Image File", value=get_val('AsBuiltFile'))
+                
+                u_upload = st.text_input("Upload Note", value=get_val('UploadNote'))
+                u_notes = st.text_area("Engineering Notes", value=get_val('EngNotes'), height=150)
                 
                 if st.form_submit_button("💾 Save Project Information"):
+                    # Check if columns exist in the DB before updating, or handle via try/except
                     update_sql = f"""
                         UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
                         SET ProjectName = '{u_name}',
@@ -992,16 +1007,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             EngNotes = '{u_notes}'
                         WHERE Project = '{selected_project}'
                     """
-                    client.query(update_sql).result()
-                    st.success(f"Updated metadata for {selected_project}.")
-                    st.cache_data.clear()
+                    try:
+                        client.query(update_sql).result()
+                        st.success(f"Successfully updated metadata for {selected_project}.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Database Error: Ensure your table schema includes the new metadata columns. \n\nError details: {e}")
             
             st.divider()
-            if st.button(f"🔥 Retire Project: {selected_project}", type="primary"):
+            if st.button(f"🔥 Retire Project: {selected_project}", type="primary", key="retire_final_btn"):
                 client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus = 'Archived', EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Available' WHERE Project = '{selected_project}' AND EndDate IS NULL").result()
                 st.success("Project archived.")
                 st.cache_data.clear()
-
+                st.rerun()
     # --- TAB 4: INIT PROJECT (ADD LOCATIONS) ---
     with tab_init:
         st.subheader("🏗️ Initialize Project Structure")
