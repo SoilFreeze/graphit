@@ -52,60 +52,56 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Unified Data Engine: Joins Raw Data + Project Registry + Manual Rejections.
+    Three-Way Join: Raw + Node Registry + Project Registry + Manual Rejections.
     """
-    # 1. Get visibility cutoff from your masks
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    # 2. DEFINE THE FILTER (MUST happen before the query string is built)
     if view_mode == "client":
-        # Client sees only Approved (TRUE) data after the mask cutoff
         query_filter = f"AND rej.approve = 'TRUE' AND r.timestamp >= '{cutoff}'"
     else:
-        # Engineering sees everything except explicit deletions (FALSE)
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
-    # 3. CONSTRUCT THE REGISTRY-CENTRIC QUERY
     query = f"""
         SELECT 
-            reg.Location, 
+            n.Location, 
             r.timestamp, 
             r.temperature,
-            reg.NodeNum,
-            reg.Bank,
-            reg.Depth,
-            reg.Project
+            n.NodeNum,
+            n.Bank,
+            n.Depth,
+            n.Project,
+            p.ProjectName,
+            p.Timezone
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
-        -- JOIN TO REGISTRY INSTEAD OF OLD METADATA
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS reg 
-            ON r.NodeNum = reg.NodeNum
+        -- JOIN 1: Match raw data to its specific assignment in the Node Registry
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n 
+            ON r.NodeNum = n.NodeNum
+        -- JOIN 2: Get the project metadata (Timezone, Name) from Project Registry
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS p 
+            ON n.Project = p.Project
+        -- JOIN 3: Check for manual approvals/rejections
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE reg.Project = '{project_id}'
+        WHERE n.Project = '{project_id}'
         {query_filter}
-        -- Match data to the specific window the sensor was at this location
-        AND r.timestamp >= reg.StartDate 
-        AND (r.timestamp <= reg.EndDate OR reg.EndDate IS NULL)
-        ORDER BY reg.Location ASC, r.timestamp ASC
+        -- Ensure data is within the specific window the sensor was assigned to this spot
+        AND r.timestamp >= n.StartDate 
+        AND (r.timestamp <= n.EndDate OR n.EndDate IS NULL)
+        ORDER BY n.Location ASC, r.timestamp ASC
     """
     
     try:
         df = client.query(query).to_dataframe()
-        
         if not df.empty:
-            # Force numeric types to prevent "str vs float" errors in math/graphing
             df['Depth'] = pd.to_numeric(df['Depth'], errors='coerce')
             df['temperature'] = pd.to_numeric(df['temperature'], errors='coerce')
-            
-            # Ensure timestamp is UTC-aware for the graphing engine
             if df['timestamp'].dt.tz is None:
                 df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
-                
         return df
     except Exception as e:
         st.error(f"Registry Engine Error: {e}")
@@ -115,6 +111,27 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 #- 3. SIDEBAR UI & STATE -#
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
+
+# 1. Initialize variables
+selected_project = "All Projects"
+proj_filter = ""
+
+# 2. Fetch Active Projects from the Master Registry
+if client is not None:
+    try:
+        proj_q = f"SELECT Project, ProjectName FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus = 'Active'"
+        proj_df = client.query(proj_q).to_dataframe()
+        proj_list = sorted(proj_df['Project'].dropna().unique())
+        
+        # dropdown for project selection
+        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"] + proj_list, key="sidebar_proj_picker_global")
+        
+        # 3. Create the SQL filter snippet for downstream queries
+        if selected_project != "All Projects":
+            # Using 'n.' prefix to target the node_registry in joins
+            proj_filter = f"AND n.Project = '{selected_project}'"
+    except Exception as e:
+        st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
 
 # --- 1. NAVIGATION (The "Where am I?") ---
 page = st.sidebar.selectbox("Navigate To:", [
