@@ -876,11 +876,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
-    # --- 2. THE UNIFIED NAVIGATION (7 TABS) ---
-    (tab_bulk, tab_intel, tab_settings, tab_setup, 
+    # --- 2. THE UNIFIED NAVIGATION (6 TABS) ---
+    (tab_bulk, tab_registry, tab_project, 
      tab_scrub, tab_surgical, tab_audit) = st.tabs([
-        "✅ Bulk Approval", "🔍 Intelligence", "⚙️ Project Settings", 
-        "🏗️ Project Setup", "🧹 Scrub", "🧨 Surgical", "🕒 Audit"
+        "✅ Bulk Approval", "📋 Registry", "⚙️ Project", 
+        "🧹 Scrub", "🧨 Surgical", "🕒 Audit"
     ])
 
     # --- TAB 1: BULK APPROVAL ---
@@ -888,10 +888,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.subheader("✅ Range-Based Bulk Approval")
         sel_loc = st.selectbox("Target Location", loc_options, key="bulk_loc_main")
         c1, c2 = st.columns(2)
-        b_s = c1.date_input("Approval Start", value=datetime.now()-timedelta(7), key="bulk_date_s")
-        b_e = c2.date_input("Approval End", value=datetime.now(), key="bulk_date_e")
+        b_s = c1.date_input("Start", value=datetime.now()-timedelta(7), key="bulk_date_s")
+        b_e = c2.date_input("End", value=datetime.now(), key="bulk_date_e")
         
-        if st.button("🚀 Execute Bulk Approval", use_container_width=True, key="bulk_exec_btn"):
+        if st.button("🚀 Execute Bulk Approval", use_container_width=True):
             loc_f = f"AND m.Location = '{sel_loc}'" if sel_loc != "All Locations" else ""
             sql = f"""
                 INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
@@ -902,20 +902,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 AND NOT EXISTS (SELECT 1 FROM `{OVERRIDE_TABLE}` x WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR))
             """
             client.query(sql).result()
-            st.success(f"Successfully approved data for {sel_loc}.")
+            st.success(f"Approved data for {sel_loc}.")
             st.cache_data.clear()
 
-    # --- TAB 2: REGISTRY INTELLIGENCE (SEARCH & EDIT) ---
-    with tab_intel:
-        st.subheader("🔍 Registry Intelligence")
+    # --- TAB 2: REGISTRY (INTELLIGENCE + HARDWARE SETUP) ---
+    with tab_registry:
+        # Top Half: Search & Edit (Intelligence)
+        st.subheader("📋 Registry Intelligence")
         f_col1, f_col2, f_col3 = st.columns(3)
-        
         with f_col1:
             s_list = ["All Sensor Statuses"] + sorted(full_reg_df['SensorStatus'].dropna().unique().tolist())
-            sens_status_sel = st.selectbox("Filter Sensor:", s_list, key="intel_s_stat")
+            sens_status_sel = st.selectbox("Filter Sensor:", s_list, key="reg_s_stat")
         with f_col2:
             p_list = ["All Project Statuses"] + sorted(full_reg_df['ProjectStatus'].dropna().unique().tolist())
-            proj_status_sel = st.selectbox("Filter Project:", p_list, key="intel_p_stat")
+            proj_status_sel = st.selectbox("Filter Project:", p_list, key="reg_p_stat")
         
         search_df = full_reg_df.copy()
         if sens_status_sel != "All Sensor Statuses":
@@ -924,85 +924,99 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             search_df = search_df[search_df['ProjectStatus'] == proj_status_sel]
 
         with f_col3:
-            intel_mode = st.radio("Mode:", ["By Project", "By Node ID"], horizontal=True, key="intel_mode")
-            if intel_mode == "By Project":
+            reg_mode = st.radio("Search Mode:", ["By Project", "By Node ID"], horizontal=True, key="reg_intel_mode")
+            if reg_mode == "By Project":
                 proj_list = ["All Projects"] + sorted(search_df['Project'].dropna().unique().tolist())
-                proj_sel = st.selectbox("Select Project:", proj_list, key="intel_proj")
+                proj_sel = st.selectbox("Select Project:", proj_list, key="reg_proj_sel")
                 if proj_sel != "All Projects":
                     search_df = search_df[search_df['Project'] == proj_sel]
             else:
-                node_search = st.text_input("Search Node ID", key="intel_node_srch")
+                node_search = st.text_input("Search Node ID", key="reg_node_srch")
                 if node_search:
                     search_df = search_df[search_df['NodeNum'].fillna('').str.contains(node_search, na=False, case=False)]
 
-        search_df = search_df.sort_values(by=['SensorStatus', 'Project', 'Location'])
-        if st.checkbox("✍️ Enable Manual Spreadsheet Edits", key="intel_edit_toggle"):
-            st.warning("Editing critical metadata columns will affect all project displays.")
-            edited_df = st.data_editor(search_df, num_rows="dynamic", key="intel_editor", use_container_width=True)
-            if st.button("💾 Push Changes to BigQuery", key="intel_save"):
+        if st.checkbox("✍️ Enable Manual Edits", key="reg_edit_toggle"):
+            edited_df = st.data_editor(search_df, num_rows="dynamic", key="reg_editor", use_container_width=True)
+            if st.button("💾 Push Edits to BigQuery"):
                 final_df = full_reg_df.copy()
                 final_df.update(edited_df)
                 client.load_table_from_dataframe(final_df, f"{PROJECT_ID}.{DATASET_ID}.project_registry", 
                                                job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-                st.success("Registry Synced.")
+                st.success("Registry updated.")
                 st.cache_data.clear()
-                st.rerun()
         else:
-            st.dataframe(search_df, use_container_width=True, hide_index=True)
+            st.dataframe(search_df.sort_values(['SensorStatus', 'Project']), use_container_width=True, hide_index=True)
 
-    # --- TAB 3: PROJECT SETTINGS ---
-    with tab_settings:
-        st.subheader(f"⚙️ Settings: {selected_project}")
+        st.divider()
+
+        # Bottom Half: Hardware Initialization
+        st.subheader("📥 Add Sensors to Registry")
+        hw_type = st.radio("Hardware Type", ["SensorPush (Bulk Upload)", "Lord (Auto-Generate 12 Ch)"], horizontal=True)
         
-        if selected_project == "All Projects":
-            st.info("Select a specific project in the sidebar to update settings.")
+        new_sensors = []
+        if hw_type == "SensorPush (Bulk Upload)":
+            u_file = st.file_uploader("Upload Mapping CSV (SensorID, NodeNum, Location, Depth, Bank)", type=['csv'])
+            if u_file:
+                new_sensors = pd.read_csv(u_file).to_dict('records')
         else:
-            proj_rows = full_reg_df[full_reg_df['Project'] == selected_project]
-            proj_data = proj_rows.iloc[0] if not proj_rows.empty else None
-            
-            # Updated Helper: Provides your specific default for the Upload Note
-            def get_val(col_name):
-                if proj_data is not None and col_name in proj_data:
-                    val = proj_data[col_name]
-                    if pd.notnull(val) and str(val).strip() != "":
-                        return val
-                
-                # Apply the specific default if the field is empty or the column is missing
-                if col_name == 'UploadNote':
-                    return "Data will be uploaded once per business day by 4pm Pacific Time."
-                return ""
+            c1, c2 = st.columns([1, 2])
+            l_base = c1.text_input("Lord Base ID (e.g., 62534)")
+            l_loc = c2.text_input("Base Location (e.g., Bank N)")
+            if l_base:
+                for i in range(1, 13):
+                    new_sensors.append({'NodeNum': f"{l_base}-ch{i}", 'Location': l_loc, 'Depth': i, 'Bank': l_loc})
+                st.dataframe(pd.DataFrame(new_sensors), height=150)
 
-            with st.form("update_settings_form"):
+        if st.button("🚀 Commit Sensors to Current Project", use_container_width=True):
+            if selected_project == "All Projects" or not new_sensors:
+                st.error("Select a project and provide sensor data.")
+            else:
+                # Inherit metadata from existing project row
+                p_meta = full_reg_df[full_reg_df['Project'] == selected_project].iloc[0]
+                rows = []
+                for s in new_sensors:
+                    d = str(s['Depth']) if pd.notnull(s.get('Depth')) else "NULL"
+                    b = f"'{s['Bank']}'" if pd.notnull(s.get('Bank')) else "NULL"
+                    rows.append(f"('{selected_project}', '{s['Location']}', '{s['NodeNum']}', {b}, {d}, CURRENT_TIMESTAMP(), 'Active', 'Active', '{p_meta['ProjectName']}', '{p_meta['City']}', '{p_meta['Timezone']}', '{p_meta['UploadNote']}', '{p_meta['AsBuiltFile']}', '')")
+                
+                client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile, EngNotes) VALUES {', '.join(rows)}").result()
+                st.success("Sensors added.")
+                st.cache_data.clear()
+
+    # --- TAB 3: PROJECT (INIT & SETTINGS) ---
+    with tab_project:
+        st.subheader("⚙️ Project Management")
+        mode = st.radio("Action", ["Initialize New Project", "Update Existing Settings"], horizontal=True)
+        
+        if mode == "Initialize New Project":
+            with st.form("proj_init_form"):
                 c1, c2 = st.columns(2)
-                u_name = c1.text_input("Project Name", value=get_val('ProjectName'))
-                u_city = c2.text_input("Location/City", value=get_val('City'))
-                
-                c3, c4 = st.columns(2)
-                tz_options = ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"]
-                current_tz = get_val('Timezone')
-                tz_index = tz_options.index(current_tz) if current_tz in tz_options else 0
-                u_tz = c3.selectbox("Timezone", tz_options, index=tz_index)
-                u_asbuilt = c4.text_input("As-Built Image File", value=get_val('AsBuiltFile'))
-                
-                # This field now uses the auto-defaulting logic
-                u_upload = st.text_input("Upload Note", value=get_val('UploadNote'))
-                u_notes = st.text_area("Engineering Notes", value=get_val('EngNotes'), height=150)
-                
-                if st.form_submit_button("💾 Save Project Information"):
-                    update_sql = f"""
-                        UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
-                        SET ProjectName = '{u_name}',
-                            City = '{u_city}',
-                            Timezone = '{u_tz}',
-                            AsBuiltFile = '{u_asbuilt}',
-                            UploadNote = '{u_upload}',
-                            EngNotes = '{u_notes}'
-                        WHERE Project = '{selected_project}'
-                    """
-                    client.query(update_sql).result()
-                    st.success(f"Metadata updated for {selected_project}.")
+                n_id = c1.text_input("Project ID (e.g. 2541-Blackjack)")
+                n_name = c2.text_input("Project Name")
+                n_city = st.text_input("City, State")
+                n_tz = st.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"])
+                n_upload = st.text_input("Upload Note", value="Data will be uploaded once per business day by 4pm Pacific Time.")
+                n_asbuilt = st.text_input("As-Built Filename")
+                if st.form_submit_button("🚀 Create Project Entry"):
+                    sql = f"""INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                              (Project, Location, NodeNum, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile) 
+                              VALUES ('{n_id}', 'Admin', 'Template', CURRENT_TIMESTAMP(), 'Template', 'Active', '{n_name}', '{n_city}', '{n_tz}', '{n_upload}', '{n_asbuilt}')"""
+                    client.query(sql).result()
+                    st.success(f"Project {n_id} initialized.")
                     st.cache_data.clear()
-                    st.rerun()
+        else:
+            if selected_project == "All Projects":
+                st.info("Select a project in the sidebar.")
+            else:
+                p_data = full_reg_df[full_reg_df['Project'] == selected_project].iloc[0]
+                with st.form("proj_update_form"):
+                    u_name = st.text_input("Project Name", value=p_data.get('ProjectName', ''))
+                    u_city = st.text_input("City", value=p_data.get('City', ''))
+                    u_notes = st.text_area("Engineering Notes", value=p_data.get('EngNotes', ''))
+                    if st.form_submit_button("💾 Save Changes"):
+                        client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectName='{u_name}', City='{u_city}', EngNotes='{u_notes}' WHERE Project='{selected_project}'").result()
+                        st.success("Settings updated.")
+                        st.cache_data.clear()
 
     # --- TAB 4: UNIFIED PROJECT & HARDWARE SETUP ---
     with tab_setup:
