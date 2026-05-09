@@ -959,44 +959,45 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         else:
             st.dataframe(search_df, use_container_width=True, hide_index=True)
 
-    # --- TAB 3: PROJECT SETTINGS (UPDATE INFO & NOTES) ---
+    # --- TAB 3: PROJECT SETTINGS ---
     with tab_settings:
         st.subheader(f"⚙️ Settings: {selected_project}")
         
         if selected_project == "All Projects":
             st.info("Select a specific project in the sidebar to update settings.")
         else:
-            # 1. Row Selection
             proj_rows = full_reg_df[full_reg_df['Project'] == selected_project]
             proj_data = proj_rows.iloc[0] if not proj_rows.empty else None
             
-            # 2. Safety Helper: Get value if column exists, else return empty string
+            # Updated Helper: Provides your specific default for the Upload Note
             def get_val(col_name):
                 if proj_data is not None and col_name in proj_data:
-                    return proj_data[col_name] if pd.notnull(proj_data[col_name]) else ""
+                    val = proj_data[col_name]
+                    if pd.notnull(val) and str(val).strip() != "":
+                        return val
+                
+                # Apply the specific default if the field is empty or the column is missing
+                if col_name == 'UploadNote':
+                    return "Data will be uploaded once per business day by 4pm Pacific Time."
                 return ""
 
             with st.form("update_settings_form"):
-                st.info("💡 Note: Updating these fields will synchronize metadata across all sensors in this project.")
-                
                 c1, c2 = st.columns(2)
                 u_name = c1.text_input("Project Name", value=get_val('ProjectName'))
                 u_city = c2.text_input("Location/City", value=get_val('City'))
                 
                 c3, c4 = st.columns(2)
-                # Timezone logic with fallback index
                 tz_options = ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"]
                 current_tz = get_val('Timezone')
                 tz_index = tz_options.index(current_tz) if current_tz in tz_options else 0
-                
                 u_tz = c3.selectbox("Timezone", tz_options, index=tz_index)
                 u_asbuilt = c4.text_input("As-Built Image File", value=get_val('AsBuiltFile'))
                 
+                # This field now uses the auto-defaulting logic
                 u_upload = st.text_input("Upload Note", value=get_val('UploadNote'))
                 u_notes = st.text_area("Engineering Notes", value=get_val('EngNotes'), height=150)
                 
                 if st.form_submit_button("💾 Save Project Information"):
-                    # Check if columns exist in the DB before updating, or handle via try/except
                     update_sql = f"""
                         UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
                         SET ProjectName = '{u_name}',
@@ -1007,35 +1008,25 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             EngNotes = '{u_notes}'
                         WHERE Project = '{selected_project}'
                     """
-                    try:
-                        client.query(update_sql).result()
-                        st.success(f"Successfully updated metadata for {selected_project}.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Database Error: Ensure your table schema includes the new metadata columns. \n\nError details: {e}")
-            
-            st.divider()
-            if st.button(f"🔥 Retire Project: {selected_project}", type="primary", key="retire_final_btn"):
-                client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus = 'Archived', EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Available' WHERE Project = '{selected_project}' AND EndDate IS NULL").result()
-                st.success("Project archived.")
-                st.cache_data.clear()
-                st.rerun()
-    # --- TAB 4: INIT PROJECT (ADD LOCATIONS) ---
+                    client.query(update_sql).result()
+                    st.success(f"Metadata updated for {selected_project}.")
+                    st.cache_data.clear()
+                    st.rerun()
+
+    # --- TAB 4: INIT PROJECT ---
     with tab_init:
         st.subheader("🏗️ Initialize Project Structure")
-        st.info("Use this to create the 'skeleton' of a project (Location names) before assigning sensors.")
-        
         with st.form("init_project_form"):
             n_id = st.text_input("New Project ID (e.g., 2541-Blackjack)")
             n_locs = st.text_area("Locations/Pipes (One per line)")
-            st.caption("Note: Metadata can be updated in the 'Settings' tab after initialization.")
             
             if st.form_submit_button("🚀 Create Skeleton"):
                 if n_id and n_locs:
                     l_list = [l.strip() for l in n_locs.split('\n') if l.strip()]
-                    # Default values for metadata during init
-                    rows = [f"('{n_id}', '{loc}', 'TBD', NULL, NULL, CURRENT_TIMESTAMP(), 'Template', 'Active', '', '', 'America/Los_Angeles', 'Data will be uploaded once per business day.', '', '')" for loc in l_list]
+                    # Defaulting UploadNote here at the database insertion level
+                    def_note = "Data will be uploaded once per business day by 4pm Pacific Time."
+                    
+                    rows = [f"('{n_id}', '{loc}', 'TBD', NULL, NULL, CURRENT_TIMESTAMP(), 'Template', 'Active', '', '', 'America/Los_Angeles', '{def_note}', '', '')" for loc in l_list]
                     
                     sql = f"""
                         INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
@@ -1043,7 +1034,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         VALUES {', '.join(rows)}
                     """
                     client.query(sql).result()
-                    st.success(f"Initialized {n_id} with {len(l_list)} locations.")
+                    st.success(f"Initialized {n_id} with default upload notes.")
                     st.cache_data.clear()
 
     # --- TAB 5: SCRUB ---
