@@ -952,6 +952,38 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
             st.dataframe(rdf.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
 
+        # --- SPREADSHEET EDITOR SECTION ---
+            edit_mode = st.checkbox("✍️ Enable Spreadsheet Mode (Live Editing)")
+            
+            if edit_mode:
+                st.warning("⚠️ Changes made here are staged locally. Click 'Push Changes' below to update BigQuery.")
+                # The key must be unique to avoid state collisions
+                edited_df = st.data_editor(rdf, num_rows="dynamic", key="reg_data_editor", use_container_width=True)
+                
+                if st.button("💾 Push Changes to BigQuery", use_container_width=True, type="primary"):
+                    with st.spinner("Synchronizing with BigQuery..."):
+                        try:
+                            # 1. Merge logic: Update the master full_reg_df with the edited subset
+                            # This prevents data loss for projects/rows currently filtered out.
+                            final_sync_df = full_reg_df.copy()
+                            final_sync_df.update(edited_df)
+                            
+                            # 2. Push to BQ
+                            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                            client.load_table_from_dataframe(
+                                final_sync_df, 
+                                f"{PROJECT_ID}.{DATASET_ID}.project_registry", 
+                                job_config=job_config
+                            ).result()
+                            
+                            st.success("✅ Registry Synchronized Successfully.")
+                            st.cache_data.clear() # Clear streamlit cache to show new data
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Sync Failed: {e}")
+            else:
+                st.dataframe(rdf.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
+
         st.divider()
 
         # --- PART B: INDIVIDUAL NODE EDITOR ---
