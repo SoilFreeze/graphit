@@ -915,107 +915,67 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.success(f"Approved data for {sel_loc}.")
             st.cache_data.clear()
 
-    # --- TAB 2: REGISTRY (HARDWARE & ASSIGNMENTS) ---
+    # --- TAB 2: REGISTRY (HARDWARE & METADATA SYNC) ---
     with tab_registry:
         st.subheader("📋 Node Registry")
 
-        # --- PART A: DATA EXPLORER ---
-        with st.expander("🔍 Filter & Edit Hardware Assignments", expanded=True):
-            f_col1, f_col2, f_col3 = st.columns(3)
-            
-            with f_col1:
-                s_raw = full_reg_df['SensorStatus'].dropna().unique().tolist() if 'SensorStatus' in full_reg_df.columns else []
-                s_filter = st.selectbox("Sensor Status", ["All Statuses"] + sorted([str(s) for s in s_raw]), key="node_filt_status")
-            
-            with f_col2:
-                p_raw = full_reg_df['Project'].dropna().unique().tolist() if 'Project' in full_reg_df.columns else []
-                p_filter = st.selectbox("Project", ["All Projects"] + sorted([str(p) for p in p_raw]), key="node_filt_proj")
+        # 1. FETCH JOINED DATA
+        # We join with project_registry so you can see the "Name" while editing the "Node"
+        sync_q = f"""
+            SELECT 
+                n.*, 
+                p.ProjectName, p.City, p.Timezone, p.UploadNote
+            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON n.Project = p.Project
+        """
+        try:
+            joined_df = client.query(sync_q).to_dataframe()
+        except:
+            joined_df = pd.DataFrame()
 
-            with f_col3:
-                tenure_filter = st.radio("Scope", ["Active Nodes", "Historic", "All"], horizontal=True, key="node_tenure")
+        # 2. FILTER & EXPLORE
+        with st.expander("🔍 Registry Explorer", expanded=True):
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                p_list = ["All Projects"] + sorted(joined_df['Project'].dropna().unique().tolist()) if not joined_df.empty else ["All Projects"]
+                p_sel = st.selectbox("Filter by Project ID", p_list, key="reg_p_sync")
+            with f2:
+                s_list = ["All Statuses"] + sorted(joined_df['SensorStatus'].dropna().unique().tolist()) if not joined_df.empty else ["All Statuses"]
+                s_sel = st.selectbox("Filter by Status", s_list, key="reg_s_sync")
+            with f3:
+                tenure = st.radio("Tenure", ["Active", "Historic", "All"], horizontal=True)
 
-            # Filtering Logic
-            rdf = full_reg_df.copy()
-            if s_filter != "All Statuses":
-                rdf = rdf[rdf['SensorStatus'] == s_filter]
-            if p_filter != "All Projects":
-                rdf = rdf[rdf['Project'] == p_filter]
-            
-            if tenure_filter == "Active Nodes":
-                rdf = rdf[rdf['EndDate'].isna()]
-            elif tenure_filter == "Historic":
-                rdf = rdf[rdf['EndDate'].notna()]
+            # Filtering logic
+            view_df = joined_df.copy()
+            if p_sel != "All Projects":
+                view_df = view_df[view_df['Project'] == p_sel]
+            if s_sel != "All Statuses":
+                view_df = view_df[view_df['SensorStatus'] == s_sel]
+            if tenure == "Active":
+                view_df = view_df[view_df['EndDate'].isna()]
+            elif tenure == "Historic":
+                view_df = view_df[view_df['EndDate'].notna()]
 
-            # Spreadsheet Mode
-            if st.checkbox("✍️ Enable Spreadsheet Mode", key="node_edit_toggle"):
-                st.info("Directly editing hardware assignments. Meta-data (like Project Name) is read-only here.")
-                # We only allow editing columns that belong to the node_registry table
-                node_cols = ['NodeNum', 'Project', 'Location', 'Bank', 'Depth', 'SensorStatus', 'StartDate', 'EndDate']
-                available_cols = [c for c in node_cols if c in rdf.columns]
+            # 3. SPREADSHEET SYNC
+            if st.checkbox("✍️ Enable Bulk Metadata/Node Edit"):
+                st.info("Note: You can re-assign nodes to different projects by changing the 'Project' column.")
+                # We show the joined data but only allow edits to the node-specific columns
+                editable_cols = ['NodeNum', 'Project', 'Location', 'Bank', 'Depth', 'SensorStatus', 'StartDate', 'EndDate']
+                edited_df = st.data_editor(view_df, num_rows="dynamic", key="node_meta_sync_editor")
                 
-                edited_df = st.data_editor(rdf[available_cols], num_rows="dynamic", key="node_data_editor")
-                
-                if st.button("💾 Push Hardware Changes", use_container_width=True, type="primary"):
-                    final_node_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
-                    final_node_df.update(edited_df)
+                if st.button("💾 Sync Changes to BigQuery", use_container_width=True, type="primary"):
+                    # We push ONLY the node registry columns back to the node table
+                    final_node_push = edited_df[editable_cols]
                     
-                    client.load_table_from_dataframe(final_node_df, f"{PROJECT_ID}.{DATASET_ID}.node_registry", 
-                                                   job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-                    st.success("Node Registry Updated.")
+                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                    client.load_table_from_dataframe(final_node_push, f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
+                    
+                    st.success("✅ Node Registry synchronized with metadata links.")
                     st.cache_data.clear()
                     st.rerun()
             else:
-                st.dataframe(rdf.sort_values(['Project', 'Location']), use_container_width=True, hide_index=True)
-
-        st.divider()
-
-        # --- PART B: INDIVIDUAL OVERRIDE ---
-        st.subheader("🎯 Single Node Override")
-        target_node = st.text_input("Enter Node ID to Edit", key="node_single_search")
-        if target_node:
-            node_rec = full_reg_df[(full_reg_df['NodeNum'] == target_node) & (full_reg_df['EndDate'].isna())]
-            if not node_rec.empty:
-                nr = node_rec.iloc[0]
-                with st.form("single_node_form"):
-                    c1, c2, c3 = st.columns(3)
-                    n_loc = c1.text_input("Location", value=nr.get('Location', ''))
-                    n_depth = c2.text_input("Depth", value=str(nr.get('Depth', '')))
-                    n_bank = c3.text_input("Bank", value=nr.get('Bank', ''))
-                    
-                    if st.form_submit_button("💾 Update Node"):
-                        sql_d = n_depth if n_depth.strip() != "" else "NULL"
-                        client.query(f"""
-                            UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                            SET Location='{n_loc}', Depth={sql_d}, Bank='{n_bank}' 
-                            WHERE NodeNum='{target_node}' AND EndDate IS NULL
-                        """).result()
-                        st.success(f"Node {target_node} updated.")
-                        st.cache_data.clear()
-                        st.rerun()
-
-        st.divider()
-
-        # --- PART C: BATCH ADDITION ---
-        with st.expander("📥 Add Hardware (CSV or Lord)", expanded=False):
-            hw_choice = st.radio("Type", ["SensorPush CSV", "Lord 12-Ch"], horizontal=True)
-            if hw_choice == "SensorPush CSV":
-                u_file = st.file_uploader("Upload CSV (NodeNum, Location, Depth, Bank)", type=['csv'])
-                if u_file and st.button("🚀 Commit CSV"):
-                    df = pd.read_csv(u_file)
-                    df['Project'] = selected_project
-                    df['StartDate'] = datetime.now()
-                    df['SensorStatus'] = 'Active'
-                    client.load_table_from_dataframe(df, f"{PROJECT_ID}.{DATASET_ID}.node_registry").result()
-                    st.success("Hardware assigned.")
-                    st.cache_data.clear()
-            else:
-                l_id = st.text_input("Lord Base Station ID")
-                l_loc = st.text_input("Base Location")
-                if l_id and st.button("🚀 Generate Channels"):
-                    rows = [f"('{l_id}-ch{i}', '{selected_project}', '{l_loc}', '{l_loc}', {i}, CURRENT_TIMESTAMP(), 'Active')" for i in range(1, 13)]
-                    client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` (NodeNum, Project, Location, Bank, Depth, StartDate, SensorStatus) VALUES {', '.join(rows)}").result()
-                    st.success("Lord channels added to node registry.")
-                    st.cache_data.clear()
+                # Display the view with metadata columns (Name, City, etc)
+                st.dataframe(view_df.sort_values(['Project', 'Location']), use_container_width=True, hide_index=True)
 
         # --- PART B: INDIVIDUAL NODE OVERRIDE ---
         st.subheader("🎯 Individual Node Override")
@@ -1116,7 +1076,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.subheader("⚙️ Project Management")
         p_mode = st.radio("Primary Action", ["Update Existing Project", "Initialize New Project"], horizontal=True, key="p_main_mode")
         
-        # 1. Fetch the distinct list from the Project Registry table instead of the node join
+        # Fetch current master list
         try:
             proj_reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`").to_dataframe()
         except:
@@ -1124,7 +1084,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         if p_mode == "Update Existing Project":
             if proj_reg_df.empty:
-                st.warning("No projects found in project_registry.")
+                st.warning("No projects found in the master registry.")
             else:
                 all_projs = sorted(proj_reg_df['Project'].dropna().unique().tolist())
                 target_proj = st.selectbox("Select Project to Manage", all_projs, key="p_manage_select")
@@ -1132,13 +1092,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 if target_proj:
                     p_data = proj_reg_df[proj_reg_df['Project'] == target_proj].iloc[0]
 
-                    def safe_get(col):
-                        return p_data[col] if col in p_data and pd.notnull(p_data[col]) else ""
+                    def safe_get(col, default=""):
+                        if col in p_data and pd.notnull(p_data[col]):
+                            return p_data[col]
+                        return default
 
-                    # --- PART A: QUICK NOTES UPDATE ---
+                    # --- PART A: QUICK NOTES ---
                     st.write("### 📝 Quick Notes Update")
                     with st.form("p_notes_form"):
-                        u_upload = st.text_input("Upload Note", value=safe_get('UploadNote'))
+                        u_upload = st.text_input("Upload Note", value=safe_get('UploadNote', "Data will be uploaded once per business day by 4pm Pacific Time."))
                         u_eng = st.text_area("Engineering Notes", value=safe_get('EngNotes'), height=150)
                         
                         if st.form_submit_button("💾 Save Notes Only"):
@@ -1152,21 +1114,18 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                     st.divider()
 
-                    # --- PART B: PROJECT IDENTITY & ARCHIVING ---
+                    # --- PART B: IDENTITY ---
                     if st.checkbox("🛠️ Edit Project Identity & Lifecycle"):
                         with st.form("p_identity_form"):
                             c1, c2 = st.columns(2)
                             u_name = c1.text_input("Project Name", value=safe_get('ProjectName'))
-                            u_city = c2.text_input("City", value=safe_get('City'))
+                            u_city = c2.text_input("City/Location", value=safe_get('City'))
                             
                             c3, c4 = st.columns(2)
-                            tz_options = ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"]
-                            db_tz = safe_get('Timezone')
-                            u_tz = c3.selectbox("Timezone", tz_options, 
-                                                index=tz_options.index(db_tz) if db_tz in tz_options else 0)
+                            tz_opts = ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"]
+                            db_tz = safe_get('Timezone', "America/Los_Angeles")
+                            u_tz = c3.selectbox("Timezone", tz_opts, index=tz_opts.index(db_tz) if db_tz in tz_opts else 0)
                             u_asbuilt = c4.text_input("As-Built Filename", value=safe_get('AsBuiltFile'))
-                            
-                            st.info(f"Project Status: {safe_get('ProjectStatus')} | Started: {safe_get('StartDate')}")
                             
                             if st.form_submit_button("💾 Commit Identity Changes"):
                                 client.query(f"""
@@ -1174,35 +1133,23 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                     SET ProjectName='{u_name}', City='{u_city}', Timezone='{u_tz}', AsBuiltFile='{u_asbuilt}'
                                     WHERE Project='{target_proj}'
                                 """).result()
-                                st.success("Project identity updated.")
+                                st.success("Project identity synchronized.")
                                 st.cache_data.clear()
                                 st.rerun()
 
-                        # --- PART C: DESTRUCTIVE ARCHIVING ---
-                        st.write("### 🧨 Project Closeout")
-                        if st.button(f"🔥 Retire & Archive Project: {target_proj}", type="primary"):
-                            with st.spinner("Archiving project and releasing nodes..."):
-                                # 1. Mark Project as Archived with EndDate
-                                sql_p = f"""UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-                                           SET ProjectStatus='Archived', EndDate=CURRENT_TIMESTAMP() 
-                                           WHERE Project='{target_proj}'"""
-                                # 2. Mark all associated Nodes as Ended/Available
-                                sql_n = f"""UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                                           SET EndDate=CURRENT_TIMESTAMP(), SensorStatus='Available' 
-                                           WHERE Project='{target_proj}' AND EndDate IS NULL"""
-                                
-                                client.query(sql_p).result()
-                                client.query(sql_n).result()
-                                st.success(f"Project {target_proj} successfully archived.")
-                                st.cache_data.clear()
-                                st.rerun()
+                        if st.button(f"🔥 Archive Project: {target_proj}", type="primary"):
+                            client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus='Archived', EndDate=CURRENT_TIMESTAMP() WHERE Project='{target_proj}'").result()
+                            client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET EndDate=CURRENT_TIMESTAMP(), SensorStatus='Available' WHERE Project='{target_proj}' AND EndDate IS NULL").result()
+                            st.success("Project and associated nodes archived.")
+                            st.cache_data.clear()
+                            st.rerun()
 
         else:
             # --- INITIALIZE NEW PROJECT ---
             with st.form("proj_init_form"):
                 st.write("### 🏗️ New Project Registration")
                 c1, c2 = st.columns(2)
-                n_id = c1.text_input("Project ID (e.g. 2542-City)")
+                n_id = c1.text_input("Project ID (e.g. 2541-Blackjack)")
                 n_name = c2.text_input("Project Name")
                 n_city = st.text_input("City, State")
                 n_tz = st.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"])
@@ -1211,12 +1158,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 
                 if st.form_submit_button("🚀 Initialize Project"):
                     if n_id:
-                        # Insert into project_registry ONLY
                         sql = f"""INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
                                   (Project, ProjectName, City, Timezone, UploadNote, AsBuiltFile, StartDate, ProjectStatus) 
                                   VALUES ('{n_id}', '{n_name}', '{n_city}', '{n_tz}', '{n_upload}', '{n_asbuilt}', CURRENT_TIMESTAMP(), 'Active')"""
                         client.query(sql).result()
-                        st.success(f"Project {n_id} initialized in Master Registry.")
+                        st.success(f"Project {n_id} initialized.")
                         st.cache_data.clear()
                         st.rerun()
 
