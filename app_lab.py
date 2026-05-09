@@ -862,7 +862,7 @@ def render_data_intake_page(selected_project):
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # --- 1. GLOBAL REGISTRY FETCH ---
+    # 1. GLOBAL REGISTRY FETCH
     reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
     try:
         full_reg_df = client.query(reg_q).to_dataframe()
@@ -870,203 +870,191 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     except:
         full_reg_df = pd.DataFrame()
     
-    # Identify Active Sensors for current project for filtering
+    # Identify Active Sensors for the sidebar-selected project
     active_project_df = pd.DataFrame()
     if not full_reg_df.empty:
-        active_project_df = full_reg_df[(full_reg_df['Project'] == selected_project) & (full_reg_df['EndDate'].isna())]
+        active_project_df = full_reg_df[
+            (full_reg_df['Project'] == selected_project) & 
+            (full_reg_df['EndDate'].isna())
+        ]
     
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
-    # --- 2. TABS DEFINITION (REORDERED) ---
-    # Bulk first, Audit Trail added, Registry last
-    tab_bulk, tab_scrub, tab_surgical, tab_reg = st.tabs([
-        "✅ Bulk Approval", 
-        "🧹 Scrub", 
-        "🧨 Surgical & Mask",
-        "📋 Registry Manager"
+    # --- 2. SINGLE LINE TAB NAVIGATION ---
+    (tab_intel, tab_swap, tab_life, tab_inv, 
+     tab_bulk, tab_scrub, tab_surgical, tab_audit) = st.tabs([
+        "🔍 Intelligence", "🔄 Swap", "📁 Lifecycle", "📥 Hardware", 
+        "✅ Bulk Approval", "🧹 Scrub", "🧨 Surgical", "🕒 Audit Log"
     ])
 
-    # --- TAB 1: BULK APPROVAL ---
+    # --- TAB 1: REGISTRY INTELLIGENCE (SEARCH & EDIT) ---
+    with tab_intel:
+        st.subheader("🔍 Registry Intelligence")
+        f_col1, f_col2, f_col3 = st.columns(3)
+        
+        with f_col1:
+            s_list = ["All Sensor Statuses"] + sorted(full_reg_df['SensorStatus'].dropna().unique().tolist())
+            sens_status_sel = st.selectbox("Filter by Sensor Status:", s_list, key="intel_s_stat")
+        with f_col2:
+            p_list = ["All Project Statuses"] + sorted(full_reg_df['ProjectStatus'].dropna().unique().tolist())
+            proj_status_sel = st.selectbox("Filter by Project Status:", p_list, key="intel_p_stat")
+        
+        search_df = full_reg_df.copy()
+        if sens_status_sel != "All Sensor Statuses":
+            search_df = search_df[search_df['SensorStatus'] == sens_status_sel]
+        if proj_status_sel != "All Project Statuses":
+            search_df = search_df[search_df['ProjectStatus'] == proj_status_sel]
+
+        with f_col3:
+            intel_mode = st.radio("Search Mode:", ["By Project", "By Node ID"], horizontal=True, key="intel_mode")
+            if intel_mode == "By Project":
+                proj_list = ["All Projects"] + sorted(search_df['Project'].dropna().unique().tolist())
+                proj_sel = st.selectbox("Select Project:", proj_list, key="intel_proj")
+                if proj_sel != "All Projects":
+                    search_df = search_df[search_df['Project'] == proj_sel]
+            else:
+                node_search = st.text_input("Enter Node ID", key="intel_node_srch")
+                if node_search:
+                    search_df = search_df[search_df['NodeNum'].fillna('').str.contains(node_search, na=False, case=False)]
+
+        search_df = search_df.sort_values(by=['SensorStatus', 'Project', 'Location'])
+        if st.checkbox("✍️ Enable Manual Spreadsheet Edits", key="intel_edit_toggle"):
+            edited_df = st.data_editor(search_df, num_rows="dynamic", key="intel_editor", use_container_width=True)
+            if st.button("💾 Push Changes to BigQuery", key="intel_save"):
+                final_df = full_reg_df.copy()
+                final_df.update(edited_df)
+                client.load_table_from_dataframe(final_df, f"{PROJECT_ID}.{DATASET_ID}.project_registry", 
+                                               job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
+                st.success("✅ Registry Synchronized.")
+                st.cache_data.clear()
+                st.rerun()
+        else:
+            st.dataframe(search_df, use_container_width=True, hide_index=True)
+
+    # --- TAB 2: INDIVIDUAL SENSOR SWAP ---
+    with tab_swap:
+        st.subheader("🔄 Hardware Swap")
+        if not active_project_df.empty:
+            c1, c2 = st.columns(2)
+            t_loc = c1.selectbox("Select Location", sorted(active_project_df['Location'].unique()), key="sw_loc")
+            loc_rows = active_project_df[active_project_df['Location'] == t_loc]
+            t_row = c2.selectbox("Select Position", loc_rows.to_dict('records'), 
+                                format_func=lambda x: f"{x['Depth']}ft ({x['NodeNum']})" if pd.notnull(x['Depth']) else f"Bank {x['Bank']} ({x['NodeNum']})",
+                                key="sw_row")
+            
+            # Inventory Lookup
+            inv_q = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.hardware_inventory`"
+            try:
+                inventory = client.query(inv_q).to_dataframe()['NodeNum'].tolist()
+                active_now = full_reg_df[full_reg_df['EndDate'].isna()]['NodeNum'].tolist()
+                available = [n for n in inventory if n not in active_now]
+            except: available = []
+
+            new_node = st.selectbox("Select New Hardware", available if available else ["No hardware available"], key="sw_new")
+            if st.button("🚀 Execute Swap", use_container_width=True, key="sw_btn"):
+                s_bank = f"'{t_row['Bank']}'" if pd.notnull(t_row['Bank']) else "NULL"
+                s_depth = str(t_row['Depth']) if pd.notnull(t_row['Depth']) else "NULL"
+                sql = f"""
+                    BEGIN TRANSACTION;
+                    UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Swapped'
+                    WHERE NodeNum = '{t_row['NodeNum']}' AND Location = '{t_loc}' AND EndDate IS NULL;
+                    INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus)
+                    VALUES ('{selected_project}', '{t_loc}', '{new_node}', {s_bank}, {s_depth}, CURRENT_TIMESTAMP(), 'Active', 'Active');
+                    COMMIT;
+                """
+                client.query(sql).result()
+                st.success("Swap complete.")
+                st.cache_data.clear()
+        else: st.info("No active project data.")
+
+    # --- TAB 3: PROJECT LIFECYCLE ---
+    with tab_life:
+        st.subheader("📁 Project Management")
+        action = st.selectbox("Action", ["Initialize New Project", "Retire Current Project"], key="life_act")
+        if action == "Initialize New Project":
+            with st.form("life_init"):
+                n_id = st.text_input("Project Code")
+                n_locs = st.text_area("Locations (One per line)")
+                if st.form_submit_button("🚀 Build Skeleton"):
+                    l_list = [l.strip() for l in n_locs.split('\n') if l.strip()]
+                    rows = [f"('{n_id}', '{loc}', 'TBD', CURRENT_TIMESTAMP(), 'Template', 'Active')" for loc in l_list]
+                    client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, Location, NodeNum, StartDate, SensorStatus, ProjectStatus) VALUES {', '.join(rows)}").result()
+                    st.success("Skeleton built.")
+                    st.cache_data.clear()
+        else:
+            if st.button(f"🔥 Retire {selected_project}", type="primary", key="life_ret"):
+                client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus = 'Archived', EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Available' WHERE Project = '{selected_project}' AND EndDate IS NULL").result()
+                st.success("Project retired.")
+                st.cache_data.clear()
+
+    # --- TAB 4: HARDWARE INVENTORY ---
+    with tab_inv:
+        st.subheader("📥 Master Inventory")
+        i_mode = st.radio("Mode", ["Manual", "Bulk CSV"], horizontal=True, key="inv_mode")
+        if i_mode == "Manual":
+            c1, c2 = st.columns(2)
+            l_id, f_id = c1.text_input("Long ID", key="inv_l"), c2.text_input("Friendly ID", key="inv_f")
+            if st.button("💾 Add Hardware", key="inv_btn"):
+                client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` (RawID, NodeNum, DateAdded) VALUES ('{l_id}', '{f_id}', CURRENT_DATE())").result()
+                st.success("Added.")
+        else:
+            u_f = st.file_uploader("CSV Upload", type=['csv'], key="inv_csv")
+            if u_f and st.button("📤 Upload", key="inv_u"):
+                client.load_table_from_dataframe(pd.read_csv(u_f), f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory").result()
+                st.success("Uploaded.")
+
+    # --- TAB 5: BULK APPROVAL ---
     with tab_bulk:
         st.subheader("✅ Range-Based Bulk Approval")
-        sel_loc_bulk = st.selectbox("Target Location", loc_options, key="bulk_loc_sel")
+        sel_loc = st.selectbox("Target Location", loc_options, key="bulk_loc")
         c1, c2 = st.columns(2)
-        b_start = c1.date_input("Start", value=datetime.now() - timedelta(days=7), key="bulk_start")
-        b_end = c2.date_input("End", value=datetime.now(), key="bulk_end")
-
-        if st.button("🚀 Approve Range", use_container_width=True, key="bulk_exec_btn"):
-            loc_filter = f"AND m.Location = '{sel_loc_bulk}'" if sel_loc_bulk != "All Locations" else ""
-            bulk_sql = f"""
+        b_s, b_e = c1.date_input("Start", value=datetime.now()-timedelta(7)), c2.date_input("End", value=datetime.now())
+        if st.button("🚀 Approve Range", use_container_width=True, key="bulk_btn"):
+            loc_f = f"AND m.Location = '{sel_loc}'" if sel_loc != "All Locations" else ""
+            sql = f"""
                 INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                 SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
                 FROM (SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` UNION ALL SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`) AS r
                 INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS m ON r.NodeNum = m.NodeNum
-                WHERE m.Project = '{selected_project}' {loc_filter}
-                AND r.timestamp >= '{b_start}' AND r.timestamp <= '{b_end}'
+                WHERE m.Project = '{selected_project}' {loc_f} AND r.timestamp >= '{b_s}' AND r.timestamp <= '{b_e}'
                 AND NOT EXISTS (SELECT 1 FROM `{OVERRIDE_TABLE}` x WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR))
             """
-            job = client.query(bulk_sql)
-            job.result()
-            # Reported added points
-            points_added = job.num_dml_affected_rows if job.num_dml_affected_rows else 0
-            st.success(f"Successfully registered **{points_added}** approval points.")
+            client.query(sql).result()
+            st.success("Range Approved.")
             st.cache_data.clear()
 
-    # --- TAB 2: DEEP DATA SCRUB ---
+    # --- TAB 6: SCRUB ---
     with tab_scrub:
         st.subheader("🧹 Deep Data Scrub")
-        scrub_target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scrub_target_radio")
-        sel_loc_scrub = st.selectbox("Target Location", loc_options, key="scrub_loc_sel")
-        if st.button(f"🧨 Purge & Average {scrub_target}", use_container_width=True, key="scrub_exec_btn"):
-            t_table = f"{PROJECT_ID}.{DATASET_ID}.raw_{scrub_target.lower()}"
-            loc_subquery = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}'"
-            if sel_loc_scrub != "All Locations":
-                loc_subquery += f" AND Location = '{sel_loc_scrub}'"
-            scrub_sql = f"""
-                CREATE OR REPLACE TABLE `{t_table}` AS 
+        target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True, key="scr_t")
+        sel_loc = st.selectbox("Target Location", loc_options, key="scr_l")
+        if st.button("🧨 Purge & Average", use_container_width=True, key="scr_btn"):
+            t_tab = f"{PROJECT_ID}.{DATASET_ID}.raw_{target.lower()}"
+            sub_q = f"SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}'"
+            if sel_loc != "All Locations": sub_q += f" AND Location = '{sel_loc}'"
+            sql = f"""
+                CREATE OR REPLACE TABLE `{t_tab}` AS 
                 SELECT TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, NodeNum, AVG(temperature) as temperature
-                FROM `{t_table}`
-                WHERE NodeNum IN ({loc_subquery}) OR NodeNum NOT IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}')
+                FROM `{t_tab}`
+                WHERE NodeNum IN ({sub_q}) OR NodeNum NOT IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project = '{selected_project}')
                 GROUP BY 1, 2
             """
-            client.query(scrub_sql).result()
-            st.success("Table scrubbed.")
+            client.query(sql).result()
+            st.success("Scrub complete.")
             st.cache_data.clear()
 
-    # --- TAB 3: SURGICAL & MASK ---
+    # --- TAB 7: SURGICAL ---
     with tab_surgical:
         if not selected_project or selected_project == "All Projects":
-            st.warning("Please select a project.")
+            st.warning("Please select a specific project.")
         else:
             render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
-    # --- 1. DATA REFRESH & METRICS ---
-    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
-    try:
-        full_reg_df = client.query(reg_q).to_dataframe()
-    except:
-        full_reg_df = pd.DataFrame()
-
-    if not full_reg_df.empty:
-        # Sensor Count Metrics
-        m_active = len(full_reg_df[full_reg_df['EndDate'].isna()])
-        m_swapped = len(full_reg_df[full_reg_df['SensorStatus'] == 'Swapped'])
-        m_available = len(full_reg_df[full_reg_df['SensorStatus'] == 'Available'])
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("🟢 Active", m_active)
-        c2.metric("🟡 Swapped", m_swapped)
-        c3.metric("🔵 Available", m_available)
-        c4.metric("📊 Total Nodes", len(full_reg_df))
-
-    # --- 2. TABS DEFINITION ---
-    tab_bulk, tab_intel, tab_life, tab_hardware, tab_audit, tab_scrub, tab_surgical = st.tabs([
-        "✅ Bulk Approval", "🔍 Registry Intelligence", "📁 Project Lifecycle", 
-        "📥 Hardware", "🕒 Recent Changes", "🧹 Scrub", "🧨 Surgical"
-    ])
-
-    # --- TAB: BULK APPROVAL ---
-    with tab_bulk:
-        st.subheader("✅ Bulk Approval")
-        # Existing logic... (ensure you include the job.num_dml_affected_rows count here)
-
-    # --- TAB: REGISTRY INTELLIGENCE (The Main Table) ---
-    with tab_intel:
-        st.subheader("🔍 Registry Intelligence")
-        
-        # 1. Row 1 Filters
-        f1, f2, f3 = st.columns(3)
-        view_type = f1.selectbox("Data View:", ["Current Active", "Historical Archive", "All Data"], key="intel_view")
-        search_mode = f2.radio("Search Mode:", ["By Project/Loc", "Single Sensor Lookup"], horizontal=True)
-        
-        # 2. Filtering Logic
-        df_display = full_reg_df.copy()
-        if view_type == "Current Active":
-            df_display = df_display[df_display['EndDate'].isna()]
-        elif view_type == "Historical Archive":
-            df_display = df_display[df_display['EndDate'].notna()]
-
-        if search_mode == "By Project/Loc":
-            c_p, c_l, c_s = st.columns(3)
-            p_list = ["All"] + sorted(df_display['Project'].dropna().unique().tolist())
-            p_sel = c_p.selectbox("Project", p_list, key="intel_p")
-            if p_sel != "All":
-                df_display = df_display[df_display['Project'] == p_sel]
-                l_list = ["All"] + sorted(df_display['Location'].dropna().unique().tolist())
-                l_sel = c_l.selectbox("Location", l_list, key="intel_l")
-                if l_sel != "All":
-                    df_display = df_display[df_display['Location'] == l_sel]
-            
-            s_list = ["All"] + sorted(df_display['SensorStatus'].dropna().unique().tolist())
-            s_sel = c_s.selectbox("Sensor Status", s_list, key="intel_s")
-            if s_sel != "All":
-                df_display = df_display[df_display['SensorStatus'] == s_sel]
-        else:
-            node_id = st.text_input("Enter exact Node ID (e.g. 58014-ch1)", key="intel_single")
-            if node_id:
-                df_display = df_display[df_display['NodeNum'] == node_id]
-
-        # 3. Table and Backdated Editing
-        if st.checkbox("✍️ Enable Manual Edits", key="intel_edit"):
-            st.info("💡 You can edit 'StartDate' or 'EndDate' here to backdate changes.")
-            edited = st.data_editor(df_display, num_rows="dynamic", key="intel_editor")
-            if st.button("💾 Save Changes"):
-                # Merge and Update logic...
-                st.success("Database Updated")
-
-    # --- TAB: PROJECT LIFECYCLE (Client App Master) ---
-    with tab_life:
-        st.subheader("📁 Project Master Configuration")
-        st.info("Settings here update the Client Portal display (Timezones, Notes, As-Builts).")
-        
-        # Fetch or Create the project_metadata table
-        # Structure: ProjectID, Name, Location, StartDate, Timezone, UploadNote, ClientNote, AsBuiltFile
-        with st.form("lifecycle_form"):
-            col1, col2 = st.columns(2)
-            p_id = col1.text_input("Project ID (e.g. 2538)")
-            p_name = col2.text_input("Project Name (e.g. Pump Station 16)")
-            p_loc = col1.text_input("Physical Location (City, State)")
-            p_tz = col2.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"])
-            p_start = col1.date_input("Project Start Date")
-            p_asbuilt = col2.text_input("As-Built Filename (e.g. AsBuiltFerndale.jpg)")
-            
-            u_note = st.text_area("Upload Note (Status update timing)", value="Data will be uploaded once per business day by 4pm Pacific Time.")
-            c_note = st.text_area("Note for Client (Special Instructions)")
-            
-            if st.form_submit_button("🚀 Sync Project Metadata"):
-                # SQL to UPSERT into project_metadata table
-                st.success(f"Configured {p_id} for Client Portal.")
-
-    # --- TAB: HARDWARE (Auto-Lord Expansion) ---
-    with tab_hardware:
-        st.subheader("📥 Register Hardware")
-        h_type = st.radio("Hardware Type", ["SensorPush (Single)", "Lord (12-Channel Auto)", "Bulk CSV"], horizontal=True)
-        
-        if h_type == "Lord (12-Channel Auto)":
-            lord_id = st.text_input("Base Lord Node ID (e.g. 62000)")
-            if st.button("🛠️ Generate & Register 12 Channels"):
-                if lord_id:
-                    nodes = [f"{lord_id}-ch{i+1}" for i in range(12)]
-                    # SQL to INSERT 12 rows into hardware_inventory
-                    st.write(f"Registered nodes: {', '.join(nodes)}")
-                    st.success(f"Created 12 nodes for Lord {lord_id}")
-
-        elif h_type == "Bulk CSV":
-            u_file = st.file_uploader("Upload Hardware CSV", type=['csv'])
-            if u_file:
-                df_h = pd.read_csv(u_file)
-                st.write(f"Pre-flight check: {len(df_h)} sensors found.")
-                if st.button("📤 Confirm Bulk Load"):
-                    # Load to BQ
-                    st.success(f"Registered {len(df_h)} sensors.")
-                    st.dataframe(df_h)
-
-    # --- TAB: RECENT CHANGES ---
+    # --- TAB 8: AUDIT LOG ---
     with tab_audit:
         st.subheader("🕒 Registry Audit Log")
-        # Ensure your SQL includes a 'LastUpdated' column in the project_registry
-        # Logic: SELECT * FROM registry ORDER BY LastUpdated DESC LIMIT 10
-        st.dataframe(full_reg_df.sort_values('StartDate', ascending=False).head(10))
+        st.write("Most recent changes to hardware assignments:")
+        st.dataframe(full_reg_df.sort_values('StartDate', ascending=False).head(100), use_container_width=True, hide_index=True)
         
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
