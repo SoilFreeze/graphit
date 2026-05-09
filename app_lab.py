@@ -382,25 +382,24 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         proj_filter = f"AND n.Project = '{selected_project}'" if selected_project != "All Projects" else ""
 
     # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes + Registry Integration
+    # Use this exact query structure for your Health Monitor / Executive Summary
     query = f"""
         WITH MappedNodes AS (
             SELECT 
                 n.NodeNum, 
-                n.Project, -- This is now the ONLY 'Project' column in the CTE
+                n.Project, 
                 n.Location, 
                 n.Bank, 
                 n.Depth, 
                 n.StartDate AS NodeStartDate, 
                 n.EndDate AS NodeEndDate,
                 p.ProjectName,
-                p.City,
                 p.Timezone
             FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n
-            -- We only join to get metadata, we don't 'SELECT p.Project'
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS p ON n.Project = p.Project
             WHERE p.ProjectStatus = 'Active' 
             AND n.SensorStatus = 'Active'
-            {proj_filter} 
+            {proj_filter}  -- Ensure this is: "AND n.Project = '{selected_project}'"
         ),
         BaseReporting AS (
             SELECT r.NodeNum, r.timestamp, r.temperature
@@ -424,18 +423,12 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 NodeNum, 
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
-                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN temperature ELSE NULL END) AS low_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN temperature ELSE NULL END) AS high_24h,
+                -- Rolling 24h stats
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature ELSE NULL END) AS low_24h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature ELSE NULL END) AS high_24h,
+                -- Connectivity stats
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS gap_7d,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) AS gap_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) AS active_24h,
-                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) AS hours_24h,
-                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
-                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) AS hours_7d
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) AS gap_24h
             FROM GapAnalysis 
             GROUP BY NodeNum
         )
@@ -446,10 +439,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             h.low_24h, 
             h.high_24h,
             COALESCE(h.gap_24h, 0) AS gap_24h, 
-            COALESCE(h.gap_7d, 0) AS gap_7d,
-            COALESCE(h.active_24h, 0) AS active_24h,
-            COALESCE(h.hours_24h, 0) AS hours_24h, 
-            COALESCE(h.hours_7d, 0) AS hours_7d
+            COALESCE(h.gap_7d, 0) AS gap_7d
         FROM MappedNodes m
         LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
     """
