@@ -1070,66 +1070,91 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.cache_data.clear()
                     st.rerun()
 
-    # --- TAB 3: PROJECT (SETTINGS & INIT) ---
+    # --- TAB 3: PROJECT (MASTER SETTINGS & LIFECYCLE) ---
     with tab_project:
         st.subheader("⚙️ Project Management")
         p_mode = st.radio("Primary Action", ["Update Existing Project", "Initialize New Project"], horizontal=True, key="p_main_mode")
         
+        # 1. Fetch the distinct list from the Project Registry table instead of the node join
+        try:
+            proj_reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`").to_dataframe()
+        except:
+            proj_reg_df = pd.DataFrame()
+
         if p_mode == "Update Existing Project":
-            # 1. Project Selector
-            all_projs = sorted(full_reg_df['Project'].dropna().unique().tolist())
-            target_proj = st.selectbox("Select Project to Manage", all_projs, key="p_manage_select")
-            
-            if target_proj:
-                p_rows = full_reg_df[full_reg_df['Project'] == target_proj]
-                p_data = p_rows.iloc[0]
+            if proj_reg_df.empty:
+                st.warning("No projects found in project_registry.")
+            else:
+                all_projs = sorted(proj_reg_df['Project'].dropna().unique().tolist())
+                target_proj = st.selectbox("Select Project to Manage", all_projs, key="p_manage_select")
+                
+                if target_proj:
+                    p_data = proj_reg_df[proj_reg_df['Project'] == target_proj].iloc[0]
 
-                # Defensive Helper: Returns empty string if column is missing from DB
-                def safe_get(col):
-                    return p_data[col] if col in p_data and pd.notnull(p_data[col]) else ""
+                    def safe_get(col):
+                        return p_data[col] if col in p_data and pd.notnull(p_data[col]) else ""
 
-                # --- PART A: QUICK NOTES UPDATE ---
-                st.write("### 📝 Quick Notes Update")
-                with st.form("p_notes_form"):
-                    u_upload = st.text_input("Upload Note", value=safe_get('UploadNote'))
-                    u_eng = st.text_area("Engineering Notes", value=safe_get('EngNotes'), height=150)
-                    
-                    # Fix: Ensure every form has a submit button
-                    if st.form_submit_button("💾 Save Notes Only"):
-                        client.query(f"""
-                            UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-                            SET UploadNote='{u_upload}', EngNotes='{u_eng}' 
-                            WHERE Project='{target_proj}'
-                        """).result()
-                        st.success(f"Notes updated for {target_proj}")
-                        st.cache_data.clear()
-
-                st.divider()
-
-                # --- PART B: PROJECT IDENTITY ---
-                if st.checkbox("🛠️ Edit Project Identity (Name, City, TZ, As-Built)"):
-                    with st.form("p_identity_form"):
-                        c1, c2 = st.columns(2)
-                        u_name = c1.text_input("Project Name", value=safe_get('ProjectName'))
-                        u_city = c2.text_input("City", value=safe_get('City'))
+                    # --- PART A: QUICK NOTES UPDATE ---
+                    st.write("### 📝 Quick Notes Update")
+                    with st.form("p_notes_form"):
+                        u_upload = st.text_input("Upload Note", value=safe_get('UploadNote'))
+                        u_eng = st.text_area("Engineering Notes", value=safe_get('EngNotes'), height=150)
                         
-                        c3, c4 = st.columns(2)
-                        tz_options = ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"]
-                        db_tz = safe_get('Timezone')
-                        u_tz = c3.selectbox("Timezone", tz_options, 
-                                            index=tz_options.index(db_tz) if db_tz in tz_options else 0)
-                        u_asbuilt = c4.text_input("As-Built Filename", value=safe_get('AsBuiltFile'))
-                        
-                        # Fix: Ensure every form has a submit button
-                        if st.form_submit_button("💾 Commit Identity Changes"):
+                        if st.form_submit_button("💾 Save Notes Only"):
                             client.query(f"""
                                 UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-                                SET ProjectName='{u_name}', City='{u_city}', Timezone='{u_tz}', AsBuiltFile='{u_asbuilt}'
+                                SET UploadNote='{u_upload}', EngNotes='{u_eng}' 
                                 WHERE Project='{target_proj}'
                             """).result()
-                            st.success("Project identity updated.")
+                            st.success(f"Notes updated for {target_proj}")
                             st.cache_data.clear()
-                            st.rerun()
+
+                    st.divider()
+
+                    # --- PART B: PROJECT IDENTITY & ARCHIVING ---
+                    if st.checkbox("🛠️ Edit Project Identity & Lifecycle"):
+                        with st.form("p_identity_form"):
+                            c1, c2 = st.columns(2)
+                            u_name = c1.text_input("Project Name", value=safe_get('ProjectName'))
+                            u_city = c2.text_input("City", value=safe_get('City'))
+                            
+                            c3, c4 = st.columns(2)
+                            tz_options = ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"]
+                            db_tz = safe_get('Timezone')
+                            u_tz = c3.selectbox("Timezone", tz_options, 
+                                                index=tz_options.index(db_tz) if db_tz in tz_options else 0)
+                            u_asbuilt = c4.text_input("As-Built Filename", value=safe_get('AsBuiltFile'))
+                            
+                            st.info(f"Project Status: {safe_get('ProjectStatus')} | Started: {safe_get('StartDate')}")
+                            
+                            if st.form_submit_button("💾 Commit Identity Changes"):
+                                client.query(f"""
+                                    UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                                    SET ProjectName='{u_name}', City='{u_city}', Timezone='{u_tz}', AsBuiltFile='{u_asbuilt}'
+                                    WHERE Project='{target_proj}'
+                                """).result()
+                                st.success("Project identity updated.")
+                                st.cache_data.clear()
+                                st.rerun()
+
+                        # --- PART C: DESTRUCTIVE ARCHIVING ---
+                        st.write("### 🧨 Project Closeout")
+                        if st.button(f"🔥 Retire & Archive Project: {target_proj}", type="primary"):
+                            with st.spinner("Archiving project and releasing nodes..."):
+                                # 1. Mark Project as Archived with EndDate
+                                sql_p = f"""UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                                           SET ProjectStatus='Archived', EndDate=CURRENT_TIMESTAMP() 
+                                           WHERE Project='{target_proj}'"""
+                                # 2. Mark all associated Nodes as Ended/Available
+                                sql_n = f"""UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                           SET EndDate=CURRENT_TIMESTAMP(), SensorStatus='Available' 
+                                           WHERE Project='{target_proj}' AND EndDate IS NULL"""
+                                
+                                client.query(sql_p).result()
+                                client.query(sql_n).result()
+                                st.success(f"Project {target_proj} successfully archived.")
+                                st.cache_data.clear()
+                                st.rerun()
 
         else:
             # --- INITIALIZE NEW PROJECT ---
@@ -1143,14 +1168,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 n_upload = st.text_input("Upload Note", value="Data will be uploaded once per business day by 4pm Pacific Time.")
                 n_asbuilt = st.text_input("As-Built Filename")
                 
-                # Fix: Ensure every form has a submit button
                 if st.form_submit_button("🚀 Initialize Project"):
                     if n_id:
+                        # Insert into project_registry ONLY
                         sql = f"""INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-                                  (Project, Location, NodeNum, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile) 
-                                  VALUES ('{n_id}', 'Admin', 'Template', CURRENT_TIMESTAMP(), 'Template', 'Active', '{n_name}', '{n_city}', '{n_tz}', '{n_upload}', '{n_asbuilt}')"""
+                                  (Project, ProjectName, City, Timezone, UploadNote, AsBuiltFile, StartDate, ProjectStatus) 
+                                  VALUES ('{n_id}', '{n_name}', '{n_city}', '{n_tz}', '{n_upload}', '{n_asbuilt}', CURRENT_TIMESTAMP(), 'Active')"""
                         client.query(sql).result()
-                        st.success(f"Project {n_id} created.")
+                        st.success(f"Project {n_id} initialized in Master Registry.")
                         st.cache_data.clear()
                         st.rerun()
 
