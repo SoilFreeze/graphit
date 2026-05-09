@@ -384,16 +384,18 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes + Registry Integration
     query = f"""
         WITH MappedNodes AS (
-            -- Explicitly select n.Project to resolve ambiguity
+            -- We explicitly pull the columns we need. 
+            -- By NOT using 'p.*' or 'n.*', we avoid bringing in duplicate 'Project' columns.
             SELECT 
                 n.NodeNum, 
-                n.Project, 
+                n.Project,  -- Explicitly defining this as our primary project key
                 n.Location, 
                 n.Bank, 
                 n.Depth, 
                 n.StartDate as NodeStartDate, 
                 n.EndDate as NodeEndDate,
                 p.ProjectName,
+                p.City,
                 p.Timezone
             FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON n.Project = p.Project
