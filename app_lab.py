@@ -384,16 +384,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes + Registry Integration
     query = f"""
         WITH MappedNodes AS (
-            -- We explicitly pull the columns we need. 
-            -- By NOT using 'p.*' or 'n.*', we avoid bringing in duplicate 'Project' columns.
             SELECT 
                 n.NodeNum, 
-                n.Project,  -- Explicitly defining this as our primary project key
+                n.Project AS ProjectID,  -- Rename it here to avoid collision
                 n.Location, 
                 n.Bank, 
                 n.Depth, 
-                n.StartDate as NodeStartDate, 
-                n.EndDate as NodeEndDate,
+                n.StartDate AS NodeStartDate, 
+                n.EndDate AS NodeEndDate,
                 p.ProjectName,
                 p.City,
                 p.Timezone
@@ -417,40 +415,47 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         GapAnalysis AS (
             SELECT 
                 NodeNum, timestamp, temperature,
-                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) as prev_ts
+                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
             FROM BaseReporting
         ),
         HistoricalStats AS (
             SELECT 
                 NodeNum, 
-                MAX(timestamp) as last_ping,
-                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
+                MAX(timestamp) AS last_ping,
+                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN temperature ELSE NULL END) as low_24h,
+                    THEN temperature ELSE NULL END) AS low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN temperature ELSE NULL END) as high_24h,
-                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
+                    THEN temperature ELSE NULL END) AS high_24h,
+                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS gap_7d,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
+                    THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) AS gap_24h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) AS active_24h,
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
+                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) AS hours_24h,
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
-                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
+                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) AS hours_7d
             FROM GapAnalysis 
             GROUP BY NodeNum
         )
         SELECT 
-            m.*, 
+            m.ProjectID AS Project, -- Rename it back to 'Project' for your app's frontend
+            m.NodeNum,
+            m.Location,
+            m.Bank,
+            m.Depth,
+            m.ProjectName,
+            m.City,
+            m.Timezone,
             h.last_ping, 
             h.current_temp, 
             h.low_24h, 
             h.high_24h,
-            COALESCE(h.gap_24h, 0) as gap_24h, 
-            COALESCE(h.gap_7d, 0) as gap_7d,
-            COALESCE(h.active_24h, 0) as active_24h,
-            COALESCE(h.hours_24h, 0) as hours_24h, 
-            COALESCE(h.hours_7d, 0) as hours_7d
+            COALESCE(h.gap_24h, 0) AS gap_24h, 
+            COALESCE(h.gap_7d, 0) AS gap_7d,
+            COALESCE(h.active_24h, 0) AS active_24h,
+            COALESCE(h.hours_24h, 0) AS hours_24h, 
+            COALESCE(h.hours_7d, 0) AS hours_7d
         FROM MappedNodes m
         LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
     """
