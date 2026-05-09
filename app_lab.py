@@ -915,75 +915,107 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.success(f"Approved data for {sel_loc}.")
             st.cache_data.clear()
 
-    # --- TAB 2: REGISTRY ---
+    # --- TAB 2: REGISTRY (HARDWARE & ASSIGNMENTS) ---
     with tab_registry:
-        st.subheader("📋 Registry Management")
+        st.subheader("📋 Node Registry")
 
-        # --- PART A: DATA EXPLORER & SPREADSHEET EDITOR ---
-        with st.expander("🔍 Filter & Edit Registry", expanded=True):
-            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+        # --- PART A: DATA EXPLORER ---
+        with st.expander("🔍 Filter & Edit Hardware Assignments", expanded=True):
+            f_col1, f_col2, f_col3 = st.columns(3)
             
             with f_col1:
-                # 1. Sensor Status (Null-Safe)
-                s_raw = full_reg_df['SensorStatus'].dropna().unique().tolist()
-                s_list = ["All Statuses"] + sorted([str(s) for s in s_raw])
-                s_filter = st.selectbox("Sensor Status", s_list, key="reg_filt_status")
+                s_raw = full_reg_df['SensorStatus'].dropna().unique().tolist() if 'SensorStatus' in full_reg_df.columns else []
+                s_filter = st.selectbox("Sensor Status", ["All Statuses"] + sorted([str(s) for s in s_raw]), key="node_filt_status")
             
             with f_col2:
-                # 2. Project (Null-Safe)
-                p_raw = full_reg_df['Project'].dropna().unique().tolist()
-                p_list = ["All Projects"] + sorted([str(p) for p in p_raw])
-                p_filter = st.selectbox("Project", p_list, key="reg_filt_proj")
-            
+                p_raw = full_reg_df['Project'].dropna().unique().tolist() if 'Project' in full_reg_df.columns else []
+                p_filter = st.selectbox("Project", ["All Projects"] + sorted([str(p) for p in p_raw]), key="node_filt_proj")
+
             with f_col3:
-                # 3. Location (Null-Safe & Drill-down)
-                if p_filter != "All Projects":
-                    l_raw = full_reg_df[full_reg_df['Project'] == p_filter]['Location'].dropna().unique().tolist()
-                else:
-                    l_raw = full_reg_df['Location'].dropna().unique().tolist()
-                l_list = ["All Locations"] + sorted([str(l) for l in l_raw])
-                l_filter = st.selectbox("Location", l_list, key="reg_filt_loc")
+                tenure_filter = st.radio("Scope", ["Active Nodes", "Historic", "All"], horizontal=True, key="node_tenure")
 
-            with f_col4:
-                # 4. Record Scope (Current vs Historic)
-                tenure_filter = st.radio("Record Scope", ["Current (Active)", "Historic (Ended)", "All Records"], key="reg_tenure_scope")
-
-            # Apply Filtering Logic
+            # Filtering Logic
             rdf = full_reg_df.copy()
             if s_filter != "All Statuses":
                 rdf = rdf[rdf['SensorStatus'] == s_filter]
             if p_filter != "All Projects":
                 rdf = rdf[rdf['Project'] == p_filter]
-            if l_filter != "All Locations":
-                rdf = rdf[rdf['Location'] == l_filter]
             
-            if tenure_filter == "Current (Active)":
+            if tenure_filter == "Active Nodes":
                 rdf = rdf[rdf['EndDate'].isna()]
-            elif tenure_filter == "Historic (Ended)":
+            elif tenure_filter == "Historic":
                 rdf = rdf[rdf['EndDate'].notna()]
 
-            # Spreadsheet Mode for BigQuery Push
-            edit_mode = st.checkbox("✍️ Enable Spreadsheet Mode (Live Editing)", key="reg_spreadsheet_toggle")
-            
-            if edit_mode:
-                st.warning("⚠️ Manual edits will overwrite BigQuery data upon Pushing.")
-                edited_df = st.data_editor(rdf, num_rows="dynamic", key="reg_data_editor_v2", use_container_width=True)
+            # Spreadsheet Mode
+            if st.checkbox("✍️ Enable Spreadsheet Mode", key="node_edit_toggle"):
+                st.info("Directly editing hardware assignments. Meta-data (like Project Name) is read-only here.")
+                # We only allow editing columns that belong to the node_registry table
+                node_cols = ['NodeNum', 'Project', 'Location', 'Bank', 'Depth', 'SensorStatus', 'StartDate', 'EndDate']
+                available_cols = [c for c in node_cols if c in rdf.columns]
                 
-                if st.button("💾 Push Changes to BigQuery", use_container_width=True, type="primary", key="reg_push_bq"):
-                    with st.spinner("Syncing..."):
-                        final_sync_df = full_reg_df.copy()
-                        final_sync_df.update(edited_df)
-                        
-                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-                        client.load_table_from_dataframe(final_sync_df, f"{PROJECT_ID}.{DATASET_ID}.project_registry", job_config=job_config).result()
-                        
-                        st.success("✅ Registry Updated Successfully.")
-                        st.cache_data.clear()
-                        st.rerun()
+                edited_df = st.data_editor(rdf[available_cols], num_rows="dynamic", key="node_data_editor")
+                
+                if st.button("💾 Push Hardware Changes", use_container_width=True, type="primary"):
+                    final_node_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
+                    final_node_df.update(edited_df)
+                    
+                    client.load_table_from_dataframe(final_node_df, f"{PROJECT_ID}.{DATASET_ID}.node_registry", 
+                                                   job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
+                    st.success("Node Registry Updated.")
+                    st.cache_data.clear()
+                    st.rerun()
             else:
-                st.dataframe(rdf.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
+                st.dataframe(rdf.sort_values(['Project', 'Location']), use_container_width=True, hide_index=True)
 
         st.divider()
+
+        # --- PART B: INDIVIDUAL OVERRIDE ---
+        st.subheader("🎯 Single Node Override")
+        target_node = st.text_input("Enter Node ID to Edit", key="node_single_search")
+        if target_node:
+            node_rec = full_reg_df[(full_reg_df['NodeNum'] == target_node) & (full_reg_df['EndDate'].isna())]
+            if not node_rec.empty:
+                nr = node_rec.iloc[0]
+                with st.form("single_node_form"):
+                    c1, c2, c3 = st.columns(3)
+                    n_loc = c1.text_input("Location", value=nr.get('Location', ''))
+                    n_depth = c2.text_input("Depth", value=str(nr.get('Depth', '')))
+                    n_bank = c3.text_input("Bank", value=nr.get('Bank', ''))
+                    
+                    if st.form_submit_button("💾 Update Node"):
+                        sql_d = n_depth if n_depth.strip() != "" else "NULL"
+                        client.query(f"""
+                            UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                            SET Location='{n_loc}', Depth={sql_d}, Bank='{n_bank}' 
+                            WHERE NodeNum='{target_node}' AND EndDate IS NULL
+                        """).result()
+                        st.success(f"Node {target_node} updated.")
+                        st.cache_data.clear()
+                        st.rerun()
+
+        st.divider()
+
+        # --- PART C: BATCH ADDITION ---
+        with st.expander("📥 Add Hardware (CSV or Lord)", expanded=False):
+            hw_choice = st.radio("Type", ["SensorPush CSV", "Lord 12-Ch"], horizontal=True)
+            if hw_choice == "SensorPush CSV":
+                u_file = st.file_uploader("Upload CSV (NodeNum, Location, Depth, Bank)", type=['csv'])
+                if u_file and st.button("🚀 Commit CSV"):
+                    df = pd.read_csv(u_file)
+                    df['Project'] = selected_project
+                    df['StartDate'] = datetime.now()
+                    df['SensorStatus'] = 'Active'
+                    client.load_table_from_dataframe(df, f"{PROJECT_ID}.{DATASET_ID}.node_registry").result()
+                    st.success("Hardware assigned.")
+                    st.cache_data.clear()
+            else:
+                l_id = st.text_input("Lord Base Station ID")
+                l_loc = st.text_input("Base Location")
+                if l_id and st.button("🚀 Generate Channels"):
+                    rows = [f"('{l_id}-ch{i}', '{selected_project}', '{l_loc}', '{l_loc}', {i}, CURRENT_TIMESTAMP(), 'Active')" for i in range(1, 13)]
+                    client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` (NodeNum, Project, Location, Bank, Depth, StartDate, SensorStatus) VALUES {', '.join(rows)}").result()
+                    st.success("Lord channels added to node registry.")
+                    st.cache_data.clear()
 
         # --- PART B: INDIVIDUAL NODE OVERRIDE ---
         st.subheader("🎯 Individual Node Override")
