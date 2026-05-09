@@ -910,28 +910,34 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_registry:
         st.subheader("📋 Registry Management")
 
-        # --- PART A: DATA EXPLORER, FILTERS & SYNC ---
+        # --- PART A: DATA EXPLORER & SPREADSHEET EDITOR ---
         with st.expander("🔍 Filter & Edit Registry", expanded=True):
             f_col1, f_col2, f_col3, f_col4 = st.columns(4)
             
             with f_col1:
-                s_list = ["All Statuses"] + sorted(full_reg_df['SensorStatus'].dropna().unique().tolist())
+                # 1. Sensor Status (Null-Safe)
+                s_raw = full_reg_df['SensorStatus'].dropna().unique().tolist()
+                s_list = ["All Statuses"] + sorted([str(s) for s in s_raw])
                 s_filter = st.selectbox("Sensor Status", s_list, key="reg_filt_status")
             
             with f_col2:
-                p_list = ["All Projects"] + sorted(full_reg_df['Project'].dropna().unique().tolist())
+                # 2. Project (Null-Safe)
+                p_raw = full_reg_df['Project'].dropna().unique().tolist()
+                p_list = ["All Projects"] + sorted([str(p) for p in p_raw])
                 p_filter = st.selectbox("Project", p_list, key="reg_filt_proj")
             
             with f_col3:
-                # Drill-down Location logic
+                # 3. Location (Null-Safe & Drill-down)
                 if p_filter != "All Projects":
-                    l_list = ["All Locations"] + sorted(full_reg_df[full_reg_df['Project'] == p_filter]['Location'].dropna().unique().tolist())
+                    l_raw = full_reg_df[full_reg_df['Project'] == p_filter]['Location'].dropna().unique().tolist()
                 else:
-                    l_list = ["All Locations"] + sorted(full_reg_df['Location'].unique().tolist())
+                    l_raw = full_reg_df['Location'].dropna().unique().tolist()
+                l_list = ["All Locations"] + sorted([str(l) for l in l_raw])
                 l_filter = st.selectbox("Location", l_list, key="reg_filt_loc")
 
             with f_col4:
-                tenure_filter = st.radio("Record Scope", ["Current (Active)", "Historic (Ended)", "All Records"], key="reg_tenure_filt")
+                # 4. Record Scope (Current vs Historic)
+                tenure_filter = st.radio("Record Scope", ["Current (Active)", "Historic (Ended)", "All Records"], key="reg_tenure_scope")
 
             # Apply Filtering Logic
             rdf = full_reg_df.copy()
@@ -947,41 +953,30 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             elif tenure_filter == "Historic (Ended)":
                 rdf = rdf[rdf['EndDate'].notna()]
 
-            # --- SPREADSHEET EDITOR SECTION ---
-            edit_mode = st.checkbox("✍️ Enable Spreadsheet Mode (Live Editing)")
+            # Spreadsheet Mode for BigQuery Push
+            edit_mode = st.checkbox("✍️ Enable Spreadsheet Mode (Live Editing)", key="reg_spreadsheet_toggle")
             
             if edit_mode:
-                st.warning("⚠️ Changes made here are staged locally. Click 'Push Changes' below to update BigQuery.")
-                # The key must be unique to avoid state collisions
-                edited_df = st.data_editor(rdf, num_rows="dynamic", key="reg_data_editor", use_container_width=True)
+                st.warning("⚠️ Manual edits will overwrite BigQuery data upon Pushing.")
+                edited_df = st.data_editor(rdf, num_rows="dynamic", key="reg_data_editor_v2", use_container_width=True)
                 
-                if st.button("💾 Push Changes to BigQuery", use_container_width=True, type="primary"):
-                    with st.spinner("Synchronizing with BigQuery..."):
-                        try:
-                            # 1. Merge logic: Update the master full_reg_df with the edited subset
-                            # This prevents data loss for projects/rows currently filtered out.
-                            final_sync_df = full_reg_df.copy()
-                            final_sync_df.update(edited_df)
-                            
-                            # 2. Push to BQ
-                            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-                            client.load_table_from_dataframe(
-                                final_sync_df, 
-                                f"{PROJECT_ID}.{DATASET_ID}.project_registry", 
-                                job_config=job_config
-                            ).result()
-                            
-                            st.success("✅ Registry Synchronized Successfully.")
-                            st.cache_data.clear() # Clear streamlit cache to show new data
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Sync Failed: {e}")
+                if st.button("💾 Push Changes to BigQuery", use_container_width=True, type="primary", key="reg_push_bq"):
+                    with st.spinner("Syncing..."):
+                        final_sync_df = full_reg_df.copy()
+                        final_sync_df.update(edited_df)
+                        
+                        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                        client.load_table_from_dataframe(final_sync_df, f"{PROJECT_ID}.{DATASET_ID}.project_registry", job_config=job_config).result()
+                        
+                        st.success("✅ Registry Updated Successfully.")
+                        st.cache_data.clear()
+                        st.rerun()
             else:
                 st.dataframe(rdf.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
 
         st.divider()
 
-        # --- PART B: INDIVIDUAL NODE EDITOR ---
+        # --- PART B: INDIVIDUAL NODE OVERRIDE ---
         st.subheader("🎯 Individual Node Override")
         st.info("Search by Node Name (NodeNum) to update its specific assignment.")
         
@@ -1000,8 +995,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     new_depth = c2.text_input("Depth", value=str(nr['Depth']) if pd.notnull(nr['Depth']) else "")
                     new_bank = c3.text_input("Bank", value=nr['Bank'] if pd.notnull(nr['Bank']) else "")
                     
-                    new_status = st.selectbox("Sensor Status", ["Active", "Swapped", "Template", "Available"], 
-                                            index=["Active", "Swapped", "Template", "Available"].index(nr['SensorStatus']) if nr['SensorStatus'] in ["Active", "Swapped", "Template", "Available"] else 0)
+                    status_opts = ["Active", "Swapped", "Template", "Available"]
+                    new_status = st.selectbox("Sensor Status", status_opts, 
+                                            index=status_opts.index(nr['SensorStatus']) if nr['SensorStatus'] in status_opts else 0)
 
                     if st.form_submit_button("💾 Save Node Changes"):
                         # Convert empty strings back to NULL for SQL
@@ -1021,12 +1017,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.cache_data.clear()
                         st.rerun()
             else:
-                st.warning(f"No active record found for node '{target_node}'. It may be historic or misspelled.")
+                st.warning(f"No active record found for node '{target_node}'.")
 
         st.divider()
 
         # --- PART C: HARDWARE ADDITION (Upload Batch) ---
-        # Note: Kept separate as requested to avoid mixing manual overrides with batch logic
         with st.expander("📥 Add New Sensors (Batch)", expanded=False):
             hw_type = st.radio("Hardware Type", ["SensorPush (Bulk Upload)", "Lord (Auto-Generate 12 Ch)"], horizontal=True, key="reg_hw_type")
             
@@ -1048,14 +1043,29 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 if selected_project == "All Projects" or not new_sensors:
                     st.error("Select a specific project and provide sensor data.")
                 else:
-                    p_meta = full_reg_df[full_reg_df['Project'] == selected_project].iloc[0]
+                    # Inherit metadata from a template or project row
+                    p_meta = full_reg_df[full_reg_df['Project'] == selected_project].iloc[0] if not active_project_df.empty else None
+                    
                     rows = []
                     for s in new_sensors:
                         d = str(s['Depth']) if pd.notnull(s.get('Depth')) else "NULL"
                         b = f"'{s['Bank']}'" if pd.notnull(s.get('Bank')) else "NULL"
-                        rows.append(f"('{selected_project}', '{s['Location']}', '{s['NodeNum']}', {b}, {d}, CURRENT_TIMESTAMP(), 'Active', 'Active', '{p_meta['ProjectName']}', '{p_meta['City']}', '{p_meta['Timezone']}', '{p_meta['UploadNote']}', '{p_meta['AsBuiltFile']}', '')")
+                        
+                        # Project Metadata handling
+                        p_name = p_meta['ProjectName'] if p_meta is not None else ""
+                        p_city = p_meta['City'] if p_meta is not None else ""
+                        p_tz = p_meta['Timezone'] if p_meta is not None else "America/Los_Angeles"
+                        p_note = p_meta['UploadNote'] if p_meta is not None else ""
+                        p_file = p_meta['AsBuiltFile'] if p_meta is not None else ""
+
+                        rows.append(f"('{selected_project}', '{s['Location']}', '{s['NodeNum']}', {b}, {d}, CURRENT_TIMESTAMP(), 'Active', 'Active', '{p_name}', '{p_city}', '{p_tz}', '{p_note}', '{p_file}', '')")
                     
-                    client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile, EngNotes) VALUES {', '.join(rows)}").result()
+                    insert_sql = f"""
+                        INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                        (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile, EngNotes) 
+                        VALUES {', '.join(rows)}
+                    """
+                    client.query(insert_sql).result()
                     st.success(f"Added {len(new_sensors)} sensors to {selected_project}.")
                     st.cache_data.clear()
                     st.rerun()
