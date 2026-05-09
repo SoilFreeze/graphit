@@ -879,11 +879,17 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
-    # --- 2. THE UNIFIED NAVIGATION ---
-    (tab_bulk, tab_intel, tab_life, tab_inv, 
+    # --- 2. THE UNIFIED NAVIGATION (Corrected Variable Names) ---
+    (tab_bulk, tab_intel, tab_settings, tab_init, tab_inv, 
      tab_scrub, tab_surgical, tab_audit) = st.tabs([
-        "✅ Bulk Approval", "🔍 Intelligence", "📁 Lifecycle", 
-        "📥 Hardware", "🧹 Scrub", "🧨 Surgical", "🕒 Audit Log"
+        "✅ Bulk Approval", 
+        "🔍 Intelligence", 
+        "⚙️ Project Settings", 
+        "🏗️ Init Project", 
+        "📥 Hardware", 
+        "🧹 Scrub", 
+        "🧨 Surgical", 
+        "🕒 Audit"
     ])
 
     # --- TAB 1: BULK APPROVAL ---
@@ -955,8 +961,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # --- TAB 3: PROJECT SETTINGS (UPDATE INFO & NOTES) ---
     with tab_settings:
-        st.subheader(f"⚙️ Settings: {selected_project}")
-        
+        st.subheader(f"⚙️ Project Settings: {selected_project}")
         if selected_project == "All Projects":
             st.info("Select a specific project in the sidebar to update settings.")
         else:
