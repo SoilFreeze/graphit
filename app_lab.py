@@ -1001,37 +1001,37 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         # --- PART C: HARDWARE ADDITION (Upload Batch) ---
         # Note: Kept separate as requested to avoid mixing manual overrides with batch logic
         with st.expander("📥 Add New Sensors (Batch)", expanded=False):
-        hw_type = st.radio("Hardware Type", ["SensorPush (Bulk Upload)", "Lord (Auto-Generate 12 Ch)"], horizontal=True, key="reg_hw_type")
-        
-        new_sensors = []
-        if hw_type == "SensorPush (Bulk Upload)":
-            u_file = st.file_uploader("Upload CSV (SensorID, NodeNum, Location, Depth, Bank)", type=['csv'], key="reg_csv_upload")
-            if u_file:
-                new_sensors = pd.read_csv(u_file).to_dict('records')
-        else:
-            c1, c2 = st.columns([1, 2])
-            l_base = c1.text_input("Lord Base ID (e.g., 62534)", key="reg_lord_base")
-            l_loc = c2.text_input("Base Location (e.g., Bank N)", key="reg_lord_loc")
-            if l_base:
-                for i in range(1, 13):
-                    new_sensors.append({'NodeNum': f"{l_base}-ch{i}", 'Location': l_loc, 'Depth': i, 'Bank': l_loc})
-                st.dataframe(pd.DataFrame(new_sensors), height=150)
-
-        if st.button("🚀 Commit New Sensors", use_container_width=True, key="reg_commit_btn"):
-            if selected_project == "All Projects" or not new_sensors:
-                st.error("Select a specific project and provide sensor data.")
+            hw_type = st.radio("Hardware Type", ["SensorPush (Bulk Upload)", "Lord (Auto-Generate 12 Ch)"], horizontal=True, key="reg_hw_type")
+            
+            new_sensors = []
+            if hw_type == "SensorPush (Bulk Upload)":
+                u_file = st.file_uploader("Upload CSV (SensorID, NodeNum, Location, Depth, Bank)", type=['csv'], key="reg_csv_upload")
+                if u_file:
+                    new_sensors = pd.read_csv(u_file).to_dict('records')
             else:
-                p_meta = full_reg_df[full_reg_df['Project'] == selected_project].iloc[0]
-                rows = []
-                for s in new_sensors:
-                    d = str(s['Depth']) if pd.notnull(s.get('Depth')) else "NULL"
-                    b = f"'{s['Bank']}'" if pd.notnull(s.get('Bank')) else "NULL"
-                    rows.append(f"('{selected_project}', '{s['Location']}', '{s['NodeNum']}', {b}, {d}, CURRENT_TIMESTAMP(), 'Active', 'Active', '{p_meta['ProjectName']}', '{p_meta['City']}', '{p_meta['Timezone']}', '{p_meta['UploadNote']}', '{p_meta['AsBuiltFile']}', '')")
-                
-                client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile, EngNotes) VALUES {', '.join(rows)}").result()
-                st.success(f"Added {len(new_sensors)} sensors to {selected_project}.")
-                st.cache_data.clear()
-                st.rerun()
+                c1, c2 = st.columns([1, 2])
+                l_base = c1.text_input("Lord Base ID (e.g., 62534)", key="reg_lord_base")
+                l_loc = c2.text_input("Base Location (e.g., Bank N)", key="reg_lord_loc")
+                if l_base:
+                    for i in range(1, 13):
+                        new_sensors.append({'NodeNum': f"{l_base}-ch{i}", 'Location': l_loc, 'Depth': i, 'Bank': l_loc})
+                    st.dataframe(pd.DataFrame(new_sensors), height=150)
+    
+            if st.button("🚀 Commit New Sensors", use_container_width=True, key="reg_commit_btn"):
+                if selected_project == "All Projects" or not new_sensors:
+                    st.error("Select a specific project and provide sensor data.")
+                else:
+                    p_meta = full_reg_df[full_reg_df['Project'] == selected_project].iloc[0]
+                    rows = []
+                    for s in new_sensors:
+                        d = str(s['Depth']) if pd.notnull(s.get('Depth')) else "NULL"
+                        b = f"'{s['Bank']}'" if pd.notnull(s.get('Bank')) else "NULL"
+                        rows.append(f"('{selected_project}', '{s['Location']}', '{s['NodeNum']}', {b}, {d}, CURRENT_TIMESTAMP(), 'Active', 'Active', '{p_meta['ProjectName']}', '{p_meta['City']}', '{p_meta['Timezone']}', '{p_meta['UploadNote']}', '{p_meta['AsBuiltFile']}', '')")
+                    
+                    client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile, EngNotes) VALUES {', '.join(rows)}").result()
+                    st.success(f"Added {len(new_sensors)} sensors to {selected_project}.")
+                    st.cache_data.clear()
+                    st.rerun()
 
     # --- TAB 3: PROJECT (SETTINGS & INIT) ---
     with tab_project:
