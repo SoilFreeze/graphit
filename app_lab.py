@@ -379,14 +379,14 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     
     proj_filter = ""
     if selected_project and selected_project != "All Projects":
-        proj_filter = f"AND TRIM(Project) = '{selected_project.strip()}'"
+        proj_filter = f"AND n.Project = '{selected_project}'" if selected_project != "All Projects" else ""
 
     # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes + Registry Integration
     query = f"""
         WITH MappedNodes AS (
             SELECT 
                 n.NodeNum, 
-                n.Project AS ProjectID,  -- Rename it here to avoid collision
+                n.Project, -- This is now the ONLY 'Project' column in the CTE
                 n.Location, 
                 n.Bank, 
                 n.Depth, 
@@ -395,8 +395,9 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
                 p.ProjectName,
                 p.City,
                 p.Timezone
-            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON n.Project = p.Project
+            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n
+            -- We only join to get metadata, we don't 'SELECT p.Project'
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` AS p ON n.Project = p.Project
             WHERE p.ProjectStatus = 'Active' 
             AND n.SensorStatus = 'Active'
             {proj_filter} 
@@ -439,14 +440,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             GROUP BY NodeNum
         )
         SELECT 
-            m.ProjectID AS Project, -- Rename it back to 'Project' for your app's frontend
-            m.NodeNum,
-            m.Location,
-            m.Bank,
-            m.Depth,
-            m.ProjectName,
-            m.City,
-            m.Timezone,
+            m.*, 
             h.last_ping, 
             h.current_temp, 
             h.low_24h, 
