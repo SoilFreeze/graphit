@@ -862,7 +862,7 @@ def render_data_intake_page(selected_project):
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # 1. DATA REFRESH (Including new Metadata columns)
+    # 1. DATA REFRESH 
     reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
     try:
         full_reg_df = client.query(reg_q).to_dataframe()
@@ -872,24 +872,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     
     active_project_df = pd.DataFrame()
     if not full_reg_df.empty:
-        active_project_df = full_reg_df[
-            (full_reg_df['Project'] == selected_project) & 
-            (full_reg_df['EndDate'].isna())
-        ]
+        active_project_df = full_reg_df[(full_reg_df['Project'] == selected_project) & (full_reg_df['EndDate'].isna())]
     
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
-    # --- 2. THE UNIFIED NAVIGATION (Corrected Variable Names) ---
-    (tab_bulk, tab_intel, tab_settings, tab_init, tab_inv, 
+    # --- 2. THE UNIFIED NAVIGATION (7 TABS) ---
+    (tab_bulk, tab_intel, tab_settings, tab_setup, 
      tab_scrub, tab_surgical, tab_audit) = st.tabs([
-        "✅ Bulk Approval", 
-        "🔍 Intelligence", 
-        "⚙️ Project Settings", 
-        "🏗️ Init Project", 
-        "📥 Hardware", 
-        "🧹 Scrub", 
-        "🧨 Surgical", 
-        "🕒 Audit"
+        "✅ Bulk Approval", "🔍 Intelligence", "⚙️ Project Settings", 
+        "🏗️ Project Setup", "🧹 Scrub", "🧨 Surgical", "🕒 Audit"
     ])
 
     # --- TAB 1: BULK APPROVAL ---
@@ -1013,20 +1004,68 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.cache_data.clear()
                     st.rerun()
 
-    # --- TAB 4: INIT PROJECT ---
-    with tab_init:
-        st.subheader("🏗️ Initialize Project Structure")
-        with st.form("init_project_form"):
-            n_id = st.text_input("New Project ID (e.g., 2541-Blackjack)")
-            n_locs = st.text_area("Locations/Pipes (One per line)")
+    # --- TAB 4: UNIFIED PROJECT & HARDWARE SETUP ---
+    with tab_setup:
+        st.subheader("🏗️ Initialize Project & Hardware")
+        
+        # SECTION 1: PROJECT METADATA
+        with st.expander("Step 1: Project Information", expanded=True):
+            c1, c2 = st.columns(2)
+            n_id = c1.text_input("Project ID (e.g., 2541-Blackjack)", key="setup_id")
+            n_name = c2.text_input("Project Name", key="setup_name")
             
-            if st.form_submit_button("🚀 Create Skeleton"):
-                if n_id and n_locs:
-                    l_list = [l.strip() for l in n_locs.split('\n') if l.strip()]
-                    # Defaulting UploadNote here at the database insertion level
-                    def_note = "Data will be uploaded once per business day by 4pm Pacific Time."
-                    
-                    rows = [f"('{n_id}', '{loc}', 'TBD', NULL, NULL, CURRENT_TIMESTAMP(), 'Template', 'Active', '', '', 'America/Los_Angeles', '{def_note}', '', '')" for loc in l_list]
+            c3, c4 = st.columns(2)
+            n_city = c3.text_input("City, State", key="setup_city")
+            n_tz = c4.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"], key="setup_tz")
+            
+            n_upload = st.text_input("Upload Note", value="Data will be uploaded once per business day by 4pm Pacific Time.", key="setup_upload")
+            n_asbuilt = st.text_input("As-Built Filename", key="setup_asbuilt")
+
+        # SECTION 2: SENSOR INITIALIZATION
+        with st.expander("Step 2: Initialize Hardware", expanded=True):
+            hw_type = st.radio("Hardware Type", ["SensorPush (Bulk Upload)", "Lord (Auto-Generate 12 Ch)"], horizontal=True)
+            
+            st.divider()
+            new_sensors = [] # List of dicts: {'NodeNum': x, 'Location': y, 'Depth': z, 'Bank': b}
+
+            if hw_type == "SensorPush (Bulk Upload)":
+                st.info("Upload CSV with columns: `SensorID`, `NodeNum`, `Location`, `Depth`, `Bank`")
+                u_file = st.file_uploader("Upload SensorPush Mapping", type=['csv'])
+                if u_file:
+                    df_upload = pd.read_csv(u_file)
+                    st.dataframe(df_upload, height=150)
+                    new_sensors = df_upload.to_dict('records')
+
+            else:
+                c1, c2 = st.columns([1, 2])
+                lord_base = c1.text_input("Lord Base ID (e.g., 62534)")
+                l_loc = c2.text_input("Base Location (e.g., Bank N)")
+                if lord_base:
+                    st.caption(f"Will generate 12 channels: {lord_base}-ch1 through {lord_base}-ch12")
+                    for i in range(1, 13):
+                        new_sensors.append({
+                            'NodeNum': f"{lord_base}-ch{i}",
+                            'Location': l_loc,
+                            'Depth': i, # Defaulting depth to channel number for Lord strings
+                            'Bank': l_loc
+                        })
+                    st.write(pd.DataFrame(new_sensors))
+
+        # SECTION 3: EXECUTION
+        if st.button("🚀 Initialize Project & Commit Hardware", use_container_width=True, type="primary"):
+            if not n_id or not new_sensors:
+                st.error("Missing Project ID or Sensor Data.")
+            else:
+                try:
+                    rows = []
+                    for s in new_sensors:
+                        # Clean values
+                        node = str(s.get('NodeNum', 'TBD'))
+                        loc = str(s.get('Location', 'Unknown'))
+                        depth = str(s['Depth']) if pd.notnull(s.get('Depth')) else "NULL"
+                        bank = f"'{s['Bank']}'" if pd.notnull(s.get('Bank')) else "NULL"
+                        
+                        rows.append(f"('{n_id}', '{loc}', '{node}', {bank}, {depth}, CURRENT_TIMESTAMP(), 'Active', 'Active', '{n_name}', '{n_city}', '{n_tz}', '{n_upload}', '{n_asbuilt}', '')")
                     
                     sql = f"""
                         INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
@@ -1034,8 +1073,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         VALUES {', '.join(rows)}
                     """
                     client.query(sql).result()
-                    st.success(f"Initialized {n_id} with default upload notes.")
+                    st.success(f"✅ Successfully initialized Project {n_id} with {len(new_sensors)} sensors.")
                     st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Initialization Failed: {e}")
 
     # --- TAB 5: SCRUB ---
     with tab_scrub:
