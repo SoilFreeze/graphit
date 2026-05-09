@@ -862,7 +862,7 @@ def render_data_intake_page(selected_project):
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
-    # 1. DATA REFRESH
+    # 1. DATA REFRESH (Including new Metadata columns)
     reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
     try:
         full_reg_df = client.query(reg_q).to_dataframe()
@@ -879,7 +879,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     
     loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
 
-    # --- 2. THE UNIFIED NAVIGATION (Bulk Approval First) ---
+    # --- 2. THE UNIFIED NAVIGATION ---
     (tab_bulk, tab_intel, tab_life, tab_inv, 
      tab_scrub, tab_surgical, tab_audit) = st.tabs([
         "✅ Bulk Approval", "🔍 Intelligence", "📁 Lifecycle", 
@@ -940,6 +940,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         search_df = search_df.sort_values(by=['SensorStatus', 'Project', 'Location'])
         if st.checkbox("✍️ Enable Manual Spreadsheet Edits", key="intel_edit_toggle"):
+            st.warning("Editing critical metadata columns will affect all project displays.")
             edited_df = st.data_editor(search_df, num_rows="dynamic", key="intel_editor", use_container_width=True)
             if st.button("💾 Push Changes to BigQuery", key="intel_save"):
                 final_df = full_reg_df.copy()
@@ -952,29 +953,60 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         else:
             st.dataframe(search_df, use_container_width=True, hide_index=True)
 
-    # --- TAB 3: PROJECT LIFECYCLE (FIXED FIELDS) ---
+    # --- TAB 3: PROJECT LIFECYCLE (ENHANCED INPUTS) ---
     with tab_life:
         st.subheader("📁 Project Lifecycle")
-        action = st.selectbox("Action", ["Initialize New Project", "Retire Current Project"], key="life_act")
+        action = st.selectbox("Action", ["Initialize New Project", "Update Engineering Notes", "Retire Current Project"], key="life_act")
         
         if action == "Initialize New Project":
             with st.form("life_init_full"):
-                st.write("Initialize project skeleton with full schema support.")
-                n_id = st.text_input("New Project Code (e.g., 2541-Blackjack)")
-                n_locs = st.text_area("Locations (One per line)")
+                st.write("### 🏗️ New Project Setup")
+                c1, c2 = st.columns(2)
+                n_id = c1.text_input("Project ID (e.g., 2538-Ferndale)")
+                n_name = c2.text_input("Friendly Name (e.g., Pump Station 16 Upgrade)")
+                
+                c3, c4 = st.columns(2)
+                n_loc_city = c3.text_input("Physical Location (City, State)")
+                n_tz = c4.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"])
+                
+                n_upload = st.text_input("Upload Note", value="Data will be uploaded once per business day by 4pm Pacific Time.")
+                n_asbuilt = st.text_input("As-Built Filename (e.g., AsBuiltFerndale.jpg)")
+                
+                n_loc_structure = st.text_area("Locations/Pipes (One per line)")
+                n_notes = st.text_area("Initial Engineering Notes")
+                
                 if st.form_submit_button("🚀 Build Registry Skeleton"):
-                    if n_id and n_locs:
-                        l_list = [l.strip() for l in n_locs.split('\n') if l.strip()]
-                        # We must include Bank (NULL) and Depth (NULL) to match schema requirements
-                        rows = [f"('{n_id}', '{loc}', 'TBD', NULL, NULL, CURRENT_TIMESTAMP(), 'Template', 'Active')" for loc in l_list]
+                    if n_id and n_loc_structure:
+                        l_list = [l.strip() for l in n_loc_structure.split('\n') if l.strip()]
+                        # Format for INSERT: (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, Name, City, Timezone, UploadNote, AsBuilt, EngNotes)
+                        rows = [f"('{n_id}', '{loc}', 'TBD', NULL, NULL, CURRENT_TIMESTAMP(), 'Template', 'Active', '{n_name}', '{n_loc_city}', '{n_tz}', '{n_upload}', '{n_asbuilt}', '{n_notes}')" for loc in l_list]
+                        
                         sql = f"""
                             INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-                            (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus) 
+                            (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile, EngNotes) 
                             VALUES {', '.join(rows)}
                         """
                         client.query(sql).result()
-                        st.success(f"Initialized {len(l_list)} locations for {n_id}.")
+                        st.success(f"Project {n_id} initialized.")
                         st.cache_data.clear()
+
+        elif action == "Update Engineering Notes":
+            st.write(f"### 📝 Field Notes: {selected_project}")
+            # Pull existing notes for current project
+            current_notes = active_project_df['EngNotes'].dropna().unique().tolist()
+            existing_note_str = current_notes[0] if current_notes else ""
+            
+            new_note_entry = st.text_area("Update / Append Notes", value=existing_note_str, height=200)
+            if st.button("💾 Save Engineering Notes"):
+                update_sql = f"""
+                    UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
+                    SET EngNotes = '{new_note_entry}'
+                    WHERE Project = '{selected_project}'
+                """
+                client.query(update_sql).result()
+                st.success("Engineering notes updated for all project nodes.")
+                st.cache_data.clear()
+
         else:
             st.warning(f"Retiring **{selected_project}** releases hardware to inventory.")
             if st.button(f"🔥 Retire {selected_project}", type="primary", key="life_ret"):
@@ -1028,8 +1060,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- TAB 7: AUDIT LOG ---
     with tab_audit:
         st.subheader("🕒 Registry History")
-        st.dataframe(full_reg_df.sort_values('StartDate', ascending=False).head(100), use_container_width=True, hide_index=True)
-        
+        st.dataframe(full_reg_df.sort_values('StartDate', ascending=False).head(100), use_container_width=True, hide_index=True)        
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
 ###########
