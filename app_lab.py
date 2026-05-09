@@ -384,11 +384,10 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
     # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes + Registry Integration
     query = f"""
     WITH MappedNodes AS (
-        -- JOIN: Get hardware details from node_registry 
-        -- and filter by project settings in project_registry
+        -- Explicitly alias the source tables to avoid ambiguity
         SELECT 
             n.NodeNum, 
-            n.Project, 
+            n.Project, -- This is the 'Project' that will be carried forward
             n.Location, 
             n.Bank, 
             n.Depth, 
@@ -400,7 +399,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON n.Project = p.Project
         WHERE p.ProjectStatus = 'Active' 
         AND n.SensorStatus = 'Active'
-        {proj_filter}  -- Dynamic filter from your sidebar
+        {proj_filter} 
     ),
     BaseReporting AS (
         SELECT r.NodeNum, r.timestamp, r.temperature
@@ -410,7 +409,6 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
         INNER JOIN MappedNodes m ON r.NodeNum = m.NodeNum
-        -- Ensure we only report data from within the sensor's assigned tenure
         WHERE r.timestamp >= m.NodeStartDate
         AND (r.timestamp <= m.NodeEndDate OR m.NodeEndDate IS NULL)
     ),
@@ -441,7 +439,7 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         GROUP BY NodeNum
     )
     SELECT 
-        m.*, 
+        m.*, -- m.* now includes the clearly defined n.Project from MappedNodes
         h.last_ping, 
         h.current_temp, 
         h.low_24h, 
