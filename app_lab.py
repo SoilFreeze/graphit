@@ -52,66 +52,29 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    New Relational Engine: Joins Raw + Node Registry + Project Registry.
+    Simplified Engine: Pulls from the real-time View Table.
     """
-    cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
-    
-    # 1. DEFINE THE FILTER
+    # Filter logic for Client vs Engineering
     if view_mode == "client":
-        query_filter = f"AND rej.approve = 'TRUE' AND r.timestamp >= '{cutoff}'"
+        # Client only sees 'TRUE' (Approved) points
+        rej_filter = "AND approval_status = 'TRUE'"
     else:
-        query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
+        # Engineering sees everything EXCEPT 'FALSE' (Rejected)
+        rej_filter = "AND (approval_status IS NULL OR approval_status != 'FALSE')"
 
-    # 2. THE THREE-WAY JOIN
     query = f"""
-        SELECT 
-            n.Location, 
-            r.timestamp, 
-            r.temperature,
-            n.NodeNum,
-            n.Bank,
-            n.Depth,
-            n.Project,
-            p.ProjectName,
-            p.Timezone
-        FROM (
-            SELECT NodeNum, timestamp, temperature FROM `sensorpush-export.Temperature.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `sensorpush-export.Temperature.raw_lord`
-        ) AS r
-        -- JOIN 1: Match raw data to its specific assignment in the Node Registry
-        INNER JOIN `sensorpush-export.Temperature.node_registry` AS n 
-            ON r.NodeNum = n.NodeNum
-        -- JOIN 2: Get the site-wide settings from the Project Registry
-        INNER JOIN `sensorpush-export.Temperature.project_registry` AS p 
-            ON n.Project = p.Project
-        -- JOIN 3: Check for manual approvals
-        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
-            ON r.NodeNum = rej.NodeNum 
-            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE n.Project = '{project_id}'
-        {query_filter}
-        -- Ensure data is within the specific window the sensor was assigned to this spot
-        AND r.timestamp >= n.StartDate 
-        AND (r.timestamp <= n.EndDate OR n.EndDate IS NULL)
-        ORDER BY n.Location ASC, r.timestamp ASC
+        SELECT * FROM `sensorpush-export.Temperature.master_data_view`
+        WHERE Project = '{project_id}'
+        {rej_filter}
+        ORDER BY Location ASC, timestamp ASC
     """
     
     try:
-        df = client.query(query).to_dataframe()
-        if not df.empty:
-            df['Depth'] = pd.to_numeric(df['Depth'], errors='coerce')
-            df['temperature'] = pd.to_numeric(df['temperature'], errors='coerce')
-            if df['timestamp'].dt.tz is None:
-                df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
-        return df
+        return client.query(query).to_dataframe()
     except Exception as e:
-        st.error(f"Registry Engine Error: {e}")
+        st.error(f"View Error: {e}")
         return pd.DataFrame()
         
-###########################
-#- 3. SIDEBAR UI & STATE -#
-###########################
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
