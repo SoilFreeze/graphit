@@ -383,54 +383,77 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
     # COMPREHENSIVE QUERY: Health Metrics + Temperature Extremes + Registry Integration
     query = f"""
-        WITH MappedNodes AS (
-            SELECT Project, NodeNum, Location, Bank, Depth, StartDate, EndDate
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
-            WHERE ProjectStatus = 'Active' {proj_filter}
-        ),
-        BaseReporting AS (
-            SELECT r.NodeNum, r.timestamp, r.temperature, m.StartDate
-            FROM (
-                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                UNION ALL
-                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-            ) AS r
-            INNER JOIN MappedNodes m ON r.NodeNum = m.NodeNum
-            WHERE r.timestamp >= m.StartDate
-            AND (r.timestamp <= m.EndDate OR m.EndDate IS NULL)
-        ),
-        GapAnalysis AS (
-            SELECT 
-                NodeNum, timestamp, temperature,
-                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) as prev_ts
-            FROM BaseReporting
-        ),
-        HistoricalStats AS (
-            SELECT 
-                NodeNum, 
-                MAX(timestamp) as last_ping,
-                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
-                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN temperature ELSE NULL END) as low_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN temperature ELSE NULL END) as high_24h,
-                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
-                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
-                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
-                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
-            FROM GapAnalysis GROUP BY NodeNum
-        )
-        SELECT m.*, h.last_ping, h.current_temp, h.low_24h, h.high_24h,
-               COALESCE(h.gap_24h, 0) as gap_24h, COALESCE(h.gap_7d, 0) as gap_7d,
-               COALESCE(h.active_24h, 0) as active_24h,
-               COALESCE(h.hours_24h, 0) as hours_24h, COALESCE(h.hours_7d, 0) as hours_7d
-        FROM MappedNodes m
-        LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
-    """
+    WITH MappedNodes AS (
+        -- JOIN: Get hardware details from node_registry 
+        -- and filter by project settings in project_registry
+        SELECT 
+            n.NodeNum, 
+            n.Project, 
+            n.Location, 
+            n.Bank, 
+            n.Depth, 
+            n.StartDate as NodeStartDate, 
+            n.EndDate as NodeEndDate,
+            p.ProjectName,
+            p.Timezone
+        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON n.Project = p.Project
+        WHERE p.ProjectStatus = 'Active' 
+        AND n.SensorStatus = 'Active'
+        {proj_filter}  -- Dynamic filter from your sidebar
+    ),
+    BaseReporting AS (
+        SELECT r.NodeNum, r.timestamp, r.temperature
+        FROM (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ) AS r
+        INNER JOIN MappedNodes m ON r.NodeNum = m.NodeNum
+        -- Ensure we only report data from within the sensor's assigned tenure
+        WHERE r.timestamp >= m.NodeStartDate
+        AND (r.timestamp <= m.NodeEndDate OR m.NodeEndDate IS NULL)
+    ),
+    GapAnalysis AS (
+        SELECT 
+            NodeNum, timestamp, temperature,
+            LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) as prev_ts
+        FROM BaseReporting
+    ),
+    HistoricalStats AS (
+        SELECT 
+            NodeNum, 
+            MAX(timestamp) as last_ping,
+            ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
+            MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                THEN temperature ELSE NULL END) as low_24h,
+            MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                THEN temperature ELSE NULL END) as high_24h,
+            MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) as gap_7d,
+            MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) as gap_24h,
+            MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
+            COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
+            COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) 
+                THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
+        FROM GapAnalysis 
+        GROUP BY NodeNum
+    )
+    SELECT 
+        m.*, 
+        h.last_ping, 
+        h.current_temp, 
+        h.low_24h, 
+        h.high_24h,
+        COALESCE(h.gap_24h, 0) as gap_24h, 
+        COALESCE(h.gap_7d, 0) as gap_7d,
+        COALESCE(h.active_24h, 0) as active_24h,
+        COALESCE(h.hours_24h, 0) as hours_24h, 
+        COALESCE(h.hours_7d, 0) as hours_7d
+    FROM MappedNodes m
+    LEFT JOIN HistoricalStats h ON m.NodeNum = h.NodeNum
+"""
     
     try:
         raw_df = client.query(query).to_dataframe()
