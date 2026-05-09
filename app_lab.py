@@ -953,82 +953,74 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         else:
             st.dataframe(search_df, use_container_width=True, hide_index=True)
 
-    # --- TAB 3: PROJECT LIFECYCLE (ENHANCED INPUTS) ---
-    with tab_life:
-        st.subheader("📁 Project Lifecycle")
-        action = st.selectbox("Action", ["Initialize New Project", "Update Engineering Notes", "Retire Current Project"], key="life_act")
+    # --- TAB 3: PROJECT SETTINGS (UPDATE INFO & NOTES) ---
+    with tab_settings:
+        st.subheader(f"⚙️ Settings: {selected_project}")
         
-        if action == "Initialize New Project":
-            with st.form("life_init_full"):
-                st.write("### 🏗️ New Project Setup")
+        if selected_project == "All Projects":
+            st.info("Select a specific project in the sidebar to update settings.")
+        else:
+            # Extract current metadata for this project
+            proj_data = full_reg_df[full_reg_df['Project'] == selected_project].iloc[0] if not active_project_df.empty else None
+            
+            with st.form("update_settings_form"):
                 c1, c2 = st.columns(2)
-                n_id = c1.text_input("Project ID (e.g., 2538-Ferndale)")
-                n_name = c2.text_input("Friendly Name (e.g., Pump Station 16 Upgrade)")
+                u_name = c1.text_input("Project Name", value=proj_data['ProjectName'] if proj_data is not None else "")
+                u_city = c2.text_input("Location/City", value=proj_data['City'] if proj_data is not None else "")
                 
                 c3, c4 = st.columns(2)
-                n_loc_city = c3.text_input("Physical Location (City, State)")
-                n_tz = c4.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"])
+                u_tz = c3.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"], 
+                                    index=["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"].index(proj_data['Timezone']) if proj_data is not None else 0)
+                u_asbuilt = c4.text_input("As-Built Image File", value=proj_data['AsBuiltFile'] if proj_data is not None else "")
                 
-                n_upload = st.text_input("Upload Note", value="Data will be uploaded once per business day by 4pm Pacific Time.")
-                n_asbuilt = st.text_input("As-Built Filename (e.g., AsBuiltFerndale.jpg)")
+                u_upload = st.text_input("Upload Note", value=proj_data['UploadNote'] if proj_data is not None else "")
+                u_notes = st.text_area("Engineering Notes", value=proj_data['EngNotes'] if proj_data is not None else "", height=150)
                 
-                n_loc_structure = st.text_area("Locations/Pipes (One per line)")
-                n_notes = st.text_area("Initial Engineering Notes")
-                
-                if st.form_submit_button("🚀 Build Registry Skeleton"):
-                    if n_id and n_loc_structure:
-                        l_list = [l.strip() for l in n_loc_structure.split('\n') if l.strip()]
-                        # Format for INSERT: (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, Name, City, Timezone, UploadNote, AsBuilt, EngNotes)
-                        rows = [f"('{n_id}', '{loc}', 'TBD', NULL, NULL, CURRENT_TIMESTAMP(), 'Template', 'Active', '{n_name}', '{n_loc_city}', '{n_tz}', '{n_upload}', '{n_asbuilt}', '{n_notes}')" for loc in l_list]
-                        
-                        sql = f"""
-                            INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-                            (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile, EngNotes) 
-                            VALUES {', '.join(rows)}
-                        """
-                        client.query(sql).result()
-                        st.success(f"Project {n_id} initialized.")
-                        st.cache_data.clear()
-
-        elif action == "Update Engineering Notes":
-            st.write(f"### 📝 Field Notes: {selected_project}")
-            # Pull existing notes for current project
-            current_notes = active_project_df['EngNotes'].dropna().unique().tolist()
-            existing_note_str = current_notes[0] if current_notes else ""
+                if st.form_submit_button("💾 Save Project Information"):
+                    update_sql = f"""
+                        UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
+                        SET ProjectName = '{u_name}',
+                            City = '{u_city}',
+                            Timezone = '{u_tz}',
+                            AsBuiltFile = '{u_asbuilt}',
+                            UploadNote = '{u_upload}',
+                            EngNotes = '{u_notes}'
+                        WHERE Project = '{selected_project}'
+                    """
+                    client.query(update_sql).result()
+                    st.success(f"Updated metadata for {selected_project}.")
+                    st.cache_data.clear()
             
-            new_note_entry = st.text_area("Update / Append Notes", value=existing_note_str, height=200)
-            if st.button("💾 Save Engineering Notes"):
-                update_sql = f"""
-                    UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
-                    SET EngNotes = '{new_note_entry}'
-                    WHERE Project = '{selected_project}'
-                """
-                client.query(update_sql).result()
-                st.success("Engineering notes updated for all project nodes.")
-                st.cache_data.clear()
-
-        else:
-            st.warning(f"Retiring **{selected_project}** releases hardware to inventory.")
-            if st.button(f"🔥 Retire {selected_project}", type="primary", key="life_ret"):
+            st.divider()
+            if st.button(f"🔥 Retire Project: {selected_project}", type="primary"):
                 client.query(f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus = 'Archived', EndDate = CURRENT_TIMESTAMP(), SensorStatus = 'Available' WHERE Project = '{selected_project}' AND EndDate IS NULL").result()
-                st.success("Project retired.")
+                st.success("Project archived.")
                 st.cache_data.clear()
 
-    # --- TAB 4: HARDWARE INVENTORY ---
-    with tab_inv:
-        st.subheader("📥 Master Inventory")
-        i_mode = st.radio("Input Mode", ["Manual", "Bulk CSV"], horizontal=True, key="inv_mode")
-        if i_mode == "Manual":
-            c1, c2 = st.columns(2)
-            l_id, f_id = c1.text_input("Long ID", key="inv_l"), c2.text_input("Friendly ID", key="inv_f")
-            if st.button("💾 Add Hardware", key="inv_btn"):
-                client.query(f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` (RawID, NodeNum, DateAdded) VALUES ('{l_id}', '{f_id}', CURRENT_DATE())").result()
-                st.success("Hardware Registered.")
-        else:
-            u_f = st.file_uploader("CSV (RawID, NodeNum)", type=['csv'], key="inv_csv")
-            if u_f and st.button("📤 Upload", key="inv_u"):
-                client.load_table_from_dataframe(pd.read_csv(u_f), f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory").result()
-                st.success("Inventory Sync Complete.")
+    # --- TAB 4: INIT PROJECT (ADD LOCATIONS) ---
+    with tab_init:
+        st.subheader("🏗️ Initialize Project Structure")
+        st.info("Use this to create the 'skeleton' of a project (Location names) before assigning sensors.")
+        
+        with st.form("init_project_form"):
+            n_id = st.text_input("New Project ID (e.g., 2541-Blackjack)")
+            n_locs = st.text_area("Locations/Pipes (One per line)")
+            st.caption("Note: Metadata can be updated in the 'Settings' tab after initialization.")
+            
+            if st.form_submit_button("🚀 Create Skeleton"):
+                if n_id and n_locs:
+                    l_list = [l.strip() for l in n_locs.split('\n') if l.strip()]
+                    # Default values for metadata during init
+                    rows = [f"('{n_id}', '{loc}', 'TBD', NULL, NULL, CURRENT_TIMESTAMP(), 'Template', 'Active', '', '', 'America/Los_Angeles', 'Data will be uploaded once per business day.', '', '')" for loc in l_list]
+                    
+                    sql = f"""
+                        INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                        (Project, Location, NodeNum, Bank, Depth, StartDate, SensorStatus, ProjectStatus, ProjectName, City, Timezone, UploadNote, AsBuiltFile, EngNotes) 
+                        VALUES {', '.join(rows)}
+                    """
+                    client.query(sql).result()
+                    st.success(f"Initialized {n_id} with {len(l_list)} locations.")
+                    st.cache_data.clear()
 
     # --- TAB 5: SCRUB ---
     with tab_scrub:
