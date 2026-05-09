@@ -863,11 +863,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     st.header("🛠️ Admin Tools")
     
     # 1. GLOBAL REGISTRY FETCH
-    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
+    reg_q = f"""
+        SELECT 
+            n.*, 
+            p.ProjectName, p.City, p.Timezone, p.UploadNote, p.AsBuiltFile, p.EngNotes, p.ProjectStatus as MasterProjectStatus
+        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON n.Project = p.Project
+    """
     try:
         full_reg_df = client.query(reg_q).to_dataframe()
-        full_reg_df['Depth'] = pd.to_numeric(full_reg_df['Depth'], errors='coerce')
-    except:
+        # Convert numeric for sorting
+        if 'Depth' in full_reg_df.columns:
+            full_reg_df['Depth'] = pd.to_numeric(full_reg_df['Depth'], errors='coerce')
+    except Exception as e:
+        st.error(f"Error joining registries: {e}")
         full_reg_df = pd.DataFrame()
     
     # Sidebar Context
