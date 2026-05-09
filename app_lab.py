@@ -910,31 +910,28 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_registry:
         st.subheader("📋 Registry Management")
 
-        # --- PART A: DATA EXPLORER & FILTERS ---
-        with st.expander("🔍 Filter & Explore Registry", expanded=True):
+        # --- PART A: DATA EXPLORER, FILTERS & SYNC ---
+        with st.expander("🔍 Filter & Edit Registry", expanded=True):
             f_col1, f_col2, f_col3, f_col4 = st.columns(4)
             
             with f_col1:
-                # 1. Sensor Status Filter
                 s_list = ["All Statuses"] + sorted(full_reg_df['SensorStatus'].dropna().unique().tolist())
                 s_filter = st.selectbox("Sensor Status", s_list, key="reg_filt_status")
             
             with f_col2:
-                # 2. Project Filter
                 p_list = ["All Projects"] + sorted(full_reg_df['Project'].dropna().unique().tolist())
                 p_filter = st.selectbox("Project", p_list, key="reg_filt_proj")
             
             with f_col3:
-                # 3. Location Filter (Drills down if project is selected)
+                # Drill-down Location logic
                 if p_filter != "All Projects":
                     l_list = ["All Locations"] + sorted(full_reg_df[full_reg_df['Project'] == p_filter]['Location'].dropna().unique().tolist())
                 else:
-                    l_list = ["All Locations"] + sorted(full_reg_df['Location'].dropna().unique().tolist())
+                    l_list = ["All Locations"] + sorted(full_reg_df['Location'].unique().tolist())
                 l_filter = st.selectbox("Location", l_list, key="reg_filt_loc")
 
             with f_col4:
-                # 4. Tenure Filter (Current vs Historic)
-                tenure_filter = st.radio("Record Scope", ["Current (Active)", "Historic (Ended)", "All Records"], horizontal=False)
+                tenure_filter = st.radio("Record Scope", ["Current (Active)", "Historic (Ended)", "All Records"], key="reg_tenure_filt")
 
             # Apply Filtering Logic
             rdf = full_reg_df.copy()
@@ -950,9 +947,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             elif tenure_filter == "Historic (Ended)":
                 rdf = rdf[rdf['EndDate'].notna()]
 
-            st.dataframe(rdf.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
-
-        # --- SPREADSHEET EDITOR SECTION ---
+            # --- SPREADSHEET EDITOR SECTION ---
             edit_mode = st.checkbox("✍️ Enable Spreadsheet Mode (Live Editing)")
             
             if edit_mode:
