@@ -131,17 +131,13 @@ st.sidebar.divider()
 
 # --- 2. CORE FILTERS (The "What am I looking at?") ---
 # Fetch Project list from BigQuery
-selected_project = "All Projects" # Fallback
-if client is not None:
-    try:
-        # Note: Updated to use project_registry as your source of truth
-        proj_q = f"SELECT DISTINCT TRIM(Project) as Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus = 'Active'"
-        proj_df = client.query(proj_q).to_dataframe()
-        proj_list = sorted(proj_df['Project'].dropna().unique())
-        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"] + proj_list, key="sidebar_proj_picker_global")
-    except Exception as e:
-        st.sidebar.error("Database connection lag. Defaulting to 'All Projects'.")
-
+# Create the SQL filter snippet based on the sidebar selection
+if selected_project != "All Projects":
+    # CRITICAL: Use the 'n.' prefix to target the node_registry table 
+    # to avoid the "Ambiguous Column" error during JOINS.
+    proj_filter = f"AND n.Project = '{selected_project}'"
+else:
+    proj_filter = ""
 # Unit Selection
 unit_mode = st.sidebar.radio("Temperature Unit", ["Fahrenheit", "Celsius"], horizontal=True)
 unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
