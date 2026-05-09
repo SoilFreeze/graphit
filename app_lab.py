@@ -906,54 +906,101 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.success(f"Approved data for {sel_loc}.")
             st.cache_data.clear()
 
-    # --- TAB 2: REGISTRY (INTEL + SENSOR ADDITION) ---
+    # --- TAB 2: REGISTRY ---
     with tab_registry:
         st.subheader("📋 Registry Management")
-        
-        # --- TOP: INTELLIGENCE ---
-        f_col1, f_col2, f_col3 = st.columns(3)
-        with f_col1:
-            s_list = ["All Sensor Statuses"] + sorted(full_reg_df['SensorStatus'].dropna().unique().tolist())
-            sens_status_sel = st.selectbox("Filter Sensor Status:", s_list, key="reg_s_stat")
-        with f_col2:
-            p_list = ["All Project Statuses"] + sorted(full_reg_df['ProjectStatus'].dropna().unique().tolist())
-            proj_status_sel = st.selectbox("Filter Project Status:", p_list, key="reg_p_stat")
-        
-        search_df = full_reg_df.copy()
-        if sens_status_sel != "All Sensor Statuses":
-            search_df = search_df[search_df['SensorStatus'] == sens_status_sel]
-        if proj_status_sel != "All Project Statuses":
-            search_df = search_df[search_df['ProjectStatus'] == proj_status_sel]
 
-        with f_col3:
-            reg_mode = st.radio("Search Mode:", ["By Project", "By Node ID"], horizontal=True, key="reg_intel_mode")
-            if reg_mode == "By Project":
-                proj_list = ["All Projects"] + sorted(search_df['Project'].dropna().unique().tolist())
-                proj_sel = st.selectbox("Select Project:", proj_list, key="reg_proj_sel")
-                if proj_sel != "All Projects":
-                    search_df = search_df[search_df['Project'] == proj_sel]
-            else:
-                node_search = st.text_input("Search Node ID", key="reg_node_srch")
-                if node_search:
-                    search_df = search_df[search_df['NodeNum'].fillna('').str.contains(node_search, na=False, case=False)]
+        # --- PART A: DATA EXPLORER & FILTERS ---
+        with st.expander("🔍 Filter & Explore Registry", expanded=True):
+            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+            
+            with f_col1:
+                # 1. Sensor Status Filter
+                s_list = ["All Statuses"] + sorted(full_reg_df['SensorStatus'].dropna().unique().tolist())
+                s_filter = st.selectbox("Sensor Status", s_list, key="reg_filt_status")
+            
+            with f_col2:
+                # 2. Project Filter
+                p_list = ["All Projects"] + sorted(full_reg_df['Project'].dropna().unique().tolist())
+                p_filter = st.selectbox("Project", p_list, key="reg_filt_proj")
+            
+            with f_col3:
+                # 3. Location Filter (Drills down if project is selected)
+                if p_filter != "All Projects":
+                    l_list = ["All Locations"] + sorted(full_reg_df[full_reg_df['Project'] == p_filter]['Location'].dropna().unique().tolist())
+                else:
+                    l_list = ["All Locations"] + sorted(full_reg_df['Location'].dropna().unique().tolist())
+                l_filter = st.selectbox("Location", l_list, key="reg_filt_loc")
 
-        if st.checkbox("✍️ Enable Manual Registry Edits", key="reg_edit_toggle"):
-            edited_df = st.data_editor(search_df, num_rows="dynamic", key="reg_editor", use_container_width=True)
-            if st.button("💾 Push Edits to BigQuery", key="reg_push_btn"):
-                final_df = full_reg_df.copy()
-                final_df.update(edited_df)
-                client.load_table_from_dataframe(final_df, f"{PROJECT_ID}.{DATASET_ID}.project_registry", 
-                                               job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-                st.success("Registry database updated.")
-                st.cache_data.clear()
-                st.rerun()
-        else:
-            st.dataframe(search_df.sort_values(['SensorStatus', 'Project']), use_container_width=True, hide_index=True)
+            with f_col4:
+                # 4. Tenure Filter (Current vs Historic)
+                tenure_filter = st.radio("Record Scope", ["Current (Active)", "Historic (Ended)", "All Records"], horizontal=False)
+
+            # Apply Filtering Logic
+            rdf = full_reg_df.copy()
+            if s_filter != "All Statuses":
+                rdf = rdf[rdf['SensorStatus'] == s_filter]
+            if p_filter != "All Projects":
+                rdf = rdf[rdf['Project'] == p_filter]
+            if l_filter != "All Locations":
+                rdf = rdf[rdf['Location'] == l_filter]
+            
+            if tenure_filter == "Current (Active)":
+                rdf = rdf[rdf['EndDate'].isna()]
+            elif tenure_filter == "Historic (Ended)":
+                rdf = rdf[rdf['EndDate'].notna()]
+
+            st.dataframe(rdf.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
 
         st.divider()
 
-        # --- BOTTOM: HARDWARE ADDITION ---
-        st.subheader("📥 Add Sensors to Current Project")
+        # --- PART B: INDIVIDUAL NODE EDITOR ---
+        st.subheader("🎯 Individual Node Override")
+        st.info("Search by Node Name (NodeNum) to update its specific assignment.")
+        
+        target_node = st.text_input("Enter Node Name to Edit (e.g., 58014-ch1)", key="node_edit_search")
+        
+        if target_node:
+            # Find the active record for this node
+            node_record = full_reg_df[(full_reg_df['NodeNum'] == target_node) & (full_reg_df['EndDate'].isna())]
+            
+            if not node_record.empty:
+                nr = node_record.iloc[0]
+                with st.form("single_node_form"):
+                    st.write(f"Editing Active Assignment for: **{target_node}**")
+                    c1, c2, c3 = st.columns(3)
+                    new_loc = c1.text_input("Location", value=nr['Location'])
+                    new_depth = c2.text_input("Depth", value=str(nr['Depth']) if pd.notnull(nr['Depth']) else "")
+                    new_bank = c3.text_input("Bank", value=nr['Bank'] if pd.notnull(nr['Bank']) else "")
+                    
+                    new_status = st.selectbox("Sensor Status", ["Active", "Swapped", "Template", "Available"], 
+                                            index=["Active", "Swapped", "Template", "Available"].index(nr['SensorStatus']) if nr['SensorStatus'] in ["Active", "Swapped", "Template", "Available"] else 0)
+
+                    if st.form_submit_button("💾 Save Node Changes"):
+                        # Convert empty strings back to NULL for SQL
+                        sql_depth = new_depth if new_depth.strip() != "" else "NULL"
+                        sql_bank = f"'{new_bank}'" if new_bank.strip() != "" else "NULL"
+                        
+                        update_sql = f"""
+                            UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry`
+                            SET Location = '{new_loc}',
+                                Depth = {sql_depth},
+                                Bank = {sql_bank},
+                                SensorStatus = '{new_status}'
+                            WHERE NodeNum = '{target_node}' AND EndDate IS NULL
+                        """
+                        client.query(update_sql).result()
+                        st.success(f"Successfully updated node {target_node}.")
+                        st.cache_data.clear()
+                        st.rerun()
+            else:
+                st.warning(f"No active record found for node '{target_node}'. It may be historic or misspelled.")
+
+        st.divider()
+
+        # --- PART C: HARDWARE ADDITION (Upload Batch) ---
+        # Note: Kept separate as requested to avoid mixing manual overrides with batch logic
+        with st.expander("📥 Add New Sensors (Batch)", expanded=False):
         hw_type = st.radio("Hardware Type", ["SensorPush (Bulk Upload)", "Lord (Auto-Generate 12 Ch)"], horizontal=True, key="reg_hw_type")
         
         new_sensors = []
