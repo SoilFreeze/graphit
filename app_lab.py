@@ -992,7 +992,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         p_mode = st.radio("Primary Action", ["Update Existing Project", "Initialize New Project"], horizontal=True, key="p_main_mode")
         
         if p_mode == "Update Existing Project":
-            # Dropdown for all available projects
+            # 1. Project Selector
             all_projs = sorted(full_reg_df['Project'].dropna().unique().tolist())
             target_proj = st.selectbox("Select Project to Manage", all_projs, key="p_manage_select")
             
@@ -1000,11 +1000,17 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 p_rows = full_reg_df[full_reg_df['Project'] == target_proj]
                 p_data = p_rows.iloc[0]
 
+                # Defensive Helper: Returns empty string if column is missing from DB
+                def safe_get(col):
+                    return p_data[col] if col in p_data and pd.notnull(p_data[col]) else ""
+
                 # --- PART A: QUICK NOTES UPDATE ---
                 st.write("### 📝 Quick Notes Update")
                 with st.form("p_notes_form"):
-                    u_upload = st.text_input("Upload Note", value=p_data.get('UploadNote', ''))
-                    u_eng = st.text_area("Engineering Notes", value=p_data.get('EngNotes', ''), height=150)
+                    u_upload = st.text_input("Upload Note", value=safe_get('UploadNote'))
+                    u_eng = st.text_area("Engineering Notes", value=safe_get('EngNotes'), height=150)
+                    
+                    # Fix: Ensure every form has a submit button
                     if st.form_submit_button("💾 Save Notes Only"):
                         client.query(f"""
                             UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
@@ -1016,18 +1022,21 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                 st.divider()
 
-                # --- PART B: PROJECT IDENTITY (Edit Information Button) ---
+                # --- PART B: PROJECT IDENTITY ---
                 if st.checkbox("🛠️ Edit Project Identity (Name, City, TZ, As-Built)"):
                     with st.form("p_identity_form"):
                         c1, c2 = st.columns(2)
-                        u_name = c1.text_input("Project Name", value=p_data.get('ProjectName', ''))
-                        u_city = c2.text_input("City", value=p_data.get('City', ''))
+                        u_name = c1.text_input("Project Name", value=safe_get('ProjectName'))
+                        u_city = c2.text_input("City", value=safe_get('City'))
                         
                         c3, c4 = st.columns(2)
                         tz_options = ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"]
-                        u_tz = c3.selectbox("Timezone", tz_options, index=tz_options.index(p_data['Timezone']) if p_data['Timezone'] in tz_options else 0)
-                        u_asbuilt = c4.text_input("As-Built Filename", value=p_data.get('AsBuiltFile', ''))
+                        db_tz = safe_get('Timezone')
+                        u_tz = c3.selectbox("Timezone", tz_options, 
+                                            index=tz_options.index(db_tz) if db_tz in tz_options else 0)
+                        u_asbuilt = c4.text_input("As-Built Filename", value=safe_get('AsBuiltFile'))
                         
+                        # Fix: Ensure every form has a submit button
                         if st.form_submit_button("💾 Commit Identity Changes"):
                             client.query(f"""
                                 UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
@@ -1049,6 +1058,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 n_tz = st.selectbox("Timezone", ["America/Los_Angeles", "America/New_York", "America/Chicago", "UTC"])
                 n_upload = st.text_input("Upload Note", value="Data will be uploaded once per business day by 4pm Pacific Time.")
                 n_asbuilt = st.text_input("As-Built Filename")
+                
+                # Fix: Ensure every form has a submit button
                 if st.form_submit_button("🚀 Initialize Project"):
                     if n_id:
                         sql = f"""INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
