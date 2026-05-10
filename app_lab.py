@@ -935,40 +935,69 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.cache_data.clear()
 
     # --- TAB 2: NODE REGISTRY (HARDWARE ASSIGNMENTS) ---
-    # --- TAB 2: NODE REGISTRY ---
     with tab_registry:
         st.subheader("📋 Hardware Assignment Manager")
         
+        # 1. Filter Logic with "None-Safe" Sorting
         with st.expander("🔍 Filter Hardware View", expanded=False):
             f1, f2 = st.columns(2)
             
-            # FIX: Filter out None/Null values before sorting to prevent the TypeError
-            available_projects = [p for p in full_reg_df['Project'].unique().tolist() if p is not None]
-            p_filter = f1.selectbox("View Project", ["All"] + sorted(available_projects))
+            # Clean Project List: handle Nulls/None for sorting
+            raw_projs = full_reg_df['Project'].unique().tolist() if not full_reg_df.empty else []
+            clean_projs = sorted([str(p) for p in raw_projs if pd.notnull(p)])
+            p_filter = f1.selectbox("View Project", ["All"] + clean_projs, key="reg_filter_proj")
             
-            available_statuses = [s for s in full_reg_df['SensorStatus'].unique().tolist() if s is not None]
-            s_filter = f2.selectbox("View Health Status", ["All"] + sorted(available_statuses))
+            # Clean Status List: handle Nulls/None for sorting
+            raw_stats = full_reg_df['SensorStatus'].unique().tolist() if not full_reg_df.empty else []
+            clean_stats = sorted([str(s) for s in raw_stats if pd.notnull(s)])
+            s_filter = f2.selectbox("View Health Status", ["All"] + clean_stats, key="reg_filter_status")
             
+            # Apply Filters to the dataframe
             view_df = full_reg_df.copy()
-            if p_filter != "All": view_df = view_df[view_df['Project'] == p_filter]
-            if s_filter != "All": view_df = view_df[view_df['SensorStatus'] == s_filter]
+            if p_filter != "All": 
+                view_df = view_df[view_df['Project'] == p_filter]
+            if s_filter != "All": 
+                view_df = view_df[view_df['SensorStatus'] == s_filter]
 
-        st.info("💡 Update Node health status or reassign project windows below.")
-        # Column names updated to match physical schema
-        node_cols = ['NodeNum', 'Project', 'Location', 'Bank', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']
+        st.info("💡 **Tip:** Edit rows directly to reassign sensors or update health status. Click **Sync** to save.")
         
+        # 2. Define physical columns for the BigQuery table
+        # We exclude the joined project-level metadata so we only write back node-level data
+        node_cols = [
+            'NodeNum', 'Project', 'Location', 'Bank', 
+            'Depth', 'Start_Date', 'End_Date', 'SensorStatus'
+        ]
+        
+        # 3. The Data Editor
+        # We sort by Project and Location so the list is organized for the user
         edited_df = st.data_editor(
             view_df[node_cols].sort_values(['Project', 'Location']), 
             num_rows="dynamic", 
-            key="node_registry_editor"
+            key="node_registry_editor_master",
+            use_container_width=True
         )
         
+        # 4. Sync Logic
         if st.button("💾 Sync Registry Changes", type="primary", use_container_width=True):
-            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-            client.load_table_from_dataframe(edited_df, f"sensorpush-export.Temperature.node_registry", job_config=job_config).result()
-            st.success("Node Registry synchronized.")
-            st.cache_data.clear()
-            st.rerun()
+            try:
+                with st.spinner("Writing to BigQuery..."):
+                    # Use WRITE_TRUNCATE to replace the table with the cleaned, edited version
+                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                    
+                    # Ensure Date columns are in the correct format before sending to BQ
+                    for date_col in ['Start_Date', 'End_Date']:
+                        if date_col in edited_df.columns:
+                            edited_df[date_col] = pd.to_datetime(edited_df[date_col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+                    client.load_table_from_dataframe(edited_df, table_ref, job_config=job_config).result()
+                    
+                    st.success("✅ Node Registry updated successfully!")
+                    st.cache_data.clear() # Clear graph cache since assignments changed
+                    time.sleep(1)
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Failed to sync registry: {e}")
 
     # --- TAB 3: PROJECT MASTER (SITE SETTINGS) ---
     with tab_project:
