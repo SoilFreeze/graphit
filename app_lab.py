@@ -50,18 +50,23 @@ client = get_bq_client()
 ############################
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, view_mode="engineering"):
+def get_universal_portal_data(_client, project_id, view_mode="engineering"):
     """
     Simplified Engine: Pulls point data from the real-time View Table.
+    The underscore in _client prevents Streamlit Hashing/Caching errors.
     """
     
     if view_mode == "client":
-        # CAST the column to string to catch both Boolean True and String 'TRUE'
-        filter_sql = "AND CAST(approval_status AS STRING) IN ('TRUE', 'true', '1')"
+        # Client View: Only explicitly approved data (True/1)
+        # Using UPPER and CAST to ensure we catch all variations of 'True'
+        filter_sql = "AND UPPER(CAST(approval_status AS STRING)) IN ('TRUE', '1')"
     else:
-        # Engineering sees everything EXCEPT 'FALSE' or 'MASKED'
-        # We use COALESCE to ensure NULL statuses are shown to Engineering too
-        filter_sql = "AND COALESCE(approval_status, 'PENDING') NOT IN ('FALSE', 'false', 'MASKED', 'masked')"
+        # Engineering View: Sees everything EXCEPT rejected/masked data.
+        # COALESCE ensures 'PENDING' or NULL data is visible to the team.
+        filter_sql = """
+            AND UPPER(COALESCE(CAST(approval_status AS STRING), 'PENDING')) 
+            NOT IN ('FALSE', '0', 'MASKED')
+        """
 
     query = f"""
         SELECT * FROM `sensorpush-export.Temperature.master_data_view`
@@ -71,9 +76,12 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     """
     
     try:
-        return client.query(query).to_dataframe()
+        # We use the _client passed from the main app
+        query_job = _client.query(query)
+        return query_job.to_dataframe()
     except Exception as e:
-        st.error(f"View Error: {e}")
+        # Log the error but return an empty DF so the app doesn't crash
+        st.error(f"⚠️ Database Connection Error for project '{project_id}': {e}")
         return pd.DataFrame()
         
 ###########################
@@ -343,9 +351,10 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     # 2. Data Fetching
+    # Inside render_global_overview
     with st.spinner(f"Syncing {selected_project} (Engineering View)..."):
-        # get_universal_portal_data should handle the BigQuery fetch
-        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+        # Pass 'client' as the first argument; it matches '_client' in the definition
+        p_df = get_universal_portal_data(client, selected_project, view_mode="engineering")
 
     if not p_df.empty:
         # 3. View Constraints
