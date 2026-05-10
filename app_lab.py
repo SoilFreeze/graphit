@@ -169,9 +169,8 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False):
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", mobile_mode=False):
     """
-    Relational Responsive Engine:
-    - Modular sorting for Relational Schema (Bank vs Depth).
-    - Status-aware styling (Dashed lines for non-Active sensors).
+    Stabilized Engine: Combines relational status-styling with 
+    high-fidelity grid formatting.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -187,14 +186,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     end_local = end_view.tz_convert(display_tz) if end_view.tzinfo else end_view.tz_localize('UTC').tz_convert(display_tz)
     now_local = pd.Timestamp.now(tz=display_tz)
     
+    # Restored x-axis buffer from working version
     range_start = start_local - pd.Timedelta(days=1)
     range_end = end_local + pd.Timedelta(days=1)
     
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range = [-30, 30]
+        y_range, dt_major, dt_minor = [-30, 30], 10, 5
     else:
-        y_range = [-20, 80]
+        y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
     # 2. LABELING & SORTING
     def get_sort_info(r):
@@ -206,7 +206,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     plot_df[['depth_label', 'sort_val']] = plot_df.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
     
-    # 3. TRACE GENERATION (With Status Styling)
+    # 3. TRACE GENERATION
     fig = go.Figure()
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
     unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
@@ -221,8 +221,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for j, sn in enumerate(sensors):
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # --- NEW: STATUS-BASED STYLING ---
-            # If the sensor is anything other than 'Active', make the line dashed
+            # --- STATUS-BASED STYLING (RETAINED) ---
             current_status = s_df['SensorStatus'].iloc[0] if 'SensorStatus' in s_df.columns else 'Active'
             line_dash = 'solid' if current_status == 'Active' else 'dot'
             opacity = 1.0 if current_status == 'Active' else 0.6
@@ -249,10 +248,49 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 hovertemplate=f"<b>{group_lbl} ({sn})</b><br>Status: {current_status}<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>"
             ))
 
-    # [4-5: Layout & Ref Lines stay exactly the same as your provided code]
-    # ... (omitted for brevity)
+    # 4. REFERENCE LINES & NOW MARKER
+    for val, ref_label in active_refs:
+        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+        fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
+                      annotation_text=ref_label, annotation_position="top right")
+
+    fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
+
+    # 5. RESTORED GRID HIERARCHY & LAYOUT
+    if mobile_mode:
+        legend_cfg = dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5)
+        margin_cfg = dict(t=80, l=40, r=20, b=160)
+    else:
+        legend_cfg = dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
+        margin_cfg = dict(t=80, l=50, r=180, b=50)
+
+    fig.update_layout(
+        title={'text': f"<b>{title}</b>", 'x': 0},
+        plot_bgcolor='white', hovermode="x unified", height=600,
+        margin=margin_cfg,
+        legend=legend_cfg,
+        xaxis=dict(
+            range=[range_start, range_end], 
+            showline=True, mirror=True, linecolor='black',
+            showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1,
+            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
+            tickformat='%b %d\n%H:%M'
+        ),
+        yaxis=dict(
+            title=f"Temperature ({unit_label})", range=y_range, dtick=dt_major, 
+            gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
+            minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
+        )
+    )
     
+    # 6. RESTORED MONDAY VERTICAL LINES
+    mondays = pd.date_range(start=range_start, end=range_end, freq='W-MON', tz=display_tz)
+    for mon in mondays:
+        fig.add_vline(x=mon, line_width=2, line_color="dimgray", layer="below")
+
     return fig
+
+
 ##################
 # Page Functions #
 ##################
