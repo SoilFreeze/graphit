@@ -261,12 +261,19 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 # - 5. PAGE: GLOBAL OVERVIEW - #
 ###########
 
-def render_global_overview(selected_project, display_tz):
+###########
+# - 5. PAGE: GLOBAL OVERVIEW - #
+###########
+
+# UPDATE THIS LINE to include project_metadata:
+def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
     Updated to use the relational node_registry structure.
     """
-    st.header("🌐 Global Project Overview")
+    # Optional: Use metadata to show the project stage in the header
+    stage_suffix = f" [{project_metadata['ProjectStatus']}]" if project_metadata is not None else ""
+    st.header(f"🌐 Global Project Overview{stage_suffix}")
     
     # 1. FIX: Ensure variable names match the new sidebar keys
     # Use .get() to prevent crashes if the key hasn't been initialized yet
