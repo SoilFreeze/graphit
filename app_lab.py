@@ -325,117 +325,63 @@ def render_global_overview(selected_project, display_tz):
 ###########
 
 def render_executive_summary(client, selected_project, unit_label, display_tz):
+    # Only render the header once at the very start
     st.header(f"🏠 Executive Summary: Health Monitor")
     
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar.")
+        st.info("💡 Please select a specific project in the sidebar to view health metrics.")
         return
 
-    # SIMPLIFIED QUERY: Leverages the master_data_view for tenure and status logic
+    # Updated Query: Uses the master_data_view and respects the new SensorStatus field
     query = f"""
-        WITH BaseReporting AS (
+        WITH BaseData AS (
             SELECT 
                 NodeNum, timestamp, temperature, Location, Bank, Depth, SensorStatus
             FROM `sensorpush-export.Temperature.master_data_view`
             WHERE Project = '{selected_project}'
         ),
-        GapAnalysis AS (
-            SELECT 
-                *,
-                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
-            FROM BaseReporting
-        ),
-        HistoricalStats AS (
+        Stats AS (
             SELECT 
                 NodeNum, Location, Bank, Depth, SensorStatus,
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
-                -- Rolling 24h stats
-                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature ELSE NULL END) AS low_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature ELSE NULL END) AS high_24h,
-                -- Connectivity stats
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) AS gap_24h,
-                -- Active counters
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as active_24h,
-                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
-                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
-            FROM GapAnalysis 
+                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h
+            FROM BaseData 
             GROUP BY NodeNum, Location, Bank, Depth, SensorStatus
         )
-        SELECT * FROM HistoricalStats
+        SELECT * FROM Stats
     """
     
     try:
         raw_df = client.query(query).to_dataframe()
+        
         if raw_df.empty:
-            st.warning("No data found for this project. Check your Node Registry assignments.")
+            st.warning("No data found. Ensure sensors are assigned to this project with a Start_Date in the Node Registry.")
             return
 
-        # Numeric Enforcement
-        for col in ['Depth', 'low_24h', 'high_24h', 'current_temp']:
-            if col in raw_df.columns:
-                raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce')
-
-        now_local = pd.Timestamp.now(tz=display_tz)
-
-        def fmt_temp(val):
-            if pd.isnull(val): return "N/A"
-            c_val = (val - 32) * 5/9 if unit_label == "°C" else val
-            return f"{round(c_val, 1)}{unit_label}"
-
-        # 1. LOCATION OVERVIEW
+        # 1. LOCATION OVERVIEW TABLE
+        st.subheader("📍 Location Overview")
         summary_df = raw_df.groupby(['Location']).agg(
             Nodes=('NodeNum', 'count'),
-            Seen_24h=('active_24h', 'sum'),
-            Sum_Hrs_24=('hours_24h', 'sum'),
-            Min_24h_All=('low_24h', 'min'), 
-            Max_24h_All=('high_24h', 'max'), 
             Latest_Ping=('last_ping', 'max')
         ).reset_index()
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-        # [Formatting and Table Display logic stays the same as your previous version]
-        # ... 
-
-        # --- 2. SENSOR DRILL-DOWN ---
+        # 2. SENSOR DRILL-DOWN (Fixed with Unique Namespace Key)
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         loc_list = sorted(raw_df['Location'].unique().tolist())
         
-        # ADD A UNIQUE KEY HERE:
+        # We use a prefixed key to ensure no other page element can collide with this ID
         selected_loc = st.selectbox(
             "Detailed view for:", 
             ["--- Select Location ---"] + loc_list,
-            key=f"exec_drilldown_{selected_project}" 
+            key=f"summary_drilldown_select_{selected_project}"
         )
 
         if selected_loc != "--- Select Location ---":
             sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
-            def format_sensor_row(row):
-                ping = row['last_ping']
-                status_health = row['SensorStatus'] # Pulling health from View
-                
-                # Connectivity Status Icon
-                ping_icon = "🟢"
-                if pd.notnull(ping):
-                    if ping.tzinfo is None: ping = ping.tz_localize('UTC')
-                    lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
-                    if lag > 24: ping_icon = "🔴"
-                    elif lag > 6: ping_icon = "🟡"
-                else:
-                    lag = "N/A"
-                    ping_icon = "⚪"
-
-                pos = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else (f"Bank {row['Bank']}" if pd.notnull(row['Bank']) else "N/A")
-
-                return pd.Series({
-                    "Node ID": row['NodeNum'], 
-                    "Health": status_health, # NEW FIELD
-                    "Position": pos,
-                    "Current Temp": fmt_temp(row['current_temp']), 
-                    "Connectivity": f"{lag}h {ping_icon}",
-                    "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%", 
-                })
-            st.dataframe(sensor_df.apply(format_sensor_row, axis=1), use_container_width=True, hide_index=True)
+            st.dataframe(sensor_df, use_container_width=True, hide_index=True)
             
     except Exception as e:
         st.error(f"Executive Summary Error: {e}")
