@@ -671,7 +671,24 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
     # --- TAB 4: AS-BUILT PLAN ---
     with tab_built:
         st.subheader("🗺️ Project Layout & Sensor Map")
-        st.info("The as-built site plan for this project is currently being finalized.")
+        
+        # Pull the filename from the registry
+        asbuilt_filename = project_metadata.get('AsBuiltFile')
+
+        if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
+            try:
+                # Assuming your images are stored in an 'assets' folder in your repository
+                # Use a standard path logic: assets/asbuilt/filename.png
+                image_path = f"assets/asbuilts/{asbuilt_filename}"
+                st.image(image_path, caption=f"As-Built Sensor Layout for {display_name}", use_column_width=True)
+            except Exception:
+                # Fallback if the file isn't found in the local directory
+                st.error(f"Image file '{asbuilt_filename}' not found in the assets folder.")
+                st.info("Please ensure the file is uploaded to the repository's assets directory.")
+        else:
+            # Standard disclaimer if the registry field is blank
+            st.info("The as-built site plan for this project is currently being finalized.")
+            st.write("Once engineering has verified the final sensor coordinates, the map will be displayed here.")
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
