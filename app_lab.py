@@ -53,16 +53,15 @@ client = get_bq_client()
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
     Simplified Engine: Pulls point data from the real-time View Table.
-    Uses the project_registry separately for title blocks and timezones.
     """
-    # Filter logic for Client vs Engineering
     if view_mode == "client":
-        # Client only sees 'TRUE' (Approved) points and 'Active' sensors
-        filter_sql = "AND approval_status = 'TRUE' AND SensorStatus = 'Active'"
+        # REMOVED: SensorStatus requirement. 
+        # UPDATED: Handle 'TRUE' as a string and allow any SensorStatus.
+        filter_sql = "AND approval_status IN ('TRUE', 'true')"
     else:
-        # Engineering sees everything EXCEPT 'FALSE' (Rejected)
-        # This includes Diagnostic, Need Repair, and Dead statuses
-        filter_sql = "AND (approval_status IS NULL OR approval_status != 'FALSE')"
+        # Engineering sees everything EXCEPT 'FALSE' or 'MASKED'
+        # We use COALESCE to ensure NULL statuses are shown to Engineering too
+        filter_sql = "AND COALESCE(approval_status, 'PENDING') NOT IN ('FALSE', 'false', 'MASKED', 'masked')"
 
     query = f"""
         SELECT * FROM `sensorpush-export.Temperature.master_data_view`
@@ -298,11 +297,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 ###########
 # - 5. PAGE: GLOBAL OVERVIEW - #
 ###########
-
-###########
-# - 5. PAGE: GLOBAL OVERVIEW - #
-###########
-
 # UPDATE THIS LINE to include project_metadata:
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
@@ -1015,6 +1009,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_audit:
         st.subheader("🕒 Registry Audit Log")
         st.dataframe(full_reg_df.sort_values('Start_Date', ascending=False), use_container_width=True, hide_index=True)
+
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
 ###########
@@ -1150,7 +1145,6 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
                 st.cache_data.clear()
                 st.rerun()
 
-           
 ###########
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
