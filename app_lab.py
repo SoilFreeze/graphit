@@ -504,10 +504,6 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
 
-###########
-# - 7. PAGE: CLIENT PORTAL - #
-###########
-
 def render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs):
     """
     Complete Client-facing portal. 
@@ -1419,72 +1415,86 @@ def get_trend_arrow(current, previous):
 
 def render_landing_page(client, unit_label, unit_mode):
     st.header("🌐 Global Project Dashboard")
-    st.info("24-Hour Performance Summary (Supply, Return, and Monitoring)")
-
-    # 1. Fetch 24-hour aggregate data for all projects
+    
     summary_q = f"""
+        WITH raw_data AS (
+            SELECT 
+                n.Project, n.Bank, m.temperature, m.timestamp
+            FROM `sensorpush-export.Temperature.master_data_view` m
+            JOIN `sensorpush-export.Temperature.node_registry` n ON m.NodeNum = n.NodeNum
+            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR)
+        )
         SELECT 
-            n.Project,
-            n.Bank,
-            n.Location,
-            AVG(m.temperature) as current_temp,
-            MIN(m.temperature) as min_24h,
-            MAX(m.temperature) as max_24h
-        FROM `sensorpush-export.Temperature.master_data_view` m
-        JOIN `sensorpush-export.Temperature.node_registry` n ON m.NodeNum = n.NodeNum
-        WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-        GROUP BY 1, 2, 3
+            Project, Bank,
+            AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
+            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
+            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
+            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
+            MIN(temperature) as min_24h,
+            MAX(temperature) as max_24h
+        FROM raw_data
+        GROUP BY 1, 2
     """
     
     try:
         df = client.query(summary_q).to_dataframe()
     except Exception as e:
-        st.error(f"Error loading dashboard: {e}")
+        st.error(f"Dashboard Query Failed: {e}")
         return
 
     if df.empty:
-        st.warning("No data recorded across projects in the last 24 hours.")
+        st.warning("No data found in the last 24 hours.")
         return
 
-    # 2. Iterate through each unique project
     for project in sorted(df['Project'].unique()):
-        p_data = df[df['Project'] == project]
+        p_df = df[df['Project'] == project]
         
         with st.container(border=True):
             st.subheader(f"🏗️ {project}")
             
-            # Create three columns for the sensor types
-            col1, col2, col3 = st.columns(3)
+            # Split into 4 columns to accommodate Ambient
+            c1, c2, c3, c4 = st.columns(4)
             
-            with col1:
-                st.write("**📥 Supply (S)**")
-                display_group_metrics(p_data[p_data['Bank'].str.startswith('S', na=False)], unit_mode, unit_label)
-                
-            with col2:
-                st.write("**📤 Return (R)**")
-                display_group_metrics(p_data[p_data['Bank'].str.startswith('R', na=False)], unit_mode, unit_label)
-                
-            with col3:
-                st.write("**🌡️ Monitoring (Other)**")
-                display_group_metrics(p_data[~p_data['Bank'].str.startswith(('S', 'R'), na=False)], unit_mode, unit_label)
-
-def display_group_metrics(df_group, unit_mode, unit_label):
-    """Helper to render Current/Min/Max for a sensor group"""
-    if df_group.empty:
-        st.caption("No active sensors")
-        return
-
-    # Calculate overall group averages
-    curr = df_group['current_temp'].mean()
-    mn = df_group['min_24h'].min()
-    mx = df_group['max_24h'].max()
-
-    # Convert units
-    if unit_mode == "Celsius":
-        curr, mn, mx = [(x - 32) * 5/9 for x in [curr, mn, mx]]
-
-    st.metric("Current Avg", f"{curr:.1f}{unit_label}")
-    st.caption(f"Range: {mn:.1f} to {mx:.1f}{unit_label}")
+            # Grouping Logic
+            is_supply = p_df['Bank'].str.startswith('S', na=False)
+            is_return = p_df['Bank'].str.startswith('R', na=False)
+            is_ambient = p_df['Bank'].str.contains('Amb', case=False, na=False)
+            
+            # Define the four buckets
+            groups = [
+                (c1, "📥 Supply (S)", p_df[is_supply & ~is_ambient]),
+                (c2, "📤 Return (R)", p_df[is_return & ~is_ambient]),
+                (c3, "☁️ Ambient", p_df[is_ambient]),
+                (c4, "🌡️ Monitoring", p_df[~is_supply & ~is_return & ~is_ambient])
+            ]
+            
+            for col, title, group_df in groups:
+                with col:
+                    st.write(f"**{title}**")
+                    if group_df.empty:
+                        st.caption("No data")
+                        continue
+                    
+                    # Group Averages
+                    now = group_df['avg_now'].mean()
+                    prev_1h = group_df['avg_1h'].mean()
+                    prev_6h = group_df['avg_6h'].mean()
+                    prev_24h = group_df['avg_24h'].mean()
+                    
+                    if unit_mode == "Celsius":
+                        now, prev_1h, prev_6h, prev_24h = [(x - 32) * 5/9 if pd.notnull(x) else None for x in [now, prev_1h, prev_6h, prev_24h]]
+                    
+                    # Display Main Metric
+                    st.metric("Current", f"{now:.1f}{unit_label}")
+                    
+                    # Display Trends
+                    t1, t2, t3 = st.columns(3)
+                    t1.caption(f"**1h**\n{get_trend_arrow(now, prev_1h)}")
+                    t2.caption(f"**6h**\n{get_trend_arrow(now, prev_6h)}")
+                    t3.caption(f"**24h**\n{get_trend_arrow(now, prev_24h)}")
+                    
+                    st.divider()
+                    st.caption(f"Range: {group_df['min_24h'].min():.1f} to {group_df['max_24h'].max():.1f}{unit_label}")
     
 ###########
 # - 12. MAIN ROUTER - #
