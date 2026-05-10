@@ -132,15 +132,18 @@ if sidebar_client is not None:
             key="sidebar_proj_picker_global"
         )
         
-        # Store metadata for the selected project
+        # --- CRITICAL FIX: SYNC TO SESSION STATE ---
+        st.session_state['selected_project'] = selected_project
+        
         if selected_project != "All Projects":
-            project_metadata = proj_df[proj_df['Project'] == selected_project].iloc[0]
-            # Store in session state for access by other functions
-            st.session_state['project_metadata_df'] = proj_df[proj_df['Project'] == selected_project]
+            # Filter the metadata for the ONE selected project
+            meta_df = proj_df[proj_df['Project'] == selected_project]
+            st.session_state['project_metadata_df'] = meta_df
+            project_metadata = meta_df.iloc[0] # For local use in sidebar
             
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
-
+        
 st.sidebar.divider()
 
 # --- SECTION 3: UNIT & MEASUREMENT ---
