@@ -509,51 +509,57 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
 
+###########
+# - 7. PAGE: CLIENT PORTAL - #
+###########
+
 def render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs):
     """
-    Client-facing portal driven entirely by Project Registry metadata.
+    Complete Client-facing portal. 
+    Matches the professional layout with full Depth Profile logic restored.
     """
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view client data.")
         return
 
-    # --- 1. DYNAMIC HEADER SECTION ---
-    # Safe lookups for all registry fields
+    # --- 1. DYNAMIC HEADER SECTION (From Project Registry) ---
     display_name = project_metadata.get('ProjectName', selected_project)
     project_status = project_metadata.get('ProjectStatus', 'Active')
     city = project_metadata.get('City', 'Unknown Location')
     tz_info = project_metadata.get('Timezone', 'UTC')
     
-    # New Dynamic Fields
     registry_disclaimer = project_metadata.get('ClientDisclaimer') 
     eng_notes = project_metadata.get('EngNotes')
+    asbuilt_filename = project_metadata.get('AsBuiltFile')
 
-    # Render Header & Sub-header
+    # Header Rendering
     st.markdown(f"## 📊 {display_name}")
-    st.markdown(f"<p style='color: #6d6d6d; font-size: 18px; margin-top: -15px;'>Project {selected_project} Status: {project_status}</p>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='color: #6d6d6d; font-size: 18px; margin-top: -15px;'>"
+        f"Project {selected_project} Status: {project_status}</p>", 
+        unsafe_allow_html=True
+    )
     st.markdown(f"**Location:** {city} | **Timezone:** {tz_info}")
 
-    # Render Disclaimer (Dynamic from Registry or Default)
+    # Disclaimer logic
     if pd.notnull(registry_disclaimer) and str(registry_disclaimer).strip() != "":
         st.markdown(f"### **{registry_disclaimer}**")
     else:
-        # Fallback if the registry column is empty
         st.markdown("### **Data will be uploaded once per business day by 4pm Pacific Time.**")
 
-    # Render Engineering Notes (ONLY if they exist)
+    # Engineering Notes logic
     if pd.notnull(eng_notes) and str(eng_notes).strip() != "":
         with st.expander("📝 Engineering & Site Notes", expanded=True):
             st.write(eng_notes)
 
-    st.write("") # Padding
+    st.write("") 
+
     # --- 2. DATA FETCHING ---
     with st.spinner("Synchronizing approved records..."):
-        # Note: Ensure get_universal_portal_data handles 'TRUE' status and ignores SensorStatus
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
     if p_df.empty:
         st.warning(f"⚠️ No data marked as 'Approved' found for {selected_project}.")
-        st.info("Engineering is currently reviewing the latest data points. Please check back after 4pm.")
         return
 
     # --- 3. TABS NAVIGATION ---
@@ -583,32 +589,33 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
-    # --- TAB 2: DEPTH PROFILE ---
+    # --- TAB 2: DEPTH PROFILE (Restored Detailed Logic) ---
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
         
-        # Ensure depth is numeric for plotting
+        # Scaling logic
+        x_min_f, x_max_f, ref_f = -20, 60, 32.0
+        if unit_label == "°C":
+            x_min, x_max, ref_val = (x_min_f-32)*5/9, (x_max_f-32)*5/9, 0.0
+        else:
+            x_min, x_max, ref_val = x_min_f, x_max_f, ref_f
+
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
         
         if depth_only.empty:
             st.info("Vertical profile data is not applicable for this project's sensor configuration.")
         else:
-            # Shared scale configuration
-            x_min_f, x_max_f, ref_f = -20, 60, 32.0
-            if unit_label == "°C":
-                x_min, x_max, ref_val = (x_min_f-32)*5/9, (x_max_f-32)*5/9, 0.0
-            else:
-                x_min, x_max, ref_val = x_min_f, x_max_f, ref_f
-
             for loc in sorted(depth_only['Location'].unique()):
                 with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
                     loc_data = depth_only[depth_only['Location'] == loc].copy()
                     fig_d = go.Figure()
                     
+                    # Generate snapshots for the last 6 Mondays
                     mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                     for m_date in mondays:
                         target_ts = m_date.replace(hour=6, minute=0, second=0)
+                        # 12-hour window to find the closest data point
                         window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                          (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                         
@@ -647,49 +654,33 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
     # --- TAB 3: SUMMARY TABLE ---
     with tab_table:
         latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        
         latest['Current Temp'] = latest['temperature'].apply(
             lambda x: f"{round((x - 32) * 5/9 if unit_mode == 'Celsius' else x, 1)}{unit_label}"
         )
         
-        def get_position(r):
+        def get_pos(r):
             if pd.notnull(r.get('Depth')): return f"{r['Depth']} ft"
             if pd.notnull(r.get('Bank')): return f"Bank {r['Bank']}"
             return "Surface"
 
-        latest['Position'] = latest.apply(get_position, axis=1)
+        latest['Position'] = latest.apply(get_pos, axis=1)
         
         st.dataframe(
             latest[['Location', 'Position', 'Current Temp', 'NodeNum', 'timestamp']].sort_values(['Location', 'Position']), 
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "timestamp": st.column_config.DatetimeColumn("Last Updated", format="MM/DD/YY HH:mm")
-            }
+            use_container_width=True, hide_index=True,
+            column_config={"timestamp": st.column_config.DatetimeColumn("Last Updated", format="MM/DD/YY HH:mm")}
         )
 
     # --- TAB 4: AS-BUILT PLAN ---
     with tab_built:
         st.subheader("🗺️ Project Layout & Sensor Map")
-        
-        # Pull the filename from the registry
-        asbuilt_filename = project_metadata.get('AsBuiltFile')
-
         if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
             try:
-                # Assuming your images are stored in an 'assets' folder in your repository
-                # Use a standard path logic: assets/asbuilt/filename.png
-                image_path = f"assets/asbuilts/{asbuilt_filename}"
-                st.image(image_path, caption=f"As-Built Sensor Layout for {display_name}", use_column_width=True)
+                st.image(f"assets/asbuilts/{asbuilt_filename}", caption=f"Site Map: {display_name}", use_column_width=True)
             except Exception:
-                # Fallback if the file isn't found in the local directory
-                st.error(f"Image file '{asbuilt_filename}' not found in the assets folder.")
-                st.info("Please ensure the file is uploaded to the repository's assets directory.")
+                st.error(f"Image '{asbuilt_filename}' not found in assets/asbuilts/ folder.")
         else:
-            # Standard disclaimer if the registry field is blank
-            st.info("The as-built site plan for this project is currently being finalized.")
-            st.write("Once engineering has verified the final sensor coordinates, the map will be displayed here.")
-            
+            st.info("The as-built site plan for this project is currently being finalized.")            
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
 ###########
