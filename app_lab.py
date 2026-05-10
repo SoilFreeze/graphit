@@ -1416,24 +1416,32 @@ def get_trend_arrow(current, previous):
 def render_landing_page(client, unit_label, unit_mode):
     st.header("🌐 Global Project Dashboard")
     
+    # 1. Query: Filtering for active stages + Fetching 25h of data
     summary_q = f"""
-        WITH raw_data AS (
+        WITH active_projects AS (
+            SELECT Project, ProjectName, ProjectStatus 
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
+            WHERE ProjectStatus IN ('Freezedown', 'Maintenance')
+        ),
+        raw_data AS (
             SELECT 
-                n.Project, n.Bank, m.temperature, m.timestamp
-            FROM `sensorpush-export.Temperature.master_data_view` m
-            JOIN `sensorpush-export.Temperature.node_registry` n ON m.NodeNum = n.NodeNum
+                n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR)
         )
         SELECT 
-            Project, Bank,
-            AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
-            MIN(temperature) as min_24h,
-            MAX(temperature) as max_24h
-        FROM raw_data
-        GROUP BY 1, 2
+            p.Project, p.ProjectName, p.ProjectStatus,
+            ld.Bank, ld.Location, ld.Depth,
+            AVG(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_now,
+            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_1h,
+            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN ld.temperature END) as avg_6h,
+            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as avg_24h,
+            MIN(ld.temperature) as min_24h,
+            MAX(ld.temperature) as max_24h
+        FROM active_projects p
+        LEFT JOIN raw_data ld ON p.Project = ld.Project
+        GROUP BY 1, 2, 3, 4, 5, 6
     """
     
     try:
@@ -1443,59 +1451,77 @@ def render_landing_page(client, unit_label, unit_mode):
         return
 
     if df.empty:
-        st.warning("No data found in the last 24 hours.")
+        st.warning("No projects currently in Freezedown or Maintenance with active data.")
         return
 
     for project in sorted(df['Project'].unique()):
         p_df = df[df['Project'] == project]
+        p_name = p_df['ProjectName'].iloc[0]
+        p_status = p_df['ProjectStatus'].iloc[0]
         
         with st.container(border=True):
-            st.subheader(f"🏗️ {project}")
+            st.subheader(f"🏗️ {p_name} ({project})")
+            st.caption(f"Status: {p_status}")
             
-            # Split into 4 columns to accommodate Ambient
+            # 4-Column Layout
             c1, c2, c3, c4 = st.columns(4)
             
-            # Grouping Logic
-            is_supply = p_df['Bank'].str.startswith('S', na=False)
-            is_return = p_df['Bank'].str.startswith('R', na=False)
-            is_ambient = p_df['Bank'].str.contains('Amb', case=False, na=False)
-            
-            # Define the four buckets
+            # Logic for categorization
+            # TempPipes = anything with a depth assigned
+            is_ambient = p_df['Bank'].str.contains('Amb', case=False, na=False) | p_df['Location'].str.contains('Amb', case=False, na=False)
+            is_supply = (p_df['Bank'].str.startswith('S', na=False) | p_df['Location'].str.startswith('S', na=False)) & ~is_ambient
+            is_return = (p_df['Bank'].str.startswith('R', na=False) | p_df['Location'].str.startswith('R', na=False)) & ~is_ambient
+            is_temppipe = p_df['Depth'].notnull() & ~is_supply & ~is_return & ~is_ambient
+
             groups = [
-                (c1, "📥 Supply (S)", p_df[is_supply & ~is_ambient]),
-                (c2, "📤 Return (R)", p_df[is_return & ~is_ambient]),
-                (c3, "☁️ Ambient", p_df[is_ambient]),
-                (c4, "🌡️ Monitoring", p_df[~is_supply & ~is_return & ~is_ambient])
+                (c1, "📥 Supply (S)", p_df[is_supply]),
+                (c2, "📤 Return (R)", p_df[is_return]),
+                (c3, "📏 TempPipes", p_df[is_temppipe]),
+                (c4, "☁️ Ambient", p_df[is_ambient])
             ]
             
             for col, title, group_df in groups:
                 with col:
-                    st.write(f"**{title}**")
-                    if group_df.empty:
-                        st.caption("No data")
+                    st.markdown(f"**{title}**")
+                    if group_df.empty or group_df['avg_now'].isnull().all():
+                        st.caption("No active data")
                         continue
                     
-                    # Group Averages
+                    # Group Aggregation
                     now = group_df['avg_now'].mean()
                     prev_1h = group_df['avg_1h'].mean()
                     prev_6h = group_df['avg_6h'].mean()
                     prev_24h = group_df['avg_24h'].mean()
+                    mn, mx = group_df['min_24h'].min(), group_df['max_24h'].max()
                     
                     if unit_mode == "Celsius":
-                        now, prev_1h, prev_6h, prev_24h = [(x - 32) * 5/9 if pd.notnull(x) else None for x in [now, prev_1h, prev_6h, prev_24h]]
+                        now, prev_1h, prev_6h, prev_24h, mn, mx = [(x - 32) * 5/9 if pd.notnull(x) else None for x in [now, prev_1h, prev_6h, prev_24h, mn, mx]]
                     
-                    # Display Main Metric
+                    # Display Current
                     st.metric("Current", f"{now:.1f}{unit_label}")
+                    st.divider() # Visual line
+
+                    # Trend and Range Row
+                    r1, r2 = st.columns(2)
+                    with r1:
+                        st.write("**Range**")
+                        st.caption(f"{mn:.1f} to {mx:.1f}")
+                    with r2:
+                        st.write("**Trend**")
+                        # 1h Trend as the primary indicator
+                        st.caption(get_trend_arrow(now, prev_1h))
                     
-                    # Display Trends
-                    t1, t2, t3 = st.columns(3)
-                    t1.caption(f"**1h**\n{get_trend_arrow(now, prev_1h)}")
-                    t2.caption(f"**6h**\n{get_trend_arrow(now, prev_6h)}")
-                    t3.caption(f"**24h**\n{get_trend_arrow(now, prev_24h)}")
-                    
-                    st.divider()
-                    st.caption(f"Range: {group_df['min_24h'].min():.1f} to {group_df['max_24h'].max():.1f}{unit_label}")
-    
+                    # Sub-caption for longer trends
+                    st.caption(f"6h: {get_trend_arrow(now, prev_6h)} | 24h: {get_trend_arrow(now, prev_24h)}")
+
+def get_trend_arrow(current, previous):
+    if pd.isnull(current) or pd.isnull(previous): return "N/A"
+    delta = current - previous
+    if delta > 0.1: return f"🔺 +{delta:.1f}"
+    if delta < -0.1: return f"🔹 {delta:.1f}"
+    return "➡️ 0.0"
+
+
 ###########
 # - 12. MAIN ROUTER - #
 ###########
