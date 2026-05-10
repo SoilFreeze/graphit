@@ -1314,14 +1314,13 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             st.plotly_chart(fig_d, use_container_width=True, key=f"depth_snapshot_{loc}")
 
 ###########
-# - 12. MAIN ROUTER (FINAL) - #
+# - 12. MAIN ROUTER - #
 ###########
 
 if page == "Executive Summary":
     render_executive_summary(client, selected_project, unit_label, display_tz)
 
 elif page == "Global Overview":
-    # Add project_metadata here
     render_global_overview(selected_project, project_metadata, display_tz)
 
 elif page == "Depth Charts":
@@ -1331,17 +1330,21 @@ elif page == "Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_label)
 
 elif page == "Client Portal":
-    # Add project_metadata here
     render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs)
 
-elif page == "Data Intake Lab":
-    render_data_intake_page(selected_project)
-
-elif page == "Admin Tools":
+# --- PASSWORD PROTECTED SECTIONS ---
+elif page in ["Data Intake Lab", "Admin Tools"]:
     if st.session_state.get('authenticated', False):
-        render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+        if page == "Data Intake Lab":
+            render_data_intake_page(selected_project)
+        else:
+            render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
     else:
-        pwd = st.text_input("Enter Admin Password", type="password")
-        if pwd == st.secrets["admin_password"]:
-            st.session_state['authenticated'] = True
-            st.rerun()
+        st.subheader("🔐 Restricted Access")
+        pwd = st.text_input("Enter Authorized Password", type="password")
+        if st.button("Unlock Access"):
+            if pwd == st.secrets["admin_password"]:
+                st.session_state['authenticated'] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password. Please contact the administrator.")
