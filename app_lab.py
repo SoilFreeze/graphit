@@ -82,15 +82,9 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 st.sidebar.title("❄️ SoilFreeze Lab")
 
 # --- SECTION 1: PAGE ROUTING ---
-page = st.sidebar.selectbox("Navigate To:", [
-    "Executive Summary", 
-    "Global Overview", 
-    "Depth Charts", 
-    "Node Diagnostics", 
-    "Client Portal", 
-    "Data Intake Lab", 
-    "Admin Tools"
-])
+# Update the page options
+page = st.sidebar.radio("Navigation", ["Landing Page", "Executive Summary", "Global Overview", "Depth Charts", "Node Diagnostics", "Client Portal", "Data Intake Lab", "Admin Tools"])
+
 
 st.sidebar.divider()
 
@@ -1426,12 +1420,87 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             )
             
             st.plotly_chart(fig_d, use_container_width=True, key=f"depth_snapshot_{loc}")
+###########
+# - 13. PAGE: LANDING PAGE - #
+###########
 
+def render_landing_page(client, unit_label, unit_mode):
+    st.header("🌐 Global Project Dashboard")
+    st.info("24-Hour Performance Summary (Supply, Return, and Monitoring)")
+
+    # 1. Fetch 24-hour aggregate data for all projects
+    summary_q = f"""
+        SELECT 
+            n.Project,
+            n.Bank,
+            n.Location,
+            AVG(m.temperature) as current_temp,
+            MIN(m.temperature) as min_24h,
+            MAX(m.temperature) as max_24h
+        FROM `sensorpush-export.Temperature.master_data_view` m
+        JOIN `sensorpush-export.Temperature.node_registry` n ON m.NodeNum = n.NodeNum
+        WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+        GROUP BY 1, 2, 3
+    """
+    
+    try:
+        df = client.query(summary_q).to_dataframe()
+    except Exception as e:
+        st.error(f"Error loading dashboard: {e}")
+        return
+
+    if df.empty:
+        st.warning("No data recorded across projects in the last 24 hours.")
+        return
+
+    # 2. Iterate through each unique project
+    for project in sorted(df['Project'].unique()):
+        p_data = df[df['Project'] == project]
+        
+        with st.container(border=True):
+            st.subheader(f"🏗️ {project}")
+            
+            # Create three columns for the sensor types
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.write("**📥 Supply (S)**")
+                display_group_metrics(p_data[p_data['Bank'].str.startswith('S', na=False)], unit_mode, unit_label)
+                
+            with col2:
+                st.write("**📤 Return (R)**")
+                display_group_metrics(p_data[p_data['Bank'].str.startswith('R', na=False)], unit_mode, unit_label)
+                
+            with col3:
+                st.write("**🌡️ Monitoring (Other)**")
+                display_group_metrics(p_data[~p_data['Bank'].str.startswith(('S', 'R'), na=False)], unit_mode, unit_label)
+
+def display_group_metrics(df_group, unit_mode, unit_label):
+    """Helper to render Current/Min/Max for a sensor group"""
+    if df_group.empty:
+        st.caption("No active sensors")
+        return
+
+    # Calculate overall group averages
+    curr = df_group['current_temp'].mean()
+    mn = df_group['min_24h'].min()
+    mx = df_group['max_24h'].max()
+
+    # Convert units
+    if unit_mode == "Celsius":
+        curr, mn, mx = [(x - 32) * 5/9 for x in [curr, mn, mx]]
+
+    st.metric("Current Avg", f"{curr:.1f}{unit_label}")
+    st.caption(f"Range: {mn:.1f} to {mx:.1f}{unit_label}")
+    
 ###########
 # - 12. MAIN ROUTER - #
 ###########
 
-if page == "Executive Summary":
+if page == "Landing Page":
+    render_landing_page(client, unit_label, unit_mode)
+
+elif page == "Executive Summary":
     render_executive_summary(client, selected_project, unit_label, display_tz)
 
 elif page == "Global Overview":
