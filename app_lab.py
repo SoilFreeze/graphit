@@ -309,27 +309,47 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Updated to use the relational node_registry structure.
+    Renamed to 'Time vs Temp' in the UI.
     """
-    # Optional: Use metadata to show the project stage in the header
-    stage_suffix = f" [{project_metadata['ProjectStatus']}]" if project_metadata is not None else ""
-    st.header(f"🌐 Global Project Overview{stage_suffix}")
     
-    # 1. FIX: Ensure variable names match the new sidebar keys
-    # Use .get() to prevent crashes if the key hasn't been initialized yet
+    # --- FIX: SAFE METADATA ACCESS ---
+    # We check if it's a DataFrame and get the first row, or fall back to empty string
+    stage_suffix = ""
+    if project_metadata is not None:
+        try:
+            # If it's a DataFrame, use .iloc[0]; if it's a Series/Dict, use get()
+            if isinstance(project_metadata, pd.DataFrame) and not project_metadata.empty:
+                status = project_metadata['ProjectStatus'].iloc[0]
+            else:
+                status = project_metadata.get('ProjectStatus', '')
+            
+            if status:
+                stage_suffix = f" [{status}]"
+        except (KeyError, IndexError):
+            stage_suffix = ""
+
+    # Updated Header Name
+    st.header(f"📈 Time vs Temp {stage_suffix}")
+    
+    # 1. Sidebar State Management
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
+    # Ensure active_refs exists in session state (used by the graphing engine)
+    active_refs = st.session_state.get("active_refs", [])
+    # Global unit settings
+    unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+    unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
     
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to begin.")
         return
 
-    # Using the new engine we built in Section 2
+    # 2. Data Fetching
     with st.spinner(f"Syncing {selected_project} (Engineering View)..."):
+        # get_universal_portal_data should handle the BigQuery fetch
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if not p_df.empty:
-        # 2. View Constraints
-        # We keep the lookback slider here for fine-tuning the specific view
+        # 3. View Constraints
         lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
         
         # Snap time window
@@ -341,18 +361,19 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         )
         start_view = end_view - timedelta(weeks=lookback)
 
-        # 3. Render a graph for every physical location (Pipe/Bank)
-        # Note: 'Location' now comes from node_registry
+        # 4. Render Graphs by Location
+        # Using 'Location' from node_registry to separate the charts
         locations = sorted(p_df['Location'].dropna().unique())
         
         for loc in locations:
+            # We use an expander to keep the long page manageable
             with st.expander(f"📍 Location: {loc}", expanded=True):
                 loc_df = p_df[p_df['Location'] == loc]
                 
-                # The graphing engine now handles 'Bank' vs 'Depth' automatically
+                # Call the central graphing engine
                 fig = build_high_speed_graph(
                     df=loc_df, 
-                    title=f"📈 {selected_project} - {loc}", 
+                    title=f"Project: {selected_project} | Location: {loc}", 
                     start_view=start_view, 
                     end_view=end_view, 
                     active_refs=tuple(active_refs), 
@@ -362,12 +383,14 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                     mobile_mode=mobile_mode 
                 )
                 
-                st.plotly_chart(fig, use_container_width=True, key=f"ov_{selected_project}_{loc}")
+                st.plotly_chart(
+                    fig, 
+                    use_container_width=True, 
+                    key=f"tvt_{selected_project}_{loc}" # Updated key prefix for 'Time vs Temp'
+                )
     else:
-        # This warning is now more helpful because it points to the specific new table
         st.warning(f"No engineering data found for '{selected_project}' in the registry.")
-        st.info("Verify that your sensors are assigned to this project in the **Node Registry** (Admin Tools).")
-
+        st.info("Check **Admin Tools > Node Registry** to ensure sensors are mapped to this project and location.")
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
