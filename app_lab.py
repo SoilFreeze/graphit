@@ -396,11 +396,17 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
         # [Formatting and Table Display logic stays the same as your previous version]
         # ... 
 
-        # 2. SENSOR DRILL-DOWN (Includes Status)
+        # --- 2. SENSOR DRILL-DOWN ---
         st.divider()
         st.subheader("🔍 Sensor Drill-Down")
         loc_list = sorted(raw_df['Location'].unique().tolist())
-        selected_loc = st.selectbox("Detailed view for:", ["--- Select Location ---"] + loc_list)
+        
+        # ADD A UNIQUE KEY HERE:
+        selected_loc = st.selectbox(
+            "Detailed view for:", 
+            ["--- Select Location ---"] + loc_list,
+            key=f"exec_drilldown_{selected_project}" 
+        )
 
         if selected_loc != "--- Select Location ---":
             sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
