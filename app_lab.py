@@ -880,7 +880,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     st.header("🛠️ Admin Tools")
     
     # 1. GLOBAL REGISTRY FETCH
-    # Updated to pull correct tenure fields (Start_Date, End_Date) and status
     reg_q = f"""
         SELECT 
             n.*, 
@@ -890,18 +889,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     """
     try:
         full_reg_df = client.query(reg_q).to_dataframe()
-        if 'Depth' in full_reg_df.columns:
-            full_reg_df['Depth'] = pd.to_numeric(full_reg_df['Depth'], errors='coerce')
+        # Clean numeric columns to prevent editor crashes
+        for col in ['Depth', 'PhysicalID']:
+            if col in full_reg_df.columns:
+                full_reg_df[col] = pd.to_numeric(full_reg_df[col], errors='coerce')
     except Exception as e:
         st.error(f"Error joining registries: {e}")
         full_reg_df = pd.DataFrame()
     
-    # Context for the selected project using correct date field
+    # Context for the selected project
     active_project_df = pd.DataFrame()
     if not full_reg_df.empty:
         active_project_df = full_reg_df[(full_reg_df['Project'] == selected_project) & (full_reg_df['End_Date'].isna())]
     
-    loc_options = ["All Locations"] + sorted(active_project_df['Location'].unique().tolist()) if not active_project_df.empty else ["All Locations"]
+    loc_options = ["All Locations"] + sorted([str(l) for l in active_project_df['Location'].unique() if pd.notnull(l)]) if not active_project_df.empty else ["All Locations"]
 
     # --- 2. UNIFIED NAVIGATION ---
     (tab_bulk, tab_registry, tab_project, tab_scrub, tab_surgical, tab_audit) = st.tabs([
@@ -919,7 +920,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         
         if st.button("🚀 Execute Bulk Approval", use_container_width=True):
             loc_f = f"AND n.Location = '{sel_loc}'" if sel_loc != "All Locations" else ""
-            # Updated to respect tenure logic in the subquery
             sql = f"""
                 INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                 SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
@@ -931,131 +931,89 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 AND NOT EXISTS (SELECT 1 FROM `{OVERRIDE_TABLE}` x WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR))
             """
             client.query(sql).result()
-            st.success(f"Approved records for {sel_loc} in {selected_project}.")
+            st.success(f"Approved records for {sel_loc}.")
             st.cache_data.clear()
 
-    # --- TAB 2: NODE REGISTRY (HARDWARE ASSIGNMENTS) ---
+    # --- TAB 2: NODE REGISTRY (THE REWRITTEN SECTION) ---
     with tab_registry:
         st.subheader("📋 Hardware Assignment Manager")
-        
-        # 1. Filter Logic with "None-Safe" Sorting
         with st.expander("🔍 Filter Hardware View", expanded=False):
             f1, f2 = st.columns(2)
-            
-            # Clean Project List: handle Nulls/None for sorting
             raw_projs = full_reg_df['Project'].unique().tolist() if not full_reg_df.empty else []
             clean_projs = sorted([str(p) for p in raw_projs if pd.notnull(p)])
             p_filter = f1.selectbox("View Project", ["All"] + clean_projs, key="reg_filter_proj")
             
-            # Clean Status List: handle Nulls/None for sorting
             raw_stats = full_reg_df['SensorStatus'].unique().tolist() if not full_reg_df.empty else []
             clean_stats = sorted([str(s) for s in raw_stats if pd.notnull(s)])
             s_filter = f2.selectbox("View Health Status", ["All"] + clean_stats, key="reg_filter_status")
             
-            # Apply Filters to the dataframe
             view_df = full_reg_df.copy()
-            if p_filter != "All": 
-                view_df = view_df[view_df['Project'] == p_filter]
-            if s_filter != "All": 
-                view_df = view_df[view_df['SensorStatus'] == s_filter]
+            if p_filter != "All": view_df = view_df[view_df['Project'] == p_filter]
+            if s_filter != "All": view_df = view_df[view_df['SensorStatus'] == s_filter]
 
-        st.info("💡 **Tip:** Edit rows directly to reassign sensors or update health status. Click **Sync** to save.")
-        
-        # 2. Define physical columns for the BigQuery table
-        # We exclude the joined project-level metadata so we only write back node-level data
-        node_cols = [
-            'NodeNum', 'Project', 'Location', 'Bank', 
-            'Depth', 'Start_Date', 'End_Date', 'SensorStatus'
-        ]
-        
-        # 3. The Data Editor
-        # We sort by Project and Location so the list is organized for the user
+        node_cols = ['NodeNum', 'Project', 'Location', 'Bank', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']
         edited_df = st.data_editor(
             view_df[node_cols].sort_values(['Project', 'Location']), 
-            num_rows="dynamic", 
-            key="node_registry_editor_master",
-            use_container_width=True
+            num_rows="dynamic", key="node_registry_editor_master", use_container_width=True
         )
         
-        # 4. Sync Logic
         if st.button("💾 Sync Registry Changes", type="primary", use_container_width=True):
-            try:
-                with st.spinner("Writing to BigQuery..."):
-                    # Use WRITE_TRUNCATE to replace the table with the cleaned, edited version
-                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-                    
-                    # Ensure Date columns are in the correct format before sending to BQ
-                    for date_col in ['Start_Date', 'End_Date']:
-                        if date_col in edited_df.columns:
-                            edited_df[date_col] = pd.to_datetime(edited_df[date_col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+            client.load_table_from_dataframe(edited_df, f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
+            st.success("Node Registry synchronized.")
+            st.cache_data.clear()
+            st.rerun()
 
-                    table_ref = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-                    client.load_table_from_dataframe(edited_df, table_ref, job_config=job_config).result()
-                    
-                    st.success("✅ Node Registry updated successfully!")
-                    st.cache_data.clear() # Clear graph cache since assignments changed
-                    time.sleep(1)
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Failed to sync registry: {e}")
-
-    # --- TAB 3: PROJECT MASTER (SITE SETTINGS) ---
+    # --- TAB 3: PROJECT MASTER (WITH VALUEERROR FIX) ---
     with tab_project:
         st.subheader("⚙️ Project Management")
-        p_mode = st.radio("Primary Action", ["Update Project Stage/Info", "Initialize New Project"], horizontal=True)
-        
-        try:
-            proj_reg_df = client.query(f"SELECT * FROM `sensorpush-export.Temperature.project_registry`").to_dataframe()
-        except:
-            proj_reg_df = pd.DataFrame()
+        p_mode = st.radio("Primary Action", ["Update Project Info", "Initialize New Project"], horizontal=True)
+        proj_reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`").to_dataframe()
 
         if "Update" in p_mode and not proj_reg_df.empty:
-            target_proj = st.selectbox("Select Project", sorted(proj_reg_df['Project'].unique().tolist()))
+            target_proj = st.selectbox("Select Project", sorted([str(p) for p in proj_reg_df['Project'].unique()]))
             p_data = proj_reg_df[proj_reg_df['Project'] == target_proj].iloc[0]
 
             with st.form("p_update_form"):
                 c1, c2 = st.columns(2)
                 u_name = c1.text_input("Project Name", value=p_data.get('ProjectName', ''))
-                u_status = c2.selectbox("Project Stage", ["Pre-freeze", "Freezedown", "Maintenance", "Post-freeze", "Finished", "Archived"], 
-                                         index=["Pre-freeze", "Freezedown", "Maintenance", "Post-freeze", "Finished", "Archived"].index(p_data.get('ProjectStatus', 'Active')))
                 
+                # SAFE STATUS LOOKUP
+                status_options = ["Pre-freeze", "Freezedown", "Maintenance", "Post-freeze", "Finished", "Archived"]
+                current_status = p_data.get('ProjectStatus', 'Pre-freeze')
+                try:
+                    status_idx = status_options.index(current_status)
+                except ValueError:
+                    status_idx = 0
+                
+                u_status = c2.selectbox("Project Stage", status_options, index=status_idx)
                 u_city = c1.text_input("City", value=p_data.get('City', ''))
-                u_tz = c2.selectbox("Timezone", ["US/Pacific", "US/Eastern", "UTC"], index=["US/Pacific", "US/Eastern", "UTC"].index(p_data.get('Timezone', 'US/Pacific')))
-                
+                u_tz = c2.selectbox("Timezone", ["US/Pacific", "US/Eastern", "UTC"], index=0)
                 u_eng = st.text_area("Engineering Notes", value=p_data.get('EngNotes', ''))
                 
                 if st.form_submit_button("💾 Save Project Settings"):
-                    sql = f"""
-                        UPDATE `sensorpush-export.Temperature.project_registry` 
-                        SET ProjectName='{u_name}', ProjectStatus='{u_status}', City='{u_city}', Timezone='{u_tz}', EngNotes='{u_eng}'
-                        WHERE Project='{target_proj}'
-                    """
+                    sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectName='{u_name}', ProjectStatus='{u_status}', City='{u_city}', Timezone='{u_tz}', EngNotes='{u_eng}' WHERE Project='{target_proj}'"
                     client.query(sql).result()
                     st.success(f"Updated {target_proj}")
                     st.cache_data.clear()
 
     # --- TAB 4: SCRUB ---
     with tab_scrub:
-        st.subheader("🧹 Data Averaging (Cleanup)")
+        st.subheader("🧹 Data Averaging")
         target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
         if st.button("🧨 Execute Hourly Averaging"):
-            t_tab = f"sensorpush-export.Temperature.raw_{target.lower()}"
-            sub_q = f"SELECT NodeNum FROM `sensorpush-export.Temperature.node_registry` WHERE Project = '{selected_project}'"
-            sql = f"""
-                CREATE OR REPLACE TABLE `{t_tab}` AS 
-                SELECT TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, NodeNum, AVG(temperature) as temperature
-                FROM `{t_tab}`
-                WHERE NodeNum IN ({sub_q})
-                GROUP BY 1, 2
-            """
+            t_tab = f"{PROJECT_ID}.{DATASET_ID}.raw_{target.lower()}"
+            sql = f"CREATE OR REPLACE TABLE `{t_tab}` AS SELECT TIMESTAMP_TRUNC(TIMESTAMP_ADD(timestamp, INTERVAL 30 MINUTE), HOUR) as timestamp, NodeNum, AVG(temperature) as temperature FROM `{t_tab}` WHERE NodeNum IN (SELECT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` WHERE Project = '{selected_project}') GROUP BY 1, 2"
             client.query(sql).result()
-            st.success(f"Scrubbed {target} data.")
-            st.cache_data.clear()
+            st.success("Scrubbed data successfully.")
+
+    # --- TAB 5: SURGICAL ---
+    with tab_surgical:
+        render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
 
     # --- TAB 6: AUDIT ---
     with tab_audit:
         st.subheader("🕒 Registry Audit Log")
-        # Updated to use physical schema date field
         st.dataframe(full_reg_df.sort_values('Start_Date', ascending=False), use_container_width=True, hide_index=True)
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
