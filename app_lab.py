@@ -1010,28 +1010,28 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.rerun()
 
     # --- TAB 3: PROJECT MASTER ---
-with tab_project:
-    st.subheader("⚙️ Project Management & Lifecycle")
-    
-    # 1. Action Toggle
-    p_mode = st.radio("Primary Action", ["Project Overview", "Initialize New Project", "Update Project Info"], horizontal=True)
-    
-    # Fetch current registry for all sub-actions
-    proj_reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`").to_dataframe()
-
-    # --- ACTION: PROJECT OVERVIEW ---
-    if p_mode == "Project Overview":
-        st.markdown("### 📋 Active Project Fleet")
-        # Selecting key columns for the high-level view
-        overview_cols = ['Project', 'ProjectName', 'ProjectStatus', 'City', 'Date_Initialized', 'Date_Freezedown']
-        # Filter for columns that actually exist in your DF
-        existing_cols = [c for c in overview_cols if c in proj_reg_df.columns]
+    with tab_project:
+        st.subheader("⚙️ Project Management & Lifecycle")
         
-        st.dataframe(
-            proj_reg_df[existing_cols].sort_values('Date_Initialized', ascending=False),
-            use_container_width=True,
-            hide_index=True
-        )
+        # 1. Action Toggle
+        p_mode = st.radio("Primary Action", ["Project Overview", "Initialize New Project", "Update Project Info"], horizontal=True)
+        
+        # Fetch current registry for all sub-actions
+        proj_reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`").to_dataframe()
+    
+        # --- ACTION: PROJECT OVERVIEW ---
+        if p_mode == "Project Overview":
+            st.markdown("### 📋 Active Project Fleet")
+            # Selecting key columns for the high-level view
+            overview_cols = ['Project', 'ProjectName', 'ProjectStatus', 'City', 'Date_Initialized', 'Date_Freezedown']
+            # Filter for columns that actually exist in your DF
+            existing_cols = [c for c in overview_cols if c in proj_reg_df.columns]
+            
+            st.dataframe(
+                proj_reg_df[existing_cols].sort_values('Date_Initialized', ascending=False),
+                use_container_width=True,
+                hide_index=True
+            )
 
     # --- ACTION: INITIALIZE NEW PROJECT ---
     elif p_mode == "Initialize New Project":
