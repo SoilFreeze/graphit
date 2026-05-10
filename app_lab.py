@@ -935,13 +935,19 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.cache_data.clear()
 
     # --- TAB 2: NODE REGISTRY (HARDWARE ASSIGNMENTS) ---
+    # --- TAB 2: NODE REGISTRY ---
     with tab_registry:
         st.subheader("📋 Hardware Assignment Manager")
         
         with st.expander("🔍 Filter Hardware View", expanded=False):
             f1, f2 = st.columns(2)
-            p_filter = f1.selectbox("View Project", ["All"] + sorted(full_reg_df['Project'].unique().tolist()))
-            s_filter = f2.selectbox("View Health Status", ["All", "Active", "Diagnostic", "Need Repair", "Dead", "Available"])
+            
+            # FIX: Filter out None/Null values before sorting to prevent the TypeError
+            available_projects = [p for p in full_reg_df['Project'].unique().tolist() if p is not None]
+            p_filter = f1.selectbox("View Project", ["All"] + sorted(available_projects))
+            
+            available_statuses = [s for s in full_reg_df['SensorStatus'].unique().tolist() if s is not None]
+            s_filter = f2.selectbox("View Health Status", ["All"] + sorted(available_statuses))
             
             view_df = full_reg_df.copy()
             if p_filter != "All": view_df = view_df[view_df['Project'] == p_filter]
