@@ -600,10 +600,15 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
 
     # --- 1. DYNAMIC HEADER SECTION ---
     # Safe extraction from metadata DataFrame or Dictionary
-    if isinstance(project_metadata, pd.DataFrame):
-        meta = project_metadata.iloc[0].to_dict()
-    else:
-        meta = project_metadata or {}
+    meta = {}
+    if project_metadata is not None:
+        if isinstance(project_metadata, pd.DataFrame):
+            if not project_metadata.empty:
+                meta = project_metadata.iloc[0].to_dict()
+        elif isinstance(project_metadata, pd.Series):
+            meta = project_metadata.to_dict()
+        elif isinstance(project_metadata, dict):
+            meta = project_metadata
 
     display_name = meta.get('ProjectName', selected_project)
     project_status = meta.get('ProjectStatus', 'Active')
@@ -613,7 +618,6 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
     registry_disclaimer = meta.get('ClientDisclaimer') 
     eng_notes = meta.get('EngNotes')
     asbuilt_filename = meta.get('AsBuiltFile')
-
     # Header Rendering
     st.markdown(f"## 📊 {display_name}")
     st.markdown(
@@ -1647,7 +1651,14 @@ elif page == "Node Diagnostics":
     render_node_diagnostics(selected_project, display_tz, unit_label)
 
 elif page == "Client Portal":
-    render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs)
+    render_client_portal(
+        st.session_state.get('selected_project'), 
+        st.session_state.get('project_metadata_df'), # This is your DataFrame
+        display_tz, 
+        unit_mode, 
+        unit_label, 
+        active_refs
+    )
 
 # --- PASSWORD PROTECTED SECTIONS ---
 elif page in ["Data Intake Lab", "Admin Tools"]:
