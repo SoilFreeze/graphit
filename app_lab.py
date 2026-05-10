@@ -81,10 +81,11 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# --- SECTION 1: PAGE ROUTING ---
-# Update the page options
-page = st.sidebar.radio("Navigation", ["Landing Page", "Executive Summary", "Global Overview", "Depth Charts", "Node Diagnostics", "Client Portal", "Data Intake Lab", "Admin Tools"])
-
+# --- SIDEBAR NAVIGATION ---
+page = st.sidebar.selectbox(
+    "Navigation", 
+    ["Landing Page", "Executive Summary", "Global Overview", "Depth Charts", "Node Diagnostics", "Client Portal", "Data Intake Lab", "Admin Tools"]
+)
 
 st.sidebar.divider()
 
@@ -1319,107 +1320,99 @@ def update_records(pts, df, val):
             st.error(f"Failed to update database: {e}")
 
 ###########
-# - 12. PAGE: DEPTH CHARTS - #
+# - 13. PAGE: LANDING PAGE - #
 ###########
 
-def render_depth_charts(selected_project, unit_label, display_tz):
-    st.header(f"📏 Weekly Depth Profiles: {selected_project}")
-    st.write("Vertical snapshots captured every Monday at 6:00 AM (Project Time).")
+def render_landing_page(client, unit_label, unit_mode):
+    st.header("🌐 Global Project Dashboard")
     
-    # 1. FETCH DATA (Uses the 3-way join engine)
-    with st.spinner("Analyzing vertical profiles..."):
-        df = get_universal_portal_data(selected_project, view_mode="engineering")
+    # 1. Broad Query to get enough data for 24h trends
+    # We pull the current, 1h ago, 6h ago, and 24h ago snapshots
+    summary_q = f"""
+        WITH raw_data AS (
+            SELECT 
+                n.Project, n.Bank, m.temperature, m.timestamp
+            FROM `sensorpush-export.Temperature.master_data_view` m
+            JOIN `sensorpush-export.Temperature.node_registry` n ON m.NodeNum = n.NodeNum
+            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR)
+        )
+        SELECT 
+            Project, Bank,
+            AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
+            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
+            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
+            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
+            MIN(temperature) as min_24h,
+            MAX(temperature) as max_24h
+        FROM raw_data
+        GROUP BY 1, 2
+    """
     
+    try:
+        df = client.query(summary_q).to_dataframe()
+    except Exception as e:
+        st.error(f"Dashboard Query Failed: {e}")
+        return
+
     if df.empty:
-        st.warning("No data found for this project in the registry.")
+        st.warning("No data found in the last 24 hours.")
         return
 
-    # 2. FILTER & SORT FOR DEPTH
-    # We force numeric conversion here just in case the BigQuery column contains strings
-    df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
-    depth_only = df.dropna(subset=['Depth_Num', 'Location']).copy()
-    
-    if depth_only.empty:
-        st.info("No sensors with valid depth assignments (ft) found in the registry.")
-        return
+    for project in sorted(df['Project'].unique()):
+        p_df = df[df['Project'] == project]
+        
+        with st.container(border=True):
+            st.subheader(f"🏗️ {project}")
+            
+            # Three main columns for Supply, Return, and Monitoring
+            c1, c2, c3 = st.columns(3)
+            
+            groups = [
+                (c1, "📥 Supply (S)", p_df[p_df['Bank'].str.startswith('S', na=False)]),
+                (c2, "📤 Return (R)", p_df[p_df['Bank'].str.startswith('R', na=False)]),
+                (c3, "🌡️ Monitoring", p_df[~p_df['Bank'].str.startswith(('S', 'R'), na=False)])
+            ]
+            
+            for col, title, group_df in groups:
+                with col:
+                    st.write(f"**{title}**")
+                    if group_df.empty:
+                        st.caption("No data")
+                        continue
+                    
+                    # Aggregate group averages
+                    now = group_df['avg_now'].mean()
+                    prev_1h = group_df['avg_1h'].mean()
+                    prev_6h = group_df['avg_6h'].mean()
+                    prev_24h = group_df['avg_24h'].mean()
+                    
+                    # Apply conversion if Celsius
+                    if unit_mode == "Celsius":
+                        now, prev_1h, prev_6h, prev_24h = [(x - 32) * 5/9 if pd.notnull(x) else None for x in [now, prev_1h, prev_6h, prev_24h]]
+                    
+                    # Display Current Metric
+                    st.metric("Current", f"{now:.1f}{unit_label}")
+                    
+                    # Display Trend Column
+                    t1, t2, t3 = st.columns(3)
+                    t1.caption(f"**1h**\n{get_trend_arrow(now, prev_1h)}")
+                    t2.caption(f"**6h**\n{get_trend_arrow(now, prev_6h)}")
+                    t3.caption(f"**24h**\n{get_trend_arrow(now, prev_24h)}")
+                    
+                    st.divider()
+                    st.caption(f"Range: {group_df['min_24h'].min():.1f} to {group_df['max_24h'].max():.1f}{unit_label}")
 
-    # 3. AXIS CONFIGURATION
-    # Standard engineering range: -20 to 60°F
-    x_min_f, x_max_f, ref_f = -20, 60, 32.0
-    if unit_label == "°C":
-        x_min, x_max, ref_val = (x_min_f-32)*5/9, (x_max_f-32)*5/9, 0.0
+def get_trend_arrow(current, previous):
+    """Returns a colored arrow and delta string based on temp change"""
+    if pd.isnull(current) or pd.isnull(previous):
+        return "N/A"
+    delta = current - previous
+    if delta > 0.1:
+        return f"🔺 +{delta:.1f}"
+    elif delta < -0.1:
+        return f"🔹 {delta:.1f}"
     else:
-        x_min, x_max, ref_val = x_min_f, x_max_f, ref_f
-
-    locations = sorted(depth_only['Location'].unique())
-    
-    for loc in locations:
-        with st.expander(f"📍 Location: {loc}", expanded=True):
-            loc_data = depth_only[depth_only['Location'] == loc].copy()
-            fig_d = go.Figure()
-            
-            # 4. GENERATE SNAPSHOTS (Last 6 Mondays)
-            # freq='W-MON' ensures we are looking at specific reporting intervals
-            mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
-            
-            for m_date in mondays:
-                # Snap to 6:00 AM UTC (or convert to local project time if preferred)
-                target_ts = m_date.replace(hour=6, minute=0, second=0)
-                
-                # We allow a +/- 12 hour window to find the closest reading to the snapshot target
-                window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                 (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                
-                if not window.empty:
-                    # Find the single point closest to the 6 AM target for each Node
-                    snap_df = (
-                        window.assign(diff=(window['timestamp'] - target_ts).abs())
-                        .sort_values(['NodeNum', 'diff'])
-                        .drop_duplicates('NodeNum')
-                        .sort_values('Depth_Num')
-                    )
-                    
-                    # Convert values based on unit selection
-                    conv_temps = snap_df['temperature'].apply(
-                        lambda x: (x - 32) * 5/9 if unit_label == "°C" else x
-                    )
-                    
-                    fig_d.add_trace(go.Scatter(
-                        x=conv_temps, 
-                        y=snap_df['Depth_Num'], 
-                        mode='lines+markers', 
-                        name=target_ts.strftime('%b %d'),
-                        line=dict(shape='spline', smoothing=0.5), # Smooth curves for soil profile
-                        hovertemplate=f"Date: {target_ts.strftime('%Y-%m-%d')}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
-                    ))
-
-            # 5. REFERENCE LINES
-            fig_d.add_vline(x=ref_val, line_dash="dash", line_color="RoyalBlue", 
-                            annotation_text="Freezing", annotation_position="top right")
-
-            # Calculate dynamic Y-axis limit (rounded up to nearest 10ft)
-            y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
-            
-            # 6. STYLING: Inverted Y-axis is critical here (Surface = 0)
-            fig_d.update_layout(
-                plot_bgcolor='white', 
-                height=750,
-                xaxis=dict(
-                    title=f"Temperature ({unit_label})", 
-                    gridcolor='Gainsboro', 
-                    range=[x_min, x_max]
-                ),
-                yaxis=dict(
-                    title="Depth (ft) below Surface", 
-                    range=[y_limit, 0], # INVERTED: Deepest at bottom
-                    dtick=10, 
-                    gridcolor='Silver'
-                ),
-                legend=dict(title="Weekly Snapshots", orientation="h", y=-0.15),
-                margin=dict(l=40, r=40, t=40, b=100)
-            )
-            
-            st.plotly_chart(fig_d, use_container_width=True, key=f"depth_snapshot_{loc}")
+        return "➡️ 0.0"
 ###########
 # - 13. PAGE: LANDING PAGE - #
 ###########
