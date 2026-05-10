@@ -81,10 +81,19 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 ###########################
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# --- SIDEBAR NAVIGATION ---
+# --- SIDEBAR NAVIGATION (Updated Names) ---
 page = st.sidebar.selectbox(
     "Navigation", 
-    ["Landing Page", "Executive Summary", "Global Overview", "Depth Charts", "Node Diagnostics", "Client Portal", "Data Intake Lab", "Admin Tools"]
+    [
+        "Summary",             # Previously: Landing Page
+        "Time vs Temp",        # Previously: Global Overview
+        "Sensor Status",       # Previously: Executive Summary
+        "Depth Charts", 
+        "Node Diagnostics", 
+        "Client Portal", 
+        "Data Intake Lab", 
+        "Admin Tools"
+    ]
 )
 
 st.sidebar.divider()
@@ -160,6 +169,10 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False):
 if st.sidebar.checkbox("Type A (10.2°F)", value=False): 
     active_refs.append((10.2, "Type A"))
 # --- END OF SIDEBAR ---
+
+#############
+# - Graph - #
+#############
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", mobile_mode=False):
     """
@@ -292,7 +305,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 ###########
 # - 5. PAGE: GLOBAL OVERVIEW - #
 ###########
-# UPDATE THIS LINE to include project_metadata:
+
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
@@ -354,6 +367,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         # This warning is now more helpful because it points to the specific new table
         st.warning(f"No engineering data found for '{selected_project}' in the registry.")
         st.info("Verify that your sensors are assigned to this project in the **Node Registry** (Admin Tools).")
+
 ###########
 # - 6. PAGE: EXECUTIVE SUMMARY - #
 ###########
@@ -672,6 +686,7 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
                 st.error(f"Image '{asbuilt_filename}' not found in assets/asbuilts/ folder.")
         else:
             st.info("The as-built site plan for this project is currently being finalized.")            
+
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
 ###########
@@ -903,10 +918,10 @@ def render_data_intake_page(selected_project):
                             file_name=f"{selected_project}_Export.csv",
                             mime="text/csv"
                         )
+                        
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
-
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header("🛠️ Admin Tools")
     
@@ -1318,107 +1333,9 @@ def update_records(pts, df, val):
 ###########
 # - 13. PAGE: LANDING PAGE - #
 ###########
-
 def render_landing_page(client, unit_label, unit_mode):
-    st.header("🌐 Global Project Dashboard")
-    
-    # 1. Broad Query to get enough data for 24h trends
-    # We pull the current, 1h ago, 6h ago, and 24h ago snapshots
-    summary_q = f"""
-        WITH raw_data AS (
-            SELECT 
-                n.Project, n.Bank, m.temperature, m.timestamp
-            FROM `sensorpush-export.Temperature.master_data_view` m
-            JOIN `sensorpush-export.Temperature.node_registry` n ON m.NodeNum = n.NodeNum
-            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR)
-        )
-        SELECT 
-            Project, Bank,
-            AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
-            MIN(temperature) as min_24h,
-            MAX(temperature) as max_24h
-        FROM raw_data
-        GROUP BY 1, 2
-    """
-    
-    try:
-        df = client.query(summary_q).to_dataframe()
-    except Exception as e:
-        st.error(f"Dashboard Query Failed: {e}")
-        return
-
-    if df.empty:
-        st.warning("No data found in the last 24 hours.")
-        return
-
-    for project in sorted(df['Project'].unique()):
-        p_df = df[df['Project'] == project]
-        
-        with st.container(border=True):
-            st.subheader(f"🏗️ {project}")
-            
-            # Three main columns for Supply, Return, and Monitoring
-            c1, c2, c3 = st.columns(3)
-            
-            groups = [
-                (c1, "📥 Supply (S)", p_df[p_df['Bank'].str.startswith('S', na=False)]),
-                (c2, "📤 Return (R)", p_df[p_df['Bank'].str.startswith('R', na=False)]),
-                (c3, "🌡️ Monitoring", p_df[~p_df['Bank'].str.startswith(('S', 'R'), na=False)])
-            ]
-            
-            for col, title, group_df in groups:
-                with col:
-                    st.write(f"**{title}**")
-                    if group_df.empty:
-                        st.caption("No data")
-                        continue
-                    
-                    # Aggregate group averages
-                    now = group_df['avg_now'].mean()
-                    prev_1h = group_df['avg_1h'].mean()
-                    prev_6h = group_df['avg_6h'].mean()
-                    prev_24h = group_df['avg_24h'].mean()
-                    
-                    # Apply conversion if Celsius
-                    if unit_mode == "Celsius":
-                        now, prev_1h, prev_6h, prev_24h = [(x - 32) * 5/9 if pd.notnull(x) else None for x in [now, prev_1h, prev_6h, prev_24h]]
-                    
-                    # Display Current Metric
-                    st.metric("Current", f"{now:.1f}{unit_label}")
-                    
-                    # Display Trend Column
-                    t1, t2, t3 = st.columns(3)
-                    t1.caption(f"**1h**\n{get_trend_arrow(now, prev_1h)}")
-                    t2.caption(f"**6h**\n{get_trend_arrow(now, prev_6h)}")
-                    t3.caption(f"**24h**\n{get_trend_arrow(now, prev_24h)}")
-                    
-                    st.divider()
-                    st.caption(f"Range: {group_df['min_24h'].min():.1f} to {group_df['max_24h'].max():.1f}{unit_label}")
-
-def get_trend_arrow(current, previous):
-    """Returns a colored arrow and delta string based on temp change"""
-    if pd.isnull(current) or pd.isnull(previous):
-        return "N/A"
-    delta = current - previous
-    if delta > 0.1:
-        return f"🔺 +{delta:.1f}"
-    elif delta < -0.1:
-        return f"🔹 {delta:.1f}"
-    else:
-        return "➡️ 0.0"
-###########
-# - 13. PAGE: LANDING PAGE - #
-###########
-
-###########
-# - 13. PAGE: LANDING PAGE - #
-###########
-
-def render_landing_page(client, unit_label, unit_mode):
-    st.header("🌐 Global Project Dashboard")
+    # Updated Header to "Summary"
+    st.header("🌐 Global Project Summary")
     
     # 1. Query: Filtering for Freezedown/Maintenance + 25h Window
     summary_q = f"""
@@ -1522,19 +1439,18 @@ def get_trend_arrow(current, previous):
     if delta < -0.1: return f"🔹 {delta:.1f}"
     return "➡️ 0.0"
 
-
 ###########
 # - 12. MAIN ROUTER - #
 ###########
 
-if page == "Landing Page":
+if page == "Summary":
     render_landing_page(client, unit_label, unit_mode)
 
-elif page == "Executive Summary":
-    render_executive_summary(client, selected_project, unit_label, display_tz)
+elif page == "Time vs Temp":
+    render_global_overview(client, unit_label, unit_mode)
 
-elif page == "Global Overview":
-    render_global_overview(selected_project, project_metadata, display_tz)
+elif page == "Sensor Status":
+    render_executive_summary(client, unit_label, unit_mode)
 
 elif page == "Depth Charts":
     render_depth_charts(selected_project, unit_label, display_tz)
