@@ -315,18 +315,17 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     # --- FIX: SAFE METADATA ACCESS ---
     # We check if it's a DataFrame and get the first row, or fall back to empty string
     stage_suffix = ""
+    # --- FIX: ROBUST DATAFRAME ACCESS ---
+    stage_suffix = ""
     if project_metadata is not None:
-        try:
-            # If it's a DataFrame, use .iloc[0]; if it's a Series/Dict, use get()
-            if isinstance(project_metadata, pd.DataFrame) and not project_metadata.empty:
-                status = project_metadata['ProjectStatus'].iloc[0]
-            else:
-                status = project_metadata.get('ProjectStatus', '')
-            
-            if status:
-                stage_suffix = f" [{status}]"
-        except (KeyError, IndexError):
-            stage_suffix = ""
+        if isinstance(project_metadata, pd.DataFrame) and not project_metadata.empty:
+            # Safely grab the first row and first column match
+            status = project_metadata['ProjectStatus'].iloc[0]
+            stage_suffix = f" [{status}]"
+        elif isinstance(project_metadata, dict):
+            # Fallback if it's a dictionary
+            status = project_metadata.get('ProjectStatus', '')
+            stage_suffix = f" [{status}]" if status else ""
 
     # Updated Header Name
     st.header(f"📈 Time vs Temp {stage_suffix}")
