@@ -1032,34 +1032,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
                 st.cache_data.clear()
                 st.rerun()
 
-###########
-# - 12. MAIN ROUTER - #
-###########
-
-# Execute pages based on Sidebar selection
-if page == "Executive Summary":
-    render_executive_summary(client, selected_project, unit_label, display_tz)
-
-elif page == "Global Overview":
-    render_global_overview(selected_project, project_metadata, display_tz)
-
-elif page == "Depth Charts":
-    # Ensure this function is updated to pull from master_data_view as well
-    render_depth_charts(selected_project, unit_label, display_tz)
-
-elif page == "Node Diagnostics":
-    render_node_diagnostics(selected_project, display_tz, unit_label)
-
-elif page == "Client Portal":
-    render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs)
-
-elif page == "Data Intake Lab":
-    render_data_intake_page(selected_project)
-
-elif page == "Admin Tools":
-    # Surgical Cleaner is now a tab inside Admin Tools
-    render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
-            
+           
 ###########
 # - 11. SURGICAL CLEANER HELPERS - #
 ###########
@@ -1216,29 +1189,28 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             st.plotly_chart(fig_d, use_container_width=True, key=f"depth_snapshot_{loc}")
 
 ###########
-# - 12. MAIN ROUTER - #
+# - 12. MAIN ROUTER (FINAL) - #
 ###########
 
-# 2. PAGE EXECUTION LOGIC
 if page == "Executive Summary":
     render_executive_summary(client, selected_project, unit_label, display_tz)
 
 elif page == "Global Overview":
-    render_global_overview(selected_project, display_tz)
+    # Add project_metadata here
+    render_global_overview(selected_project, project_metadata, display_tz)
 
 elif page == "Depth Charts":
-    # New function call using your standard variables
     render_depth_charts(selected_project, unit_label, display_tz)
 
 elif page == "Node Diagnostics":
-    # Updated function call for the 15-minute diagnostic table
-    render_node_diagnostics(selected_project, display_tz)
+    render_node_diagnostics(selected_project, display_tz, unit_label)
 
 elif page == "Client Portal":
-    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    # Add project_metadata here
+    render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs)
 
 elif page == "Data Intake Lab":
-    render_data_intake_page(selected_project) # Use the correct function name
+    render_data_intake_page(selected_project)
 
 elif page == "Admin Tools":
     if st.session_state.get('authenticated', False):
