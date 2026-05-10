@@ -511,29 +511,50 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
 def render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs):
     """
-    Client-facing portal. 
-    Shows only 'Active' sensors with 'Approved' data points.
+    Client-facing portal with professional header and project metadata.
+    Refined to match Pump Station 16 Upgrade layout.
     """
-    # Use metadata to show current project stage to the client
-    stage_info = f" | Status: {project_metadata['ProjectStatus']}" if project_metadata is not None else ""
-    st.header(f"📊 Project Status: {selected_project}{stage_info}")
-    
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar.")
+        st.info("💡 Please select a specific project in the sidebar to view client data.")
         return
+
+    # --- 1. PROFESSIONAL HEADER SECTION ---
+    # Pulls the descriptive name (e.g., Pump Station 16 Upgrade) from registry
+    display_name = project_metadata['ProjectName'] if project_metadata is not None else selected_project
+    project_status = project_metadata['ProjectStatus'] if project_metadata is not None else "Active"
     
+    st.markdown(f"## 📊 {display_name}")
+    st.markdown(
+        f"<p style='color: #6d6d6d; font-size: 18px; margin-top: -15px;'>"
+        f"Project {selected_project} Status: {project_status}</p>", 
+        unsafe_allow_html=True
+    )
+    
+    # Metadata Row (Location | Timezone)
+    city = project_metadata['City'] if project_metadata is not None else "Unknown"
+    tz_info = project_metadata['Timezone'] if project_metadata is not None else display_tz
+    st.markdown(f"**Location:** {city} | **Timezone:** {tz_info}")
+    
+    # Bold Daily Disclaimer
+    st.markdown("### **Data will be uploaded once per business day by 4pm Pacific Time.**")
+    st.write("") 
+
+    # --- 2. DATA FETCHING ---
     with st.spinner("Synchronizing approved records..."):
-        # The engine now filters for SensorStatus='Active' and approval_status='TRUE'
+        # Note: Ensure get_universal_portal_data handles 'TRUE' status and ignores SensorStatus
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
     if p_df.empty:
         st.warning(f"⚠️ No data marked as 'Approved' found for {selected_project}.")
-        st.info("Data is visible here once engineering completes the quality review.")
+        st.info("Engineering is currently reviewing the latest data points. Please check back after 4pm.")
         return
 
-    tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
+    # --- 3. TABS NAVIGATION ---
+    tab_time, tab_depth, tab_table, tab_built = st.tabs([
+        "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As-Built Plan"
+    ])
 
-    # --- TAB 1: TIMELINE ---
+    # --- TAB 1: TIMELINE ANALYSIS ---
     with tab_time:
         weeks_view = st.sidebar.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
         now_utc = pd.Timestamp.now(tz='UTC')
@@ -559,19 +580,20 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
         
-        # Consistent engineering scale
-        x_min_f, x_max_f, ref_f = -20, 60, 32.0
-        if unit_label == "°C":
-            x_min, x_max, ref_val = (x_min_f-32)*5/9, (x_max_f-32)*5/9, 0.0
-        else:
-            x_min, x_max, ref_val = x_min_f, x_max_f, ref_f
-
+        # Ensure depth is numeric for plotting
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
         
         if depth_only.empty:
-            st.info("Vertical profile data is not applicable for this project's current sensor configuration.")
+            st.info("Vertical profile data is not applicable for this project's sensor configuration.")
         else:
+            # Shared scale configuration
+            x_min_f, x_max_f, ref_f = -20, 60, 32.0
+            if unit_label == "°C":
+                x_min, x_max, ref_val = (x_min_f-32)*5/9, (x_max_f-32)*5/9, 0.0
+            else:
+                x_min, x_max, ref_val = x_min_f, x_max_f, ref_f
+
             for loc in sorted(depth_only['Location'].unique()):
                 with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
                     loc_data = depth_only[depth_only['Location'] == loc].copy()
@@ -631,9 +653,18 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
         latest['Position'] = latest.apply(get_position, axis=1)
         
         st.dataframe(
-            latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), 
-            use_container_width=True, hide_index=True
+            latest[['Location', 'Position', 'Current Temp', 'NodeNum', 'timestamp']].sort_values(['Location', 'Position']), 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "timestamp": st.column_config.DatetimeColumn("Last Updated", format="MM/DD/YY HH:mm")
+            }
         )
+
+    # --- TAB 4: AS-BUILT PLAN ---
+    with tab_built:
+        st.subheader("🗺️ Project Layout & Sensor Map")
+        st.info("The as-built site plan for this project is currently being finalized.")
             
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
