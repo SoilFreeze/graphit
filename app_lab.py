@@ -12,7 +12,6 @@ import io
 import re
 from streamlit_plotly_events import plotly_events
 
-
 ##################################
 # - 1. CONFIGURATION & STYLING - #
 ##################################
@@ -52,21 +51,13 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(_client, project_id, view_mode="engineering"):
     """
-    Simplified Engine: Pulls point data from the real-time View Table.
-    The underscore in _client prevents Streamlit Hashing/Caching errors.
+    The underscore in _client is the KEY fix here. 
+    It tells Streamlit: 'Don't try to hash the BigQuery connection object.'
     """
-    
     if view_mode == "client":
-        # Client View: Only explicitly approved data (True/1)
-        # Using UPPER and CAST to ensure we catch all variations of 'True'
         filter_sql = "AND UPPER(CAST(approval_status AS STRING)) IN ('TRUE', '1')"
     else:
-        # Engineering View: Sees everything EXCEPT rejected/masked data.
-        # COALESCE ensures 'PENDING' or NULL data is visible to the team.
-        filter_sql = """
-            AND UPPER(COALESCE(CAST(approval_status AS STRING), 'PENDING')) 
-            NOT IN ('FALSE', '0', 'MASKED')
-        """
+        filter_sql = "AND UPPER(COALESCE(CAST(approval_status AS STRING), 'PENDING')) NOT IN ('FALSE', '0', 'MASKED')"
 
     query = f"""
         SELECT * FROM `sensorpush-export.Temperature.master_data_view`
@@ -76,12 +67,9 @@ def get_universal_portal_data(_client, project_id, view_mode="engineering"):
     """
     
     try:
-        # We use the _client passed from the main app
-        query_job = _client.query(query)
-        return query_job.to_dataframe()
+        return _client.query(query).to_dataframe()
     except Exception as e:
-        # Log the error but return an empty DF so the app doesn't crash
-        st.error(f"⚠️ Database Connection Error for project '{project_id}': {e}")
+        st.error(f"Database Error: {e}")
         return pd.DataFrame()
         
 ###########################
