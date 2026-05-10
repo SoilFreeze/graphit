@@ -511,34 +511,41 @@ def render_executive_summary(client, selected_project, unit_label, display_tz):
 
 def render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs):
     """
-    Client-facing portal with professional header and project metadata.
-    Refined to match Pump Station 16 Upgrade layout.
+    Client-facing portal driven entirely by Project Registry metadata.
     """
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view client data.")
         return
 
-    # --- 1. PROFESSIONAL HEADER SECTION ---
-    # Pulls the descriptive name (e.g., Pump Station 16 Upgrade) from registry
-    display_name = project_metadata['ProjectName'] if project_metadata is not None else selected_project
-    project_status = project_metadata['ProjectStatus'] if project_metadata is not None else "Active"
+    # --- 1. DYNAMIC HEADER SECTION ---
+    # Safe lookups for all registry fields
+    display_name = project_metadata.get('ProjectName', selected_project)
+    project_status = project_metadata.get('ProjectStatus', 'Active')
+    city = project_metadata.get('City', 'Unknown Location')
+    tz_info = project_metadata.get('Timezone', 'UTC')
     
-    st.markdown(f"## 📊 {display_name}")
-    st.markdown(
-        f"<p style='color: #6d6d6d; font-size: 18px; margin-top: -15px;'>"
-        f"Project {selected_project} Status: {project_status}</p>", 
-        unsafe_allow_html=True
-    )
-    
-    # Metadata Row (Location | Timezone)
-    city = project_metadata['City'] if project_metadata is not None else "Unknown"
-    tz_info = project_metadata['Timezone'] if project_metadata is not None else display_tz
-    st.markdown(f"**Location:** {city} | **Timezone:** {tz_info}")
-    
-    # Bold Daily Disclaimer
-    st.markdown("### **Data will be uploaded once per business day by 4pm Pacific Time.**")
-    st.write("") 
+    # New Dynamic Fields
+    registry_disclaimer = project_metadata.get('ClientDisclaimer') 
+    eng_notes = project_metadata.get('EngNotes')
 
+    # Render Header & Sub-header
+    st.markdown(f"## 📊 {display_name}")
+    st.markdown(f"<p style='color: #6d6d6d; font-size: 18px; margin-top: -15px;'>Project {selected_project} Status: {project_status}</p>", unsafe_allow_html=True)
+    st.markdown(f"**Location:** {city} | **Timezone:** {tz_info}")
+
+    # Render Disclaimer (Dynamic from Registry or Default)
+    if pd.notnull(registry_disclaimer) and str(registry_disclaimer).strip() != "":
+        st.markdown(f"### **{registry_disclaimer}**")
+    else:
+        # Fallback if the registry column is empty
+        st.markdown("### **Data will be uploaded once per business day by 4pm Pacific Time.**")
+
+    # Render Engineering Notes (ONLY if they exist)
+    if pd.notnull(eng_notes) and str(eng_notes).strip() != "":
+        with st.expander("📝 Engineering & Site Notes", expanded=True):
+            st.write(eng_notes)
+
+    st.write("") # Padding
     # --- 2. DATA FETCHING ---
     with st.spinner("Synchronizing approved records..."):
         # Note: Ensure get_universal_portal_data handles 'TRUE' status and ignores SensorStatus
