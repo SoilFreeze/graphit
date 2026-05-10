@@ -54,10 +54,10 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     """
     Simplified Engine: Pulls point data from the real-time View Table.
     """
+    
     if view_mode == "client":
-        # REMOVED: SensorStatus requirement. 
-        # UPDATED: Handle 'TRUE' as a string and allow any SensorStatus.
-        filter_sql = "AND approval_status IN ('TRUE', 'true')"
+        # CAST the column to string to catch both Boolean True and String 'TRUE'
+        filter_sql = "AND CAST(approval_status AS STRING) IN ('TRUE', 'true', '1')"
     else:
         # Engineering sees everything EXCEPT 'FALSE' or 'MASKED'
         # We use COALESCE to ensure NULL statuses are shown to Engineering too
