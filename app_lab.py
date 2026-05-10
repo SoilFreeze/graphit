@@ -982,7 +982,7 @@ def render_data_intake_page(selected_project):
                 st.error(f"Ingestion Error: {e}")
 
     with tab_export:
-        st.subheader("📥 Export Project Data (Wide Format)")
+        st.subheader("📥 Export Project Data (Custom Wide Format)")
         if not selected_project or selected_project == "All Projects":
             st.warning("⚠️ Select a project in the sidebar first.")
         else:
@@ -991,45 +991,55 @@ def render_data_intake_page(selected_project):
             e_end = c2.date_input("End Date", value=datetime.now())
             
             with st.spinner("Fetching engineering records..."):
-                # Pull raw mapped data
                 full_df = get_universal_portal_data(selected_project, view_mode="engineering")
             
             if not full_df.empty:
-                # 1. Date Filter
+                # 1. Scope Filter: Allow users to pick specific Locations/Banks
+                all_locs = sorted(full_df['Location'].unique().tolist())
+                selected_locs = st.multiselect(
+                    "🎯 Filter by Location/Bank (Leave empty for ALL)", 
+                    options=all_locs,
+                    help="Pick specific monitoring points to include in the columns."
+                )
+
+                # Apply Filters (Date + Location)
                 mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
+                if selected_locs:
+                    mask = mask & (full_df['Location'].isin(selected_locs))
+                
                 export_df = full_df.loc[mask].copy()
                 
                 if export_df.empty:
-                    st.warning("No data found for this date range.")
+                    st.warning("No data found for this selection.")
                 else:
                     # 2. THE TRANSFORMATION (Long to Wide)
-                    # We create a unique label for each column: "Location (NodeID)"
+                    # Label columns as "Location (NodeID)"
                     export_df['Sensor_Label'] = export_df['Location'] + " (" + export_df['NodeNum'].astype(str) + ")"
                     
-                    # Pivot: Rows = Timestamp, Columns = Sensor_Label, Values = Temperature
+                    # Create the Grid: Timestamp on the left, Sensors across the top
                     wide_df = export_df.pivot_table(
                         index='timestamp', 
                         columns='Sensor_Label', 
                         values='temperature',
-                        aggfunc='first' # Ensures one value per slot
+                        aggfunc='first'
                     ).reset_index()
 
-                    # 3. Clean up the Timestamp for Excel
+                    # Format timestamp for Excel compatibility
                     wide_df['timestamp'] = wide_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
-                    # 4. Generate Download Button
+                    # 3. Final Download
+                    st.success(f"Generated report with {len(wide_df.columns)-1} sensor columns.")
                     csv = wide_df.to_csv(index=False).encode('utf-8')
-                    st.success(f"Prepared {len(wide_df)} rows of data with {len(wide_df.columns)-1} sensor columns.")
                     
                     st.download_button(
-                        label="💾 Download Wide-Format CSV",
+                        label=f"💾 Download {selected_project} Wide Export",
                         data=csv,
-                        file_name=f"{selected_project}_Wide_Export.csv",
+                        file_name=f"{selected_project}_Custom_Export.csv",
                         mime="text/csv",
                         use_container_width=True
                     )
             else:
-                st.warning("No data available to export.")
+                st.warning("No project data available in the registry.")
                         
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
