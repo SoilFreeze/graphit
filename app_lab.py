@@ -1413,10 +1413,14 @@ def get_trend_arrow(current, previous):
 # - 13. PAGE: LANDING PAGE - #
 ###########
 
+###########
+# - 13. PAGE: LANDING PAGE - #
+###########
+
 def render_landing_page(client, unit_label, unit_mode):
     st.header("🌐 Global Project Dashboard")
     
-    # 1. Query: Filtering for active stages + Fetching 25h of data
+    # 1. Query: Filtering for Freezedown/Maintenance + 25h Window
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus 
@@ -1461,16 +1465,15 @@ def render_landing_page(client, unit_label, unit_mode):
         
         with st.container(border=True):
             st.subheader(f"🏗️ {p_name} ({project})")
-            st.caption(f"Status: {p_status}")
             
-            # 4-Column Layout
+            # 4-Column Layout: Supply, Return, TempPipes, Ambient
             c1, c2, c3, c4 = st.columns(4)
             
-            # Logic for categorization
-            # TempPipes = anything with a depth assigned
+            # Grouping Logic
             is_ambient = p_df['Bank'].str.contains('Amb', case=False, na=False) | p_df['Location'].str.contains('Amb', case=False, na=False)
             is_supply = (p_df['Bank'].str.startswith('S', na=False) | p_df['Location'].str.startswith('S', na=False)) & ~is_ambient
             is_return = (p_df['Bank'].str.startswith('R', na=False) | p_df['Location'].str.startswith('R', na=False)) & ~is_ambient
+            # TempPipes specifically targets monitoring with depth
             is_temppipe = p_df['Depth'].notnull() & ~is_supply & ~is_return & ~is_ambient
 
             groups = [
@@ -1482,37 +1485,35 @@ def render_landing_page(client, unit_label, unit_mode):
             
             for col, title, group_df in groups:
                 with col:
-                    st.markdown(f"**{title}**")
+                    st.markdown(f"### {title}")
                     if group_df.empty or group_df['avg_now'].isnull().all():
-                        st.caption("No active data")
+                        st.caption("No data available")
                         continue
                     
-                    # Group Aggregation
+                    # Calculations
                     now = group_df['avg_now'].mean()
                     prev_1h = group_df['avg_1h'].mean()
                     prev_6h = group_df['avg_6h'].mean()
                     prev_24h = group_df['avg_24h'].mean()
                     mn, mx = group_df['min_24h'].min(), group_df['max_24h'].max()
                     
+                    # Conversion
                     if unit_mode == "Celsius":
                         now, prev_1h, prev_6h, prev_24h, mn, mx = [(x - 32) * 5/9 if pd.notnull(x) else None for x in [now, prev_1h, prev_6h, prev_24h, mn, mx]]
                     
-                    # Display Current
+                    # 1. Current Metric
                     st.metric("Current", f"{now:.1f}{unit_label}")
-                    st.divider() # Visual line
-
-                    # Trend and Range Row
-                    r1, r2 = st.columns(2)
-                    with r1:
-                        st.write("**Range**")
-                        st.caption(f"{mn:.1f} to {mx:.1f}")
-                    with r2:
-                        st.write("**Trend**")
-                        # 1h Trend as the primary indicator
-                        st.caption(get_trend_arrow(now, prev_1h))
                     
-                    # Sub-caption for longer trends
-                    st.caption(f"6h: {get_trend_arrow(now, prev_6h)} | 24h: {get_trend_arrow(now, prev_24h)}")
+                    # 2. Range Line
+                    st.markdown(f"**Range:** {mn:.1f} to {mx:.1f}{unit_label}")
+                    
+                    # 3. Trend Below
+                    st.write("**Trend**")
+                    t1, t2, t3 = st.columns(3)
+                    t1.caption(f"1h\n{get_trend_arrow(now, prev_1h)}")
+                    t2.caption(f"6h\n{get_trend_arrow(now, prev_6h)}")
+                    t3.caption(f"24h\n{get_trend_arrow(now, prev_24h)}")
+
 
 def get_trend_arrow(current, previous):
     if pd.isnull(current) or pd.isnull(previous): return "N/A"
