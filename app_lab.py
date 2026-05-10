@@ -60,27 +60,26 @@ def get_bq_client():
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    """
-    Pulls point data from the master view, joined with the registry
-    to apply dynamic visibility based on 'Date_Freezedown'.
-    """
     client = get_bq_client()
     if client is None:
         return pd.DataFrame()
 
-    # 1. Classification logic for data visibility
+    # 1. Classification & Visibility Logic
     if view_mode == "client":
         filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
+        # Client ONLY sees data from Freezedown onwards
+        visibility_sql = "AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)"
     else:
+        # Engineering sees everything NOT masked
         filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('FALSE', '0', 'MASKED')"
+        # Engineering sees ALL data (including pre-freeze baselines)
+        visibility_sql = ""
 
-    # 2. Dynamic Visibility Logic:
-    # Only show data where the timestamp is >= the Date_Freezedown in the registry
     query = f"""
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
         WHERE m.Project = '{project_id}'
-        AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+        {visibility_sql}
         {filter_sql}
         ORDER BY m.Location ASC, m.timestamp ASC
     """
@@ -223,7 +222,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     actual_min_data = plot_df['timestamp'].min()
     effective_start = max(start_local, actual_min_data)
     
-    range_start = effective_start - pd.Timedelta(hours=12) # Reduced buffer for tighter view
+    range_start = min(start_local, actual_min_data) - pd.Timedelta(hours=12) # Reduced buffer for tighter view
     range_end = end_local + pd.Timedelta(days=1)
     
     if unit_mode == "Celsius":
@@ -388,15 +387,22 @@ def render_global_overview(selected_project, project_metadata, display_tz):
             st.error(f"⚠️ **Stale Data Warning:** No new data has been received for this project in the last {int(hours_since_data)} hours.")
             st.info("This is common for Lord nodes that only upload on business mornings.")
 
+        # --- Inside render_global_overview ---
+
         # 3. View Constraints
-        lookback = st.sidebar.slider("Lookback (Weeks)", 1, 12, 4, key="global_lookback_slider")
+        # Added '0' as an option for "Full History"
+        lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider", help="Select 0 for Full History")
         
-        # Snap time window
         now_local = pd.Timestamp.now(tz=display_tz)
         end_view = (now_local + pd.Timedelta(days=(7-now_local.weekday())%7 or 7)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        start_view = end_view - timedelta(weeks=lookback)
+        
+        if lookback == 0:
+            # Set start_view to the beginning of the dataframe for baselines
+            start_view = p_df['timestamp'].min()
+        else:
+            start_view = end_view - timedelta(weeks=lookback)
 
         # 4. Render Graphs by Location
         locations = sorted(p_df['Location'].dropna().unique())
