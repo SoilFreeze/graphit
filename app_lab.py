@@ -945,9 +945,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     loc_options = ["All Locations"] + sorted([str(l) for l in active_project_df['Location'].unique() if pd.notnull(l)]) if not active_project_df.empty else ["All Locations"]
 
     # --- 2. UNIFIED NAVIGATION ---
-    (tab_bulk, tab_registry, tab_project, tab_scrub, tab_surgical, tab_audit) = st.tabs([
-        "✅ Bulk Approval", "📋 Node Registry", "⚙️ Project Master", 
-        "🧹 Scrub", "🧨 Surgical", "🕒 Audit"
+    # Ensure "tab_project" is explicitly named in this list
+    tab_bulk, tab_registry, tab_project, tab_scrub, tab_surgical, tab_audit = st.tabs([
+        "✅ Bulk Approval", 
+        "📋 Node Registry", 
+        "⚙️ Project Master", 
+        "🧹 Scrub", 
+        "🧨 Surgical", 
+        "🕒 Audit"
     ])
 
     # --- TAB 1: BULK APPROVAL ---
