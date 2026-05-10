@@ -1004,38 +1004,114 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.cache_data.clear()
             st.rerun()
 
-    # --- TAB 3: PROJECT MASTER (WITH VALUEERROR FIX) ---
-    with tab_project:
-        st.subheader("⚙️ Project Management")
-        p_mode = st.radio("Primary Action", ["Update Project Info", "Initialize New Project"], horizontal=True)
-        proj_reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`").to_dataframe()
+    # --- TAB 3: PROJECT MASTER ---
+with tab_project:
+    st.subheader("⚙️ Project Management & Lifecycle")
+    
+    # 1. Action Toggle
+    p_mode = st.radio("Primary Action", ["Project Overview", "Initialize New Project", "Update Project Info"], horizontal=True)
+    
+    # Fetch current registry for all sub-actions
+    proj_reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`").to_dataframe()
 
-        if "Update" in p_mode and not proj_reg_df.empty:
-            target_proj = st.selectbox("Select Project", sorted([str(p) for p in proj_reg_df['Project'].unique()]))
-            p_data = proj_reg_df[proj_reg_df['Project'] == target_proj].iloc[0]
+    # --- ACTION: PROJECT OVERVIEW ---
+    if p_mode == "Project Overview":
+        st.markdown("### 📋 Active Project Fleet")
+        # Selecting key columns for the high-level view
+        overview_cols = ['Project', 'ProjectName', 'ProjectStatus', 'City', 'Date_Initialized', 'Date_Freezedown']
+        # Filter for columns that actually exist in your DF
+        existing_cols = [c for c in overview_cols if c in proj_reg_df.columns]
+        
+        st.dataframe(
+            proj_reg_df[existing_cols].sort_values('Date_Initialized', ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
 
-            with st.form("p_update_form"):
-                c1, c2 = st.columns(2)
-                u_name = c1.text_input("Project Name", value=p_data.get('ProjectName', ''))
+    # --- ACTION: INITIALIZE NEW PROJECT ---
+    elif p_mode == "Initialize New Project":
+        st.markdown("### 🆕 Register New Project")
+        with st.form("init_project_form"):
+            c1, c2 = st.columns(2)
+            new_id = c1.text_input("Project ID (e.g., 2542-Sample)")
+            new_name = c2.text_input("Project Name (e.g., Pump Station 17)")
+            new_city = c1.text_input("City")
+            new_tz = c2.selectbox("Default Timezone", ["US/Pacific", "US/Eastern", "UTC"])
+            
+            if st.form_submit_button("🚀 Create Project Entry"):
+                if not new_id or not new_name:
+                    st.error("Project ID and Name are required.")
+                else:
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    # Set status to 'Initialized' and stamp the initiation date
+                    sql = f"""
+                        INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                        (Project, ProjectName, City, Timezone, ProjectStatus, Date_Initialized)
+                        VALUES ('{new_id}', '{new_name}', '{new_city}', '{new_tz}', 'Initialized', '{today}')
+                    """
+                    try:
+                        client.query(sql).result()
+                        st.success(f"Project {new_id} successfully initialized.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Initialization Failed: {e}")
+
+    # --- ACTION: UPDATE PROJECT INFO (MILESTONE TRACKING) ---
+    elif p_mode == "Update Project Info" and not proj_reg_df.empty:
+        target_proj = st.selectbox("Select Project to Edit", sorted([str(p) for p in proj_reg_df['Project'].unique()]))
+        p_data = proj_reg_df[proj_reg_df['Project'] == target_proj].iloc[0]
+
+        with st.form("p_update_form"):
+            c1, c2 = st.columns(2)
+            u_name = c1.text_input("Project Name", value=p_data.get('ProjectName', ''))
+            
+            # Status Mapping for Milestone Dates
+            status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Post-freeze", "Finished", "Archived"]
+            current_status = p_data.get('ProjectStatus', 'Initialized')
+            try:
+                status_idx = status_options.index(current_status)
+            except ValueError:
+                status_idx = 0
+            
+            u_status = c2.selectbox("Update Project Stage", status_options, index=status_idx)
+            u_city = c1.text_input("City", value=p_data.get('City', ''))
+            u_tz = c2.selectbox("Timezone", ["US/Pacific", "US/Eastern", "UTC"], index=0)
+            u_disclaimer = st.text_area("Client Portal Disclaimer", value=p_data.get('ClientDisclaimer', ''))
+            u_asbuilt = st.text_input("As-Built Filename (e.g. site_map.png)", value=p_data.get('AsBuiltFile', ''))
+            u_eng = st.text_area("Engineering Notes (Overwrites previous)", value=p_data.get('EngNotes', ''))
+            
+            if st.form_submit_button("💾 Save Project Settings"):
+                # Milestone Date Logic
+                date_col_mapping = {
+                    "Pre-freeze": "Date_PreFreeze",
+                    "Freezedown": "Date_Freezedown",
+                    "Maintenance": "Date_Maintenance",
+                    "Post-freeze": "Date_PostFreeze",
+                    "Archived": "Date_Archived"
+                }
                 
-                # SAFE STATUS LOOKUP
-                status_options = ["Pre-freeze", "Freezedown", "Maintenance", "Post-freeze", "Finished", "Archived"]
-                current_status = p_data.get('ProjectStatus', 'Pre-freeze')
-                try:
-                    status_idx = status_options.index(current_status)
-                except ValueError:
-                    status_idx = 0
+                target_date_col = date_col_mapping.get(u_status)
+                today_str = datetime.now().strftime('%Y-%m-%d')
                 
-                u_status = c2.selectbox("Project Stage", status_options, index=status_idx)
-                u_city = c1.text_input("City", value=p_data.get('City', ''))
-                u_tz = c2.selectbox("Timezone", ["US/Pacific", "US/Eastern", "UTC"], index=0)
-                u_eng = st.text_area("Engineering Notes", value=p_data.get('EngNotes', ''))
-                
-                if st.form_submit_button("💾 Save Project Settings"):
-                    sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectName='{u_name}', ProjectStatus='{u_status}', City='{u_city}', Timezone='{u_tz}', EngNotes='{u_eng}' WHERE Project='{target_proj}'"
-                    client.query(sql).result()
-                    st.success(f"Updated {target_proj}")
-                    st.cache_data.clear()
+                # Only stamp the date if the column exists and is currently empty
+                date_update_sql = ""
+                if target_date_col and target_date_col in proj_reg_df.columns:
+                    if pd.isnull(p_data.get(target_date_col)):
+                        date_update_sql = f", {target_date_col}='{today_str}'"
+
+                sql = f"""
+                    UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                    SET 
+                        ProjectName='{u_name}', ProjectStatus='{u_status}', City='{u_city}', 
+                        Timezone='{u_tz}', EngNotes='{u_eng}', ClientDisclaimer='{u_disclaimer}',
+                        AsBuiltFile='{u_asbuilt}' {date_update_sql}
+                    WHERE Project='{target_proj}'
+                """
+                client.query(sql).result()
+                st.success(f"Updated {target_proj}. Stamped {u_status} date if newly reached.")
+                st.cache_data.clear()
+                st.rerun()
 
     # --- TAB 4: SCRUB ---
     with tab_scrub:
