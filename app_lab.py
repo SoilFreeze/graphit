@@ -31,17 +31,38 @@ PROJECT_VISIBILITY_MASKS = {
 
 @st.cache_resource
 def get_bq_client():
+    """
+    Initializes and caches the BigQuery connection.
+    Prioritizes Service Account info from st.secrets.
+    """
     try:
-        SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive"]
+        # 1. Define the required permissions
+        SCOPES = [
+            "https://www.googleapis.com/auth/bigquery", 
+            "https://www.googleapis.com/auth/drive" # Required for Google Sheet backed tables
+        ]
+        
+        # 2. Check for Service Account in Streamlit Secrets
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            credentials = service_account.Credentials.from_service_account_info(
+                info, 
+                scopes=SCOPES
+            )
+            # Use the project ID defined in the service account JSON
             return bigquery.Client(credentials=credentials, project=info["project_id"])
+        
+        # 3. Fallback: Local Authentication (GCloud CLI / Environment Variables)
+        # This uses the PROJECT_ID constant defined at the top of your script
         return bigquery.Client(project=PROJECT_ID)
+
     except Exception as e:
-        st.error(f"Authentication Failed: {e}")
+        # We use st.error here because if this fails, the whole app is dead
+        st.error(f"❌ BigQuery Authentication Failed: {e}")
+        st.info("Check your Streamlit secrets or local gcloud credentials.")
         return None
 
+# Global shortcut to use in non-cached functions
 client = get_bq_client()
 
 ############################
