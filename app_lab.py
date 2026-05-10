@@ -1397,6 +1397,107 @@ def update_records(pts, df, val, display_tz):
 ###########
 # - 13. PAGE: LANDING PAGE - #
 ###########
+
+###########
+# - 12. PAGE: DEPTH CHARTS (ENGINEERING) - #
+###########
+
+def render_depth_charts(selected_project, unit_label, display_tz):
+    """
+    Engineering-grade Vertical Temperature Profiles.
+    Shows the thermal gradient across soil depths without date masking.
+    """
+    st.header(f"📏 Depth Profile Analysis: {selected_project}")
+    
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
+        return
+
+    # 1. Fetch Engineering Data (No Date Masking)
+    with st.spinner("Fetching full project history for vertical analysis..."):
+        # We use engineering mode here to bypass the Date_Freezedown mask
+        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+
+    if p_df.empty:
+        st.warning("No data found. Ensure sensors have 'Depth' values in the Node Registry.")
+        return
+
+    # 2. Pre-process Depth Data
+    p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+    depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
+    
+    if depth_df.empty:
+        st.info("No sensors with valid Depth values found for this project.")
+        return
+
+    # 3. UI Controls for the Profile
+    st.sidebar.subheader("📐 Profile Settings")
+    # Engineering lookback defaults to 0 (Full History) to see baselines
+    lookback = st.sidebar.slider("Historical Snapshots (Weeks)", 0, 24, 8, key="depth_lookback")
+    
+    unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+    ref_val = 0.0 if unit_mode == "Celsius" else 32.0
+    x_range = [-20, 40] if unit_mode == "Celsius" else [-10, 80]
+
+    # 4. Generate Snapshots (Mondays)
+    now_utc = pd.Timestamp.now(tz='UTC')
+    # If lookback is 0, we still show at least the current week
+    num_snapshots = max(lookback, 1)
+    mondays = pd.date_range(end=now_utc, periods=num_snapshots, freq='W-MON')
+
+    locations = sorted(depth_df['Location'].unique())
+    
+    for loc in locations:
+        with st.expander(f"📍 Location: {loc}", expanded=True):
+            loc_data = depth_df[depth_df['Location'] == loc].copy()
+            fig = go.Figure()
+            
+            for m_date in mondays:
+                target_ts = m_date.replace(hour=6, minute=0, second=0)
+                # Find data within a 12-hour window of each Monday morning
+                window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                 (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                
+                if not window.empty:
+                    # Get the reading closest to the target Monday morning for every node
+                    snap = (
+                        window.assign(diff=(window['timestamp'] - target_ts).abs())
+                        .sort_values(['NodeNum', 'diff'])
+                        .drop_duplicates('NodeNum')
+                        .sort_values('Depth_Num')
+                    )
+                    
+                    temps = snap['temperature']
+                    if unit_mode == "Celsius":
+                        temps = (temps - 32) * 5/9
+                    
+                    fig.add_trace(go.Scatter(
+                        x=temps, 
+                        y=snap['Depth_Num'], 
+                        mode='lines+markers', 
+                        name=target_ts.strftime('%Y-%m-%d'),
+                        line=dict(shape='spline', smoothing=0.3)
+                    ))
+
+            # Add the Freezing Reference Line
+            fig.add_hline(y=0, line_width=1, line_color="black") # Ground level
+            fig.add_vline(x=ref_val, line_dash="dash", line_color="RoyalBlue", 
+                          annotation_text="Freezing", annotation_position="top right")
+
+            # Determine Y-Axis (Depth) scale
+            max_d = depth_df['Depth_Num'].max()
+            y_limit = int(((max_d // 10) + 1) * 10) if pd.notnull(max_d) else 50
+
+            fig.update_layout(
+                title=f"Vertical Thermal Gradient - {loc}",
+                plot_bgcolor='white', height=700,
+                xaxis=dict(title=f"Temperature ({unit_label})", range=x_range, gridcolor='Gainsboro', showline=True, linecolor='black'),
+                yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=5, gridcolor='Silver', showline=True, linecolor='black'),
+                legend=dict(orientation="h", y=-0.15)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True, key=f"depth_chart_{loc}")
+
 ###########
 # - 11. PAGE: SUMMARY (GLOBAL) - #
 ###########
