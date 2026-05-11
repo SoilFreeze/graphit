@@ -1198,8 +1198,8 @@ def render_data_intake_page(selected_project):
 
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Advanced Admin Tools: Features Transactional Registry Management, 
-    Bulk Staging, and Project Lifecycle controls.
+    Admin Central: Manages project lifecycles, bulk data approvals, and 
+    transactional hardware logistics (Node Registry).
     """
     st.header("🛠️ Admin Tools")
     
@@ -1208,151 +1208,40 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.error("Database connection unavailable.")
         return
 
-    # 1. GLOBAL DATA FETCH
-    # We pull the full history to allow for 'Available' node lookups
-    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
+    # 1. GLOBAL DATA FETCH (Fetch once for use across tabs)
     try:
+        reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
         full_reg_df = client.query(reg_q).to_dataframe()
+        
+        proj_reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
+        proj_reg_df = client.query(proj_reg_q).to_dataframe()
     except Exception as e:
-        st.error(f"Registry Fetch Failed: {e}")
-        full_reg_df = pd.DataFrame()
+        st.error(f"Registry Link Offline: {e}")
+        return
 
-    # 2. ADMIN NAVIGATION
-    tab_bulk_app, tab_registry, tab_project, tab_scrub, tab_surgical = st.tabs([
-        "✅ Bulk Approval", "📋 Node Registry & Logistics", "⚙️ Project Master", "🧹 Scrub", "🧨 Surgical"
+    # 2. NAVIGATION TABS
+    tab_bulk, tab_logistics, tab_project, tab_scrub, tab_surgical = st.tabs([
+        "✅ Bulk Approval", 
+        "📋 Node Logistics", 
+        "⚙️ Project Master", 
+        "🧹 Maintenance", 
+        "🧨 Surgical"
     ])
-
-    # --- TAB 2: NODE REGISTRY & LOGISTICS ---
-    with tab_registry:
-        reg_mode = st.radio("Registry Action", 
-                            ["Search & Manage", "Bulk CSV Upload", "Global Status Audit"], 
-                            horizontal=True)
-
-        # A. SINGLE NODE SEARCH & EDIT
-        if reg_mode == "Search & Manage":
-            search_id = st.text_input("🔍 Find Node (Enter NodeNum or Physical ID)")
-            if search_id:
-                # Find the current active assignment (where End_Date is null)
-                active_match = full_reg_df[
-                    ((full_reg_df['NodeNum'] == search_id) | 
-                     (full_reg_df['PhysicalID'].astype(str) == search_id)) & 
-                    (full_reg_df['End_Date'].isna())
-                ]
-
-                if not active_match.empty:
-                    row = active_match.iloc[0]
-                    st.success(f"Node active in: **{row['Project']}** | Location: **{row['Location']}**")
-                    
-                    with st.form("surgical_node_edit"):
-                        c1, c2 = st.columns(2)
-                        n_loc = c1.text_input("Current Location", value=row['Location'])
-                        n_proj = c2.text_input("Current Project", value=row['Project'])
-                        n_bank = c1.text_input("Bank", value=row['Bank'])
-                        n_depth = c2.number_input("Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
-                        n_status = st.selectbox("Hardware Status", 
-                                              ["Active", "Diagnostic", "Available", "Need Repair", "Dead"],
-                                              index=["Active", "Diagnostic", "Available", "Need Repair", "Dead"].index(row['SensorStatus']))
-                        
-                        change_type = st.radio("Modification Type", 
-                            ["Correction (Overwrite existing record)", "Re-assignment (Retire old, start new)"],
-                            help="Correction fixes a mistake/typo. Re-assignment tracks a physical move to a new area.")
-
-                        if st.form_submit_button("💾 Save Registry Update"):
-                            today = datetime.now().strftime('%Y-%m-%d')
-                            if "Correction" in change_type:
-                                sql = f"""
-                                    UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                                    SET Location='{n_loc}', Project='{n_proj}', Bank='{n_bank}', 
-                                        Depth={n_depth}, SensorStatus='{n_status}'
-                                    WHERE NodeNum='{row['NodeNum']}' AND Project='{row['Project']}' AND End_Date IS NULL
-                                """
-                            else:
-                                # Transactional Retire & Insert
-                                sql = f"""
-                                    BEGIN TRANSACTION;
-                                    UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET End_Date='{today}' 
-                                    WHERE NodeNum='{row['NodeNum']}' AND Project='{row['Project']}' AND End_Date IS NULL;
-                                    
-                                    INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                                    (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                                    VALUES ('{row['NodeNum']}', {row['PhysicalID']}, '{n_proj}', '{n_loc}', '{n_bank}', {n_depth}, '{today}', '{n_status}');
-                                    COMMIT;
-                                """
-                            client.query(sql).result()
-                            st.success("Assignment updated. Cache cleared.")
-                            st.cache_data.clear()
-                else:
-                    st.info("No active assignment found for this Node. Check 'Global Status Audit' for history.")
-
-        # B. BULK CSV UPLOAD (Staging Area)
-        elif reg_mode == "Bulk CSV Upload":
-            st.write("Upload a CSV to process multiple re-assignments at once.")
-            st.caption("Required Columns: `NodeNum`, `PhysicalID`, `Project`, `Location`, `Bank`, `Depth`")
-            u_file = st.file_uploader("Upload Node CSV", type="csv")
-            
-            if u_file:
-                new_df = pd.read_csv(u_file)
-                # Check for existing active assignments
-                active_nodes = full_reg_df[full_reg_df['End_Date'].isna()]['NodeNum'].tolist()
-                conflicts = new_df[new_df['NodeNum'].isin(active_nodes)]
-                
-                if not conflicts.empty:
-                    st.warning(f"⚠️ {len(conflicts)} nodes in your CSV are currently assigned to other locations.")
-                    st.write("Confirming upload will automatically set an **End_Date** on these existing assignments.")
-                    st.dataframe(conflicts, hide_index=True)
-                
-                if st.button("🚀 Execute Bulk Re-assignment", use_container_width=True):
-                    today = datetime.now().strftime('%Y-%m-%d')
-                    with st.spinner("Processing batch transactions..."):
-                        for _, r in new_df.iterrows():
-                            # 1. Retire existing
-                            retire_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET End_Date='{today}' WHERE NodeNum='{r['NodeNum']}' AND End_Date IS NULL"
-                            client.query(retire_sql).result()
-                            # 2. Insert new
-                            ins_sql = f"""
-                                INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                                (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                                VALUES ('{r['NodeNum']}', {r['PhysicalID']}, '{r['Project']}', '{r['Location']}', '{r['Bank']}', {r['Depth']}, '{today}', 'Active')
-                            """
-                            client.query(ins_sql).result()
-                    st.success("Bulk update successful.")
-                    st.cache_data.clear()
-
-        # C. GLOBAL STATUS AUDIT
-        elif reg_mode == "Global Status Audit":
-            st.subheader("📊 Global Hardware Inventory")
-            f1, f2, f3 = st.columns(3)
-            
-            status_opts = sorted(full_reg_df['SensorStatus'].unique().tolist())
-            sel_status = f1.multiselect("Filter by Status", status_opts, default=["Active", "Diagnostic"])
-            
-            active_only = f2.checkbox("Hide Retired Assignments", value=True)
-            proj_search = f3.text_input("Filter by Project Name")
-
-            view_df = full_reg_df.copy()
-            if sel_status: view_df = view_df[view_df['SensorStatus'].isin(sel_status)]
-            if active_only: view_df = view_df[view_df['End_Date'].isna()]
-            if proj_search: view_df = view_df[view_df['Project'].str.contains(proj_search, case=False, na=False)]
-
-            st.dataframe(
-                view_df.sort_values(['Project', 'Location', 'Depth']), 
-                use_container_width=True, hide_index=True
-            )
 
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
         st.subheader("✅ Range-Based Bulk Approval")
-        st.write(f"Mass-approving telemetry for project: **{selected_project}**.")
+        st.write(f"Mass-approving telemetry for: **{selected_project}**")
         
-        loc_options = ["All Locations"] + sorted([str(l) for l in active_project_df['Location'].unique() if pd.notnull(l)])
-        sel_loc = st.selectbox("Target Location/Bank", loc_options, key="bulk_loc_admin")
+        active_locs = sorted(full_reg_df[full_reg_df['Project'] == selected_project]['Location'].unique())
+        sel_loc = st.selectbox("Target Location", ["All Locations"] + active_locs, key="admin_bulk_loc")
         
         c1, c2 = st.columns(2)
         b_s = c1.date_input("Start Date", value=datetime.now() - timedelta(days=7))
         b_e = c2.date_input("End Date", value=datetime.now())
         
         if st.button("🚀 Execute Bulk Approval", use_container_width=True):
-            loc_filter = f"AND n.Location = '{sel_loc}'" if sel_loc != "All Locations" else ""
+            loc_f = f"AND n.Location = '{sel_loc}'" if sel_loc != "All Locations" else ""
             sql = f"""
                 INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
                 SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
@@ -1362,7 +1251,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
                 ) AS r
                 INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
-                WHERE n.Project = '{selected_project}' {loc_filter} 
+                WHERE n.Project = '{selected_project}' {loc_f} 
                 AND r.timestamp BETWEEN '{b_s}' AND '{b_e}'
                 AND NOT EXISTS (
                     SELECT 1 FROM `{OVERRIDE_TABLE}` x 
@@ -1370,70 +1259,141 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 )
             """
             client.query(sql).result()
-            st.success(f"Records approved for {sel_loc}. Data will now appear in Client Portal.")
+            st.success("Batch approval processed.")
             st.cache_data.clear()
+
+    # --- TAB 2: NODE LOGISTICS (The "Smart" Registry) ---
+    with tab_logistics:
+        sub_mode = st.radio("Logistics Mode", ["Single Node Search", "Bulk CSV Upload", "Status Audit"], horizontal=True)
+
+        if sub_mode == "Single Node Search":
+            search_id = st.text_input("🔍 Search Node ID (NodeNum or PhysicalID)")
+            if search_id:
+                # Find current active assignment
+                match = full_reg_df[((full_reg_df['NodeNum'] == search_id) | 
+                                     (full_reg_df['PhysicalID'].astype(str) == search_id)) & 
+                                    (full_reg_df['End_Date'].isna())]
+                
+                if not match.empty:
+                    row = match.iloc[0]
+                    st.info(f"Active Assignment: {row['Project']} -> {row['Location']} ({row['SensorStatus']})")
+                    
+                    with st.form("node_edit_form"):
+                        c1, c2 = st.columns(2)
+                        u_proj = c1.text_input("Project", value=row['Project'])
+                        u_loc = c2.text_input("Location", value=row['Location'])
+                        u_bank = c1.text_input("Bank", value=row['Bank'])
+                        u_depth = c2.number_input("Depth", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
+                        u_stat = st.selectbox("Status", ["Active", "Diagnostic", "Available", "Need Repair", "Dead"], index=0)
+                        
+                        op_type = st.radio("Update Strategy", 
+                            ["Correction (Fix typo/swap)", "Re-assignment (Move to new location)"],
+                            help="Correction overwrites this record. Re-assignment ends this record and starts a new one.")
+
+                        if st.form_submit_button("💾 Commit Changes"):
+                            today = datetime.now().strftime('%Y-%m-%d')
+                            if "Correction" in op_type:
+                                sql = f"""UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                          SET Project='{u_proj}', Location='{u_loc}', Bank='{u_bank}', Depth={u_depth}, SensorStatus='{u_stat}'
+                                          WHERE NodeNum='{row['NodeNum']}' AND Project='{row['Project']}' AND End_Date IS NULL"""
+                            else:
+                                sql = f"""
+                                    BEGIN TRANSACTION;
+                                    UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET End_Date='{today}' 
+                                    WHERE NodeNum='{row['NodeNum']}' AND Project='{row['Project']}' AND End_Date IS NULL;
+                                    INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                    (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                                    VALUES ('{row['NodeNum']}', {row['PhysicalID']}, '{u_proj}', '{u_loc}', '{u_bank}', {u_depth}, '{today}', '{u_stat}');
+                                    COMMIT;"""
+                            client.query(sql).result()
+                            st.success("Update Successful.")
+                            st.cache_data.clear()
+                            st.rerun()
+                else:
+                    st.warning("No active record found for this ID.")
+
+        elif sub_mode == "Bulk CSV Upload":
+            st.markdown("### 📥 Bulk Re-assignment")
+            st.caption("Upload CSV with: `NodeNum`, `PhysicalID`, `Project`, `Location`, `Bank`, `Depth`")
+            u_csv = st.file_uploader("Upload Node List", type="csv")
+            if u_csv:
+                upload_df = pd.read_csv(u_csv)
+                active_nodes = full_reg_df[full_reg_df['End_Date'].isna()]['NodeNum'].unique()
+                conflicts = upload_df[upload_df['NodeNum'].isin(active_nodes)]
+                
+                if not conflicts.empty:
+                    st.warning(f"⚠️ {len(conflicts)} nodes in CSV are currently In-Use. Uploading will set an End Date on existing assignments.")
+                    st.dataframe(conflicts, hide_index=True)
+                
+                if st.button("🚀 Process Bulk Re-assignment"):
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    for _, r in upload_df.iterrows():
+                        retire_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET End_Date='{today}' WHERE NodeNum='{r['NodeNum']}' AND End_Date IS NULL"
+                        client.query(retire_sql).result()
+                        ins_sql = f"""INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                      (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                                      VALUES ('{r['NodeNum']}', {r['PhysicalID']}, '{r['Project']}', '{r['Location']}', '{r['Bank']}', {r['Depth']}, '{today}', 'Active')"""
+                        client.query(ins_sql).result()
+                    st.success("Bulk update complete.")
+                    st.cache_data.clear()
+
+        elif sub_mode == "Status Audit":
+            st.subheader("🔍 Hardware Inventory Audit")
+            f1, f2 = st.columns(2)
+            sel_s = f1.multiselect("Status Filter", full_reg_df['SensorStatus'].unique(), default=["Active", "Diagnostic"])
+            active_only = f2.checkbox("Show Only Active Assignments", value=True)
+            
+            view_df = full_reg_df.copy()
+            if sel_s: view_df = view_df[view_df['SensorStatus'].isin(sel_s)]
+            if active_only: view_df = view_df[view_df['End_Date'].isna()]
+            
+            st.dataframe(view_df.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
 
     # --- TAB 3: PROJECT MASTER ---
     with tab_project:
         st.subheader("⚙️ Project Lifecycle")
-        action = st.radio("Action", ["Overview", "New Project", "Update Existing"], horizontal=True)
-        proj_reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`").to_dataframe()
-    
-        if action == "Overview":
+        p_act = st.radio("Project Action", ["Overview", "Add New", "Edit Details"], horizontal=True)
+        
+        if p_act == "Overview":
             st.dataframe(proj_reg_df.sort_values('Date_Initialized', ascending=False), use_container_width=True, hide_index=True)
-
-        elif action == "New Project":
-            with st.form("new_proj_form"):
+        
+        elif p_act == "Add New":
+            with st.form("new_p_form"):
                 c1, c2 = st.columns(2)
-                n_id = c1.text_input("Project ID (Unique)")
-                n_name = c2.text_input("Project Name")
-                n_city = c1.text_input("City")
-                n_tz = c2.selectbox("Site Timezone", ["US/Pacific", "US/Eastern", "UTC"])
+                p_id = c1.text_input("Project ID")
+                p_name = c2.text_input("Display Name")
+                p_tz = st.selectbox("Timezone", ["US/Pacific", "US/Eastern", "UTC"])
                 if st.form_submit_button("🚀 Create Project"):
-                    sql = f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, ProjectName, City, Timezone, ProjectStatus, Date_Initialized) VALUES ('{n_id}', '{n_name}', '{n_city}', '{n_tz}', 'Initialized', CURRENT_DATE())"
+                    sql = f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, ProjectName, Timezone, ProjectStatus, Date_Initialized) VALUES ('{p_id}', '{p_name}', '{p_tz}', 'Initialized', CURRENT_DATE())"
                     client.query(sql).result()
-                    st.success(f"Project '{n_id}' initialized.")
+                    st.success(f"Project {p_id} initialized.")
                     st.cache_data.clear()
-                    st.rerun()
-    
-        elif action == "Update Existing" and not proj_reg_df.empty:
-            target = st.selectbox("Select Project to Edit", sorted(proj_reg_df['Project'].unique()))
-            p_data = proj_reg_df[proj_reg_df['Project'] == target].iloc[0]
-            with st.form("edit_proj_form"):
-                u_status = st.selectbox("Status", ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"], 
-                                      index=["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"].index(p_data['ProjectStatus']))
-                u_eng = st.text_area("Engineering Notes", value=p_data.get('EngNotes', ''))
-                u_dis = st.text_area("Client Disclaimer", value=p_data.get('ClientDisclaimer', ''))
-                
-                if st.form_submit_button("💾 Save Project Settings"):
-                    # Trigger Freeze Date if moving to Freezedown for the first time
-                    date_sql = ""
-                    if u_status == "Freezedown" and pd.isnull(p_data.get('Date_Freezedown')):
-                        date_sql = ", Date_Freezedown = CURRENT_DATE()"
-                    
-                    sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus='{u_status}', EngNotes='{u_eng}', ClientDisclaimer='{u_dis}' {date_sql} WHERE Project='{target}'"
-                    client.query(sql).result()
-                    st.success("Project updated successfully.")
-                    st.cache_data.clear()
-                    st.rerun()
 
-    # --- TAB 4: DATA SCRUB ---
+        elif p_act == "Edit Details":
+            target = st.selectbox("Select Project", sorted(proj_reg_df['Project'].unique()))
+            p_data = proj_reg_df[proj_reg_df['Project'] == target].iloc[0]
+            with st.form("edit_p_form"):
+                u_status = st.selectbox("Stage", ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"], 
+                                      index=["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"].index(p_data['ProjectStatus']))
+                u_notes = st.text_area("Site Notes", value=p_data.get('EngNotes', ''))
+                if st.form_submit_button("💾 Save Settings"):
+                    freeze_sql = ", Date_Freezedown = CURRENT_DATE()" if u_status == "Freezedown" and pd.isnull(p_data.get('Date_Freezedown')) else ""
+                    sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus='{u_status}', EngNotes='{u_notes}' {freeze_sql} WHERE Project='{target}'"
+                    client.query(sql).result()
+                    st.success("Project updated.")
+                    st.cache_data.clear()
+
+    # --- TAB 4: MAINT & TAB 5: SURGICAL (Referencing existing external functions) ---
     with tab_scrub:
         st.subheader("🧹 Database Maintenance")
-        st.warning("This tool aggregates raw data into hourly averages to keep the system fast.")
-        target_tbl = st.radio("Target Source", ["SensorPush", "Lord"], horizontal=True)
+        src = st.radio("Table", ["SensorPush", "Lord"], horizontal=True)
         if st.button("🧨 Run Hourly Compression"):
-            table_path = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_tbl.lower()}"
-            sql = f"""
-                CREATE OR REPLACE TABLE `{table_path}` AS 
-                SELECT TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, NodeNum, AVG(temperature) as temperature 
-                FROM `{table_path}` GROUP BY 1, 2
-            """
+            path = f"{PROJECT_ID}.{DATASET_ID}.raw_{src.lower()}"
+            sql = f"CREATE OR REPLACE TABLE `{path}` AS SELECT TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, NodeNum, AVG(temperature) as temperature FROM `{path}` GROUP BY 1, 2"
             client.query(sql).result()
-            st.success(f"Compressed {target_tbl} table to hourly averages.")
+            st.success("Cleanup Complete.")
             st.cache_data.clear()
 
-    # --- TAB 5: SURGICAL CLEANER ---
     with tab_surgical:
         render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
 
