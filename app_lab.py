@@ -1779,10 +1779,10 @@ def get_trend_arrow(current, previous):
 client = get_bq_client() 
 
 # 2. Match the variable name to your sidebar (Using 'service' here)
-if page == "🌐 Time vs Temp":
+if page == "Time vs Temp":
     render_global_overview(selected_project, display_tz) 
 
-elif page == "🏠 Sensor Status":
+elif page == "Sensor Status":
     if client is not None:
         # Using the NEW function name we created
         render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
