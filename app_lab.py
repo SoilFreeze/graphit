@@ -22,9 +22,6 @@ DATASET_ID = "Temperature"
 PROJECT_ID = "sensorpush-export"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
-# NOTE: PROJECT_VISIBILITY_MASKS has been removed. 
-# Visibility is now handled dynamically via 'Date_Freezedown' in the project_registry.
-
 @st.cache_resource
 def get_bq_client():
     """
@@ -99,8 +96,8 @@ st.sidebar.title("❄️ SoilFreeze Lab")
 page = st.sidebar.selectbox(
     "Navigation", 
     [
-        "Summary",             # Previously: Landing Page
-        "Time vs Temp",        # Previously: Global Overview
+        "Summary",             
+        "Time vs Temp",        
         "Sensor Status",       
         "Depth Charts", 
         "Node Diagnostics", 
@@ -116,7 +113,6 @@ st.sidebar.divider()
 selected_project = "All Projects"
 project_metadata = None  
 
-# FIX: Fetch the client locally since the global 'client' is gone
 sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
@@ -132,7 +128,7 @@ if sidebar_client is not None:
             key="sidebar_proj_picker_global"
         )
         
-        # --- CRITICAL FIX: SYNC TO SESSION STATE ---
+
         st.session_state['selected_project'] = selected_project
         
         if selected_project != "All Projects":
