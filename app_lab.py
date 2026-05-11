@@ -1128,9 +1128,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             
             # Dynamic Location Filter
             if p_filter != "All":
-                available_locs = sorted(full_reg_df[full_reg_df['Project'] == p_filter]['Location'].unique().tolist())
+                raw_locs = full_reg_df[full_reg_df['Project'] == p_filter]['Location'].unique().tolist()
+                # Filter out None/NaN and convert everything to string to be safe
+                available_locs = sorted([str(l) for l in raw_locs if pd.notnull(l)])
             else:
-                available_locs = sorted(full_reg_df['Location'].unique().tolist())
+                # --- UPDATE 2: Inside the "else" block ---
+                raw_locs = full_reg_df['Location'].unique().tolist()
+                # Filter out None/NaN and convert everything to string to be safe
+                available_locs = sorted([str(l) for l in raw_locs if pd.notnull(l)])
             
             l_filter = f2.selectbox("Filter by Location", ["All"] + available_locs, key="reg_l_filter")
             
