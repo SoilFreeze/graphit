@@ -1052,7 +1052,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     if client is None: return
 
     # 1. GLOBAL REGISTRY FETCH
-    # Joins hardware nodes with project-level metadata
     reg_q = f"""
         SELECT 
             n.*, 
@@ -1075,14 +1074,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     
     loc_options = ["All Locations"] + sorted([str(l) for l in active_project_df['Location'].unique() if pd.notnull(l)]) if not active_project_df.empty else ["All Locations"]
 
-    # --- 2. ADMIN NAVIGATION ---
-    tab_bulk, tab_registry, tab_project, tab_scrub, tab_surgical, tab_audit = st.tabs([
+    # --- 2. ADMIN NAVIGATION (Audit Tab Removed) ---
+    tab_bulk, tab_registry, tab_project, tab_scrub, tab_surgical = st.tabs([
         "✅ Bulk Approval", 
         "📋 Node Registry", 
         "⚙️ Project Master", 
         "🧹 Scrub", 
-        "🧨 Surgical", 
-        "🕒 Audit"
+        "🧨 Surgical"
     ])
 
     # --- TAB 1: BULK APPROVAL ---
@@ -1116,31 +1114,57 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.success(f"Successfully approved records for {sel_loc}.")
             st.cache_data.clear()
 
-    # --- TAB 2: NODE REGISTRY ---
+    # --- TAB 2: NODE REGISTRY (Hardware Assignment with Location Filter) ---
     with tab_registry:
         st.subheader("📋 Hardware Assignment Manager")
-        # Filters to help find specific sensors in a large fleet
-        with st.expander("🔍 Filter Hardware View", expanded=False):
-            f1, f2 = st.columns(2)
-            raw_projs = full_reg_df['Project'].unique().tolist() if not full_reg_df.empty else []
-            p_filter = f1.selectbox("View Project", ["All"] + sorted([str(p) for p in raw_projs if pd.notnull(p)]), key="reg_filter_proj")
-            raw_stats = full_reg_df['SensorStatus'].unique().tolist() if not full_reg_df.empty else []
-            s_filter = f2.selectbox("View Health Status", ["All"] + sorted([str(s) for s in raw_stats if pd.notnull(s)]), key="reg_filter_status")
+        
+        with st.expander("🔍 Filter Hardware View", expanded=True):
+            f1, f2, f3 = st.columns(3)
             
-            view_df = full_reg_df.copy()
-            if p_filter != "All": view_df = view_df[view_df['Project'] == p_filter]
-            if s_filter != "All": view_df = view_df[view_df['SensorStatus'] == s_filter]
+            # Project Filter
+            raw_projs = full_reg_df['Project'].unique().tolist() if not full_reg_df.empty else []
+            clean_projs = sorted([str(p) for p in raw_projs if pd.notnull(p)])
+            p_filter = f1.selectbox("Filter by Project", ["All"] + clean_projs, key="reg_p_filter")
+            
+            # Dynamic Location Filter
+            if p_filter != "All":
+                available_locs = sorted(full_reg_df[full_reg_df['Project'] == p_filter]['Location'].unique().tolist())
+            else:
+                available_locs = sorted(full_reg_df['Location'].unique().tolist())
+            
+            l_filter = f2.selectbox("Filter by Location", ["All"] + available_locs, key="reg_l_filter")
+            
+            # Health Status Filter
+            raw_stats = full_reg_df['SensorStatus'].unique().tolist() if not full_reg_df.empty else []
+            s_filter = f3.selectbox("Filter by Status", ["All"] + sorted([str(s) for s in raw_stats if pd.notnull(s)]), key="reg_s_filter")
+
+        # Apply Filters to the view
+        view_df = full_reg_df.copy()
+        if p_filter != "All": view_df = view_df[view_df['Project'] == p_filter]
+        if l_filter != "All": view_df = view_df[view_df['Location'] == l_filter]
+        if s_filter != "All": view_df = view_df[view_df['SensorStatus'] == s_filter]
 
         node_cols = ['NodeNum', 'Project', 'Location', 'Bank', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']
-        # The Data Editor allows for inline changes to the BigQuery table
+        
         edited_df = st.data_editor(
-            view_df[node_cols].sort_values(['Project', 'Location']), 
+            view_df[node_cols].sort_values(['Project', 'Location', 'Depth']), 
             num_rows="dynamic", key="node_registry_editor_master", use_container_width=True
         )
         
         if st.button("💾 Sync Registry Changes", type="primary", use_container_width=True):
+            # Safe Merge: update only the visible rows in the master set
+            final_df = full_reg_df.copy()
+            final_df.set_index('NodeNum', inplace=True)
+            edited_df.set_index('NodeNum', inplace=True)
+            
+            final_df.update(edited_df)
+            final_df.reset_index(inplace=True)
+            
+            # Ensure final output matches expected schema
+            final_df = final_df[node_cols]
+
             job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-            client.load_table_from_dataframe(edited_df, f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
+            client.load_table_from_dataframe(final_df, f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
             st.success("Node Registry synchronized with BigQuery.")
             st.cache_data.clear()
             st.rerun()
@@ -1178,7 +1202,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 u_disclaim = st.text_area("Client Disclaimer", value=p_data.get('ClientDisclaimer', ''))
                 
                 if st.form_submit_button("💾 Save Settings"):
-                    # Dynamic visibility logic: stamp the date if moving to a new phase
                     date_update = ""
                     if u_status == "Freezedown" and pd.isnull(p_data.get('Date_Freezedown')):
                         date_update = f", Date_Freezedown='{datetime.now().strftime('%Y-%m-%d')}'"
@@ -1195,7 +1218,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         target = st.radio("Target Table", ["SensorPush", "Lord"], horizontal=True)
         if st.button("🧨 Execute Hourly Averaging"):
             t_tab = f"{PROJECT_ID}.{DATASET_ID}.raw_{target.lower()}"
-            # This query collapses high-frequency data into clean hourly buckets
             sql = f"""
                 CREATE OR REPLACE TABLE `{t_tab}` AS 
                 SELECT TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, NodeNum, AVG(temperature) as temperature 
@@ -1208,14 +1230,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # --- TAB 5: SURGICAL ---
     with tab_surgical:
-        # Assumes render_surgical_cleaner is defined elsewhere in your utils
         render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
-
-    # --- TAB 6: AUDIT ---
-    with tab_audit:
-        st.subheader("🕒 Full Registry Audit")
-        st.dataframe(full_reg_df.sort_values('Start_Date', ascending=False), use_container_width=True)
-
 ###########
 # - 11. SURGICAL CLEANER FUNCTIONS - #
 ###########
