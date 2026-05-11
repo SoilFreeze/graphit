@@ -1155,35 +1155,37 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             # 1. Fetch the FULL current table
             full_table_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
             
-            # --- FIX: ALIGN DTYPES ---
-            # Streamlit's editor often turns numeric/date columns into objects.
-            # We must force edited_df to match full_table_df types.
+            # --- FIX: THE THREE-COLUMN KEY ---
+            # This allows the same Node to exist in different projects OR different locations
+            # because the 'Key' is now the combination of all three.
+            composite_key = ['NodeNum', 'Project', 'Location']
+            
+            # 2. Deduplicate the edits based on the composite key
+            edited_df = edited_df.drop_duplicates(subset=composite_key, keep='last')
+            
+            # 3. Align Dtypes
             for col in node_cols:
                 if col in full_table_df.columns and col in edited_df.columns:
                     if pd.api.types.is_datetime64_any_dtype(full_table_df[col]):
                         edited_df[col] = pd.to_datetime(edited_df[col], errors='coerce')
                     elif pd.api.types.is_numeric_dtype(full_table_df[col]):
                         edited_df[col] = pd.to_numeric(edited_df[col], errors='coerce')
-                    else:
-                        edited_df[col] = edited_df[col].astype(str).replace('nan', None).replace('None', None)
 
-            # 2. Set index for merging
-            full_table_df.set_index('NodeNum', inplace=True)
-            edited_df.set_index('NodeNum', inplace=True)
+            # 4. Set the Composite Index
+            full_table_df.set_index(composite_key, inplace=True)
+            edited_df.set_index(composite_key, inplace=True)
             
-            # 3. Update (This will now succeed because types match)
+            # 5. Update matches and Append new assignments
             full_table_df.update(edited_df)
-            
-            # 4. Handle any brand new sensors added to the bottom of the list
-            new_nodes = edited_df[~edited_df.index.isin(full_table_df.index)]
-            final_df = pd.concat([full_table_df, new_nodes]).reset_index()
+            new_assignments = edited_df[~edited_df.index.isin(full_table_df.index)]
+            final_df = pd.concat([full_table_df, new_assignments]).reset_index()
 
-            # 5. Save back to BQ
-            with st.spinner("Processing data types and syncing safely..."):
+            # 6. Save back to BigQuery
+            with st.spinner("Syncing multi-mapped assignments..."):
                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
                 client.load_table_from_dataframe(final_df[node_cols], f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
                 
-                st.success("Registry updated! Dtypes aligned and all projects preserved.")
+                st.success("Registry Synced! Node/Project/Location combinations are now unique.")
                 st.cache_data.clear()
                 st.rerun()
     # --- TAB 3: PROJECT MASTER ---
