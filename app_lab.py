@@ -458,11 +458,12 @@ def render_executive_summary(client, selected_project, unit_label, unit_mode, di
     """
     
     # --- 1. PROJECT METADATA & TITLE SECTION ---
-    # We fetch this first so the title appears even if the data query is heavy.
+    # BACKWARDS COMPATIBLE: Pulling from metadata_snapshot instead of project_registry
     meta_query = f"""
-        SELECT ProjectName, Date_Freezedown 
-        FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+        SELECT DISTINCT ProjectName, Date_Freezedown 
+        FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot` 
         WHERE Project = '{selected_project}'
+        LIMIT 1
     """
     
     try:
@@ -483,10 +484,11 @@ def render_executive_summary(client, selected_project, unit_label, unit_mode, di
                 st.markdown(f"## 🗓️ Day **{max(0, days_since)}** of Freezedown")
                 st.caption(f"Project initialized on {freeze_start.strftime('%B %d, %Y')}")
             else:
-                st.warning("⚠️ Freeze start date (Date_Freezedown) not set in Project Registry.")
+                st.warning("⚠️ Freeze start date (Date_Freezedown) not set in Metadata Snapshot.")
         else:
-            st.error(f"Project ID '{selected_project}' not found in Registry. Please check Sidebar mapping.")
-            return
+            # Fallback if the Project ID exists in telemetry but not the snapshot yet
+            st.title(f"🏠 {selected_project}")
+            st.info("ℹ️ Project details not found in Metadata Snapshot.")
 
     except Exception as e:
         st.error(f"Metadata Error: {e}")
