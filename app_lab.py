@@ -1245,33 +1245,38 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.divider()
                     
                     # --- FORM: EDIT / RE-ASSIGN ---
-                    with st.form("surgical_node_edit_form"):
+                    with st.form("surgical_node_edit_form_v2"):
                         st.subheader("📝 Edit Assignment")
                         c1, c2 = st.columns(2)
-                        u_proj = c1.text_input("Project", value=row['Project'])
-                        u_loc = c2.text_input("Location", value=row['Location'])
-                        u_bank = c1.text_input("Bank", value=row['Bank'])
+                        u_proj = c1.text_input("Project", value=str(row['Project']))
+                        u_loc = c2.text_input("Location", value=str(row['Location']))
+                        u_bank = c1.text_input("Bank", value=str(row['Bank']) if pd.notnull(row['Bank']) else "")
                         u_depth = c2.number_input("Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
                         
                         d1, d2 = st.columns(2)
-                        u_start = d1.date_input("Start Date", value=pd.to_datetime(row['Start_Date']))
                         
-                        is_retired = pd.notnull(row['End_Date'])
-                        u_end = d2.date_input("End Date", value=pd.to_datetime(row['End_Date']) if is_retired else datetime.now())
+                        # FIX: Handle NaT/Null dates to prevent ValueError
+                        raw_start = pd.to_datetime(row['Start_Date'])
+                        default_start = raw_start.date() if pd.notnull(raw_start) else datetime.now().date()
+                        u_start = d1.date_input("Start Date", value=default_start)
+                        
+                        raw_end = pd.to_datetime(row['End_Date'])
+                        is_retired = pd.notnull(raw_end)
+                        default_end = raw_end.date() if is_retired else datetime.now().date()
+                        u_end = d2.date_input("End Date", value=default_end)
                         apply_end = d2.checkbox("Apply/Active End Date", value=is_retired)
 
                         # FIX: Safe Status Indexing
                         status_list = ["Active", "Diagnostic", "Available", "Need Repair", "Dead"]
                         current_stat = str(row['SensorStatus']).strip()
                         default_idx = status_list.index(current_stat) if current_stat in status_list else 0
-                        
                         u_stat = st.selectbox("Status", status_list, index=default_idx)
                         
                         op_type = st.radio("Update Strategy", 
                             ["Correction (Overwrite this record)", "Re-assignment (Retire this, start new)"],
                             help="Correction: Use to fix typos. Re-assignment: Use when moving physical hardware.")
 
-                        # FIX: This button MUST be inside the 'with st.form' block
+                        # FIX: Button is now inside the form block
                         submit_save = st.form_submit_button("💾 Save Registry Update", use_container_width=True)
 
                     if submit_save:
@@ -1345,7 +1350,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         elif reg_mode == "Global Status Audit":
             st.subheader("📊 Hardware Inventory")
             f1, f2 = st.columns(2)
-            sel_stats = f1.multiselect("Filter Status", full_reg_df['SensorStatus'].unique(), default=["Active", "Diagnostic"])
+            sel_stats = f1.multiselect("Filter Status", full_reg_df['SensorStatus'].unique().tolist(), default=["Active", "Diagnostic"])
             active_only = f2.checkbox("Show Only Active Assignments", value=True)
             
             view_df = full_reg_df.copy()
@@ -1357,7 +1362,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
         st.subheader("✅ Range-Based Bulk Approval")
-        # Ensure selected_project is used for current project context
         active_locs = sorted(full_reg_df[full_reg_df['Project'] == selected_project]['Location'].unique())
         sel_loc = st.selectbox("Target Location", ["All Locations"] + active_locs)
         c1, c2 = st.columns(2)
@@ -1393,7 +1397,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         if action == "Overview":
             st.dataframe(proj_reg_df.sort_values('Date_Initialized', ascending=False), use_container_width=True, hide_index=True)
         elif action == "New Project":
-            with st.form("new_p_form_final"):
+            with st.form("new_p_form_final_v2"):
                 c1, c2 = st.columns(2)
                 n_id = c1.text_input("Project ID")
                 n_name = c2.text_input("Project Name")
@@ -1406,7 +1410,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         elif action == "Update Existing":
             target = st.selectbox("Select Project to Edit", sorted(proj_reg_df['Project'].unique()))
             p_data = proj_reg_df[proj_reg_df['Project'] == target].iloc[0]
-            with st.form("edit_p_form_final"):
+            with st.form("edit_p_form_final_v2"):
                 u_status = st.selectbox("Status", ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"], 
                                       index=["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"].index(p_data['ProjectStatus']))
                 u_eng = st.text_area("Engineering Notes", value=p_data.get('EngNotes', ''))
