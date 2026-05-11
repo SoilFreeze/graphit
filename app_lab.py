@@ -344,24 +344,44 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
+    Now includes Dynamic Freezedown Day Tracking.
     """
-    
-    # 1. Safe Metadata Extraction
+    # 1. ENHANCED TITLE & FREEZEDOWN TRACKER
+    # Safely extract Project Name and Status
+    p_name = selected_project
     stage_suffix = ""
+    f_date_raw = None
+
     if project_metadata is not None:
         try:
             if isinstance(project_metadata, pd.DataFrame) and not project_metadata.empty:
                 status = project_metadata['ProjectStatus'].iloc[0]
+                p_name = project_metadata['ProjectName'].iloc[0]
+                f_date_raw = project_metadata['Date_Freezedown'].iloc[0]
             else:
                 status = project_metadata.get('ProjectStatus', '')
+                p_name = project_metadata.get('ProjectName', selected_project)
+                f_date_raw = project_metadata.get('Date_Freezedown')
+            
             if status:
                 stage_suffix = f" [{status}]"
         except (KeyError, IndexError):
-            stage_suffix = ""
+            pass
 
-    st.header(f"📈 Time vs Temp {stage_suffix}")
+    st.header(f"📈 Time vs Temp: {p_name}{stage_suffix}")
     
-    # UI State Management
+    # NEW: Display Day Count for the selected project
+    if pd.notnull(f_date_raw):
+        f_start = pd.to_datetime(f_date_raw).date()
+        today = pd.Timestamp.now(tz=display_tz).date()
+        days_since = (today - f_start).days
+        
+        st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
+        st.caption(f"Freezedown began: {f_start.strftime('%B %d, %Y')}")
+    else:
+        st.caption("ℹ️ Freeze start date not set for this project.")
+
+    # 2. UI STATE MANAGEMENT
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
     active_refs = st.session_state.get("active_refs", [])
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
@@ -371,15 +391,13 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         st.info("💡 Please select a specific project in the sidebar to begin.")
         return
 
-    # 2. Data Fetching
-    with st.spinner(f"Syncing {selected_project} (Engineering View)..."):
-        # FIX: Removed 'client' argument to prevent hashing errors
+    # 3. DATA FETCHING
+    with st.spinner(f"Syncing {p_name} (Engineering View)..."):
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if not p_df.empty:
-        # --- NEW: FRESHNESS CHECK ---
+        # --- FRESHNESS CHECK ---
         last_reading = p_df['timestamp'].max()
-        # Ensure timestamp is offset-aware for comparison
         if last_reading.tzinfo is None:
             last_reading = last_reading.tz_localize('UTC')
         
@@ -387,27 +405,24 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         hours_since_data = (now_utc - last_reading).total_seconds() / 3600
         
         if hours_since_data > 24:
-            st.error(f"⚠️ **Stale Data Warning:** No new data has been received for this project in the last {int(hours_since_data)} hours.")
-            st.info("This is common for Lord nodes that only upload on business mornings.")
+            st.error(f"⚠️ **Stale Data Warning:** No new data received in {int(hours_since_data)} hours.")
+            st.info("Typical for Lord nodes that upload on business-hour schedules.")
 
-        # --- Inside render_global_overview ---
-
-        # 3. View Constraints
-        # Added '0' as an option for "Full History"
+        # 4. VIEW CONSTRAINTS (TIMELINE)
         lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider", help="Select 0 for Full History")
         
         now_local = pd.Timestamp.now(tz=display_tz)
+        # End view snaps to the end of the current week (Sunday midnight)
         end_view = (now_local + pd.Timedelta(days=(7-now_local.weekday())%7 or 7)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
         
         if lookback == 0:
-            # Set start_view to the beginning of the dataframe for baselines
             start_view = p_df['timestamp'].min()
         else:
             start_view = end_view - timedelta(weeks=lookback)
 
-        # 4. Render Graphs by Location
+        # 5. RENDER GRAPHS BY LOCATION
         locations = sorted(p_df['Location'].dropna().unique())
         
         for loc in locations:
@@ -416,7 +431,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 
                 fig = build_high_speed_graph(
                     df=loc_df, 
-                    title=f"Project: {selected_project} | Location: {loc}", 
+                    title=f"Project: {p_name} | Location: {loc}", 
                     start_view=start_view, 
                     end_view=end_view, 
                     active_refs=tuple(active_refs), 
@@ -428,7 +443,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 
                 st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
     else:
-        st.warning(f"No engineering data found for '{selected_project}' in the registry.")
+        st.warning(f"No engineering data found for '{p_name}' in the registry.")
         st.info("Check **Admin Tools > Node Registry** to ensure sensors are mapped to this project and location.")
         
 ###########
