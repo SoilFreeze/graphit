@@ -493,12 +493,10 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Updated: May 11, 2026
-    Now exclusively uses project_registry data via session state.
+    Restored: Complete detailed sensor breakdown table with registry-only metadata.
     """
     
-    # --- 1. SOURCE OF TRUTH: REGISTRY METADATA ---
-    # We pull from the session state populated by the sidebar in Section 3
+    # --- 1. HEADER LOGIC (Source: Project Registry via Sidebar) ---
     p_meta = st.session_state.get('project_metadata')
     
     if not p_meta or selected_project == "All Projects":
@@ -511,24 +509,22 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
     st.title(f"❄️ {p_name}")
     
-    # Calculate Day Count from Registry Date
+    # Day Count Calculation
     if pd.notnull(f_date):
         try:
             freeze_start = pd.to_datetime(f_date).date()
             today = pd.Timestamp.now(tz=display_tz).date()
             days_since = (today - freeze_start).days
-            
             st.markdown(f"## 🗓️ Day **{max(0, days_since)}** of Freezedown")
-            st.caption(f"Project Status: {p_status} | Freezedown Start: {freeze_start.strftime('%B %d, %Y')}")
+            st.caption(f"Status: {p_status} | Freeze Start: {freeze_start.strftime('%B %d, %Y')}")
         except Exception:
-            st.caption(f"Status: {p_status} (Freeze date format pending)")
+            st.caption(f"Status: {p_status}")
     else:
-        st.info(f"ℹ️ Status: {p_status}. Freeze start date not yet set in Registry.")
+        st.info(f"ℹ️ Status: {p_status}. Freeze start date not yet initialized.")
 
     st.divider()
 
     # --- 2. SENSOR HEALTH & TELEMETRY QUERY ---
-    # We still query the master_data_view for real-time sensor pings
     query = f"""
         WITH BaseReporting AS (
             SELECT 
@@ -572,7 +568,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             st.warning("No sensor telemetry found. Verify registry assignments.")
             return
 
-        # --- 3. KPI CALCULATIONS ---
+        # --- 3. KPI DASHBOARD ---
         now_local = pd.Timestamp.now(tz=display_tz)
         
         def get_safe_lag(ts_val):
@@ -582,25 +578,64 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         raw_df['current_lag'] = raw_df['last_ping'].apply(get_safe_lag)
         max_lag = raw_df['current_lag'].max()
-        worst_node = raw_df.loc[raw_df['current_lag'].idxmax(), 'NodeNum']
 
         k1, k2, k3 = st.columns(3)
         k1.metric("Active Sensors", len(raw_df))
-        k2.metric("Max System Lag", f"{max_lag:.1f}h", help=f"Longest silence: {worst_node}")
+        k2.metric("Max System Lag", f"{max_lag:.1f}h")
         k3.metric("Project Health", "Optimal" if max_lag < 6 else "Review Required")
 
-        # --- 4. DATA TABLES ---
-        # Helper for trend arrows
-        def get_arrow(cur, prev):
+        # Formatting Helpers
+        def fmt_temp(val):
+            if pd.isnull(val): return "N/A"
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            return f"{round(c_val, 1)}{unit_label}"
+
+        def get_trend_arrow(cur, prev):
             if pd.isnull(cur) or pd.isnull(prev): return "N/A"
             delta = cur - prev
             if delta > 0.1: return f"🔺 +{delta:.1f}"
             if delta < -0.1: return f"🔹 {delta:.1f}"
             return "➡️ 0.0"
 
+        # --- 4. LOCATION OVERVIEW TABLE ---
         st.subheader("📍 Location Overview")
-        # (Remaining display logic for the location table and drill-down)
+        loc_sum = raw_df.groupby('Location').agg(
+            Nodes=('NodeNum', 'count'),
+            Low=('low_24h', 'min'),
+            High=('high_24h', 'max'),
+            Last_Ping=('last_ping', 'max')
+        ).reset_index()
+
+        st.dataframe(
+            loc_sum.assign(
+                Range=lambda x: x.apply(lambda r: f"{fmt_temp(r.Low)} to {fmt_temp(r.High)}", axis=1),
+                Status=lambda x: x['Last_Ping'].apply(lambda t: f"{get_safe_lag(t):.1f}h ago")
+            )[['Location', 'Nodes', 'Range', 'Status']],
+            use_container_width=True, hide_index=True
+        )
+
+        # --- 5. DETAILED SENSOR DRILL-DOWN (THE ORIGINAL TABLE) ---
+        st.divider()
+        st.subheader("🔍 Sensor Drill-Down")
         
+        # Sort by Location then Depth/Bank
+        raw_df = raw_df.sort_values(['Location', 'Depth', 'Bank'])
+        
+        rows = []
+        for _, r in raw_df.iterrows():
+            rows.append({
+                "Location": r['Location'],
+                "Node ID": r['NodeNum'],
+                "Position": f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"Bank {r['Bank']}",
+                "Current Temp": fmt_temp(r['current_temp']),
+                "1h Trend": get_trend_arrow(r['current_temp'], r['avg_1h']),
+                "24h Trend": get_trend_arrow(r['current_temp'], r['avg_24h']),
+                "Lag": f"{r['current_lag']:.1f}h",
+                "Status": "🟢" if r['current_lag'] < 6 else "🔴"
+            })
+        
+        st.table(rows) # Using table for clear, static reading of all sensors
+
     except Exception as e:
         st.error(f"Health Audit Error: {e}")
         
