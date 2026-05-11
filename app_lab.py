@@ -1164,6 +1164,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             # This allows the same Node to exist in different projects OR different locations
             # because the 'Key' is now the combination of all three.
             composite_key = ['NodeNum', 'Project', 'Location']
+            edited_df['Location'] = edited_df['Location'].fillna('Unknown')
+            full_table_df['Location'] = full_table_df['Location'].fillna('Unknown')
             
             # 2. Deduplicate the edits based on the composite key
             edited_df = edited_df.drop_duplicates(subset=composite_key, keep='last')
@@ -1172,7 +1174,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             for col in node_cols:
                 if col in full_table_df.columns and col in edited_df.columns:
                     if pd.api.types.is_datetime64_any_dtype(full_table_df[col]):
-                        edited_df[col] = pd.to_datetime(edited_df[col], errors='coerce')
+                        # --- TWEAK 2: Force hard date format to prevent INT64 errors ---
+                        edited_df[col] = pd.to_datetime(edited_df[col], errors='coerce').dt.date
                     elif pd.api.types.is_numeric_dtype(full_table_df[col]):
                         edited_df[col] = pd.to_numeric(edited_df[col], errors='coerce')
 
