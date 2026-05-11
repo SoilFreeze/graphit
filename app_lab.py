@@ -1347,17 +1347,38 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.success("Bulk update processed.")
                     st.cache_data.clear()
 
+        # --- Inside render_admin_page under Global Status Audit ---
         elif reg_mode == "Global Status Audit":
             st.subheader("📊 Hardware Inventory")
+            
+            # Ensure we handle nulls and whitespace in the Status column
+            available_stats = [str(s).strip() for s in full_reg_df['SensorStatus'].unique() if pd.notnull(s)]
+            
             f1, f2 = st.columns(2)
-            sel_stats = f1.multiselect("Filter Status", full_reg_df['SensorStatus'].unique().tolist(), default=["Active", "Diagnostic"])
+            
+            # FIX: Only use defaults that actually exist in the available_stats list
+            initial_defaults = [s for s in ["Active", "Diagnostic"] if s in available_stats]
+            
+            sel_stats = f1.multiselect(
+                "Filter Status", 
+                options=available_stats, 
+                default=initial_defaults
+            )
+            
             active_only = f2.checkbox("Show Only Active Assignments", value=True)
             
             view_df = full_reg_df.copy()
-            if sel_stats: view_df = view_df[view_df['SensorStatus'].isin(sel_stats)]
-            if active_only: view_df = view_df[view_df['End_Date'].isna()]
+            if sel_stats:
+                # Use .str.strip() to match our cleaned list
+                view_df = view_df[view_df['SensorStatus'].str.strip().isin(sel_stats)]
+            if active_only:
+                view_df = view_df[view_df['End_Date'].isna()]
             
-            st.dataframe(view_df.sort_values(['Project', 'Location', 'Depth']), use_container_width=True, hide_index=True)
+            st.dataframe(
+                view_df.sort_values(['Project', 'Location', 'Depth']), 
+                use_container_width=True, 
+                hide_index=True
+            )
 
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
