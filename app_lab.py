@@ -435,7 +435,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 # - 6. PAGE: SENSOR STATUS - #
 ###########
 
-def render_executive_summary(selected_project, unit_label, display_tz):
+def render_executive_summary(selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
     Provides a high-level health and reliability audit of the sensor fleet.
@@ -450,7 +450,7 @@ def render_executive_summary(selected_project, unit_label, display_tz):
     client = get_bq_client()
     if client is None: return
 
-    # Updated SQL to respect the Date_Freezedown mask for reliability calculations
+    # Updated SQL: Enriched with snapshots for trend analysis
     query = f"""
         WITH BaseReporting AS (
             SELECT 
@@ -471,6 +471,12 @@ def render_executive_summary(selected_project, unit_label, display_tz):
                 NodeNum, Location, Bank, Depth, SensorStatus,
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
+                
+                -- Snapshots for trend calculation
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
+
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature ELSE NULL END) AS low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature ELSE NULL END) AS high_24h,
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d,
@@ -491,15 +497,23 @@ def render_executive_summary(selected_project, unit_label, display_tz):
             st.warning("No data found for this project. Check that sensors are assigned in the Node Registry.")
             return
 
-        for col in ['Depth', 'low_24h', 'high_24h', 'current_temp']:
+        for col in ['Depth', 'low_24h', 'high_24h', 'current_temp', 'avg_1h', 'avg_6h', 'avg_24h']:
             if col in raw_df.columns:
                 raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce')
 
         now_local = pd.Timestamp.now(tz=display_tz)
 
+        # Helper for Trend Arrows
+        def get_trend_arrow(current, previous):
+            if pd.isnull(current) or pd.isnull(previous): return "N/A"
+            delta = current - previous
+            if delta > 0.1: return f"🔺 +{delta:.1f}"
+            if delta < -0.1: return f"🔹 {delta:.1f}"
+            return "➡️ 0.0"
+
         def fmt_temp(val):
             if pd.isnull(val): return "N/A"
-            c_val = (val - 32) * 5/9 if unit_label == "°C" else val
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
             return f"{round(c_val, 1)}{unit_label}"
 
         # --- 1. LOCATION OVERVIEW (TOP TABLE) ---
@@ -542,7 +556,7 @@ def render_executive_summary(selected_project, unit_label, display_tz):
 
         # --- 2. SENSOR DRILL-DOWN (BOTTOM TABLE) ---
         st.divider()
-        st.subheader("🔍 Sensor Drill-Down")
+        st.subheader("🔍 Sensor Drill-Down & Trends")
         loc_list = sorted(raw_df['Location'].unique().tolist())
         selected_loc = st.selectbox(
             "Detailed view for:", 
@@ -560,19 +574,27 @@ def render_executive_summary(selected_project, unit_label, display_tz):
                     if ping.tzinfo is None: ping = ping.tz_localize('UTC')
                     lag = round((now_local - ping.tz_convert(display_tz)).total_seconds() / 3600, 1)
 
+                # Process Trends
+                cur = row['current_temp']
+                t1 = row['avg_1h']
+                t6 = row['avg_6h']
+                t24 = row['avg_24h']
+
+                # Apply unit conversion for the trend values if needed
+                if unit_mode == "Celsius":
+                    cur, t1, t6, t24 = [(x - 32) * 5/9 if pd.notnull(x) else x for x in [cur, t1, t6, t24]]
+
                 return pd.Series({
                     "Node ID": row['NodeNum'], 
-                    "Bank": row['Bank'] or "N/A",
                     "Depth": f"{row['Depth']}ft" if pd.notnull(row['Depth']) else "N/A",
                     "Current Temp": fmt_temp(row['current_temp']), 
+                    "1h Trend": get_trend_arrow(cur, t1),
+                    "6h Trend": get_trend_arrow(cur, t6),
+                    "24h Trend": get_trend_arrow(cur, t24),
                     "High (24h)": fmt_temp(row['high_24h']),
                     "Low (24h)": fmt_temp(row['low_24h']),
                     "Seen (24h)": "✅" if row['seen_24h'] > 0 else "❌",
-                    "Seen (6h)": "✅" if row['seen_6h'] > 0 else "❌",
-                    "% Active (24h)": f"{round((row['hours_24h'] / 24) * 100, 1)}%", 
-                    "% Active (7d)": f"{round((row['hours_7d'] / 168) * 100, 1)}%",
                     "Gap (24h)": f"{int(row['gap_24h'])}h",
-                    "Gap (7d)": f"{int(row['max_gap_7d'])}h",
                     "Status": f"{lag}h {'🟢' if lag < 6 else ('🟡' if lag < 24 else '🔴')}"
                 })
             
