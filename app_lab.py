@@ -1152,28 +1152,40 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         )
         
         if st.button("💾 Sync Registry Changes", type="primary", use_container_width=True):
-            # 1. Fetch the FULL current table from BQ first (The "Safety Net")
+            # 1. Fetch the FULL current table
             full_table_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
             
-            # 2. Use NodeNum as the index to align the data
+            # --- FIX: ALIGN DTYPES ---
+            # Streamlit's editor often turns numeric/date columns into objects.
+            # We must force edited_df to match full_table_df types.
+            for col in node_cols:
+                if col in full_table_df.columns and col in edited_df.columns:
+                    if pd.api.types.is_datetime64_any_dtype(full_table_df[col]):
+                        edited_df[col] = pd.to_datetime(edited_df[col], errors='coerce')
+                    elif pd.api.types.is_numeric_dtype(full_table_df[col]):
+                        edited_df[col] = pd.to_numeric(edited_df[col], errors='coerce')
+                    else:
+                        edited_df[col] = edited_df[col].astype(str).replace('nan', None).replace('None', None)
+
+            # 2. Set index for merging
             full_table_df.set_index('NodeNum', inplace=True)
             edited_df.set_index('NodeNum', inplace=True)
             
-            # 3. Update the full table with ONLY the changes you made in the editor
+            # 3. Update (This will now succeed because types match)
             full_table_df.update(edited_df)
             
-            # 4. If you added NEW rows (like for a new project), append them
-            new_rows = edited_df[~edited_df.index.isin(full_table_df.index)]
-            final_df = pd.concat([full_table_df, new_rows]).reset_index()
+            # 4. Handle any brand new sensors added to the bottom of the list
+            new_nodes = edited_df[~edited_df.index.isin(full_table_df.index)]
+            final_df = pd.concat([full_table_df, new_nodes]).reset_index()
 
-            # 5. Now save the COMPLETE list back to BigQuery
-            with st.spinner("Protecting existing registry and syncing changes..."):
+            # 5. Save back to BQ
+            with st.spinner("Processing data types and syncing safely..."):
                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
                 client.load_table_from_dataframe(final_df[node_cols], f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
-                st.success("Registry updated safely. All projects preserved.")
+                
+                st.success("Registry updated! Dtypes aligned and all projects preserved.")
                 st.cache_data.clear()
                 st.rerun()
-
     # --- TAB 3: PROJECT MASTER ---
     with tab_project:
         st.subheader("⚙️ Project Management & Lifecycle")
