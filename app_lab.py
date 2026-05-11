@@ -493,9 +493,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Full Restore: Features an aggregate Location Summary and a detailed 13-column Drill-Down.
+    Features high-resolution summary with mathematical percent coverage and de-coupled columns.
     """
-    # 1. HEADER LOGIC (Source: Project Registry via Sidebar)
+    # 1. HEADER LOGIC
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
@@ -510,7 +510,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # 2. TELEMETRY & HEALTH QUERY
+    # 2. TELEMETRY & COVERAGE QUERY
+    # Logic: COUNT(DISTINCT TIMESTAMP_TRUNC(timestamp, HOUR)) gives us "Hours Seen"
     query = f"""
         WITH BaseReporting AS (
             SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth, m.SensorStatus
@@ -526,13 +527,22 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 NodeNum, Location, Bank, Depth, SensorStatus,
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
-                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
-                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
-                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h,
+                
+                -- Pulse Flags
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN 1 ELSE 0 END) as seen_1h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h,
+
+                -- Coverage Percentages (Hours seen / Total Hours)
+                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
+                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 168 HOUR) 
+                    THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 168.0) * 100 as coverage_7d,
+
+                -- Extremes
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS low_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h,
+                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d
             FROM GapAnalysis 
             GROUP BY NodeNum, Location, Bank, Depth, SensorStatus
         )
@@ -549,71 +559,73 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             st.warning("No data found for this project.")
             return
 
-        # 3. KPI CALCULATIONS
+        # 3. TIME CONVERSIONS
         now_local = pd.Timestamp.now(tz=display_tz)
         def get_lag(ts):
             if pd.isnull(ts): return 999.0
             return (now_local - (ts if ts.tzinfo else ts.tz_localize('UTC')).tz_convert(display_tz)).total_seconds() / 3600
         
-        df['current_lag'] = df['last_ping'].apply(get_lag)
+        df['last_seen_hrs'] = df['last_ping'].apply(get_lag)
 
-        # 4. FORMATTING HELPERS
+        # 4. FORMATTING
         def fmt(val):
             if pd.isnull(val): return "N/A"
             v = (val - 32) * 5/9 if unit_mode == "Celsius" else val
             return f"{v:.1f}{unit_label}"
 
-        def get_arrow(cur, prev):
-            if pd.isnull(cur) or pd.isnull(prev): return "N/A"
-            d = cur - prev
-            return f"🔺 +{d:.1f}" if d > 0.1 else f"🔹 {d:.1f}" if d < -0.1 else "➡️ 0.0"
-
-        # 5. SUMMARY TABLE (Aggregated by Location)
-        st.subheader("📍 Location Summary")
-        summary_df = df.groupby('Location').agg(
-            Sensors=('NodeNum', 'count'),
-            Avg_Temp=('current_temp', 'mean'),
-            Min_24h=('low_24h', 'min'),
-            Max_24h=('high_24h', 'max'),
-            Worst_Lag=('current_lag', 'max')
-        ).reset_index()
+        # 5. LOCATION SUMMARY (DE-COUPLED COLUMNS)
+        st.subheader("📍 Location Health Summary")
+        
+        summary_df = df.groupby('Location').apply(lambda x: pd.Series({
+            'Total': len(x),
+            'Seen 1h': int(x['seen_1h'].sum()),
+            'Seen 6h': int(x['seen_6h'].sum()),
+            'Seen 24h': int(x['seen_24h'].sum()),
+            'Avg Temp': x['current_temp'].mean(),
+            'Low 24h': x['low_24h'].min(),
+            'High 24h': x['high_24h'].max(),
+            'Avg 24h %': x['coverage_24h'].mean(),
+            'Avg 7d %': x['coverage_7d'].mean(),
+            'Worst Node': x.loc[x['last_seen_hrs'].idxmax(), 'NodeNum'],
+            'Last Seen': x['last_seen_hrs'].max()
+        })).reset_index()
 
         st.dataframe(
             summary_df.assign(
-                Avg_Temp=lambda x: x['Avg_Temp'].apply(fmt),
-                Range_24h=lambda x: x.apply(lambda r: f"{fmt(r.Min_24h)} to {fmt(r.Max_24h)}", axis=1),
-                Status=lambda x: x['Worst_Lag'].apply(lambda l: f"{l:.1f}h ago")
-            )[['Location', 'Sensors', 'Avg_Temp', 'Range_24h', 'Status']],
+                Avg_Temp=lambda x: x['Avg Temp'].apply(fmt),
+                Low_24h=lambda x: x['Low 24h'].apply(fmt),
+                High_24h=lambda x: x['High 24h'].apply(fmt),
+                Last_Seen=lambda x: x['Last Seen'].apply(lambda l: f"{l:.1f}h ago"),
+                Coverage_24h=lambda x: x['Avg 24h %'].apply(lambda v: f"{v:.1f}%"),
+                Coverage_7d=lambda x: x['Avg 7d %'].apply(lambda v: f"{v:.1f}%")
+            )[['Location', 'Total', 'Seen 1h', 'Seen 6h', 'Seen 24h', 'Coverage_24h', 'Coverage_7d', 'Avg_Temp', 'Low_24h', 'High_24h', 'Worst Node', 'Last_Seen']],
             use_container_width=True, hide_index=True
         )
 
-        # 6. DETAILED DRILL-DOWN (Individual Node Audit)
+        # 6. DETAILED AUDIT
         st.divider()
         st.subheader("🔍 Detailed Sensor Audit")
         
-        # User selects a location to drill down into
-        selected_loc = st.selectbox("Select Location to Inspect:", ["--- All Sensors ---"] + sorted(df['Location'].unique()))
-        
+        # Location Picker
+        selected_loc = st.selectbox("Filter Detailed Audit by Location:", ["--- All Sensors ---"] + sorted(df['Location'].unique()))
         display_df = df.copy()
         if selected_loc != "--- All Sensors ---":
             display_df = display_df[display_df['Location'] == selected_loc]
         
-        # Sort for clean display
-        display_df = display_df.sort_values(['Location', 'Depth', 'Bank'])
-        
+        # Build Table Rows
         full_rows = []
-        for _, r in display_df.iterrows():
+        for _, r in display_df.sort_values(['Location', 'Depth', 'Bank']).iterrows():
             full_rows.append({
                 "Location": r['Location'],
                 "Node": r['NodeNum'],
                 "Pos": f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"B:{r['Bank']}",
                 "Temp": fmt(r['current_temp']),
-                "1h Δ": get_arrow(r['current_temp'], r['avg_1h']),
-                "24h Δ": get_arrow(r['current_temp'], r['avg_24h']),
                 "24h Low": fmt(r['low_24h']),
                 "24h High": fmt(r['high_24h']),
-                "Lag": f"{r['current_lag']:.1f}h",
-                "Max Gap": f"{r['max_gap_7d']:.1f}h" if pd.notnull(r['max_gap_7d']) else "N/A",
+                "24h %": f"{r['coverage_24h']:.1f}%",
+                "7d %": f"{r['coverage_7d']:.1f}%",
+                "Last Seen": f"{r['last_seen_hrs']:.1f}h",
+                "Max Gap": f"{r['max_gap_7d']:.1f}h",
                 "6h": "🟢" if r['seen_6h'] == 1 else "🔴",
                 "24h": "🟢" if r['seen_24h'] == 1 else "🔴",
                 "Status": r['SensorStatus']
@@ -622,7 +634,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.dataframe(full_rows, use_container_width=True, hide_index=True)
 
     except Exception as e:
-        st.error(f"Sensor Status Error: {e}")        
+        st.error(f"Health Audit Error: {e}")        
 #####################
 # Depth Charts #
 #####################
