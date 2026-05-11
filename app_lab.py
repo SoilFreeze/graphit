@@ -1152,22 +1152,27 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         )
         
         if st.button("💾 Sync Registry Changes", type="primary", use_container_width=True):
-            # Safe Merge: update only the visible rows in the master set
-            final_df = full_reg_df.copy()
-            final_df.set_index('NodeNum', inplace=True)
+            # 1. Fetch the FULL current table from BQ first (The "Safety Net")
+            full_table_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
+            
+            # 2. Use NodeNum as the index to align the data
+            full_table_df.set_index('NodeNum', inplace=True)
             edited_df.set_index('NodeNum', inplace=True)
             
-            final_df.update(edited_df)
-            final_df.reset_index(inplace=True)
+            # 3. Update the full table with ONLY the changes you made in the editor
+            full_table_df.update(edited_df)
             
-            # Ensure final output matches expected schema
-            final_df = final_df[node_cols]
+            # 4. If you added NEW rows (like for a new project), append them
+            new_rows = edited_df[~edited_df.index.isin(full_table_df.index)]
+            final_df = pd.concat([full_table_df, new_rows]).reset_index()
 
-            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-            client.load_table_from_dataframe(final_df, f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
-            st.success("Node Registry synchronized with BigQuery.")
-            st.cache_data.clear()
-            st.rerun()
+            # 5. Now save the COMPLETE list back to BigQuery
+            with st.spinner("Protecting existing registry and syncing changes..."):
+                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                client.load_table_from_dataframe(final_df[node_cols], f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
+                st.success("Registry updated safely. All projects preserved.")
+                st.cache_data.clear()
+                st.rerun()
 
     # --- TAB 3: PROJECT MASTER ---
     with tab_project:
