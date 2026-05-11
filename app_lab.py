@@ -493,9 +493,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Full Restore: Includes all health, connectivity, and thermal trend columns.
+    Full Restore: Features an aggregate Location Summary and a detailed 13-column Drill-Down.
     """
-    # 1. HEADER LOGIC (Source: Project Registry via Sidebar Session State)
+    # 1. HEADER LOGIC (Source: Project Registry via Sidebar)
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
@@ -510,7 +510,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # 2. FULL TELEMETRY & HEALTH QUERY
+    # 2. TELEMETRY & HEALTH QUERY
     query = f"""
         WITH BaseReporting AS (
             SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth, m.SensorStatus
@@ -546,7 +546,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     try:
         df = client.query(query, job_config=job_config).to_dataframe()
         if df.empty:
-            st.warning("No data found.")
+            st.warning("No data found for this project.")
             return
 
         # 3. KPI CALCULATIONS
@@ -568,14 +568,41 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             d = cur - prev
             return f"🔺 +{d:.1f}" if d > 0.1 else f"🔹 {d:.1f}" if d < -0.1 else "➡️ 0.0"
 
-        # 5. THE FULL DRILL-DOWN TABLE
+        # 5. SUMMARY TABLE (Aggregated by Location)
+        st.subheader("📍 Location Summary")
+        summary_df = df.groupby('Location').agg(
+            Sensors=('NodeNum', 'count'),
+            Avg_Temp=('current_temp', 'mean'),
+            Min_24h=('low_24h', 'min'),
+            Max_24h=('high_24h', 'max'),
+            Worst_Lag=('current_lag', 'max')
+        ).reset_index()
+
+        st.dataframe(
+            summary_df.assign(
+                Avg_Temp=lambda x: x['Avg_Temp'].apply(fmt),
+                Range_24h=lambda x: x.apply(lambda r: f"{fmt(r.Min_24h)} to {fmt(r.Max_24h)}", axis=1),
+                Status=lambda x: x['Worst_Lag'].apply(lambda l: f"{l:.1f}h ago")
+            )[['Location', 'Sensors', 'Avg_Temp', 'Range_24h', 'Status']],
+            use_container_width=True, hide_index=True
+        )
+
+        # 6. DETAILED DRILL-DOWN (Individual Node Audit)
+        st.divider()
         st.subheader("🔍 Detailed Sensor Audit")
         
+        # User selects a location to drill down into
+        selected_loc = st.selectbox("Select Location to Inspect:", ["--- All Sensors ---"] + sorted(df['Location'].unique()))
+        
+        display_df = df.copy()
+        if selected_loc != "--- All Sensors ---":
+            display_df = display_df[display_df['Location'] == selected_loc]
+        
         # Sort for clean display
-        df = df.sort_values(['Location', 'Depth', 'Bank'])
+        display_df = display_df.sort_values(['Location', 'Depth', 'Bank'])
         
         full_rows = []
-        for _, r in df.iterrows():
+        for _, r in display_df.iterrows():
             full_rows.append({
                 "Location": r['Location'],
                 "Node": r['NodeNum'],
@@ -595,8 +622,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.dataframe(full_rows, use_container_width=True, hide_index=True)
 
     except Exception as e:
-        st.error(f"Table Restoration Failed: {e}")
-        
+        st.error(f"Sensor Status Error: {e}")        
 #####################
 # Depth Charts #
 #####################
