@@ -448,31 +448,45 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
 
     client = get_bq_client()
     if client is None: return
-    # 1. Fetch the project metadata to get the Freeze Date
+        
+    # 1. Fetch metadata with a clean join check
     project_info_query = f"""
         SELECT Date_Freezedown, ProjectName 
         FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
         WHERE Project = '{selected_project}'
     """
-    project_info = client.query(project_info_query).to_dataframe()
+    try:
+        project_info = client.query(project_info_query).to_dataframe()
     
-    if not project_info.empty:
-        freeze_date = pd.to_datetime(project_info['Date_Freezedown'].iloc[0])
-        project_name = project_info['ProjectName'].iloc[0]
-        
-        if pd.notnull(freeze_date):
-            # Calculate days since freezedown
-            # We normalize to midnight to get a clean "Day" count
-            today = pd.Timestamp.now().normalize()
-            freeze_start = freeze_date.tz_localize(None).normalize()
-            days_since = (today - freeze_start).days
+        if not project_info.empty:
+            # Get the raw value from BigQuery
+            raw_date = project_info['Date_Freezedown'].iloc[0]
+            project_name = project_info['ProjectName'].iloc[0]
             
-            # 2. Display the Dynamic Title
-            st.title(f"❄️ {project_name}")
-            st.subheader(f"Day {days_since} of Freezedown")
+            if pd.notnull(raw_date):
+                # Force conversion to a naive date for clean subtraction
+                freeze_start = pd.to_datetime(raw_date).date()
+                today = pd.Timestamp.now(tz=display_tz).date()
+                
+                days_since = (today - freeze_start).days
+                
+                # 2. THE DISPLAY
+                st.title(f"❄️ {project_name}")
+                
+                # Styling it as a big metric or a subheader
+                st.markdown(f"### 🗓️ Day **{days_since}** of Freezedown")
+                st.caption(f"Freezedown began on {freeze_start.strftime('%B %d, %Y')}")
+            else:
+                st.title(f"❄️ {project_name}")
+                st.warning("⚠️ No 'Date_Freezedown' set in the Project Registry.")
         else:
-            st.title(f"❄️ {project_name}")
-            st.info("Freeze start date not yet set in registry.")
+            # This triggers if the selected_project ID doesn't match the registry
+            st.error(f"Could not find project details for ID: {selected_project}")
+    
+    except Exception as e:
+        st.error(f"Title Logic Error: {e}")
+
+    
     # 1. ENRICHED QUERY
     query = f"""
         WITH BaseReporting AS (
