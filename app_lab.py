@@ -1711,8 +1711,13 @@ elif page == "Time vs Temp":
     render_global_overview(selected_project, project_metadata, display_tz)
 
 elif page == "Sensor Status":
-    # Removed 'client' - now uses 3 parameters
-    render_executive_summary(selected_project, unit_label, display_tz)
+    # FIX: Add unit_mode to the call
+    render_executive_summary(
+        selected_project, 
+        unit_label, 
+        unit_mode,    # <--- Add this here
+        display_tz
+    )
 
 elif page == "Depth Charts":
     # Ensure this function exists in your utils; updated to standard parameters
