@@ -453,7 +453,7 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
     client = get_bq_client()
     if client is None: return
 
-    # 1. ENRICHED QUERY: Connectivity, Trends, and Density
+    # 1. ENRICHED QUERY
     query = f"""
         WITH BaseReporting AS (
             SELECT 
@@ -475,23 +475,17 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
                 
-                -- Trends
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
 
-                -- Connectivity
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) AS gap_24h,
-                
-                -- Seen Status
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h,
                 
-                -- Summary Stats
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h,
-                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_24h,
                 COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
             FROM GapAnalysis 
             GROUP BY NodeNum, Location, Bank, Depth, SensorStatus
@@ -507,20 +501,25 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
 
         now_local = pd.Timestamp.now(tz=display_tz)
 
-        # 2. KPI CALCULATIONS
-        # Logic for "Max System Lag"
-        raw_df['current_lag'] = raw_df['last_ping'].apply(
-            lambda x: (now_local - x.tz_localize('UTC').tz_convert(display_tz)).total_seconds() / 3600 if pd.notnull(x) else 999
-        )
+        # 2. HELPER: SAFE TIME CONVERSION
+        def get_safe_lag(ts_val):
+            if pd.isnull(ts_val): return 999.0
+            # If already aware (BigQuery default), convert. If naive, localize then convert.
+            if ts_val.tzinfo is not None:
+                return (now_local - ts_val.tz_convert(display_tz)).total_seconds() / 3600
+            else:
+                return (now_local - ts_val.tz_localize('UTC').tz_convert(display_tz)).total_seconds() / 3600
+
+        # KPI Logic
+        raw_df['current_lag'] = raw_df['last_ping'].apply(get_safe_lag)
         max_system_lag = raw_df['current_lag'].max()
         worst_sensor = raw_df.loc[raw_df['current_lag'].idxmax(), 'NodeNum'] if not raw_df.empty else "N/A"
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Active Sensors", len(raw_df))
-        c2.metric("Max System Lag", f"{round(max_system_lag, 1)}h", help=f"Longest current silence from node: {worst_sensor}")
+        c2.metric("Max System Lag", f"{round(max_system_lag, 1)}h", help=f"Longest silence from node: {worst_sensor}")
         c3.metric("Project Health", "Optimal" if max_system_lag < 6 else "Attention Req.")
 
-        # HELPERS
         def get_trend_arrow_local(current, previous):
             if pd.isnull(current) or pd.isnull(previous): return "N/A"
             delta = current - previous
@@ -528,47 +527,32 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
             if delta < -0.1: return f"🔹 {delta:.1f}"
             return "➡️ 0.0"
 
-        def convert_temp(val):
-            if pd.isnull(val): return val
-            return (val - 32) * 5/9 if unit_mode == "Celsius" else val
-
         def fmt_temp(val):
             if pd.isnull(val): return "N/A"
-            c_val = convert_temp(val)
+            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
             return f"{round(c_val, 1)}{unit_label}"
 
-        # --- 3. LOCATION OVERVIEW (TOP TABLE) ---
+        # --- 3. LOCATION OVERVIEW ---
         st.subheader("📍 Location Overview")
         summary_df = raw_df.groupby(['Location']).agg(
             Nodes=('NodeNum', 'count'),
             Seen_24h=('seen_24h', 'sum'),
             Seen_6h=('seen_6h', 'sum'),
-            Sum_Hrs_24=('hours_24h', 'sum'),
-            Sum_Hrs_7d=('hours_7d', 'sum'),
             Gap_24h=('gap_24h', 'max'),
-            Gap_7d=('max_gap_7d', 'max'), # Fixed naming to match query
+            Gap_7d=('max_gap_7d', 'max'),
             Min_24h_All=('low_24h', 'min'), 
             Max_24h_All=('high_24h', 'max'), 
             Latest_Ping=('last_ping', 'max')
         ).reset_index()
 
         def format_summary_table(row):
-            latest = row['Latest_Ping']
-            last_seen_str = "Never"
-            if pd.notnull(latest):
-                if latest.tzinfo is None: latest = latest.tz_localize('UTC')
-                lag_hrs = (now_local - latest.tz_convert(display_tz)).total_seconds() / 3600
-                last_seen_str = f"{round(lag_hrs, 1)}h ago"
-
-            avg_7d = (row['Sum_Hrs_7d'] / (row['Nodes'] * 168)) * 100
-
+            lag_hrs = get_safe_lag(row['Latest_Ping'])
             return pd.Series({
                 "Location": row['Location'], 
                 "Min/Max (24h)": f"{fmt_temp(row['Min_24h_All'])} / {fmt_temp(row['Max_24h_All'])}",
                 "Nodes": int(row['Nodes']), 
                 "Seen 24h/6h": f"{int(row['Seen_24h'])} / {int(row['Seen_6h'])}",
-                "% Active (7d)": f"{round(avg_7d, 1)}%",
-                "Last Seen": last_seen_str, 
+                "Last Seen": f"{round(lag_hrs, 1)}h ago" if lag_hrs < 500 else "Never", 
                 "Max Gap 24h/7d": f"{int(row['Gap_24h'])}h / {int(row['Gap_7d'])}h"
             })
 
@@ -577,17 +561,16 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
         # --- 4. SENSOR DRILL-DOWN ---
         st.divider()
         st.subheader("🔍 Sensor Drill-Down & Trends")
-        loc_list = sorted(raw_df['Location'].unique().tolist())
-        selected_loc = st.selectbox("Detailed view for:", ["--- Select Location ---"] + loc_list, key="status_drill_vfinal")
+        selected_loc = st.selectbox("Detailed view for:", ["--- Select Location ---"] + sorted(raw_df['Location'].unique().tolist()), key="status_v_safe")
 
         if selected_loc != "--- Select Location ---":
             sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
             
             def format_sensor_row(row):
-                cur = convert_temp(row['current_temp'])
-                t1 = convert_temp(row['avg_1h'])
-                t6 = convert_temp(row['avg_6h'])
-                t24 = convert_temp(row['avg_24h'])
+                cur = (row['current_temp'] - 32) * 5/9 if unit_mode == "Celsius" else row['current_temp']
+                t1 = (row['avg_1h'] - 32) * 5/9 if unit_mode == "Celsius" else row['avg_1h']
+                t6 = (row['avg_6h'] - 32) * 5/9 if unit_mode == "Celsius" else row['avg_6h']
+                t24 = (row['avg_24h'] - 32) * 5/9 if unit_mode == "Celsius" else row['avg_24h']
 
                 return pd.Series({
                     "Node ID": row['NodeNum'], 
@@ -597,7 +580,6 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
                     "1h Trend": get_trend_arrow_local(cur, t1),
                     "6h Trend": get_trend_arrow_local(cur, t6),
                     "24h Trend": get_trend_arrow_local(cur, t24),
-                    "High/Low (24h)": f"{fmt_temp(row['high_24h'])} / {fmt_temp(row['low_24h'])}",
                     "Seen (6h)": "✅" if row['seen_6h'] > 0 else "❌",
                     "Outage (7d)": f"{int(row['max_gap_7d'])}h",
                     "Status": f"{round(row['current_lag'], 1)}h {'🟢' if row['current_lag'] < 6 else ('🔴' if row['current_lag'] > 24 else '🟡')}"
