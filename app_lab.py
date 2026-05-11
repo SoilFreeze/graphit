@@ -1774,18 +1774,19 @@ def get_trend_arrow(current, previous):
 # - 12. MAIN ROUTER - #
 ###########
 
+# 1. INITIALIZE THE CLIENT (Crucial step to fix NameError)
+client = get_bq_client() 
+
 # --- PAGE ROUTING LOGIC ---
 
 if page == "Summary":
-    # Removed 'client' - function now calls get_bq_client() internally
     render_landing_page(unit_label, unit_mode, display_tz)
 
 elif page == "Time vs Temp":
-    # Removed 'client' - updated to match the new 3-parameter definition
     render_global_overview(selected_project, project_metadata, display_tz)
 
 elif page == "Sensor Status":
-    # FIX: Add unit_mode to the call
+    # Now 'client' exists because we called it above
     render_executive_summary(client, selected_project, unit_label, unit_mode, display_tz)
 
 elif page == "Depth Charts":
