@@ -1212,34 +1212,47 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label):
     """
     🧨 Unified Data Management (Mask & Purge)
-    Allows for precision removal or hiding of bad data points.
+    Precision tool for hiding or deleting bad data points.
     """
-    from datetime import time as dt_time # Safety import for time objects
+    from datetime import time as dt_time
     import re
+    import time
 
     st.subheader("🧨 Unified Data Management (Mask & Purge)")
     
-    # FIX: Fetch client internally
+    # 0. INITIALIZE DATABASE CLIENT
     client = get_bq_client()
-    if client is None: return
+    if client is None:
+        st.error("Database connection unavailable.")
+        return
 
     # 1. SCOPE & ACTION MODE
     c1, c2 = st.columns(2)
     with c1:
-        scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
+        scope = st.radio(
+            "Target Scope", 
+            ["Project Wide", "Specific Location", "Specific Node"], 
+            horizontal=True, 
+            key="surg_scope_toggle"
+        )
     with c2:
-        action_mode = st.radio("Action Type", ["🚫 Mask (Soft Hide)", "🔥 Purge (Hard Delete)"], horizontal=True)
+        action_mode = st.radio(
+            "Action Type", 
+            ["🚫 Mask (Soft Hide)", "🔥 Purge (Hard Delete)"], 
+            horizontal=True, 
+            key="surg_action_toggle"
+        )
 
-    # Fetch from node_registry utilizing new schema
+    # Fetch Registry for Filtering
     reg_q = f"SELECT NodeNum, Location FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` WHERE Project = '{selected_project}'"
     reg_df = client.query(reg_q).to_dataframe()
     
     target_node, target_loc = None, None
     if not reg_df.empty:
         if scope == "Specific Location":
-            target_loc = st.selectbox("Select Location", sorted(reg_df['Location'].unique()))
+            target_loc = st.selectbox("Select Location", sorted(reg_df['Location'].unique()), key="surg_loc_select")
         elif scope == "Specific Node":
-            target_node = st.selectbox("Select Node ID", sorted(reg_df['NodeNum'].unique()))
+            target_node = st.selectbox("Select Node ID", sorted(reg_df['NodeNum'].unique()), key="surg_node_select")
     else:
         st.warning("No nodes found in registry for this project.")
         return
@@ -1247,23 +1260,36 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
     # 2. TEMPORAL LOGIC
     st.divider()
     t_col1, t_col2 = st.columns([1, 2])
-    direction = t_col1.selectbox("Temporal Direction", ["Between Range", "Everything Older Than", "Everything Newer Than"])
+    direction = t_col1.selectbox(
+        "Temporal Direction", 
+        ["Between Range", "Everything Older Than", "Everything Newer Than"],
+        key="surg_time_direction"
+    )
     
-    # --- Inside render_surgical_cleaner ---
-
     with t_col2:
         if direction == "Between Range":
             sc1, sc2 = st.columns(2)
-            # ADDED unique keys here:
-            s_dt = datetime.combine(sc1.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="surgical_start_date"), dt_time(0,0))
-            e_dt = datetime.combine(sc2.date_input("End Date", value=datetime.now(), key="surgical_end_date"), dt_time(23,59))
+            s_dt = datetime.combine(sc1.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="surg_start"), dt_time(0,0))
+            e_dt = datetime.combine(sc2.date_input("End Date", value=datetime.now(), key="surg_end"), dt_time(23,59))
         else:
-            # ADDED unique keys here:
-            anchor_dt = datetime.combine(st.date_input("Anchor Date", key="surgical_anchor_date"), 
-                                         st.time_input("Anchor Time", value=dt_time(6,0), key="surgical_anchor_time"))
+            anchor_dt = datetime.combine(
+                st.date_input("Anchor Date", key="surg_anchor_d"), 
+                st.time_input("Anchor Time", value=dt_time(6,0), key="surg_anchor_t")
+            )
             s_dt = datetime(2000, 1, 1) if direction == "Everything Older Than" else anchor_dt
             e_dt = anchor_dt if direction == "Everything Older Than" else datetime(2100, 1, 1)
 
+    # 3. THRESHOLD LOGIC (Defined BEFORE SQL construction to prevent NameError)
+    thr_col1, thr_col2 = st.columns([1, 2])
+    operator = thr_col1.selectbox(
+        "Value Filter", 
+        ["No Threshold", "Greater Than (>)", "Less Than (<)"], 
+        key="surg_val_op"
+    )
+    thresh_val = thr_col2.number_input(f"Threshold Value ({unit_label})", value=100.0, key="surg_val_input")
+    
+    # Convert for BQ
+    thresh_val_f = (thresh_val * 9/5) + 32 if unit_mode == "Celsius" else thresh_val
 
     # 4. SQL CONSTRUCTION
     if scope == "Project Wide":
@@ -1274,14 +1300,16 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
         where_clause = f"n.NodeNum = '{target_node}' AND n.Project = '{selected_project}'"
 
     threshold_clause = ""
-    if operator == "Greater Than (>)": threshold_clause = f"AND r.temperature > {thresh_val_f}"
-    elif operator == "Less Than (<)": threshold_clause = f"AND r.temperature < {thresh_val_f}"
+    if operator == "Greater Than (>)": 
+        threshold_clause = f"AND r.temperature > {thresh_val_f}"
+    elif operator == "Less Than (<)": 
+        threshold_clause = f"AND r.temperature < {thresh_val_f}"
 
     s_str, e_str = s_dt.strftime('%Y-%m-%d %H:%M:%S'), e_dt.strftime('%Y-%m-%d %H:%M:%S')
 
     # 5. EXECUTION GATE
     st.divider()
-    if st.button("🔍 Step 1: Verify Match Count", use_container_width=True):
+    if st.button("🔍 Step 1: Verify Match Count", use_container_width=True, key="surg_verify_btn"):
         status_q = f"""
             SELECT COALESCE(rej.approve, 'PENDING') as status, COUNT(*) as point_count
             FROM (
@@ -1305,15 +1333,19 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
         if total > 0:
             st.warning(f"### ⚠️ Action Staged: {total} Points")
             st.table(staged_df.set_index('status'))
-            confirm = st.checkbox(f"Confirm {action_mode} for these records.")
+            confirm = st.checkbox(f"Confirm {action_mode} for these records.", key="surg_confirm_check")
             
-            if st.button(f"🚀 Execute {action_mode}", use_container_width=True, disabled=not confirm):
+            if st.button(f"🚀 Execute {action_mode}", use_container_width=True, disabled=not confirm, key="surg_exec_btn"):
                 if "Mask" in action_mode:
                     sql = f"""
                         MERGE `{OVERRIDE_TABLE}` T
                         USING (
                             SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
-                            FROM (SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` UNION ALL SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`) AS r
+                            FROM (
+                                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                                UNION ALL 
+                                SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                            ) AS r
                             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
                             WHERE {where_clause} 
                             AND r.timestamp BETWEEN '{s_str}' AND '{e_str}'
@@ -1323,7 +1355,7 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
                         WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'MASKED')
                     """
                 else:
-                    # Hard Delete logic with transaction safety
+                    # Hard Delete logic with Multi-Table Transaction
                     sql = f"""
                         BEGIN TRANSACTION;
                         DELETE FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` r 
@@ -1335,11 +1367,18 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
                         AND r.timestamp BETWEEN '{s_str}' AND '{e_str}' {threshold_clause};
                         COMMIT;
                     """
-                client.query(sql).result()
-                st.success(f"Successfully processed {total} points.")
-                del st.session_state["purge_staged_df"]
-                st.cache_data.clear()
-                st.rerun()
+                
+                try:
+                    client.query(sql).result()
+                    st.success(f"Successfully processed {total} points.")
+                    del st.session_state["purge_staged_df"]
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Surgical execution failed: {e}")
+        else:
+            st.info("No matching records found for the selected criteria.")
 
 ###########
 # - 11. SURGICAL CLEANER HELPERS - #
