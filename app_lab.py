@@ -101,7 +101,7 @@ page = st.sidebar.selectbox(
     [
         "Summary",             # Previously: Landing Page
         "Time vs Temp",        # Previously: Global Overview
-        "Sensor Status",       # Previously: Executive Summary
+        "Sensor Status",       
         "Depth Charts", 
         "Node Diagnostics", 
         "Client Portal", 
@@ -450,9 +450,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 # - 6. PAGE: SENSOR STATUS - #
 ###########
 
-def render_executive_summary(client, selected_project, unit_label, unit_mode, display_tz):
+def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
-    Page Name: Sensor Status / Executive Summary
+    Page Name: Sensor Status
     Updated: May 11, 2026
     Handles real-time health monitoring and dynamic freezedown tracking.
     """
@@ -1528,9 +1528,6 @@ def update_records(pts, df, val, display_tz):
 # - 13. PAGE: LANDING PAGE - #
 ###########
 
-###########
-# - 12. PAGE: DEPTH CHARTS (ENGINEERING) - #
-###########
 
 def render_landing_page(unit_label, unit_mode, display_tz='UTC'):
     """
@@ -1785,9 +1782,9 @@ if page == "Summary":
 elif page == "Time vs Temp":
     render_global_overview(selected_project, project_metadata, display_tz)
 
-elif page == "Sensor Status":
-    # Now 'client' exists because we called it above
-    render_executive_summary(client, selected_project, unit_label, unit_mode, display_tz)
+elif service == "🏠 Sensor Status":
+    # This now calls the renamed function
+    render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
 
 elif page == "Depth Charts":
     # Ensure this function exists in your utils; updated to standard parameters
