@@ -493,9 +493,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Full Data Restore: Summary + Audit with Performance Spread & Pulse Coverage.
+    Strictly locked to: project_registry, master_data_view, and manual_rejections.
     """
-    # 1. HEADER LOGIC (Source: Project Registry via Session State)
+    # 1. HEADER LOGIC (Source: project_registry via Sidebar Session State)
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
@@ -510,10 +510,10 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # 2. TELEMETRY & COVERAGE QUERY
+    # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view)
     query = f"""
         WITH BaseReporting AS (
-            SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth, m.SensorStatus
+            SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             WHERE m.Project = @proj_id
         ),
@@ -523,27 +523,27 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         ),
         HistoricalStats AS (
             SELECT 
-                NodeNum, Location, Bank, Depth, SensorStatus,
+                NodeNum, Location, Bank, Depth,
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
                 
                 -- Pulse Check Flags
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN 1 ELSE 0 END) as seen_1h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN 1 ELSE 0 END) as seen_1h_f,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h_f,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h_f,
 
-                -- Hourly Coverage Math
+                -- Hourly Coverage Calculation (Distinct hours seen / Total hours in period)
                 (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
                 (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 168 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 168.0) * 100 as coverage_7d,
 
-                -- Extremes
+                -- Extremes & Gaps
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h,
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d
             FROM GapAnalysis 
-            GROUP BY NodeNum, Location, Bank, Depth, SensorStatus
+            GROUP BY NodeNum, Location, Bank, Depth
         )
         SELECT * FROM HistoricalStats
     """
@@ -555,7 +555,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     try:
         df = client.query(query, job_config=job_config).to_dataframe()
         if df.empty:
-            st.warning("No data found for this project.")
+            st.warning("No data found in master_data_view for this project.")
             return
 
         # 3. STATUS & LAG CALCULATIONS
@@ -583,16 +583,16 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             d = cur - prev
             return f"🔺 +{d:.1f}" if d > 0.1 else f"🔹 {d:.1f}" if d < -0.1 else "➡️ 0.0"
 
-        # 5. LOCATION SUMMARY (DE-COUPLED & COLORED)
+        # 5. LOCATION SUMMARY (High-Resolution Spread)
         st.subheader("📍 Location Performance Summary")
         
         summary_df = df.groupby('Location').apply(lambda x: pd.Series({
-            'Total': len(x),
-            'Seen 1h': int(x['seen_1h'].sum()),
-            'Seen 6h': int(x['seen_6h'].sum()),
-            'Seen 24h': int(x['seen_24h'].sum()),
-            'Avg 24h %': f"{x['coverage_24h'].mean():.1f}%",
-            'Avg 7d %': f"{x['coverage_7d'].mean():.1f}%",
+            'Total Nodes': len(x),
+            'Seen 1h': int(x['seen_1h_f'].sum()),
+            'Seen 6h': int(x['seen_6h_f'].sum()),
+            'Seen 24h': int(x['seen_24h_f'].sum()),
+            '24h Coverage': f"{x['coverage_24h'].mean():.1f}%",
+            '7d Coverage': f"{x['coverage_7d'].mean():.1f}%",
             'Avg Temp': fmt_t(x['current_temp'].mean()),
             'Low 24h': fmt_t(x['low_24h'].min()),
             'High 24h': fmt_t(x['high_24h'].max()),
@@ -620,8 +620,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 "24h Δ": get_arrow(r['current_temp'], r['avg_24h']),
                 "24h Low": fmt_t(r['low_24h']),
                 "24h High": fmt_t(r['high_24h']),
-                "24h %": f"{r['coverage_24h']:.1f}%",
-                "7d %": f"{r['coverage_7d']:.1f}%",
+                "24h Coverage": f"{r['coverage_24h']:.1f}%",
+                "7d Coverage": f"{r['coverage_7d']:.1f}%",
                 "Last Seen": get_status_icon(r['last_seen_hrs']),
                 "Max Gap": f"{r['max_gap_7d']:.1f}h"
             })
