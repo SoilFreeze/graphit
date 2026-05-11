@@ -1630,22 +1630,22 @@ def render_depth_charts(selected_project, unit_label, display_tz):
 # - 11. PAGE: SUMMARY (GLOBAL) - #
 ###########
 
-def render_landing_page(unit_label, unit_mode):
+def render_landing_page(unit_label, unit_mode, display_tz):
     """
-    The main Dashboard. Shows active project health and temperature trends.
+    The main Dashboard. Shows active project health, 
+    temperature trends, and days since freezedown.
     """
     st.header("🌐 Global Project Summary")
     
-    # FIX: Fetch client internally
     client = get_bq_client()
     if client is None: return
 
     # Improved Query: 
-    # 1. Joins project_registry for status.
-    # 2. Uses a wider window (48h) to catch Lord sensors that might be slightly delayed.
+    # 1. Joins project_registry for status AND Date_Freezedown.
+    # 2. Uses a 48h window for Lord sensor resilience.
     summary_q = f"""
         WITH active_projects AS (
-            SELECT Project, ProjectName, ProjectStatus 
+            SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
             WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
         ),
@@ -1657,19 +1657,18 @@ def render_landing_page(unit_label, unit_mode):
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
         )
         SELECT 
-            p.Project, p.ProjectName, p.ProjectStatus,
+            p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown,
             ld.Bank, ld.Location, ld.Depth,
             AVG(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_now,
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_1h,
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN ld.temperature END) as avg_6h,
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as avg_24h,
-            -- Latest known temperature if 'avg_now' is null (for Lord batch nodes)
             ARRAY_AGG(ld.temperature ORDER BY ld.timestamp DESC LIMIT 1)[OFFSET(0)] as last_known_temp,
             MIN(ld.temperature) as min_24h,
             MAX(ld.temperature) as max_24h
         FROM active_projects p
         LEFT JOIN raw_data ld ON p.Project = ld.Project
-        GROUP BY 1, 2, 3, 4, 5, 6
+        GROUP BY 1, 2, 3, 4, 5, 6, 7
     """
     
     try:
@@ -1682,12 +1681,30 @@ def render_landing_page(unit_label, unit_mode):
         st.warning("No projects currently in Freezedown or Maintenance with active data.")
         return
 
+    # Sort projects and render cards
     for project in sorted(df['Project'].unique()):
         p_df = df[df['Project'] == project]
         p_name = p_df['ProjectName'].iloc[0] if not p_df['ProjectName'].isnull().all() else project
         
+        # --- NEW: FREEZEDOWN DAY CALCULATION ---
+        f_date_raw = p_df['Date_Freezedown'].iloc[0]
+        day_count_text = ""
+        
+        if pd.notnull(f_date_raw):
+            # Convert to date objects for clean subtraction
+            freeze_start = pd.to_datetime(f_date_raw).date()
+            today = pd.Timestamp.now(tz=display_tz).date()
+            days_since = (today - freeze_start).days
+            day_count_text = f"🗓️ **Day {max(0, days_since)} of Freezedown**"
+        
         with st.container(border=True):
-            st.subheader(f"🏗️ {p_name} ({project})")
+            # Header with Project Name and Day Count
+            st.subheader(f"🏗️ {p_name}")
+            if day_count_text:
+                st.markdown(day_count_text)
+            st.caption(f"Project ID: {project} | Status: {p_df['ProjectStatus'].iloc[0]}")
+            
+            st.divider()
             
             c1, c2, c3, c4 = st.columns(4)
             
@@ -1706,12 +1723,12 @@ def render_landing_page(unit_label, unit_mode):
             
             for col, title, group_df in groups:
                 with col:
-                    st.markdown(f"### {title}")
+                    st.markdown(f"#### {title}")
                     if group_df.empty:
-                        st.caption("No sensors assigned")
+                        st.caption("No data in 48h")
                         continue
                     
-                    # Core Metrics - Using last_known_temp as fallback for avg_now
+                    # Metrics with Fallback
                     now = group_df['avg_now'].mean()
                     if pd.isnull(now):
                         now = group_df['last_known_temp'].mean()
@@ -1730,17 +1747,14 @@ def render_landing_page(unit_label, unit_mode):
                         ]
                     
                     if pd.notnull(now):
-                        st.metric("Current Avg", f"{now:.1f}{unit_label}")
-                        st.markdown(f"**24h Range:** {mn:.1f} to {mx:.1f}{unit_label}")
+                        st.metric("Avg Temp", f"{now:.1f}{unit_label}")
+                        st.caption(f"24h Range: {mn:.1f} to {mx:.1f}{unit_label}")
                         
-                        # Trends
-                        st.write("**Thermal Delta**")
+                        # Compact Trends
                         t1, t2, t3 = st.columns(3)
                         t1.caption(f"1h\n{get_trend_arrow(now, prev_1h)}")
                         t2.caption(f"6h\n{get_trend_arrow(now, prev_6h)}")
                         t3.caption(f"24h\n{get_trend_arrow(now, prev_24h)}")
-                    else:
-                        st.caption("No data in window")
 
 def get_trend_arrow(current, previous):
     if pd.isnull(current) or pd.isnull(previous): return "N/A"
