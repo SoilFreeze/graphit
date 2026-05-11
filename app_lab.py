@@ -493,13 +493,14 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Comprehensive health monitoring, connectivity lag, and thermal trends.
+    Fixed: Resolved Unrecognized name: ProjectName error by aligning with snapshot schema.
     """
     
     # --- 1. PROJECT METADATA & TITLE ---
-    # We use the snapshot for backwards compatibility with historical project data
+    # FIXED: metadata_snapshot uses 'Project' as the primary label. 
+    # We alias it to ProjectName so the UI doesn't break.
     meta_query = f"""
-        SELECT DISTINCT ProjectName, Date_Freezedown 
+        SELECT DISTINCT Project AS ProjectName, Date_Freezedown 
         FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot` 
         WHERE Project = @proj_id
         LIMIT 1
@@ -526,8 +527,9 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             else:
                 st.warning("⚠️ Date_Freezedown not set in Metadata Snapshot.")
         else:
+            # Fallback if no metadata is found
             st.title(f"🏠 {selected_project}")
-            st.info("ℹ️ Metadata not yet available for this Project ID.")
+            st.info("ℹ️ Metadata not yet available in the snapshot for this Project ID.")
 
     except Exception as e:
         st.error(f"Metadata Fetch Failed: {e}")
@@ -535,8 +537,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
     st.divider()
 
-    # --- 2. SENSOR HEALTH & TRENDS QUERY ---
-    # CTEs calculate windowed averages and connectivity gaps server-side
+    # --- 2. SENSOR HEALTH & TRENDS ---
+    # The rest of your query logic using master_data_view remains robust.
     query = f"""
         WITH BaseReporting AS (
             SELECT 
@@ -556,13 +558,11 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
                 
-                -- Rolling Averages for Trend Indicators
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) 
                          AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) 
                          AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
 
-                -- Threshold Extremes
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS low_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h
             FROM GapAnalysis 
@@ -577,9 +577,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             st.warning("No sensor telemetry found for this project.")
             return
 
-        # --- 3. KPI DASHBOARD ---
+        # KPI Metrics
         now_local = pd.Timestamp.now(tz=display_tz)
-
         def get_safe_lag(ts_val):
             if pd.isnull(ts_val): return 999.0
             ts_aware = ts_val if ts_val.tzinfo else ts_val.tz_localize('UTC')
@@ -591,21 +590,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         k1, k2, k3 = st.columns(3)
         k1.metric("Active Sensors", len(raw_df))
-        k2.metric("Max System Lag", f"{max_lag:.1f}h", help=f"Longest delay from: {worst_node}")
+        k2.metric("Max System Lag", f"{max_lag:.1f}h", help=f"Longest delay: {worst_node}")
         k3.metric("Project Health", "Optimal" if max_lag < 6 else "Review Required")
-
-        # --- 4. DATA FORMATTING ---
-        def fmt_temp(val):
-            if pd.isnull(val): return "N/A"
-            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            return f"{round(c_val, 1)}{unit_label}"
-
-        def get_trend_arrow(cur, prev):
-            if pd.isnull(cur) or pd.isnull(prev): return "N/A"
-            delta = cur - prev
-            if delta > 0.1: return f"🔺 +{delta:.1f}"
-            if delta < -0.1: return f"🔹 {delta:.1f}"
-            return "➡️ 0.0"
 
         # --- 5. LOCATION OVERVIEW ---
         st.subheader("📍 Location Overview")
@@ -1402,9 +1388,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- TAB 5: SURGICAL CLEANER ---
     with tab_surgical:
         render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
-###########
+
+
+######################################
 # - 11. SURGICAL CLEANER FUNCTIONS - #
-###########
+######################################
 
 def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label):
     """
@@ -1580,9 +1568,9 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
                     st.error(f"Surgical execution failed: {e}")
         else:
             st.info("No matching records found for the selected criteria.")
-###########
+####################################
 # - 11. SURGICAL CLEANER HELPERS - #
-###########
+####################################
 
 def update_records(pts, df, val, display_tz):
     """
@@ -1657,6 +1645,10 @@ def update_records(pts, df, val, display_tz):
             
         except Exception as e:
             st.error(f"❌ Failed to update override table: {e}")
+
+#####################
+# Dashboard Summary #
+#####################
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     The main Dashboard. Shows active project health, 
@@ -1760,7 +1752,11 @@ def get_trend_arrow(current, previous):
     if delta > 0.1: return f"🔺 +{delta:.1f}"
     if delta < -0.1: return f"🔹 {delta:.1f}"
     return "➡️ 0.0"
-# 12. MAIN ROUTER
+
+
+###################
+# 12. MAIN ROUTER #
+###################
 
 # Initialize DB Client
 client = get_bq_client() 
