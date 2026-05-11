@@ -1779,7 +1779,7 @@ def get_trend_arrow(current, previous):
 client = get_bq_client() 
 
 # 2. Match the variable name to your sidebar (Using 'service' here)
-if service == "🌐 Global Overview":
+if service == "🌐 Time vs Temp":
     render_global_overview(selected_project, display_tz) 
 
 elif service == "🏠 Sensor Status":
