@@ -1771,20 +1771,26 @@ def get_trend_arrow(current, previous):
 # - 12. MAIN ROUTER - #
 ###########
 
-# 1. INITIALIZE THE CLIENT (Crucial step to fix NameError)
+###########
+# - 12. MAIN ROUTER - #
+###########
+
+# 1. Ensure the client is initialized for the session
 client = get_bq_client() 
 
-# --- PAGE ROUTING LOGIC ---
-
-if page == "Summary":
-    render_landing_page(unit_label, unit_mode, display_tz)
-
-elif page == "Time vs Temp":
-    render_global_overview(selected_project, project_metadata, display_tz)
+# 2. Match the variable name to your sidebar (Using 'service' here)
+if service == "🌐 Global Overview":
+    render_global_overview(selected_project, display_tz) 
 
 elif service == "🏠 Sensor Status":
-    # This now calls the renamed function
-    render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+    if client is not None:
+        # Using the NEW function name we created
+        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+    else:
+        st.error("BigQuery Client not available.")
+
+elif service == "📊 Client Portal":
+    render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs)
 
 elif page == "Depth Charts":
     # Ensure this function exists in your utils; updated to standard parameters
