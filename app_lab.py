@@ -551,7 +551,7 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
                 "Seen 24h": f"{int(row['Seen_24h'])}",
                 "Seen 6h": f"{int(row['Seen_6h'])}",
                 "Last Seen": f"{round(lag_hrs, 1)}h ago" if lag_hrs < 500 else "Never", 
-                "Max Gap 24h": f"{int(row['Gap_24h'])}h"
+                "Max Gap 24h": f"{int(row['Gap_24h'])}h",
                 "Max Gap 7d": f"{int(row['Gap_7d'])}h"
             })
 
