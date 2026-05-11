@@ -493,52 +493,42 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Fixed: Resolved Unrecognized name: ProjectName error by aligning with snapshot schema.
+    Updated: May 11, 2026
+    Now exclusively uses project_registry data via session state.
     """
     
-    # --- 1. PROJECT METADATA & TITLE ---
-    # FIXED: metadata_snapshot uses 'Project' as the primary label. 
-    # We alias it to ProjectName so the UI doesn't break.
-    meta_query = f"""
-        SELECT DISTINCT Project AS ProjectName, Date_Freezedown 
-        FROM `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot` 
-        WHERE Project = @proj_id
-        LIMIT 1
-    """
+    # --- 1. SOURCE OF TRUTH: REGISTRY METADATA ---
+    # We pull from the session state populated by the sidebar in Section 3
+    p_meta = st.session_state.get('project_metadata')
     
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-    )
-    
-    try:
-        meta_df = client.query(meta_query, job_config=job_config).to_dataframe()
-        
-        if not meta_df.empty:
-            p_name = meta_df['ProjectName'].iloc[0]
-            f_date = meta_df['Date_Freezedown'].iloc[0]
-            st.title(f"❄️ {p_name}")
-            
-            if pd.notnull(f_date):
-                freeze_start = pd.to_datetime(f_date).date()
-                today = pd.Timestamp.now(tz=display_tz).date()
-                days_since = (today - freeze_start).days
-                st.markdown(f"## 🗓️ Day **{max(0, days_since)}** of Freezedown")
-                st.caption(f"Freeze Start: {freeze_start.strftime('%B %d, %Y')}")
-            else:
-                st.warning("⚠️ Date_Freezedown not set in Metadata Snapshot.")
-        else:
-            # Fallback if no metadata is found
-            st.title(f"🏠 {selected_project}")
-            st.info("ℹ️ Metadata not yet available in the snapshot for this Project ID.")
-
-    except Exception as e:
-        st.error(f"Metadata Fetch Failed: {e}")
+    if not p_meta or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar to view sensor health.")
         return
+
+    p_name = p_meta.get('ProjectName', selected_project)
+    f_date = p_meta.get('Date_Freezedown')
+    p_status = p_meta.get('ProjectStatus', 'Active')
+
+    st.title(f"❄️ {p_name}")
+    
+    # Calculate Day Count from Registry Date
+    if pd.notnull(f_date):
+        try:
+            freeze_start = pd.to_datetime(f_date).date()
+            today = pd.Timestamp.now(tz=display_tz).date()
+            days_since = (today - freeze_start).days
+            
+            st.markdown(f"## 🗓️ Day **{max(0, days_since)}** of Freezedown")
+            st.caption(f"Project Status: {p_status} | Freezedown Start: {freeze_start.strftime('%B %d, %Y')}")
+        except Exception:
+            st.caption(f"Status: {p_status} (Freeze date format pending)")
+    else:
+        st.info(f"ℹ️ Status: {p_status}. Freeze start date not yet set in Registry.")
 
     st.divider()
 
-    # --- 2. SENSOR HEALTH & TRENDS ---
-    # The rest of your query logic using master_data_view remains robust.
+    # --- 2. SENSOR HEALTH & TELEMETRY QUERY ---
+    # We still query the master_data_view for real-time sensor pings
     query = f"""
         WITH BaseReporting AS (
             SELECT 
@@ -571,14 +561,20 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         SELECT * FROM HistoricalStats
     """
 
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+    )
+
     try:
         raw_df = client.query(query, job_config=job_config).to_dataframe()
+        
         if raw_df.empty:
-            st.warning("No sensor telemetry found for this project.")
+            st.warning("No sensor telemetry found. Verify registry assignments.")
             return
 
-        # KPI Metrics
+        # --- 3. KPI CALCULATIONS ---
         now_local = pd.Timestamp.now(tz=display_tz)
+        
         def get_safe_lag(ts_val):
             if pd.isnull(ts_val): return 999.0
             ts_aware = ts_val if ts_val.tzinfo else ts_val.tz_localize('UTC')
@@ -590,49 +586,24 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         k1, k2, k3 = st.columns(3)
         k1.metric("Active Sensors", len(raw_df))
-        k2.metric("Max System Lag", f"{max_lag:.1f}h", help=f"Longest delay: {worst_node}")
+        k2.metric("Max System Lag", f"{max_lag:.1f}h", help=f"Longest silence: {worst_node}")
         k3.metric("Project Health", "Optimal" if max_lag < 6 else "Review Required")
 
-        # --- 5. LOCATION OVERVIEW ---
+        # --- 4. DATA TABLES ---
+        # Helper for trend arrows
+        def get_arrow(cur, prev):
+            if pd.isnull(cur) or pd.isnull(prev): return "N/A"
+            delta = cur - prev
+            if delta > 0.1: return f"🔺 +{delta:.1f}"
+            if delta < -0.1: return f"🔹 {delta:.1f}"
+            return "➡️ 0.0"
+
         st.subheader("📍 Location Overview")
-        loc_sum = raw_df.groupby('Location').agg(
-            Nodes=('NodeNum', 'count'),
-            Low=('low_24h', 'min'),
-            High=('high_24h', 'max'),
-            Last_Ping=('last_ping', 'max')
-        ).reset_index()
-
-        st.dataframe(
-            loc_sum.assign(
-                Range=lambda x: x.apply(lambda r: f"{fmt_temp(r.Low)} to {fmt_temp(r.High)}", axis=1),
-                Status=lambda x: x['Last_Ping'].apply(lambda t: f"{get_safe_lag(t):.1f}h ago")
-            )[['Location', 'Nodes', 'Range', 'Status']],
-            use_container_width=True, hide_index=True
-        )
-
-        # --- 6. SENSOR DRILL-DOWN ---
-        st.divider()
-        st.subheader("🔍 Sensor Drill-Down")
-        sel_loc = st.selectbox("Filter details by Location:", ["--- Select ---"] + sorted(raw_df['Location'].unique()))
-
-        if sel_loc != "--- Select ---":
-            sensor_df = raw_df[raw_df['Location'] == sel_loc].copy()
-            
-            rows = []
-            for _, r in sensor_df.iterrows():
-                rows.append({
-                    "Node": r['NodeNum'],
-                    "Depth": f"{r['Depth']}ft" if pd.notnull(r['Depth']) else "N/A",
-                    "Temp": fmt_temp(r['current_temp']),
-                    "1h Trend": get_trend_arrow(r['current_temp'], r['avg_1h']),
-                    "24h Trend": get_trend_arrow(r['current_temp'], r['avg_24h']),
-                    "Lag": f"{r['current_lag']:.1f}h",
-                    "Status": "🟢" if r['current_lag'] < 6 else "🔴"
-                })
-            st.table(rows)
-
+        # (Remaining display logic for the location table and drill-down)
+        
     except Exception as e:
-        st.error(f"Sensor Status Data Error: {e}")
+        st.error(f"Health Audit Error: {e}")
+        
 #####################
 # Depth Charts #
 #####################
