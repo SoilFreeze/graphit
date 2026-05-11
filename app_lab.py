@@ -1778,11 +1778,11 @@ def get_trend_arrow(current, previous):
 # 1. Ensure the client is initialized for the session
 client = get_bq_client() 
 
-if service == "Summary":
+if page == "Summary":
     # Uses unit_label, unit_mode, and display_tz
     render_landing_page(unit_label, unit_mode, display_tz)
 
-elif service == "Time vs Temp":
+elif page == "Time vs Temp":
     # FIX: Pass all 3 arguments: ID, Metadata Dictionary, and Timezone
     render_global_overview(selected_project, current_project_meta, display_tz) 
 
