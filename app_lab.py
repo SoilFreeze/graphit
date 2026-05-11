@@ -1640,9 +1640,7 @@ def render_landing_page(unit_label, unit_mode, display_tz):
     client = get_bq_client()
     if client is None: return
 
-    # Improved Query: 
-    # 1. Joins project_registry for status AND Date_Freezedown.
-    # 2. Uses a 48h window for Lord sensor resilience.
+    # Improved Query: Added Date_Freezedown and ensured metadata joins
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -1673,6 +1671,10 @@ def render_landing_page(unit_label, unit_mode, display_tz):
     
     try:
         df = client.query(summary_q).to_dataframe()
+        # SAFEGUARD: Fill null strings to prevent .str errors later
+        df['Bank'] = df['Bank'].fillna('')
+        df['Location'] = df['Location'].fillna('')
+        df['ProjectStatus'] = df['ProjectStatus'].fillna('Unknown')
     except Exception as e:
         st.error(f"Dashboard Query Failed: {e}")
         return
@@ -1684,34 +1686,38 @@ def render_landing_page(unit_label, unit_mode, display_tz):
     # Sort projects and render cards
     for project in sorted(df['Project'].unique()):
         p_df = df[df['Project'] == project]
-        p_name = p_df['ProjectName'].iloc[0] if not p_df['ProjectName'].isnull().all() else project
         
-        # --- NEW: FREEZEDOWN DAY CALCULATION ---
+        # Safe Unpacking
+        p_name = p_df['ProjectName'].iloc[0] if pd.notnull(p_df['ProjectName'].iloc[0]) else project
+        p_status = p_df['ProjectStatus'].iloc[0]
+        
+        # --- SAFE DAY COUNT CALCULATION ---
         f_date_raw = p_df['Date_Freezedown'].iloc[0]
         day_count_text = ""
         
         if pd.notnull(f_date_raw):
-            # Convert to date objects for clean subtraction
-            freeze_start = pd.to_datetime(f_date_raw).date()
-            today = pd.Timestamp.now(tz=display_tz).date()
-            days_since = (today - freeze_start).days
-            day_count_text = f"🗓️ **Day {max(0, days_since)} of Freezedown**"
+            try:
+                freeze_start = pd.to_datetime(f_date_raw).date()
+                today = pd.Timestamp.now(tz=display_tz).date()
+                days_since = (today - freeze_start).days
+                day_count_text = f"🗓️ **Day {max(0, days_since)} of Freezedown**"
+            except:
+                day_count_text = "🗓️ *Freeze date format error*"
         
         with st.container(border=True):
-            # Header with Project Name and Day Count
             st.subheader(f"🏗️ {p_name}")
             if day_count_text:
                 st.markdown(day_count_text)
-            st.caption(f"Project ID: {project} | Status: {p_df['ProjectStatus'].iloc[0]}")
+            st.caption(f"Project ID: {project} | Status: {p_status}")
             
             st.divider()
             
             c1, c2, c3, c4 = st.columns(4)
             
-            # Classification Logic
-            is_ambient = p_df['Bank'].str.contains('Amb', case=False, na=False) | p_df['Location'].str.contains('Amb', case=False, na=False)
-            is_supply = (p_df['Bank'].str.startswith('S', na=False) | p_df['Location'].str.startswith('S', na=False)) & ~is_ambient
-            is_return = (p_df['Bank'].str.startswith('R', na=False) | p_df['Location'].str.startswith('R', na=False)) & ~is_ambient
+            # --- IMPROVED CLASSIFICATION LOGIC ---
+            is_ambient = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
+            is_supply = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_ambient
+            is_return = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_ambient
             is_temppipe = p_df['Depth'].notnull() & ~is_supply & ~is_return & ~is_ambient
 
             groups = [
@@ -1728,7 +1734,7 @@ def render_landing_page(unit_label, unit_mode, display_tz):
                         st.caption("No data in 48h")
                         continue
                     
-                    # Metrics with Fallback
+                    # Core Metrics
                     now = group_df['avg_now'].mean()
                     if pd.isnull(now):
                         now = group_df['last_known_temp'].mean()
@@ -1750,11 +1756,10 @@ def render_landing_page(unit_label, unit_mode, display_tz):
                         st.metric("Avg Temp", f"{now:.1f}{unit_label}")
                         st.caption(f"24h Range: {mn:.1f} to {mx:.1f}{unit_label}")
                         
-                        # Compact Trends
-                        t1, t2, t3 = st.columns(3)
-                        t1.caption(f"1h\n{get_trend_arrow(now, prev_1h)}")
-                        t2.caption(f"6h\n{get_trend_arrow(now, prev_6h)}")
-                        t3.caption(f"24h\n{get_trend_arrow(now, prev_24h)}")
+                        t_cols = st.columns(3)
+                        t_cols[0].caption(f"1h\n{get_trend_arrow(now, prev_1h)}")
+                        t_cols[1].caption(f"6h\n{get_trend_arrow(now, prev_6h)}")
+                        t_cols[2].caption(f"24h\n{get_trend_arrow(now, prev_24h)}")
 
 def get_trend_arrow(current, previous):
     if pd.isnull(current) or pd.isnull(previous): return "N/A"
