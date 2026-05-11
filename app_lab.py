@@ -1780,7 +1780,7 @@ client = get_bq_client()
 
 # 2. Match the variable name to your sidebar (Using 'service' here)
 if page == "Time vs Temp":
-    render_global_overview(selected_project, display_tz) 
+    render_global_overview(selected_project, current_project_meta, display_tz) 
 
 elif page == "Sensor Status":
     if client is not None:
