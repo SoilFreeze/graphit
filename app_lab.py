@@ -1530,7 +1530,7 @@ def update_records(pts, df, val, display_tz):
 # - 12. PAGE: DEPTH CHARTS (ENGINEERING) - #
 ###########
 
-def render_depth_charts(selected_project, unit_label, display_tz):
+def render_landing_page(unit_label, unit_mode, display_tz='UTC'):
     """
     Engineering-grade Vertical Temperature Profiles.
     Shows the thermal gradient across soil depths without date masking.
@@ -1776,7 +1776,7 @@ def get_trend_arrow(current, previous):
 
 if page == "Summary":
     # Removed 'client' - function now calls get_bq_client() internally
-    render_landing_page(unit_label, unit_mode)
+    render_landing_page(unit_label, unit_mode, display_tz)
 
 elif page == "Time vs Temp":
     # Removed 'client' - updated to match the new 3-parameter definition
