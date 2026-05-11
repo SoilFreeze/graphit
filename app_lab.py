@@ -1198,7 +1198,8 @@ def render_data_intake_page(selected_project):
 
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Central hub for registry management, bulk approvals, and project lifecycle.
+    Advanced Admin Tools: Features Transactional Registry Management, 
+    Bulk Staging, and Project Lifecycle controls.
     """
     st.header("🛠️ Admin Tools")
     
@@ -1207,37 +1208,136 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.error("Database connection unavailable.")
         return
 
-    # 1. GLOBAL REGISTRY FETCH
-    # We join the node and project registries to give admins a complete view
-    reg_q = f"""
-        SELECT 
-            n.*, 
-            p.ProjectName, p.City, p.Timezone, p.ProjectStatus as MasterProjectStatus
-        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON n.Project = p.Project
-    """
+    # 1. GLOBAL DATA FETCH
+    # We pull the full history to allow for 'Available' node lookups
+    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
     try:
         full_reg_df = client.query(reg_q).to_dataframe()
-        # Ensure numeric columns are properly typed for the data editor
-        for col in ['Depth', 'Bank']:
-            if col in full_reg_df.columns:
-                full_reg_df[col] = pd.to_numeric(full_reg_df[col], errors='coerce')
     except Exception as e:
-        st.error(f"Error joining registries: {e}")
+        st.error(f"Registry Fetch Failed: {e}")
         full_reg_df = pd.DataFrame()
-    
-    # Identify active sensors for the currently selected project
-    active_project_df = pd.DataFrame()
-    if not full_reg_df.empty:
-        active_project_df = full_reg_df[
-            (full_reg_df['Project'] == selected_project) & 
-            (full_reg_df['End_Date'].isna())
-        ]
-    
+
     # 2. ADMIN NAVIGATION
-    tab_bulk, tab_registry, tab_project, tab_scrub, tab_surgical = st.tabs([
-        "✅ Bulk Approval", "📋 Node Registry", "⚙️ Project Master", "🧹 Scrub", "🧨 Surgical"
+    tab_bulk_app, tab_registry, tab_project, tab_scrub, tab_surgical = st.tabs([
+        "✅ Bulk Approval", "📋 Node Registry & Logistics", "⚙️ Project Master", "🧹 Scrub", "🧨 Surgical"
     ])
+
+    # --- TAB 2: NODE REGISTRY & LOGISTICS ---
+    with tab_registry:
+        reg_mode = st.radio("Registry Action", 
+                            ["Search & Manage", "Bulk CSV Upload", "Global Status Audit"], 
+                            horizontal=True)
+
+        # A. SINGLE NODE SEARCH & EDIT
+        if reg_mode == "Search & Manage":
+            search_id = st.text_input("🔍 Find Node (Enter NodeNum or Physical ID)")
+            if search_id:
+                # Find the current active assignment (where End_Date is null)
+                active_match = full_reg_df[
+                    ((full_reg_df['NodeNum'] == search_id) | 
+                     (full_reg_df['PhysicalID'].astype(str) == search_id)) & 
+                    (full_reg_df['End_Date'].isna())
+                ]
+
+                if not active_match.empty:
+                    row = active_match.iloc[0]
+                    st.success(f"Node active in: **{row['Project']}** | Location: **{row['Location']}**")
+                    
+                    with st.form("surgical_node_edit"):
+                        c1, c2 = st.columns(2)
+                        n_loc = c1.text_input("Current Location", value=row['Location'])
+                        n_proj = c2.text_input("Current Project", value=row['Project'])
+                        n_bank = c1.text_input("Bank", value=row['Bank'])
+                        n_depth = c2.number_input("Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
+                        n_status = st.selectbox("Hardware Status", 
+                                              ["Active", "Diagnostic", "Available", "Need Repair", "Dead"],
+                                              index=["Active", "Diagnostic", "Available", "Need Repair", "Dead"].index(row['SensorStatus']))
+                        
+                        change_type = st.radio("Modification Type", 
+                            ["Correction (Overwrite existing record)", "Re-assignment (Retire old, start new)"],
+                            help="Correction fixes a mistake/typo. Re-assignment tracks a physical move to a new area.")
+
+                        if st.form_submit_button("💾 Save Registry Update"):
+                            today = datetime.now().strftime('%Y-%m-%d')
+                            if "Correction" in change_type:
+                                sql = f"""
+                                    UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                    SET Location='{n_loc}', Project='{n_proj}', Bank='{n_bank}', 
+                                        Depth={n_depth}, SensorStatus='{n_status}'
+                                    WHERE NodeNum='{row['NodeNum']}' AND Project='{row['Project']}' AND End_Date IS NULL
+                                """
+                            else:
+                                # Transactional Retire & Insert
+                                sql = f"""
+                                    BEGIN TRANSACTION;
+                                    UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET End_Date='{today}' 
+                                    WHERE NodeNum='{row['NodeNum']}' AND Project='{row['Project']}' AND End_Date IS NULL;
+                                    
+                                    INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                    (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                                    VALUES ('{row['NodeNum']}', {row['PhysicalID']}, '{n_proj}', '{n_loc}', '{n_bank}', {n_depth}, '{today}', '{n_status}');
+                                    COMMIT;
+                                """
+                            client.query(sql).result()
+                            st.success("Assignment updated. Cache cleared.")
+                            st.cache_data.clear()
+                else:
+                    st.info("No active assignment found for this Node. Check 'Global Status Audit' for history.")
+
+        # B. BULK CSV UPLOAD (Staging Area)
+        elif reg_mode == "Bulk CSV Upload":
+            st.write("Upload a CSV to process multiple re-assignments at once.")
+            st.caption("Required Columns: `NodeNum`, `PhysicalID`, `Project`, `Location`, `Bank`, `Depth`")
+            u_file = st.file_uploader("Upload Node CSV", type="csv")
+            
+            if u_file:
+                new_df = pd.read_csv(u_file)
+                # Check for existing active assignments
+                active_nodes = full_reg_df[full_reg_df['End_Date'].isna()]['NodeNum'].tolist()
+                conflicts = new_df[new_df['NodeNum'].isin(active_nodes)]
+                
+                if not conflicts.empty:
+                    st.warning(f"⚠️ {len(conflicts)} nodes in your CSV are currently assigned to other locations.")
+                    st.write("Confirming upload will automatically set an **End_Date** on these existing assignments.")
+                    st.dataframe(conflicts, hide_index=True)
+                
+                if st.button("🚀 Execute Bulk Re-assignment", use_container_width=True):
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    with st.spinner("Processing batch transactions..."):
+                        for _, r in new_df.iterrows():
+                            # 1. Retire existing
+                            retire_sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET End_Date='{today}' WHERE NodeNum='{r['NodeNum']}' AND End_Date IS NULL"
+                            client.query(retire_sql).result()
+                            # 2. Insert new
+                            ins_sql = f"""
+                                INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                                VALUES ('{r['NodeNum']}', {r['PhysicalID']}, '{r['Project']}', '{r['Location']}', '{r['Bank']}', {r['Depth']}, '{today}', 'Active')
+                            """
+                            client.query(ins_sql).result()
+                    st.success("Bulk update successful.")
+                    st.cache_data.clear()
+
+        # C. GLOBAL STATUS AUDIT
+        elif reg_mode == "Global Status Audit":
+            st.subheader("📊 Global Hardware Inventory")
+            f1, f2, f3 = st.columns(3)
+            
+            status_opts = sorted(full_reg_df['SensorStatus'].unique().tolist())
+            sel_status = f1.multiselect("Filter by Status", status_opts, default=["Active", "Diagnostic"])
+            
+            active_only = f2.checkbox("Hide Retired Assignments", value=True)
+            proj_search = f3.text_input("Filter by Project Name")
+
+            view_df = full_reg_df.copy()
+            if sel_status: view_df = view_df[view_df['SensorStatus'].isin(sel_status)]
+            if active_only: view_df = view_df[view_df['End_Date'].isna()]
+            if proj_search: view_df = view_df[view_df['Project'].str.contains(proj_search, case=False, na=False)]
+
+            st.dataframe(
+                view_df.sort_values(['Project', 'Location', 'Depth']), 
+                use_container_width=True, hide_index=True
+            )
 
     # --- TAB 1: BULK APPROVAL ---
     with tab_bulk:
@@ -1272,55 +1372,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             client.query(sql).result()
             st.success(f"Records approved for {sel_loc}. Data will now appear in Client Portal.")
             st.cache_data.clear()
-
-    # --- TAB 2: NODE REGISTRY (Data Editor) ---
-    with tab_registry:
-        st.subheader("📋 Hardware Assignment Manager")
-        
-        # Filter logic to make the editor manageable
-        with st.expander("🔍 Filter View", expanded=True):
-            f1, f2 = st.columns(2)
-            p_filter = f1.selectbox("Filter by Project", ["All"] + sorted(full_reg_df['Project'].dropna().unique().tolist()))
-            l_filter = f2.selectbox("Filter by Location", ["All"] + sorted(full_reg_df['Location'].dropna().unique().tolist()))
-
-        view_df = full_reg_df.copy()
-        if p_filter != "All": view_df = view_df[view_df['Project'] == p_filter]
-        if l_filter != "All": view_df = view_df[view_df['Location'] == l_filter]
-
-        node_cols = ['NodeNum', 'Project', 'Location', 'Bank', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']
-        
-        edited_df = st.data_editor(
-            view_df[node_cols].sort_values(['Project', 'Location', 'Depth']), 
-            num_rows="dynamic", key="node_registry_master_editor", use_container_width=True
-        )
-        
-        if st.button("💾 Sync Registry Changes", type="primary", use_container_width=True):
-            full_table_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
-            composite_key = ['NodeNum', 'Project', 'Location']
-            
-            # Sanitize nulls for key comparison
-            edited_df['Location'] = edited_df['Location'].fillna('Unknown')
-            full_table_df['Location'] = full_table_df['Location'].fillna('Unknown')
-            
-            # Date Alignment (Prevents INT64 conversion errors in BigQuery)
-            for col in ['Start_Date', 'End_Date']:
-                edited_df[col] = pd.to_datetime(edited_df[col], errors='coerce').dt.date
-            
-            # Merge and Update
-            full_table_df.set_index(composite_key, inplace=True)
-            edited_df.set_index(composite_key, inplace=True)
-            full_table_df.update(edited_df)
-            
-            # Append brand new rows
-            new_rows = edited_df[~edited_df.index.isin(full_table_df.index)]
-            final_df = pd.concat([full_table_df, new_rows]).reset_index()
-
-            with st.spinner("Syncing to BigQuery..."):
-                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-                client.load_table_from_dataframe(final_df[node_cols], f"{PROJECT_ID}.{DATASET_ID}.node_registry", job_config=job_config).result()
-                st.success("Registry successfully updated.")
-                st.cache_data.clear()
-                st.rerun()
 
     # --- TAB 3: PROJECT MASTER ---
     with tab_project:
