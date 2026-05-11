@@ -1778,8 +1778,12 @@ def get_trend_arrow(current, previous):
 # 1. Ensure the client is initialized for the session
 client = get_bq_client() 
 
-# 2. Match the variable name to your sidebar (Using 'service' here)
-if page == "Time vs Temp":
+if service == "Summary":
+    # Uses unit_label, unit_mode, and display_tz
+    render_landing_page(unit_label, unit_mode, display_tz)
+
+elif service == "Time vs Temp":
+    # FIX: Pass all 3 arguments: ID, Metadata Dictionary, and Timezone
     render_global_overview(selected_project, current_project_meta, display_tz) 
 
 elif page == "Sensor Status":
