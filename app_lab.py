@@ -432,10 +432,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         st.info("Check **Admin Tools > Node Registry** to ensure sensors are mapped to this project and location.")
         
 ###########
-# - 6. PAGE: EXECUTIVE SUMMARY - #
-###########
-
-###########
 # - 6. PAGE: SENSOR STATUS - #
 ###########
 
@@ -585,10 +581,6 @@ def render_executive_summary(selected_project, unit_label, display_tz):
     except Exception as e:
         st.error(f"Sensor Status Error: {e}")
         
-###########
-# - 7. PAGE: CLIENT PORTAL - #
-###########
-
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
@@ -772,10 +764,6 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
 # - 8. PAGE: NODE DIAGNOSTICS - #
 ###########
 
-###########
-# - 8. PAGE: NODE DIAGNOSTICS - #
-###########
-
 def render_node_diagnostics(selected_project, display_tz, unit_label):
     """
     Page Name: Node Diagnostics
@@ -884,10 +872,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 # - 9. PAGE: DATA INTAKE LAB - #
 ###########
 
-###########
-# - 9. PAGE: DATA INTAKE LAB - #
-###########
-
 def render_data_intake_page(selected_project):
     """
     Handles manual file ingestion for Lord (Wide/Long) and SensorPush formats.
@@ -987,8 +971,9 @@ def render_data_intake_page(selected_project):
             st.warning("⚠️ Select a project in the sidebar first.")
         else:
             c1, c2 = st.columns(2)
-            e_start = c1.date_input("Start Date", value=datetime.now() - timedelta(days=30))
-            e_end = c2.date_input("End Date", value=datetime.now())
+            # --- Inside render_data_intake_page Export Tab ---
+            e_start = c1.date_input("Start Date", value=datetime.now() - timedelta(days=30), key="export_start_date")
+            e_end = c2.date_input("End Date", value=datetime.now(), key="export_end_date")
             
             with st.spinner("Fetching engineering records..."):
                 full_df = get_universal_portal_data(selected_project, view_mode="engineering")
@@ -1041,9 +1026,6 @@ def render_data_intake_page(selected_project):
             else:
                 st.warning("No project data available in the registry.")
                         
-###########
-# - 10. PAGE: ADMIN TOOLS - #
-###########
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
@@ -1267,21 +1249,21 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
     t_col1, t_col2 = st.columns([1, 2])
     direction = t_col1.selectbox("Temporal Direction", ["Between Range", "Everything Older Than", "Everything Newer Than"])
     
+    # --- Inside render_surgical_cleaner ---
+
     with t_col2:
         if direction == "Between Range":
             sc1, sc2 = st.columns(2)
-            s_dt = datetime.combine(sc1.date_input("Start Date", value=datetime.now() - timedelta(days=7)), dt_time(0,0))
-            e_dt = datetime.combine(sc2.date_input("End Date", value=datetime.now()), dt_time(23,59))
+            # ADDED unique keys here:
+            s_dt = datetime.combine(sc1.date_input("Start Date", value=datetime.now() - timedelta(days=7), key="surgical_start_date"), dt_time(0,0))
+            e_dt = datetime.combine(sc2.date_input("End Date", value=datetime.now(), key="surgical_end_date"), dt_time(23,59))
         else:
-            anchor_dt = datetime.combine(st.date_input("Anchor Date"), st.time_input("Anchor Time", value=dt_time(6,0)))
+            # ADDED unique keys here:
+            anchor_dt = datetime.combine(st.date_input("Anchor Date", key="surgical_anchor_date"), 
+                                         st.time_input("Anchor Time", value=dt_time(6,0), key="surgical_anchor_time"))
             s_dt = datetime(2000, 1, 1) if direction == "Everything Older Than" else anchor_dt
             e_dt = anchor_dt if direction == "Everything Older Than" else datetime(2100, 1, 1)
 
-    # 3. THRESHOLD Logic
-    thr_col1, thr_col2 = st.columns([1, 2])
-    operator = thr_col1.selectbox("Value Filter", ["No Threshold", "Greater Than (>)", "Less Than (<)"])
-    thresh_val = thr_col2.number_input(f"Threshold Value ({unit_label})", value=100.0)
-    thresh_val_f = (thresh_val * 9/5) + 32 if unit_mode == "Celsius" else thresh_val
 
     # 4. SQL CONSTRUCTION
     if scope == "Project Wide":
