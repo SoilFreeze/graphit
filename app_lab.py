@@ -1786,12 +1786,7 @@ elif page == "Time vs Temp":
 
 elif page == "Sensor Status":
     # FIX: Add unit_mode to the call
-    render_executive_summary(
-        selected_project, 
-        unit_label, 
-        unit_mode,    # <--- Add this here
-        display_tz
-    )
+    render_executive_summary(client, selected_project, unit_label, unit_mode, display_tz)
 
 elif page == "Depth Charts":
     # Ensure this function exists in your utils; updated to standard parameters
