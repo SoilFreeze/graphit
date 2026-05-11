@@ -1354,18 +1354,22 @@ def render_surgical_cleaner(selected_project, display_tz, unit_mode, unit_label)
     st.divider()
     if st.button("🔍 Step 1: Verify Match Count", use_container_width=True, key="surg_verify_btn"):
         status_q = f"""
-            SELECT COALESCE(rej.approve, 'PENDING') as status, COUNT(*) as point_count
+            SELECT 
+                COALESCE(CAST(rej.approve AS STRING), 'PENDING') as status, 
+                COUNT(*) as point_count
             FROM (
                 SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
                 UNION ALL 
                 SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             ) AS r
             INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
-            LEFT JOIN `{OVERRIDE_TABLE}` AS rej ON r.NodeNum = rej.NodeNum AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+            LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+                ON r.NodeNum = rej.NodeNum 
+                AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
             WHERE {where_clause} 
             AND r.timestamp BETWEEN '{s_str}' AND '{e_str}'
             {threshold_clause}
-            GROUP BY status
+            GROUP BY 1
         """
         st.session_state["purge_staged_df"] = client.query(status_q).to_dataframe()
 
