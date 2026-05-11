@@ -435,10 +435,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 # - 6. PAGE: SENSOR STATUS - #
 ###########
 
-###########
-# - 6. PAGE: SENSOR STATUS - #
-###########
-
 def render_executive_summary(selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
@@ -549,11 +545,14 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
             lag_hrs = get_safe_lag(row['Latest_Ping'])
             return pd.Series({
                 "Location": row['Location'], 
-                "Min/Max (24h)": f"{fmt_temp(row['Min_24h_All'])} / {fmt_temp(row['Max_24h_All'])}",
+                "Min (24h)": f"{fmt_temp(row['Min_24h_All'])}",
+                "Max (24h)": f"{fmt_temp(row['Max_24h_All'])}",
                 "Nodes": int(row['Nodes']), 
-                "Seen 24h/6h": f"{int(row['Seen_24h'])} / {int(row['Seen_6h'])}",
+                "Seen 24h": f"{int(row['Seen_24h'])}",
+                "Seen 6h": f"{int(row['Seen_6h'])}",
                 "Last Seen": f"{round(lag_hrs, 1)}h ago" if lag_hrs < 500 else "Never", 
-                "Max Gap 24h/7d": f"{int(row['Gap_24h'])}h / {int(row['Gap_7d'])}h"
+                "Max Gap 24h": f"{int(row['Gap_24h'])}h"
+                "Max Gap 7d": f"{int(row['Gap_7d'])}h"
             })
 
         st.dataframe(summary_df.apply(format_summary_table, axis=1), use_container_width=True, hide_index=True)
@@ -577,10 +576,13 @@ def render_executive_summary(selected_project, unit_label, unit_mode, display_tz
                     "Bank": row['Bank'] or "N/A",
                     "Depth": f"{row['Depth']}ft" if pd.notnull(row['Depth']) else "N/A",
                     "Current": f"{cur:.1f}{unit_label}", 
+                    "High (24h)": fmt_temp(row['high_24h']),
+                    "Low (24h)": fmt_temp(row['low_24h']),
                     "1h Trend": get_trend_arrow_local(cur, t1),
                     "6h Trend": get_trend_arrow_local(cur, t6),
                     "24h Trend": get_trend_arrow_local(cur, t24),
-                    "Seen (6h)": "✅" if row['seen_6h'] > 0 else "❌",
+                    "Seen (24h)": "✅" if row['seen_24h'] > 0 else "❌",
+                    "Gap (24h)": f"{int(row['gap_24h'])}h",
                     "Outage (7d)": f"{int(row['max_gap_7d'])}h",
                     "Status": f"{round(row['current_lag'], 1)}h {'🟢' if row['current_lag'] < 6 else ('🔴' if row['current_lag'] > 24 else '🟡')}"
                 })
