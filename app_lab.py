@@ -438,197 +438,156 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 def render_executive_summary(selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Comprehensive health monitor with real-time temperature trends and worst-case lag tracking.
+    Consolidated Health Monitor and Dynamic Freezedown Tracker.
     """
-    st.header(f"🏠 Sensor Status: Health Monitor")
-    
+    # 1. INITIAL VALIDATION
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view health metrics.")
+        st.header("🏠 Sensor Status: Health Monitor")
+        st.info("💡 Please select a specific project in the sidebar to begin.")
         return
 
     client = get_bq_client()
     if client is None: return
-        
-    # 1. Fetch metadata with a clean join check
-    project_info_query = f"""
-        SELECT Date_Freezedown, ProjectName 
-        FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-        WHERE Project = '{selected_project}'
-    """
-    try:
-        project_info = client.query(project_info_query).to_dataframe()
-    
-        if not project_info.empty:
-            # Get the raw value from BigQuery
-            raw_date = project_info['Date_Freezedown'].iloc[0]
-            project_name = project_info['ProjectName'].iloc[0]
-            
-            if pd.notnull(raw_date):
-                # Force conversion to a naive date for clean subtraction
-                freeze_start = pd.to_datetime(raw_date).date()
-                today = pd.Timestamp.now(tz=display_tz).date()
-                
-                days_since = (today - freeze_start).days
-                
-                # 2. THE DISPLAY
-                st.title(f"❄️ {project_name}")
-                
-                # Styling it as a big metric or a subheader
-                st.markdown(f"### 🗓️ Day **{days_since}** of Freezedown")
-                st.caption(f"Freezedown began on {freeze_start.strftime('%B %d, %Y')}")
-            else:
-                st.title(f"❄️ {project_name}")
-                st.warning("⚠️ No 'Date_Freezedown' set in the Project Registry.")
-        else:
-            # This triggers if the selected_project ID doesn't match the registry
-            st.error(f"Could not find project details for ID: {selected_project}")
-    
-    except Exception as e:
-        st.error(f"Title Logic Error: {e}")
 
-    
-    # 1. ENRICHED QUERY
+    # 2. CONSOLIDATED DATA FETCH
+    # We pull everything (Project metadata + Sensor Data) in one go to ensure sync.
     query = f"""
-        WITH BaseReporting AS (
+        WITH ProjectMeta AS (
+            SELECT ProjectName, Date_Freezedown, Timezone
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
+            WHERE Project = '{selected_project}'
+        ),
+        BaseReporting AS (
             SELECT 
-                m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth, m.SensorStatus
+                m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth, m.SensorStatus,
+                p.Date_Freezedown, p.ProjectName
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
+            CROSS JOIN ProjectMeta p
             WHERE m.Project = '{selected_project}'
-            AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+            -- Ensure we only see data since the project's freeze date
+            AND m.timestamp >= COALESCE(CAST(p.Date_Freezedown AS TIMESTAMP), TIMESTAMP('2000-01-01'))
         ),
         GapAnalysis AS (
-            SELECT 
-                *,
-                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
+            SELECT *, LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
             FROM BaseReporting
         ),
         HistoricalStats AS (
             SELECT 
-                NodeNum, Location, Bank, Depth, SensorStatus,
+                NodeNum, Location, Bank, Depth, SensorStatus, ProjectName, Date_Freezedown,
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
-                
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
-
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_DIFF(timestamp, prev_ts, HOUR) ELSE 0 END) AS gap_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h,
-                
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS low_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h,
-                COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) as hours_7d
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h
             FROM GapAnalysis 
-            GROUP BY NodeNum, Location, Bank, Depth, SensorStatus
+            GROUP BY NodeNum, Location, Bank, Depth, SensorStatus, ProjectName, Date_Freezedown
         )
         SELECT * FROM HistoricalStats
     """
-    
+
     try:
         raw_df = client.query(query).to_dataframe()
+        
         if raw_df.empty:
-            st.warning("No data found for this project.")
+            st.warning(f"No active data found for {selected_project} since its Freeze Date.")
             return
 
+        # 3. DYNAMIC TITLE & DAY COUNT
+        # Grab metadata from the first row of our results
+        p_name = raw_df['ProjectName'].iloc[0]
+        f_date_raw = raw_df['Date_Freezedown'].iloc[0]
+        
+        st.title(f"❄️ {p_name}")
+        
+        if pd.notnull(f_date_raw):
+            f_start = pd.to_datetime(f_date_raw).date()
+            today = pd.Timestamp.now(tz=display_tz).date()
+            days_since = (today - f_start).days
+            st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
+            st.caption(f"Project started on {f_start.strftime('%B %d, %Y')}")
+        else:
+            st.caption("⚠️ Freeze date not set in Project Registry.")
+
+        st.divider()
+
+        # 4. HEALTH METRICS (KPIs)
         now_local = pd.Timestamp.now(tz=display_tz)
 
-        # 2. HELPER: SAFE TIME CONVERSION
         def get_safe_lag(ts_val):
             if pd.isnull(ts_val): return 999.0
-            # If already aware (BigQuery default), convert. If naive, localize then convert.
-            if ts_val.tzinfo is not None:
-                return (now_local - ts_val.tz_convert(display_tz)).total_seconds() / 3600
-            else:
-                return (now_local - ts_val.tz_localize('UTC').tz_convert(display_tz)).total_seconds() / 3600
+            ts_aware = ts_val if ts_val.tzinfo else ts_val.tz_localize('UTC')
+            return (now_local - ts_aware.tz_convert(display_tz)).total_seconds() / 3600
 
-        # KPI Logic
         raw_df['current_lag'] = raw_df['last_ping'].apply(get_safe_lag)
-        max_system_lag = raw_df['current_lag'].max()
-        worst_sensor = raw_df.loc[raw_df['current_lag'].idxmax(), 'NodeNum'] if not raw_df.empty else "N/A"
+        max_lag = raw_df['current_lag'].max()
+        worst_node = raw_df.loc[raw_df['current_lag'].idxmax(), 'NodeNum']
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Active Sensors", len(raw_df))
-        c2.metric("Max System Lag", f"{round(max_system_lag, 1)}h", help=f"Longest silence from node: {worst_sensor}")
-        c3.metric("Project Health", "Optimal" if max_system_lag < 6 else "Attention Req.")
+        c2.metric("Max System Lag", f"{max_lag:.1f}h", delta=f"Node: {worst_node}", delta_color="inverse")
+        c3.metric("Project Health", "Optimal" if max_lag < 6 else "Review Required")
 
-        def get_trend_arrow_local(current, previous):
-            if pd.isnull(current) or pd.isnull(previous): return "N/A"
-            delta = current - previous
-            if delta > 0.1: return f"🔺 +{delta:.1f}"
-            if delta < -0.1: return f"🔹 {delta:.1f}"
-            return "➡️ 0.0"
-
+        # 5. DATA TABLES (Helper Functions)
         def fmt_temp(val):
             if pd.isnull(val): return "N/A"
-            c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            return f"{round(c_val, 1)}{unit_label}"
+            out = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            return f"{out:.1f}{unit_label}"
 
-        # --- 3. LOCATION OVERVIEW ---
+        def get_trend(cur, prev):
+            if pd.isnull(cur) or pd.isnull(prev): return "N/A"
+            diff = cur - prev
+            if diff > 0.1: return f"🔺 +{diff:.1f}"
+            if diff < -0.1: return f"🔹 {diff:.1f}"
+            return "➡️ 0.0"
+
+        # 6. LOCATION SUMMARY
         st.subheader("📍 Location Overview")
-        summary_df = raw_df.groupby(['Location']).agg(
-            Nodes=('NodeNum', 'count'),
-            Seen_24h=('seen_24h', 'sum'),
-            Seen_6h=('seen_6h', 'sum'),
-            Gap_24h=('gap_24h', 'max'),
-            Gap_7d=('max_gap_7d', 'max'),
-            Min_24h_All=('low_24h', 'min'), 
-            Max_24h_All=('high_24h', 'max'), 
-            Latest_Ping=('last_ping', 'max')
-        ).reset_index()
+        loc_sum = raw_df.groupby('Location').agg({
+            'NodeNum': 'count',
+            'seen_24h': 'sum',
+            'low_24h': 'min',
+            'high_24h': 'max',
+            'last_ping': 'max'
+        }).reset_index()
 
-        def format_summary_table(row):
-            lag_hrs = get_safe_lag(row['Latest_Ping'])
-            return pd.Series({
-                "Location": row['Location'], 
-                "Min (24h)": f"{fmt_temp(row['Min_24h_All'])}",
-                "Max (24h)": f"{fmt_temp(row['Max_24h_All'])}",
-                "Nodes": int(row['Nodes']), 
-                "Seen 24h": f"{int(row['Seen_24h'])}",
-                "Seen 6h": f"{int(row['Seen_6h'])}",
-                "Last Seen": f"{round(lag_hrs, 1)}h ago" if lag_hrs < 500 else "Never", 
-                "Max Gap 24h": f"{int(row['Gap_24h'])}h",
-                "Max Gap 7d": f"{int(row['Gap_7d'])}h"
-            })
+        st.dataframe(
+            loc_sum.assign(
+                Last_Seen=lambda x: x['last_ping'].apply(lambda t: f"{get_safe_lag(t):.1f}h ago"),
+                Range=lambda x: x.apply(lambda r: f"{fmt_temp(r.low_24h)} to {fmt_temp(r.high_24h)}", axis=1)
+            )[['Location', 'NodeNum', 'Range', 'Last_Seen']],
+            use_container_width=True, hide_index=True
+        )
 
-        st.dataframe(summary_df.apply(format_summary_table, axis=1), use_container_width=True, hide_index=True)
-
-        # --- 4. SENSOR DRILL-DOWN ---
-        st.divider()
-        st.subheader("🔍 Sensor Drill-Down & Trends")
-        selected_loc = st.selectbox("Detailed view for:", ["--- Select Location ---"] + sorted(raw_df['Location'].unique().tolist()), key="status_v_safe")
-
-        if selected_loc != "--- Select Location ---":
-            sensor_df = raw_df[raw_df['Location'] == selected_loc].copy()
+        # 7. DRILL DOWN
+        st.subheader("🔍 Sensor Detail")
+        sel_loc = st.selectbox("Filter by Location", ["---"] + sorted(raw_df['Location'].unique()))
+        
+        if sel_loc != "---":
+            view_df = raw_df[raw_df['Location'] == sel_loc].copy()
             
-            def format_sensor_row(row):
-                cur = (row['current_temp'] - 32) * 5/9 if unit_mode == "Celsius" else row['current_temp']
-                t1 = (row['avg_1h'] - 32) * 5/9 if unit_mode == "Celsius" else row['avg_1h']
-                t6 = (row['avg_6h'] - 32) * 5/9 if unit_mode == "Celsius" else row['avg_6h']
-                t24 = (row['avg_24h'] - 32) * 5/9 if unit_mode == "Celsius" else row['avg_24h']
-
-                return pd.Series({
-                    "Node ID": row['NodeNum'], 
-                    "Bank": row['Bank'] or "N/A",
-                    "Depth": f"{row['Depth']}ft" if pd.notnull(row['Depth']) else "N/A",
-                    "Current": f"{cur:.1f}{unit_label}", 
-                    "High (24h)": fmt_temp(row['high_24h']),
-                    "Low (24h)": fmt_temp(row['low_24h']),
-                    "1h Trend": get_trend_arrow_local(cur, t1),
-                    "6h Trend": get_trend_arrow_local(cur, t6),
-                    "24h Trend": get_trend_arrow_local(cur, t24),
-                    "Seen (24h)": "✅" if row['seen_24h'] > 0 else "❌",
-                    "Gap (24h)": f"{int(row['gap_24h'])}h",
-                    "Outage (7d)": f"{int(row['max_gap_7d'])}h",
-                    "Status": f"{round(row['current_lag'], 1)}h {'🟢' if row['current_lag'] < 6 else ('🔴' if row['current_lag'] > 24 else '🟡')}"
+            # Format row-by-row for the detailed table
+            detailed_rows = []
+            for _, row in view_df.iterrows():
+                cur_f = row['current_temp']
+                detailed_rows.append({
+                    "Node": row['NodeNum'],
+                    "Depth": f"{row['Depth']}ft",
+                    "Temp": fmt_temp(cur_f),
+                    "1h": get_trend(cur_f, row['avg_1h']),
+                    "24h": get_trend(cur_f, row['avg_24h']),
+                    "Lag": f"{row['current_lag']:.1f}h",
+                    "Status": "🟢" if row['current_lag'] < 6 else "🔴"
                 })
-            
-            st.dataframe(sensor_df.apply(format_sensor_row, axis=1), use_container_width=True, hide_index=True)
-            
+            st.table(detailed_rows)
+
     except Exception as e:
-        st.error(f"Sensor Status Error: {e}")
+        st.error(f"Critical System Error: {e}")
         
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
