@@ -249,57 +249,55 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # --- 3. THEORETICAL REFERENCE CURVES (e.g., Sat Stiff Clay) ---
     # --- Inside build_high_speed_graph ---
     if curve_id and f_start_date:
-        # curve_id is currently "2527-T8"
-        parts = curve_id.split('-')
-        p_id = parts[0] # "2527"
-        l_id = parts[1] # "T8"
-
         try:
-            # This query looks for rows that contain BOTH the project and the location
             ref_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{p_id}%') 
-                  AND UPPER(CurveID) LIKE UPPER('%{l_id}%')
+                WHERE UPPER(CurveID) LIKE UPPER('%{curve_id}%')
                 ORDER BY Day
             """
             ref_df = client.query(ref_q).to_dataframe()
             
-            # Temporary Debug - this will tell us what BigQuery found
-            st.write(f"🔍 Fuzzy Search: '{p_id}' + '{l_id}' | Found: {len(ref_df)} rows")
-
             if not ref_df.empty:
-                for full_cid, g_df in ref_df.groupby('CurveID'):
-                    # This pulls 'Sat Soft Clay' out for the legend
+                # Define a high-contrast palette for the Goal lines
+                # Dark colors ensure they stay visible over the brighter sensor lines
+                ref_colors = ['#000000', '#4B0082', '#006400', '#8B0000', '#FF8C00']
+                ref_dashes = ['solid', 'dash', 'dashdot', 'longdash']
+                
+                for i, (full_cid, g_df) in enumerate(ref_df.groupby('CurveID')):
+                    # Pick a unique color and dash style for this specific curve
+                    color = ref_colors[i % len(ref_colors)]
+                    dash = ref_dashes[i % len(ref_dashes)]
+                    
+                    # Legend Name (e.g., GOAL: Sat Stiff Clay)
                     clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
                     
-                    # Convert Day offset to a real calendar date
                     g_df['timestamp'] = g_df['Day'].apply(
                         lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
                     )
                     
-                    # Unit conversion
                     if unit_mode == "Celsius":
                         g_df['Temp'] = (g_df['Temp'] - 32) * 5/9
 
+                    # Add the Trace
                     fig.add_trace(go.Scatter(
                         x=g_df['timestamp'], 
                         y=g_df['Temp'],
-                        name=f"REF: {clean_name}",
+                        name=f"<b>GOAL: {clean_name}</b>",
                         mode='lines',
-                        line=dict(color='rgba(150, 150, 150, 0.5)', width=2, dash='dashdot', shape='spline'),
-                        hoverinfo='skip', 
-                        legendrank=1000
+                        line=dict(
+                            color=color, 
+                            width=3.5, # Slightly thicker than sensors
+                            dash=dash
+                        ),
+                        # Ensure these sit on the top layer
+                        legendrank=10,
+                        hoverinfo='all'
                     ))
         except Exception as e:
-            print(f"Plotting Error: {e}")
+            st.error(f"Ref Curve Plotting Error: {e}")
 
-           # Temporary Debug Line
-        if curve_id:
-            st.write(f"Searching for: {curve_id} | Found: {len(ref_df)} rows")                            
-                               
-
-    # --- 4. SENSOR TRACE GENERATION (Smooth Solid Lines) ---
+     # --- 4. SENSOR TRACE GENERATION (Smooth Solid Lines) ---
     plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
     plot_df['sort_val'] = 1000.0
     depth_mask = plot_df['Depth'].notnull()
