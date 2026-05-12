@@ -1512,20 +1512,65 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- TAB: REFERENCE CURVE LIBRARY ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
+        
+        # 1. INITIALIZATION TOOL
+        with st.expander("🛠️ Table Initialization"):
+            st.info("If this is your first time using Reference Curves, click below to set up the BigQuery Table.")
+            if st.button("Initialize Reference Table"):
+                init_sql = f"""
+                CREATE TABLE IF NOT EXISTS `{PROJECT_ID}.{DATASET_ID}.reference_curves` (
+                    CurveID STRING,
+                    Day INT64,
+                    Temp FLOAT64
+                )
+                """
+                client.query(init_sql).result()
+                st.success("Table ready.")
+
+        st.divider()
+
+        # 2. UPLOADER WITH ENCODING FIX
         st.write("Upload CSVs named `TP1-Silt.csv`. Format: `Day,Temp` (Fahrenheit)")
         u_files = st.file_uploader("Upload Reference CSVs", type="csv", accept_multiple_files=True)
+        
         if u_files:
             if st.button("💾 Save to Library"):
                 for f in u_files:
-                    curve_id = f.name.replace(".csv", "")
-                    ref_df = pd.read_csv(f, names=['Day', 'Temp'])
-                    ref_df['CurveID'] = curve_id
-                    client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
-                    client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
+                    try:
+                        curve_id = f.name.replace(".csv", "")
+                        
+                        # FIX: Try UTF-8 first, fallback to Latin-1 if Excel adds weird characters
+                        try:
+                            ref_df = pd.read_csv(f, names=['Day', 'Temp'], encoding='utf-8')
+                        except UnicodeDecodeError:
+                            f.seek(0) # Reset file pointer
+                            ref_df = pd.read_csv(f, names=['Day', 'Temp'], encoding='latin-1')
+
+                        # Data Cleaning
+                        ref_df['CurveID'] = curve_id
+                        ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
+                        ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
+                        ref_df = ref_df.dropna()
+
+                        # Upload to BQ
+                        client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
+                        client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
+                        st.write(f"✅ Processed: {curve_id}")
+                        
+                    except Exception as e:
+                        st.error(f"Failed to process {f.name}: {e}")
+                
                 st.success("Library Updated.")
+                st.cache_data.clear()
                 st.rerun()
-        if "None" in available_curves and len(available_curves) > 1:
-            st.write("Active Curves in Library:", available_curves[1:])
+
+        # 3. SHOW CURRENT INVENTORY
+        try:
+            lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
+            if not lib_df.empty:
+                st.write("Current Curves:", sorted(lib_df['CurveID'].tolist()))
+        except:
+            st.caption("No curves found in library.")
         
     # --- TAB 4: MAINTENANCE ---
     with tab_scrub:
