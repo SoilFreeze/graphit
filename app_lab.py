@@ -259,19 +259,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             ref_df = client.query(ref_q).to_dataframe()
             
             if not ref_df.empty:
-                # Define a high-contrast palette for the Goal lines
-                # Dark colors ensure they stay visible over the brighter sensor lines
-                ref_colors = ['#000000', '#4B0082', '#006400', '#8B0000', '#FF8C00']
-                ref_dashes = ['solid', 'dash', 'dashdot', 'longdash']
-                
-                for i, (full_cid, g_df) in enumerate(ref_df.groupby('CurveID')):
-                    # Pick a unique color and dash style for this specific curve
-                    color = ref_colors[i % len(ref_colors)]
-                    dash = ref_dashes[i % len(ref_dashes)]
-                    
+                # We group by CurveID in case one pipe (like TP3) has multiple soil references
+                for full_cid, g_df in ref_df.groupby('CurveID'):
                     # Legend Name (e.g., GOAL: Sat Stiff Clay)
                     clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
                     
+                    # Convert Day offset to a real calendar date
                     g_df['timestamp'] = g_df['Day'].apply(
                         lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
                     )
@@ -279,24 +272,26 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     if unit_mode == "Celsius":
                         g_df['Temp'] = (g_df['Temp'] - 32) * 5/9
 
-                    # Add the Trace
+                    # --- DARK GRAY OVERLAY ---
                     fig.add_trace(go.Scatter(
                         x=g_df['timestamp'], 
                         y=g_df['Temp'],
-                        name=f"<b>GOAL: {clean_name}</b>",
+                        name=f"GOAL: {clean_name}",
                         mode='lines',
                         line=dict(
-                            color=color, 
-                            width=3.5, # Slightly thicker than sensors
-                            dash=dash
+                            # Dark Gray (40, 40, 40) at 60% Opacity (0.6)
+                            color='rgba(40, 40, 40, 0.6)', 
+                            width=4, # Thicker to show the 'shape' clearly
+                            dash='solid'
                         ),
-                        # Ensure these sit on the top layer
-                        legendrank=10,
+                        # Placing it at the bottom of the code/trace list 
+                        # ensures it sits on top of the sensor data
+                        legendrank=100, 
                         hoverinfo='all'
                     ))
         except Exception as e:
-            st.error(f"Ref Curve Plotting Error: {e}")
-
+            st.error(f"Ref Curve Error: {e}")
+            
      # --- 4. SENSOR TRACE GENERATION (Smooth Solid Lines) ---
     plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
     plot_df['sort_val'] = 1000.0
