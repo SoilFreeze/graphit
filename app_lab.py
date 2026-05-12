@@ -282,6 +282,29 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
    # 3. TRACE GENERATION
     fig = go.Figure()
+
+    # --- 1. ADD THEORETICAL REFERENCE CURVE ---
+    if curve_id and curve_id != "None" and f_start_date:
+        ref_q = f"SELECT Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID = '{curve_id}' ORDER BY Day"
+        ref_df = client.query(ref_q).to_dataframe()
+        
+        if not ref_df.empty:
+            # Shift Day 0 to the actual Freezedown Start Date
+            ref_df['timestamp'] = ref_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+            
+            if unit_mode == "Celsius":
+                ref_df['Temp'] = (ref_df['Temp'] - 32) * 5/9
+
+            fig.add_trace(go.Scatter(
+                x=ref_df['timestamp'],
+                y=ref_df['Temp'],
+                name=f"THEORY: {curve_id}",
+                mode='lines',
+                line=dict(color='rgba(150, 150, 150, 0.5)', width=3, dash='dashdot', shape='spline'),
+                hoverinfo='skip',
+                legendrank=1000 # Keep it at the bottom of the list
+            ))
+            
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
     unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
     
@@ -361,6 +384,27 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
     return fig
 
+def get_soil_reference_curves(soil_type, start_date, unit_mode):
+    """
+    Returns X (timestamps) and Y (temps) for a specific soil type 
+    starting from the project start date.
+    """
+    # Example Data: Day vs Temp (F)
+    # This represents a typical cooling curve for Silty Sand vs Clay
+    references = {
+        "Silty Sand": [(0, 50), (5, 32), (14, 20), (30, 10), (60, 5)],
+        "Clay":       [(0, 50), (10, 32), (25, 25), (45, 15), (90, 10)]
+    }
+    
+    curve = references.get(soil_type, [])
+    if not curve:
+        return None, None
+        
+    # Convert Day Offsets to real Timestamps
+    x_times = [start_date + pd.Timedelta(days=d) for d, t in curve]
+    y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
+    
+    return x_times, y_temps
 
 ##################
 # Page Functions #
@@ -1195,11 +1239,10 @@ def render_data_intake_page(selected_project):
 ###########
 # - 10. PAGE: ADMIN TOOLS - #
 ###########
-
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
     Advanced Admin Tools: Transactional Node Logistics, 
-    Bulk Staging, Project Management, and Data Scrubbing.
+    Bulk Staging, Project Management, Ref Curve Library, and Maintenance.
     """
     st.header("🛠️ Admin Tools")
     
@@ -1215,13 +1258,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         
         proj_reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
         proj_reg_df = client.query(proj_reg_q).to_dataframe()
+
+        # Fetch Reference Curve List for dropdowns
+        try:
+            lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
+            available_curves = ["None"] + sorted(lib_df['CurveID'].tolist())
+        except:
+            available_curves = ["None"]
     except Exception as e:
         st.error(f"Registry Link Offline: {e}")
         return
 
     # 2. NAVIGATION TABS
-    tab_bulk, tab_logistics, tab_project, tab_scrub, tab_surgical = st.tabs([
-        "✅ Bulk Approval", "📋 Node Logistics", "⚙️ Project Master", "🧹 Maintenance", "🧨 Surgical"
+    tab_bulk, tab_logistics, tab_project, tab_ref_library, tab_scrub, tab_surgical = st.tabs([
+        "✅ Bulk Approval", "📋 Node Logistics", "⚙️ Project Master", "📈 Ref Curve Library", "🧹 Maintenance", "🧨 Surgical"
     ])
 
     # --- TAB 2: NODE LOGISTICS ---
@@ -1442,6 +1492,24 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.success("Project updated.")
                     st.cache_data.clear()
 
+    # --- TAB: REFERENCE CURVE LIBRARY ---
+    with tab_ref_library:
+        st.subheader("📚 Theoretical Curve Library")
+        st.write("Upload CSVs named `TP1-Silt.csv`. Format: `Day,Temp` (Fahrenheit)")
+        u_files = st.file_uploader("Upload Reference CSVs", type="csv", accept_multiple_files=True)
+        if u_files:
+            if st.button("💾 Save to Library"):
+                for f in u_files:
+                    curve_id = f.name.replace(".csv", "")
+                    ref_df = pd.read_csv(f, names=['Day', 'Temp'])
+                    ref_df['CurveID'] = curve_id
+                    client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
+                    client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
+                st.success("Library Updated.")
+                st.rerun()
+        if "None" in available_curves and len(available_curves) > 1:
+            st.write("Active Curves in Library:", available_curves[1:])
+        
     # --- TAB 4: MAINTENANCE ---
     with tab_scrub:
         st.subheader("🧹 Database Maintenance")
