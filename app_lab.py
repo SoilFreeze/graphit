@@ -237,12 +237,48 @@ st.session_state["active_refs"] = tuple(active_refs)
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
-    Optimized Graphing Engine: Handles unit conversion, timezone alignment, 
-    status-based styling, and SMOOTH SPLINE lines without markers.
+    Smooth spline graph with multiple theoretical 'Day 0' background curves.
     """
-    if df.empty:
-        return go.Figure().update_layout(title="No data available for the selected period.")
+    client = get_bq_client()
+    fig = go.Figure()
 
+    # --- 1. THEORETICAL REFERENCE CURVES ---
+    if curve_id and curve_id != "None" and f_start_date:
+        # If curve_id is a single string, wrap it in a list for the loop
+        curve_list = [curve_id] if isinstance(curve_id, str) else curve_id
+        
+        # Define dash styles to rotate through if multiple curves exist
+        dash_styles = ['dashdot', 'dash', 'dot']
+        
+        for idx, cid in enumerate(curve_list):
+            try:
+                ref_q = f"SELECT Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID = '{cid}' ORDER BY Day"
+                ref_df = client.query(ref_q).to_dataframe()
+                
+                if not ref_df.empty:
+                    # Map Day 0 to the start of the project
+                    ref_df['timestamp'] = ref_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                    
+                    if unit_mode == "Celsius":
+                        ref_df['Temp'] = (ref_df['Temp'] - 32) * 5/9
+
+                    fig.add_trace(go.Scatter(
+                        x=ref_df['timestamp'],
+                        y=ref_df['Temp'],
+                        name=f"REF: {cid}",
+                        mode='lines',
+                        line=dict(
+                            color='rgba(120, 120, 120, 0.5)', # Professional Grey
+                            width=2.5, 
+                            dash=dash_styles[idx % len(dash_styles)],
+                            shape='spline'
+                        ),
+                        hoverinfo='skip',
+                        legendrank=1000 
+                    ))
+            except Exception:
+                pass
+                
     plot_df = df.copy()
     
     # 1. TIMEZONE & UNIT CONVERSION
