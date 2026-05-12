@@ -1435,16 +1435,39 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             p_data = proj_reg_df[proj_reg_df['Project'] == target].iloc[0]
             
             with st.form("edit_p_form_final_v3"):
-                u_status = st.selectbox("Status", ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"], 
-                                      index=["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"].index(p_data['ProjectStatus']))
+                # --- SAFE STATUS LOOKUP ---
+                status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
+                current_status = str(p_data.get('ProjectStatus', 'Initialized'))
                 
-                # FETCH DYNAMIC SOIL LIST: Shows "Sat Stiff Clay" if uploaded to library
-                u_soil = st.selectbox("Assigned Soil Reference", available_curves, 
-                                     index=available_curves.index(p_data['SoilType']) if 'SoilType' in p_data and p_data['SoilType'] in available_curves else 0)
+                # If the status in the DB isn't in our list, default to index 0
+                try:
+                    status_index = status_options.index(current_status)
+                except ValueError:
+                    status_index = 0
+                
+                u_status = st.selectbox("Status", status_options, index=status_index)
+                # --------------------------
+                
+                # Fetch available curves for the dropdown
+                try:
+                    curve_list_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
+                    available_curves = ["None"] + sorted(curve_list_df['CurveID'].tolist())
+                except:
+                    available_curves = ["None"]
+                
+                # SAFE SOIL LOOKUP
+                current_soil = p_data.get('SoilType', 'None')
+                try:
+                    soil_index = available_curves.index(current_soil)
+                except ValueError:
+                    soil_index = 0
+
+                u_soil = st.selectbox("Assigned Soil Reference", available_curves, index=soil_index)
                 
                 u_eng = st.text_area("Engineering Notes", value=p_data.get('EngNotes', ''))
                 
                 if st.form_submit_button("💾 Save Project Settings"):
+                    # ... (rest of your save logic)
                     # Logic to set Day 0 automatically when status moves to Freezedown
                     date_sql = ", Date_Freezedown = CURRENT_DATE()" if u_status == "Freezedown" and pd.isnull(p_data.get('Date_Freezedown')) else ""
                     
