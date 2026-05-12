@@ -317,17 +317,24 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                     s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
+            # Inside your build_high_speed_graph function (or where you define the trace)
             fig.add_trace(go.Scatter(
-                x=s_df['timestamp'], 
-                y=s_df['temperature'], 
-                name=f"{group_lbl} ({sn})", 
-                legendgroup=group_lbl,
-                showlegend=True if j == 0 else False,
-                mode='lines+markers' if not is_surgical else 'markers',
-                connectgaps=False, 
-                line=dict(color=color, width=1.8 if status == 'Active' else 1.0, dash=line_dash),
-                marker=dict(size=4, opacity=opacity),
-                hovertemplate=f"<b>{group_lbl} ({sn})</b><br>Status: {status}<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>"
+                x=loc_df['timestamp'],
+                y=loc_df['temperature'],
+                name=str(node_id),
+                
+                # 1. REMOVE POINTS: Set mode to 'lines' only (removes the dots)
+                mode='lines',
+                
+                # 2. SMOOTH LINES: Set shape to 'spline'
+                line=dict(
+                    shape='spline', 
+                    smoothing=1.3, # Adjust between 0 and 1.3 for "curviness"
+                    width=2        # Optional: adjust line thickness
+                ),
+                
+                connectgaps=True, # Recommended for sensor data
+                hovertemplate="Temp: %{y:.1f}°F<br>Time: %{x}<extra></extra>"
             ))
 
     # 4. REFERENCE LINES & MARKERS
