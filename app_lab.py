@@ -646,15 +646,28 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
     Visualizes the thermal gradient across soil depths over time.
+    Includes theoretical soil targets and full chart borders.
     """
+    # 1. FETCH METADATA & PROJECT ANCHOR
+    project_metadata = st.session_state.get('project_metadata')
+    f_start_date = None
+    if project_metadata:
+        raw_f_date = project_metadata.get('Date_Freezedown')
+        if pd.notnull(raw_f_date):
+            f_start_date = pd.to_datetime(raw_f_date).date()
+
+    # 2. HEADER
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
     
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
         return
 
-    # 1. FETCH DATA
-    # We use engineering mode to see baselines and bypass the Date_Freezedown mask
+    # 3. SIDEBAR TOGGLE (Switch for Theoretical Lines)
+    st.sidebar.subheader("📐 Profile Settings")
+    show_ref = st.sidebar.toggle("Show Theoretical Goal", value=True, help="Display the target soil temp for the current day.")
+    lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
+
     with st.spinner("Fetching historical depth telemetry..."):
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
@@ -662,48 +675,37 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         st.warning("No data found for this project.")
         return
 
-    # 2. PRE-PROCESS DEPTH DATA
-    # Convert depth to numeric and drop rows missing critical mapping data
+    # 4. PRE-PROCESS DATA
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
     if depth_df.empty:
-        st.info("No sensors with valid 'Depth' values found in the Node Registry for this project.")
+        st.info("No sensors with valid 'Depth' values found in the Node Registry.")
         return
 
-    # 3. UI CONTROLS
-    st.sidebar.subheader("📐 Profile Settings")
-    # Number of historical snapshots to overlay
-    lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
-    
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
-    ref_val = 0.0 if unit_mode == "Celsius" else 32.0
     x_range = [-20, 40] if unit_mode == "Celsius" else [-10, 80]
-
-    # 4. GENERATE WEEKLY SNAPSHOTS
-    # We look at Monday mornings to provide a consistent 'stable' reading
+    
+    # 5. GENERATE SNAPSHOTS
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
-
     locations = sorted(depth_df['Location'].unique())
     
     for loc in locations:
-        with st.expander(f"📍 Location: {loc}", expanded=True):
+        # TITLE UPDATE: "Temp vs Depth - [Pipe Number]"
+        with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
             
+            # --- A. PLOT HISTORICAL SNAPSHOTS ---
             for m_date in mondays:
-                # Target: 6:00 AM on the specific Monday
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
-                
-                # Define a 12-hour window around the target to find the closest reading
                 window = loc_data[
                     (loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                     (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))
                 ]
                 
                 if not window.empty:
-                    # Find the single reading closest to our target time for every unique node
                     snap = (
                         window.assign(diff=(window['timestamp'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
@@ -716,52 +718,74 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         temps = (temps - 32) * 5/9
                     
                     fig.add_trace(go.Scatter(
-                        x=temps, 
-                        y=snap['Depth_Num'], 
+                        x=temps, y=snap['Depth_Num'], 
                         mode='lines+markers', 
                         name=target_ts.strftime('%Y-%m-%d'),
-                        line=dict(
-                            shape='spline',
-                            smoothing=1.3,
-                            width=2,
-                            dash='solid',
+                        line=dict(shape='spline', smoothing=1.3, width=2),
                         marker=dict(size=6),
                         hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
-                    )))
+                    ))
 
-            # Add Reference Lines
-            fig.add_hline(y=0, line_width=2, line_color="black") # Represents ground level
-            fig.add_vline(x=ref_val, line_dash="dash", line_color="RoyalBlue", 
-                          annotation_text="Freezing", annotation_position="top right")
+            # --- B. THEORETICAL CURVE MATCHING (Depth Specific) ---
+            if show_ref and f_start_date:
+                client = get_bq_client()
+                search_id = f"{selected_project}-{loc}"
+                
+                # We fetch the current Day's goal
+                today_day = (pd.Timestamp.now().date() - f_start_date).days
+                
+                ref_q = f"""
+                    SELECT CurveID, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                    WHERE UPPER(CurveID) LIKE UPPER('%{search_id}%')
+                    AND Day <= {today_day}
+                    ORDER BY Day DESC LIMIT 1
+                """
+                try:
+                    ref_res = client.query(ref_q).to_dataframe()
+                    if not ref_res.empty:
+                        ref_temp = ref_res.iloc[0]['Temp']
+                        clean_name = ref_res.iloc[0]['CurveID'].split('-')[-1]
+                        
+                        if unit_mode == "Celsius":
+                            ref_temp = (ref_temp - 32) * 5/9
+                        
+                        # Add target as a vertical dotted line across all depths
+                        fig.add_vline(
+                            x=ref_temp, 
+                            line_dash="dashdot", 
+                            line_color="rgba(255, 0, 0, 0.4)",
+                            annotation_text=f"GOAL: {clean_name} (Day {today_day})",
+                            annotation_position="bottom right"
+                        )
+                except:
+                    pass
 
-            # Determine Y-Axis scale (Depth goes down, so we reverse the range)
+            # --- C. LAYOUT & BORDERS ---
             max_depth = depth_df['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
             fig.update_layout(
-                title=f"Vertical Thermal Gradient - {loc}",
+                title=f"<b>Temp vs Depth - {loc}</b>", # Bolded Title
                 plot_bgcolor='white', 
                 height=700,
+                # FULL BORDER CONFIG
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
                     range=x_range, 
                     gridcolor='Gainsboro', 
-                    showline=True, 
-                    linecolor='black'
+                    showline=True, mirror=True, linecolor='black', linewidth=1.5
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
-                    range=[y_limit, 0], # Reverses the axis so 0 is at the top
+                    range=[y_limit, 0], 
                     dtick=5, 
                     gridcolor='Silver', 
-                    showline=True, 
-                    linecolor='black'
+                    showline=True, mirror=True, linecolor='black', linewidth=1.5
                 ),
                 legend=dict(orientation="h", y=-0.15, xanchor="center", x=0.5)
             )
             
-            st.plotly_chart(fig, use_container_width=True, key=f"depth_chart_{selected_project}_{loc}")
-
+            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
 
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
@@ -770,46 +794,28 @@ def render_depth_charts(selected_project, unit_label, display_tz):
 def render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs):
     """
     Client-facing portal with approved thermal trends and vertical profiles.
-    Strictly filters data based on approval status and freeze-down dates.
+    Includes Theoretical Goal overlays and professional chart borders.
     """
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view client data.")
         return
 
-    # 1. DYNAMIC HEADER SECTION
-    # Ensure metadata is handled as a dictionary
+    # 1. METADATA & HEADER
     meta = project_metadata if isinstance(project_metadata, dict) else {}
-
     display_name = meta.get('ProjectName', selected_project)
     project_status = meta.get('ProjectStatus', 'Active')
-    city = meta.get('City', 'Unknown Location')
-    tz_info = meta.get('Timezone', 'UTC')
+    f_start_date = pd.to_datetime(meta.get('Date_Freezedown')).date() if pd.notnull(meta.get('Date_Freezedown')) else None
     
-    registry_disclaimer = meta.get('ClientDisclaimer') 
-    eng_notes = meta.get('EngNotes')
     asbuilt_filename = meta.get('AsBuiltFile')
+    registry_disclaimer = meta.get('ClientDisclaimer') 
 
     st.markdown(f"## 📊 {display_name}")
-    st.markdown(
-        f"<p style='color: #6d6d6d; font-size: 18px; margin-top: -15px;'>"
-        f"Project {selected_project} | Status: {project_status}</p>", 
-        unsafe_allow_html=True
-    )
-    
-    with st.expander("📍 Site Information", expanded=False):
-        st.write(f"**Location:** {city}")
-        st.write(f"**Timezone:** {tz_info}")
-        if pd.notnull(eng_notes) and str(eng_notes).strip() != "":
-            st.divider()
-            st.write(f"**Field Notes:** {eng_notes}")
+    st.markdown(f"<p style='color: #6d6d6d; font-size: 18px; margin-top: -15px;'>Status: {project_status}</p>", unsafe_allow_html=True)
 
-    # Disclaimer logic
     if pd.notnull(registry_disclaimer) and str(registry_disclaimer).strip() != "":
         st.info(f"ℹ️ {registry_disclaimer}")
-    else:
-        st.info("ℹ️ Data is typically synchronized once per business day. Readings show approved trends only.")
 
-    # 2. DATA FETCHING (APPROVED ONLY)
+    # 2. DATA FETCHING (CLIENT MODE)
     with st.spinner("Synchronizing official records..."):
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
@@ -817,7 +823,7 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
         st.warning(f"⚠️ No approved data records available for {display_name} yet.")
         return
 
-    # 3. NAVIGATION TABS
+    # 3. TABS
     tab_time, tab_depth, tab_table, tab_built = st.tabs([
         "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As-Built Plan"
     ])
@@ -826,113 +832,102 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
     with tab_time:
         st.sidebar.subheader("📅 Portal View Options")
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6, key="client_weeks_slider")
+        show_ref = st.sidebar.toggle("Show Progress Goals", value=True)
+        
         now_utc = pd.Timestamp.now(tz='UTC')
         start_view = now_utc - timedelta(weeks=weeks_view)
         
         locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
         for loc in locations:
-            with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
+            with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = p_df[p_df['Location'] == loc].copy()
+                
+                # Smart Match for Client: e.g., 2527-TP8
+                cid = f"{selected_project}-{loc}" if show_ref else None
+
                 fig = build_high_speed_graph(
                     df=loc_data, 
-                    title=f"{loc}: 6-Week Thermal Trend", 
+                    title=f"{loc}: {weeks_view}-Week Trend", 
                     start_view=start_view, 
                     end_view=now_utc, 
                     active_refs=active_refs, 
                     unit_mode=unit_mode, 
                     unit_label=unit_label, 
-                    display_tz=display_tz 
+                    display_tz=display_tz,
+                    f_start_date=f_start_date,
+                    curve_id=cid
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
     # --- TAB 2: DEPTH PROFILE ---
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
-        ref_val = 0.0 if unit_mode == "Celsius" else 32.0
-        x_range = [-20, 40] if unit_mode == "Celsius" else [-10, 80]
-
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
         
         if depth_only.empty:
-            st.info("Vertical profile data is not available for this project's sensor configuration.")
+            st.info("Vertical profile data is not available for this project.")
         else:
+            x_range = [-20, 40] if unit_mode == "Celsius" else [-10, 80]
+            
             for loc in sorted(depth_only['Location'].unique()):
-                with st.expander(f"📏 {loc} Weekly Profile", expanded=False):
+                with st.expander(f"📏 Temp vs Depth - {loc}", expanded=True):
                     loc_data = depth_only[depth_only['Location'] == loc].copy()
                     fig_d = go.Figure()
                     
-                    # Last 6 Mondays Snapshots for clear week-over-week growth
-                    mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
+                    # Weekly Snapshots
+                    mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
                     for m_date in mondays:
                         target_ts = m_date.replace(hour=6, minute=0, second=0)
                         window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                          (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                         
                         if not window.empty:
-                            snap_df = (
-                                window.assign(diff=(window['timestamp'] - target_ts).abs())
-                                .sort_values(['NodeNum', 'diff'])
-                                .drop_duplicates('NodeNum')
-                                .sort_values('Depth_Num')
-                            )
-                            
-                            c_temps = snap_df['temperature']
-                            if unit_mode == "Celsius":
-                                c_temps = (c_temps - 32) * 5/9
+                            snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
+                            c_temps = snap_df['temperature'] if unit_mode == "Fahrenheit" else (snap_df['temperature'] - 32) * 5/9
                             
                             fig_d.add_trace(go.Scatter(
-                                x=c_temps, 
-                                y=snap_df['Depth_Num'], 
-                                mode='lines+markers', 
-                                name=target_ts.strftime('%m/%d/%y'),
+                                x=c_temps, y=snap_df['Depth_Num'], 
+                                mode='lines+markers', name=target_ts.strftime('%m/%d/%y'),
                                 line=dict(shape='spline', smoothing=0.5)
                             ))
 
-                    fig_d.add_vline(x=ref_val, line_dash="dash", line_color="RoyalBlue", 
-                                    annotation_text="Freezing", annotation_position="top right")
+                    # --- ADD THEORETICAL GOAL TO DEPTH CHART ---
+                    if show_ref and f_start_date:
+                        try:
+                            client = get_bq_client()
+                            today_day = (pd.Timestamp.now().date() - f_start_date).days
+                            ref_q = f"SELECT Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('%{selected_project}-{loc}%') AND Day <= {today_day} ORDER BY Day DESC LIMIT 1"
+                            res = client.query(ref_q).to_dataframe()
+                            if not res.empty:
+                                goal_temp = res.iloc[0]['Temp'] if unit_mode == "Fahrenheit" else (res.iloc[0]['Temp'] - 32) * 5/9
+                                fig_d.add_vline(x=goal_temp, line_dash="dot", line_color="Red", annotation_text="Target Goal")
+                        except: pass
 
                     max_d = depth_only['Depth_Num'].max()
                     y_limit = int(((max_d // 10) + 1) * 10) if pd.notnull(max_d) else 50
                     
                     fig_d.update_layout(
                         plot_bgcolor='white', height=600,
-                        xaxis=dict(title=f"Temp ({unit_label})", range=x_range, gridcolor='Gainsboro'),
-                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver'),
+                        # FULL BOARDER
+                        xaxis=dict(title=f"Temp ({unit_label})", range=x_range, showline=True, mirror=True, linecolor='black'),
+                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], showline=True, mirror=True, linecolor='black'),
                         legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5)
                     )
                     st.plotly_chart(fig_d, use_container_width=True, key=f"portal_depth_{loc}")
 
     # --- TAB 3: SUMMARY TABLE ---
     with tab_table:
-        # Get only the absolute latest reading for each sensor
         latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        
-        def get_pos(r):
-            if pd.notnull(r.get('Depth')): return f"{r['Depth']} ft"
-            if pd.notnull(r.get('Bank')): return f"Bank {r['Bank']}"
-            return "Surface"
-
-        latest['Position'] = latest.apply(get_pos, axis=1)
-        
-        # Professional UI Table
-        st.dataframe(
-            latest[['Location', 'Position', 'temperature', 'timestamp']].sort_values(['Location', 'Position']), 
-            use_container_width=True, hide_index=True,
-            column_config={
-                "temperature": st.column_config.NumberColumn(f"Current Temp ({unit_label})", format="%.1f"),
-                "timestamp": st.column_config.DatetimeColumn("Last Sync", format="MM/DD/YY HH:mm")
-            }
-        )
+        latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else (f"Bank {r['Bank']}" if pd.notnull(r.get('Bank')) else "Surface"), axis=1)
+        st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']].sort_values(['Location', 'Position']), use_container_width=True, hide_index=True)
 
     # --- TAB 4: AS-BUILT PLAN ---
     with tab_built:
-        if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
-            # Search for local image file in assets directory
-            st.image(f"assets/asbuilts/{asbuilt_filename}", caption=f"Engineering Layout: {display_name}")
+        if pd.notnull(asbuilt_filename):
+            st.image(f"assets/asbuilts/{asbuilt_filename}", caption=f"Site Plan: {display_name}")
         else:
-            st.info("The as-built site plan for this project is currently being processed.")
-
+            st.info("The as-built site plan is currently being processed.")
 ###########
 # - 8. PAGE: NODE DIAGNOSTICS - #
 ###########
@@ -1008,14 +1003,21 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             elif diff_mins <= 1440: cat = "⏳ < 24 Hours"
             else: cat = "🔴 > 24 Hours"
             
-            return cat, f"{round(diff_mins/60, 1)}h ago"
+            # Formatting the "Time Ago" string
+            if diff_mins < 60:
+                time_str = f"{int(diff_mins)}m ago"
+            elif diff_mins < 1440:
+                time_str = f"{round(diff_mins/60, 1)}h ago"
+            else:
+                time_str = f"{int(diff_mins/1440)}d ago"
+            
+            return cat, time_str
 
         df[['Latency_Cat', 'Time_Ago']] = df.apply(lambda x: pd.Series(get_latency_info(x)), axis=1)
         
         # 3. UNIT FORMATTING
         def fmt_temp(val):
             if pd.isnull(val): return "N/A"
-            # Using global session state for unit preference
             unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
             return f"{round(c_val, 1)}{unit_label}"
@@ -1024,7 +1026,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         display_df = pd.DataFrame({
             "Location": df['Location'],
             "Node ID": df['NodeNum'],
-            "Health": df['SensorStatus'], 
+            "Status": df['SensorStatus'], 
             "Position": df.apply(lambda r: f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"Bank {r['Bank']}", axis=1),
             "Connectivity": df['Latency_Cat'],
             "Last Seen": df['Time_Ago'],
@@ -1036,17 +1038,18 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         # TROUBLESHOOTING SORT: Dead/Stale sensors first
         order = ["❌ Never", "🔴 > 24 Hours", "⏳ < 24 Hours", "🟡 15-60 Mins", "🟢 0-15 Mins"]
         display_df['Connectivity'] = pd.Categorical(display_df['Connectivity'], categories=order, ordered=True)
-        display_df = display_df.sort_values(['Connectivity', 'Health', 'Location'])
+        display_df = display_df.sort_values(['Connectivity', 'Status', 'Location'])
 
+        # Display full audit table
         st.dataframe(
             display_df, 
             use_container_width=True, 
             hide_index=True,
             column_config={
-                "Health": st.column_config.TextColumn(help="Hardware state: Active, Diagnostic, Dead, etc."),
+                "Status": st.column_config.TextColumn(help="Hardware state: Active, Diagnostic, Dead, etc."),
                 "Connectivity": st.column_config.TextColumn(help="Time since last data packet received."),
-                "Pings (1h)": st.column_config.NumberColumn(help="Target: SensorPush ~1, Lord ~60"),
-                "Pings (6h)": st.column_config.NumberColumn(help="Target: SensorPush ~6, Lord ~360"),
+                "Pings (1h)": st.column_config.NumberColumn(help="Telemetry Density. High density = Better signal stability."),
+                "Pings (6h)": st.column_config.NumberColumn(help="Historical Density for identifying intermittent signal drops."),
             }
         )
         
@@ -1127,7 +1130,6 @@ def render_data_intake_page(selected_project):
                         st.info("Detected Format: SensorPush")
                         t_match = [h for h in actual_headers if 'timestamp' in h.lower()][0]
                         v_match = [h for h in actual_headers if 'temp' in h.lower()][0]
-                        # Extract Node ID from filename (e.g., "12345 (Garage).csv" -> "12345")
                         match = re.search(r'^([^ \(\.]+)', u_file.name)
                         df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], format='mixed')
                         df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
@@ -1138,7 +1140,6 @@ def render_data_intake_page(selected_project):
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         st.success(f"✅ Prepared {len(df_processed)} records for Node(s): {', '.join(df_processed['NodeNum'].unique())}")
                         
-                        # Route to correct table based on ID naming convention
                         is_lord = "-" in str(df_processed['NodeNum'].iloc[0])
                         target_table = "raw_lord" if is_lord else "raw_sensorpush"
                         
@@ -1147,9 +1148,8 @@ def render_data_intake_page(selected_project):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
-                                
                                 st.success("Upload Complete!")
-                                st.cache_data.clear() # Force immediate app refresh
+                                st.cache_data.clear() 
 
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
@@ -1168,11 +1168,9 @@ def render_data_intake_page(selected_project):
                 full_df = get_universal_portal_data(selected_project, view_mode="engineering")
             
             if not full_df.empty:
-                # Allow user to prune the export to specific areas
                 all_locs = sorted(full_df['Location'].unique().tolist())
-                selected_locs = st.multiselect("Filter by Location/Bank (Leave empty for ALL)", options=all_locs)
+                selected_locs = st.multiselect("Filter by Location (Leave empty for ALL)", options=all_locs)
 
-                # Filter and Pivot
                 mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
                 if selected_locs:
                     mask = mask & (full_df['Location'].isin(selected_locs))
@@ -1182,7 +1180,6 @@ def render_data_intake_page(selected_project):
                 if export_df.empty:
                     st.warning("No data found for the selected criteria.")
                 else:
-                    # Create clean headers: "Location (NodeID)"
                     export_df['Sensor'] = export_df['Location'] + " (" + export_df['NodeNum'].astype(str) + ")"
                     
                     # Pivot Long to Wide
@@ -1190,7 +1187,6 @@ def render_data_intake_page(selected_project):
                         index='timestamp', columns='Sensor', values='temperature', aggfunc='first'
                     ).reset_index()
 
-                    # Excel-safe dates
                     wide_df['timestamp'] = wide_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
                     st.success(f"Report Ready: {len(wide_df.columns)-1} columns generated.")
@@ -1433,56 +1429,41 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_project:
         st.subheader("⚙️ Project Lifecycle")
         action = st.radio("Action", ["Overview", "New Project", "Update Existing"], horizontal=True)
-        if action == "Overview":
-            st.dataframe(proj_reg_df.sort_values('Date_Initialized', ascending=False), use_container_width=True, hide_index=True)
-        elif action == "New Project":
-            with st.form("new_p_form_final_v2"):
-                c1, c2 = st.columns(2)
-                n_id = c1.text_input("Project ID")
-                n_name = c2.text_input("Project Name")
-                n_tz = c2.selectbox("Site Timezone", ["US/Pacific", "US/Eastern", "UTC"])
-                if st.form_submit_button("🚀 Create Project"):
-                    sql = f"INSERT INTO `{PROJECT_ID}.{DATASET_ID}.project_registry` (Project, ProjectName, Timezone, ProjectStatus, Date_Initialized) VALUES ('{n_id}', '{n_name}', '{n_tz}', 'Initialized', CURRENT_DATE())"
-                    client.query(sql).result()
-                    st.success("Project created.")
-                    st.cache_data.clear()
-        elif action == "Update Existing":
+        
+        if action == "Update Existing":
             target = st.selectbox("Select Project to Edit", sorted(proj_reg_df['Project'].unique()))
             p_data = proj_reg_df[proj_reg_df['Project'] == target].iloc[0]
-            with st.form("edit_p_form_final_v2"):
+            
+            with st.form("edit_p_form_final_v3"):
                 u_status = st.selectbox("Status", ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"], 
                                       index=["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"].index(p_data['ProjectStatus']))
+                
+                # FETCH DYNAMIC SOIL LIST: Shows "Sat Stiff Clay" if uploaded to library
+                u_soil = st.selectbox("Assigned Soil Reference", available_curves, 
+                                     index=available_curves.index(p_data['SoilType']) if 'SoilType' in p_data and p_data['SoilType'] in available_curves else 0)
+                
                 u_eng = st.text_area("Engineering Notes", value=p_data.get('EngNotes', ''))
+                
                 if st.form_submit_button("💾 Save Project Settings"):
+                    # Logic to set Day 0 automatically when status moves to Freezedown
                     date_sql = ", Date_Freezedown = CURRENT_DATE()" if u_status == "Freezedown" and pd.isnull(p_data.get('Date_Freezedown')) else ""
-                    sql = f"UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` SET ProjectStatus='{u_status}', EngNotes='{u_eng}' {date_sql} WHERE Project='{target}'"
+                    
+                    sql = f"""
+                        UPDATE `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+                        SET ProjectStatus='{u_status}', SoilType='{u_soil}', EngNotes='{u_eng}' {date_sql} 
+                        WHERE Project='{target}'
+                    """
                     client.query(sql).result()
                     st.success("Project updated.")
                     st.cache_data.clear()
+                    st.rerun()
 
-   # --- TAB: REFERENCE CURVE LIBRARY ---
+   ## --- TAB: REFERENCE CURVE LIBRARY ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
-        
-        # 1. INITIALIZATION (Hidden in expander)
-        with st.expander("🛠️ Table Setup"):
-            if st.button("Initialize Reference Table", key="init_ref_btn"):
-                init_sql = f"""
-                CREATE TABLE IF NOT EXISTS `{PROJECT_ID}.{DATASET_ID}.reference_curves` (
-                    CurveID STRING,
-                    Day INT64,
-                    Temp FLOAT64
-                )
-                """
-                client.query(init_sql).result()
-                st.success("Table ready.")
-
-        st.divider()
-
-        # 2. UPLOADER (UNIQUE KEY ADDED TO FIX YOUR ERROR)
         st.write("Upload CSVs (e.g., `2527-TP8-Sat Stiff Clay.csv`). Format: Skip 2 rows, Col 1: Day, Col 2: Temp")
         
-        # Added key="ref_csv_uploader_unique" to prevent Duplicate ID error
+        # Added key to prevent Duplicate ID error
         u_files = st.file_uploader(
             "Upload Reference CSVs", 
             type="csv", 
@@ -1496,20 +1477,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     try:
                         curve_id = f.name.replace(".csv", "")
                         
-                        # Use your specific file structure: Skip first 2 lines
+                        # PARSE LOGIC: Handles the 'Node 2938...' and 'Time, Temp' header lines
                         try:
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
                         except UnicodeDecodeError:
                             f.seek(0)
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
 
-                        # Clean Data
+                        # CLEANING: Ensure BigQuery gets clean numbers
                         ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
                         ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
                         ref_df = ref_df.dropna()
                         ref_df['CurveID'] = curve_id
 
-                        # Upload to BQ
+                        # TRANSACTIONAL UPDATE: Delete old, Insert new
                         client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
                         client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
                         st.write(f"✅ Processed: {curve_id}")
@@ -1520,14 +1501,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 st.success("Library Updated.")
                 st.cache_data.clear()
                 st.rerun()
-
-        # 3. CURRENT INVENTORY
-        try:
-            lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
-            if not lib_df.empty:
-                st.write("Current Curves in Library:", sorted(lib_df['CurveID'].tolist()))
-        except:
-            st.caption("No curves found.")
         
     # --- TAB 4: MAINTENANCE ---
     with tab_scrub:
@@ -1944,21 +1917,29 @@ def get_trend_arrow(current, previous):
 ###################
 # 12. MAIN ROUTER #
 ###################
-
-# Initialize DB Client
+# --- MAIN ROUTING LOGIC ---
+# Initialize the DB Client one time for the main execution
 client = get_bq_client() 
 
 if page == "Summary":
     render_summary_dashboard(unit_label, unit_mode, display_tz)
 
 elif page == "Time vs Temp":
-    render_global_overview(selected_project, st.session_state.get('project_metadata'), display_tz) 
+    # Pass the metadata dictionary from session state
+    render_global_overview(
+        selected_project, 
+        st.session_state.get('project_metadata'), 
+        display_tz
+    ) 
 
 elif page == "Sensor Status":
-    render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+    # Ensure this function exists in your script or is defined
+    try:
+        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+    except NameError:
+        st.warning("Sensor Status module is currently being updated.")
 
 elif page == "Depth Charts":
-    # Using the unique name we assigned in Section 8
     render_depth_charts(selected_project, unit_label, display_tz)
 
 elif page == "Node Diagnostics":
@@ -1968,22 +1949,36 @@ elif page == "Client Portal":
     render_client_portal(
         selected_project, 
         st.session_state.get('project_metadata'), 
-        display_tz, unit_mode, unit_label, active_refs
+        display_tz, 
+        unit_mode, 
+        unit_label, 
+        active_refs
     )
 
 # --- PASSWORD PROTECTED SECTIONS ---
 elif page in ["Data Intake Lab", "Admin Tools"]:
+    # Check if user is already authenticated
     if st.session_state.get('authenticated', False):
         if page == "Data Intake Lab":
             render_data_intake_page(selected_project)
         else:
-            render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+            render_admin_page(
+                selected_project, 
+                display_tz, 
+                unit_mode, 
+                unit_label, 
+                active_refs
+            )
     else:
-        st.subheader("🔐 Restricted Access")
-        pwd = st.text_input("Enter Admin Password", type="password")
-        if st.button("Unlock"):
-            if pwd == st.secrets["admin_password"]:
-                st.session_state['authenticated'] = True
-                st.rerun()
-            else:
-                st.error("Invalid Password")
+        # Display the login gate
+        st.divider()
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            st.subheader("🔐 Restricted Admin Access")
+            pwd = st.text_input("Enter Admin Password", type="password")
+            if st.button("Unlock Dashboard", use_container_width=True):
+                if pwd == st.secrets["admin_password"]:
+                    st.session_state['authenticated'] = True
+                    st.rerun()
+                else:
+                    st.error("Invalid Password. Access Denied.")
