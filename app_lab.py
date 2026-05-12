@@ -223,32 +223,31 @@ st.session_state["active_refs"] = tuple(active_refs)
 #############
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz, f_start_date=None, curve_id=None):
     """
-    Engineering-grade Time vs Temp visualizer.
-    Features: 15-color sensor palette, Dark Gray (60% opacity) dashed Goal overlays.
+    Restores all engineering formatting: 
+    - Full black box borders (linewidth 2)
+    - 15-color sensor palette
+    - Top-layer Dark Gray Dashed Goals (60% opacity)
+    - Clean grid contrast
     """
     import plotly.graph_objects as go
     
-    # 1. EXTENDED 15-COLOR PALETTE
+    # 1. RESTORE 15-COLOR PALETTE
     extended_colors = [
-        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', # Standard 5
-        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', # Standard 10
-        '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32'  # High-Contrast 15
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', 
+        '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32'  
     ]
 
     fig = go.Figure()
 
     # 2. PLOT SENSOR DATA (Bottom Layer)
-    # Sorting by NodeNum or Depth ensures consistent legend ordering
     nodes = sorted(df['NodeNum'].unique())
     for i, node in enumerate(nodes):
         node_df = df[df['NodeNum'] == node].sort_values('timestamp')
-        
-        # Apply Unit Conversion if needed
         y_vals = node_df['temperature']
         if unit_mode == "Celsius":
             y_vals = (y_vals - 32) * 5/9
 
-        # Clean legend label
         depth_val = node_df['Depth'].iloc[0] if 'Depth' in node_df.columns else None
         label = f"{depth_val}ft (N:{node})" if pd.notnull(depth_val) else f"Node {node}"
 
@@ -257,15 +256,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             y=y_vals,
             name=label,
             mode='lines',
-            line=dict(width=1.8, color=extended_colors[i % len(extended_colors)]),
+            line=dict(width=2, color=extended_colors[i % len(extended_colors)]),
             hovertemplate="Time: %{x}<br>Temp: %{y:.1f}" + unit_label
         ))
 
-    # 3. PLOT THEORETICAL CURVES (Top Layer)
+    # 3. PLOT THEORETICAL CURVES (Top Layer - Dark Gray Dashed)
     if curve_id and f_start_date:
         try:
             client = get_bq_client()
-            # Fuzzy match Project + Location (e.g., %2527% and %T8%)
+            # Fuzzy match Project + Location (e.g., 2527 and T8)
             parts = curve_id.split('-')
             p_id, l_id = parts[0], parts[1] if len(parts) > 1 else parts[0]
             
@@ -279,17 +278,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             ref_df = client.query(ref_q).to_dataframe()
             
             if not ref_df.empty:
-                # Patterns for multiple soil types (Clay, Sand, etc.)
                 patterns = ['dash', 'dot', 'dashdot', 'longdash']
-                
                 for i, (full_cid, g_df) in enumerate(ref_df.groupby('CurveID')):
-                    # Use provided dark gray with 60% opacity
                     clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
-                    
-                    g_df['timestamp'] = g_df['Day'].apply(
-                        lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
-                    )
-                    
+                    g_df['timestamp'] = g_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     ref_y = g_df['Temp']
                     if unit_mode == "Celsius":
                         ref_y = (ref_y - 32) * 5/9
@@ -301,43 +293,41 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         mode='lines',
                         line=dict(
                             color='rgba(40, 40, 40, 0.6)', # Dark Gray, 60% Opacity
-                            width=4,                       # Heavy weight to show shape
+                            width=4,                       # Bold Shape
                             dash=patterns[i % len(patterns)]
                         ),
-                        legendrank=1, # Moves to top of legend
+                        legendrank=1 # Top of legend
                     ))
-        except Exception as e:
-            pass # Silent fail to prevent dashboard crash
+        except:
+            pass 
 
-    # 4. LAYOUT & ENGINEERING BORDERS
+    # 4. RESTORE LAYOUT & BORDERS
     fig.update_layout(
-        title=dict(text=f"<b>{title}</b>", x=0.02, font=dict(size=18)),
+        title=dict(text=f"<b>{title}</b>", x=0.02, font=dict(size=18, color='black')),
         template='plotly_white',
         hovermode='x unified',
         height=650,
         margin=dict(l=60, r=20, t=80, b=60),
-        # FULL BOX BORDER
+        # FULL BOX BORDER (Mirror: True + Linecolor: Black)
         xaxis=dict(
             range=[start_view, end_view],
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            gridcolor='Gainsboro', tickformat='%b %d\n%H:%M'
+            gridcolor='Gainsboro', tickformat='%b %d\n%H:%M',
+            showgrid=True
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})",
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            gridcolor='Silver', zeroline=False
+            gridcolor='Silver', zeroline=False,
+            showgrid=True
         ),
         legend=dict(
-            orientation="v", 
-            yanchor="top", y=1, 
-            xanchor="left", x=1.02,
-            bgcolor='rgba(255,255,255,0.8)',
-            bordercolor='Black',
-            borderwidth=1
+            orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
+            bgcolor='rgba(255,255,255,0.9)', bordercolor='Black', borderwidth=1
         )
     )
 
-    # 5. REFERENCE LINES
+    # 5. FREEZING REFERENCE
     ref_val = 32 if unit_mode == "Fahrenheit" else 0
     fig.add_hline(y=ref_val, line_dash="solid", line_color="rgba(0,0,255,0.3)", 
                   annotation_text="Freezing", annotation_position="bottom right")
