@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta, timezone, time as dt_time
+from datetime import datetime, timedelta, timezone, date, time as dt_time
 import pytz
 import traceback
 import io
@@ -43,7 +43,6 @@ def get_bq_client():
             )
             return bigquery.Client(credentials=credentials, project=info["project_id"])
         
-        # Fallback for local development
         return bigquery.Client(project=PROJECT_ID)
 
     except Exception as e:
@@ -72,10 +71,8 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     else:
         # Engineering sees everything except what was explicitly MASKED
         filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('FALSE', '0', 'MASKED')"
-        # Engineering sees ALL historical data
         visibility_sql = ""
 
-    # Using a safer multi-line string with structured logic
     query = f"""
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
@@ -85,7 +82,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         ORDER BY m.Location ASC, m.timestamp ASC
     """
     
-    # Secure Parameterized Query
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("project_id", "STRING", project_id)
@@ -97,7 +93,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         return query_job.to_dataframe()
     except Exception as e:
         st.error(f"⚠️ Data Sync Error for '{project_id}': {e}")
-        # Log the full error for debugging in the console
         print(traceback.format_exc())
         return pd.DataFrame()
         
@@ -111,7 +106,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 st.sidebar.title("❄️ SoilFreeze Lab")
 
 # --- NAVIGATION ---
-# Using session_state for page to allow for programmatic redirects if needed later
 page = st.sidebar.selectbox(
     "Navigation", 
     [
@@ -130,7 +124,6 @@ page = st.sidebar.selectbox(
 st.sidebar.divider()
 
 # --- PROJECT SELECTION ---
-# We initialize these as None/Default to prevent undefined variable errors in the router
 selected_project = "All Projects"
 project_metadata = None  
 
@@ -138,9 +131,9 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # Fetching names from project_registry - we exclude Archived projects by default
+        # UPDATED: Added SoilType to the selection
         proj_q = f"""
-            SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown 
+            SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
             WHERE ProjectStatus != 'Archived'
         """
@@ -153,14 +146,11 @@ if sidebar_client is not None:
             key="sidebar_proj_picker_global"
         )
         
-        # Keep global state in sync
         st.session_state['selected_project'] = selected_project
         
         if selected_project != "All Projects":
-            # Extract metadata for the selected project
             meta_row = proj_df[proj_df['Project'] == selected_project]
             if not meta_row.empty:
-                # Convert to dictionary for easier handling in functions
                 project_metadata = meta_row.iloc[0].to_dict()
                 st.session_state['project_metadata'] = project_metadata
         else:
@@ -187,7 +177,6 @@ st.sidebar.divider()
 # --- TIME & DISPLAY ---
 st.sidebar.subheader("📱 Display & Time")
 
-# Smart Default: If the project has a timezone set, use it. Otherwise, default to Pacific.
 default_tz_index = 2 # Default to Pacific
 if project_metadata and project_metadata.get('Timezone') == "US/Eastern":
     default_tz_index = 1
@@ -227,9 +216,7 @@ if st.sidebar.checkbox("Type B (26.6°F)", value=False, key="ref_type_b"):
 if st.sidebar.checkbox("Type A (10.2°F)", value=False, key="ref_type_a"): 
     active_refs.append((10.2, "Type A"))
 
-# Store as tuple (immutable) for caching stability
 st.session_state["active_refs"] = tuple(active_refs)
-# --- END OF SIDEBAR ---
 
 #############
 # - Graph - #
@@ -237,8 +224,8 @@ st.session_state["active_refs"] = tuple(active_refs)
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
-    Smooth spline graph with multiple theoretical 'Day 0' background curves.
-    Ensures now_local is defined internally to prevent NameErrors.
+    Smooth spline graph with theoretical reference curves, internal now_local definition,
+    and a full solid border around the plot area.
     """
     # 1. INITIALIZE DATA & CLIENT
     if df.empty:
@@ -261,12 +248,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # --- 3. THEORETICAL REFERENCE CURVES (e.g., Sat Stiff Clay) ---
     if curve_id and curve_id != "None" and f_start_date:
-        # Search for curve matches (e.g. searching 'TP8' finds '2527-TP8-Sat Stiff Clay')
         curve_list = [curve_id] if isinstance(curve_id, str) else curve_id
         dash_styles = ['dashdot', 'dash', 'dot']
         
         for idx, cid in enumerate(curve_list):
             try:
+                # Case-insensitive search to find the uploaded CSV data
                 ref_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -277,7 +264,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 
                 if not ref_df.empty:
                     for full_cid, g_df in ref_df.groupby('CurveID'):
-                        # Legend Cleanup: '2527-TP8-Sat Stiff Clay' -> 'Sat Stiff Clay'
+                        # Name Cleaning: '2527-TP8-Sat Stiff Clay' -> 'Sat Stiff Clay'
                         clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
                         
                         g_df['timestamp'] = g_df['Day'].apply(
@@ -293,7 +280,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                             name=f"REF: {clean_name}",
                             mode='lines',
                             line=dict(
-                                color='rgba(120, 120, 120, 0.6)', 
+                                color='rgba(130, 130, 130, 0.7)', 
                                 width=2.5, 
                                 dash=dash_styles[idx % len(dash_styles)],
                                 shape='spline'
@@ -322,7 +309,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for sn in group_data['NodeNum'].unique():
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # Gap Handling
             s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             if (s_df['gap'] > 6.0).any():
                 gaps = s_df[s_df['gap'] > 6.0].copy()
@@ -346,26 +332,34 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right", layer="below")
 
-    # CRITICAL FIX: Generate now_local internally so it's never missing
     now_local = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # --- 6. LAYOUT ---
+    # --- 6. LAYOUT & BOARDER CONFIG ---
     l_cfg = dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5) if mobile_mode else \
             dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     
     fig.update_layout(
         title={'text': f"<b>{title}</b>", 'x': 0.02, 'y': 0.95},
-        plot_bgcolor='white', hovermode="x unified", height=600,
+        plot_bgcolor='white', 
+        hovermode="x unified", 
+        height=600,
         legend=l_cfg,
+        # BOARDER LOGIC: showline=True + mirror=True + linecolor='black'
         xaxis=dict(
-            range=[start_view, end_view], showgrid=True, gridcolor='DarkGray', gridwidth=0.5,
-            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
+            range=[start_view, end_view], 
+            showgrid=True, gridcolor='Gainsboro', gridwidth=0.5,
+            showline=True, mirror=True, linecolor='black', linewidth=1.5,
+            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='whitesmoke', griddash='dash'),
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
-            title=f"Temperature ({unit_label})", range=y_range, dtick=dt_major, 
-            gridcolor='DarkGray', minor=dict(dtick=dt_minor, showgrid=True)
+            title=f"Temperature ({unit_label})", 
+            range=y_range, 
+            dtick=dt_major, 
+            showgrid=True, gridcolor='Gainsboro',
+            showline=True, mirror=True, linecolor='black', linewidth=1.5,
+            minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
         )
     )
     
@@ -373,11 +367,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
     """
-    Returns X (timestamps) and Y (temps) for a specific soil type 
-    starting from the project start date.
+    Fallback function for hardcoded soil types.
     """
-    # Example Data: Day vs Temp (F)
-    # This represents a typical cooling curve for Silty Sand vs Clay
     references = {
         "Silty Sand": [(0, 50), (5, 32), (14, 20), (30, 10), (60, 5)],
         "Clay":       [(0, 50), (10, 32), (25, 25), (45, 15), (90, 10)]
@@ -387,12 +378,10 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
     if not curve:
         return None, None
         
-    # Convert Day Offsets to real Timestamps
-    x_times = [start_date + pd.Timedelta(days=d) for d, t in curve]
+    x_times = [pd.Timestamp(start_date) + pd.Timedelta(days=d) for d, t in curve]
     y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
     
     return x_times, y_temps
-
 ##################
 # Page Functions #
 ##################
@@ -403,8 +392,8 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
 
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
-    Shows all pipes/banks for a selected project.
-    Includes Masking, Reference Curves, and 1-Day Cushion Logic.
+    Shows all pipes/banks for a selected project in one scrolling view.
+    Includes the Master Switch for Reference Curves and logic for chart borders.
     """
     # 1. INITIALIZE UI STATE VARIABLES
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
@@ -427,7 +416,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         if pd.notnull(raw_f_date):
             f_start_date = pd.to_datetime(raw_f_date).date()
 
-    # 3. HEADER & DASHBOARD
+    # 3. HEADER & FREEZEDOWN TRACKER
     st.header(f"📈 Time vs Temp: {p_name} [{status}]")
     
     if f_start_date:
@@ -435,19 +424,18 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         days_since = (today - f_start_date).days
         st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
     else:
-        st.caption("ℹ️ Freeze start date not yet initialized.")
+        st.caption("ℹ️ Freeze start date not yet initialized in Project Master.")
 
-    # 4. SIDEBAR TOGGLES
+    # 4. SIDEBAR TOGGLES (The Master Switch)
     st.sidebar.subheader("👁️ Visibility Settings")
-    show_masked = st.sidebar.toggle("Show Masked Points", value=False)
     
-    show_ref = False
-    if assigned_curve != "None" and f_start_date:
-        show_ref = st.sidebar.toggle(f"Show Reference Curve ({assigned_curve})", value=True)
+    # The Switch to turn curves ON/OFF
+    show_ref = st.sidebar.toggle("Show Theoretical Curves", value=True, help="Toggle background reference curves for TP locations.")
+    show_masked = st.sidebar.toggle("Show Masked Points", value=False)
 
-    # 5. DATA FETCHING
+    # 5. DATA PRE-FLIGHT
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Select a project in the sidebar.")
+        st.info("💡 Select a project in the sidebar to view engineering trends.")
         return
 
     with st.spinner(f"Syncing {p_name} telemetry..."):
@@ -461,11 +449,12 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     if not show_masked and 'approve' in p_df.columns:
         p_df = p_df[p_df['approve'] != 'MASKED'].copy()
 
-    # 7. TIMELINE CONFIG (1-Day Cushion)
+    # 7. TIMELINE CONFIG (With 1-Day Cushion)
     st.sidebar.subheader("📅 Timeline Controls")
     lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
     
     now_local = pd.Timestamp.now(tz=display_tz)
+    # Set end_view to tomorrow at midnight for a visual cushion
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     
     if lookback == 0:
@@ -473,8 +462,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     else:
         start_view = end_view - pd.Timedelta(weeks=lookback)
 
-    # --- 8. CRITICAL FIX: DEFINE LOCATIONS ---
-    # This line MUST exist before the loop to prevent NameError
+    # 8. DEFINE LOCATIONS
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
 
     # 9. LOCATION-BASED PLOTTING LOOP
@@ -483,10 +471,10 @@ def render_global_overview(selected_project, project_metadata, display_tz):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
             # --- SMART CURVE MATCHING ---
-            # Search for a specific curve named "Project-Location" (e.g., 2527-TP8)
+            # Create ID to match uploaded files (e.g., "2527-TP8")
             pipe_specific_id = f"{selected_project}-{loc}"
             
-            # Only show curves for locations that look like Temp Pipes
+            # Identify if this is a Temperature Pipe to avoid cluttering other graphs
             is_temp_pipe = any(x in loc.upper().replace(" ", "") for x in ["TP", "PIPE", "TEMP", "THERMAL"])
             
             fig = build_high_speed_graph(
@@ -498,9 +486,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_mode=unit_mode, 
                 unit_label=unit_label, 
                 display_tz=display_tz,
-                f_start_date=f_start_date,
                 mobile_mode=mobile_mode,
-                # Pass both so the engine can try the specific pipe name first
+                f_start_date=f_start_date,
+                # Pass the specific pipe ID only if the Switch is ON and it's a TP
                 curve_id=pipe_specific_id if (show_ref and is_temp_pipe) else None
             )
             
