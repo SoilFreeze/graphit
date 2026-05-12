@@ -221,51 +221,83 @@ st.session_state["active_refs"] = tuple(active_refs)
 #############
 # - Graph - #
 #############
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz, f_start_date=None, curve_id=None):
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
+                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
-    Restores all engineering formatting: 
-    - Full black box borders (linewidth 2)
-    - 15-color sensor palette
-    - Top-layer Dark Gray Dashed Goals (60% opacity)
-    - Clean grid contrast
+    Final Master Function: 
+    - 15 High-Contrast Colors
+    - Dark Gray (60% Opacity) Goals plotted LAST (Top Layer)
+    - Full Black Engineering Box Borders (LineWidth 2)
+    - Gap Detection & Spline Smoothing
     """
     import plotly.graph_objects as go
     
-    # 1. RESTORE 15-COLOR PALETTE
+    if df.empty:
+        return go.Figure().update_layout(title="No data available")
+
+    client = get_bq_client()
+    plot_df = df.copy() 
+    fig = go.Figure()
+
+    # 1. TIMEZONE & UNIT CONVERSION
+    if plot_df['timestamp'].dt.tz is None:
+        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
+    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
+    
+    if unit_mode == "Celsius":
+        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
+        y_range = [-30, 30]
+    else:
+        y_range = [-20, 80]
+
+    # 2. SENSOR TRACE GENERATION (Bottom Layer)
+    # 15-Color Engineering Palette
     extended_colors = [
         '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', 
         '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32'  
     ]
 
-    fig = go.Figure()
+    # Labeling Logic
+    plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
+    plot_df['sort_val'] = 1000.0
+    depth_mask = plot_df['Depth'].notnull()
+    plot_df.loc[depth_mask, 'depth_label'] = plot_df.loc[depth_mask, 'Depth'].astype(str) + "ft"
+    plot_df.loc[depth_mask, 'sort_val'] = pd.to_numeric(plot_df.loc[depth_mask, 'Depth'], errors='coerce')
+    
+    unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
 
-    # 2. PLOT SENSOR DATA (Bottom Layer)
-    nodes = sorted(df['NodeNum'].unique())
-    for i, node in enumerate(nodes):
-        node_df = df[df['NodeNum'] == node].sort_values('timestamp')
-        y_vals = node_df['temperature']
-        if unit_mode == "Celsius":
-            y_vals = (y_vals - 32) * 5/9
+    for i, (_, g_row) in enumerate(unique_groups.iterrows()):
+        group_lbl = g_row['depth_label']
+        group_data = plot_df[plot_df['depth_label'] == group_lbl]
+        color = extended_colors[i % len(extended_colors)]
+        
+        for sn in group_data['NodeNum'].unique():
+            s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
+            
+            # Gap Handling
+            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            if (s_df['gap'] > 6.0).any():
+                gaps = s_df[s_df['gap'] > 6.0].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        depth_val = node_df['Depth'].iloc[0] if 'Depth' in node_df.columns else None
-        label = f"{depth_val}ft (N:{node})" if pd.notnull(depth_val) else f"Node {node}"
+            fig.add_trace(go.Scatter(
+                x=s_df['timestamp'], y=s_df['temperature'],
+                name=f"{group_lbl} (N:{sn})",
+                mode='lines',
+                line=dict(shape='spline', smoothing=1.3, width=2, color=color),
+                connectgaps=False,
+                hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+            ))
 
-        fig.add_trace(go.Scatter(
-            x=node_df['timestamp'],
-            y=y_vals,
-            name=label,
-            mode='lines',
-            line=dict(width=2, color=extended_colors[i % len(extended_colors)]),
-            hovertemplate="Time: %{x}<br>Temp: %{y:.1f}" + unit_label
-        ))
-
-    # 3. PLOT THEORETICAL CURVES (Top Layer - Dark Gray Dashed)
-    if curve_id and f_start_date:
+    # 3. THEORETICAL REFERENCE CURVES (Top Layer)
+    # Plotted after sensors so they appear on top.
+    if curve_id and curve_id != "None" and f_start_date:
         try:
-            client = get_bq_client()
-            # Fuzzy match Project + Location (e.g., 2527 and T8)
-            parts = curve_id.split('-')
+            # Fuzzy Logic: Match Project and Location
+            parts = str(curve_id).split('-')
             p_id, l_id = parts[0], parts[1] if len(parts) > 1 else parts[0]
             
             ref_q = f"""
@@ -278,60 +310,67 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             ref_df = client.query(ref_q).to_dataframe()
             
             if not ref_df.empty:
-                patterns = ['dash', 'dot', 'dashdot', 'longdash']
-                for i, (full_cid, g_df) in enumerate(ref_df.groupby('CurveID')):
+                dash_patterns = ['dash', 'dot', 'dashdot', 'longdash']
+                for idx, (full_cid, g_df) in enumerate(ref_df.groupby('CurveID')):
                     clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
-                    g_df['timestamp'] = g_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                    
+                    g_df['timestamp'] = g_df['Day'].apply(
+                        lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
+                    )
+                    
                     ref_y = g_df['Temp']
                     if unit_mode == "Celsius":
                         ref_y = (ref_y - 32) * 5/9
 
                     fig.add_trace(go.Scatter(
-                        x=g_df['timestamp'], 
-                        y=ref_y,
+                        x=g_df['timestamp'], y=ref_y,
                         name=f"<b>GOAL: {clean_name}</b>",
                         mode='lines',
                         line=dict(
                             color='rgba(40, 40, 40, 0.6)', # Dark Gray, 60% Opacity
                             width=4,                       # Bold Shape
-                            dash=patterns[i % len(patterns)]
+                            dash=dash_patterns[idx % len(dash_patterns)]
                         ),
-                        legendrank=1 # Top of legend
+                        legendrank=1 # Force Goals to top of legend
                     ))
-        except:
-            pass 
+        except: pass
 
-    # 4. RESTORE LAYOUT & BORDERS
+    # 4. REFERENCE LINES (Freezing/Now)
+    for val, ref_label in active_refs:
+        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+        fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
+                      annotation_text=ref_label, annotation_position="top right", layer="below")
+
+    now_local = pd.Timestamp.now(tz=display_tz)
+    fig.add_vline(x=now_local, line_width=2, line_color="Red", line_dash="dash", layer='above')
+
+    # 5. LAYOUT & BOX BORDER
+    l_cfg = dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5) if mobile_mode else \
+            dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
+    
     fig.update_layout(
-        title=dict(text=f"<b>{title}</b>", x=0.02, font=dict(size=18, color='black')),
-        template='plotly_white',
-        hovermode='x unified',
+        title={'text': f"<b>{title}</b>", 'x': 0.02, 'y': 0.95, 'font': {'size': 18}},
+        plot_bgcolor='white', 
+        hovermode="x unified", 
         height=650,
+        legend=l_cfg,
         margin=dict(l=60, r=20, t=80, b=60),
-        # FULL BOX BORDER (Mirror: True + Linecolor: Black)
+        # FULL ENGINEERING BORDER
         xaxis=dict(
-            range=[start_view, end_view],
+            range=[start_view, end_view], 
+            showgrid=True, gridcolor='Gainsboro', 
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            gridcolor='Gainsboro', tickformat='%b %d\n%H:%M',
-            showgrid=True
+            tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
-            title=f"Temperature ({unit_label})",
+            title=f"Temperature ({unit_label})", 
+            range=y_range, 
+            showgrid=True, gridcolor='Gainsboro',
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            gridcolor='Silver', zeroline=False,
-            showgrid=True
-        ),
-        legend=dict(
-            orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
-            bgcolor='rgba(255,255,255,0.9)', bordercolor='Black', borderwidth=1
+            zeroline=False
         )
     )
-
-    # 5. FREEZING REFERENCE
-    ref_val = 32 if unit_mode == "Fahrenheit" else 0
-    fig.add_hline(y=ref_val, line_dash="solid", line_color="rgba(0,0,255,0.3)", 
-                  annotation_text="Freezing", annotation_position="bottom right")
-
+    
     return fig
 
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
