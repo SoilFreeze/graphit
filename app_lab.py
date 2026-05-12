@@ -280,7 +280,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df.loc[bank_mask & ~depth_mask, 'depth_label'] = "Bank " + plot_df.loc[bank_mask, 'Bank'].astype(str)
     plot_df.loc[bank_mask & ~depth_mask, 'sort_val'] = 999.0
     
-    # 3. TRACE GENERATION
+   # 3. TRACE GENERATION
     fig = go.Figure()
     is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
     unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
@@ -296,10 +296,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for j, sn in enumerate(sensors):
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # --- STATUS-BASED STYLING ---
-            status = s_df['SensorStatus'].iloc[0] if 'SensorStatus' in s_df.columns else 'Active'
-            line_dash = 'solid' if status == 'Active' else 'dot'
-            opacity = 1.0 if status == 'Active' else 0.5
+            # --- FORCED SOLID STYLING ---
+            # We removed the 'dot' logic here to ensure all lines are solid
+            line_dash = 'solid' 
+            opacity = 1.0 
             
             # Gap Handling
             if not is_surgical:
@@ -310,23 +310,21 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                     s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-            # --- PLOTLY TRACE (Updated for Smoothness) ---
+            # --- PLOTLY TRACE ---
             fig.add_trace(go.Scatter(
-                x=s_df['timestamp'],     # Fixed from loc_df
-                y=s_df['temperature'],   # Fixed from loc_df
+                x=s_df['timestamp'],
+                y=s_df['temperature'],
                 name=f"{group_lbl} (N:{sn})", 
-                
-                mode='lines',            # Only lines, no points/markers
-                
+                mode='lines',            # No markers
                 line=dict(
-                    shape='spline',      # Smooth cubic spline interpolation
-                    smoothing=1.3,       # Maximum smoothness
+                    shape='spline',      # Smooth curves
+                    smoothing=1.3,
                     width=2,
-                    color=color,         # Maintain group color
-                    dash=line_dash       # Respect status (Active/Diag)
+                    color=color,
+                    dash='solid'         # Forced solid line
                 ),
                 opacity=opacity,
-                connectgaps=False,       # Set to False so Gap Handling actually works
+                connectgaps=False,       # Breaks line at 6h+ gaps
                 hovertemplate=f"<b>{group_lbl}</b> (Node {sn})<br>Temp: %{{y:.1f}}{unit_label}<br>Time: %{{x}}<extra></extra>"
             ))
 
