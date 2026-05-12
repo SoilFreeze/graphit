@@ -406,7 +406,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     Shows all pipes/banks for a selected project.
     Includes Masking, Reference Curves, and 1-Day Cushion Logic.
     """
-    # 1. INITIALIZE UI STATE VARIABLES (Prevents NameError)
+    # 1. INITIALIZE UI STATE VARIABLES
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
     active_refs = st.session_state.get("active_refs", [])
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
@@ -425,7 +425,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         
         raw_f_date = project_metadata.get('Date_Freezedown')
         if pd.notnull(raw_f_date):
-            # Ensure datetime/date object is handled safely
             f_start_date = pd.to_datetime(raw_f_date).date()
 
     # 3. HEADER & DASHBOARD
@@ -474,15 +473,21 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     else:
         start_view = end_view - pd.Timedelta(weeks=lookback)
 
-   # 9. LOCATION-BASED PLOTTING LOOP
+    # --- 8. CRITICAL FIX: DEFINE LOCATIONS ---
+    # This line MUST exist before the loop to prevent NameError
+    locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
+
+    # 9. LOCATION-BASED PLOTTING LOOP
     for loc in locations:
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
             # --- SMART CURVE MATCHING ---
-            # Search for a specific curve named "Project-Location-Soil" (e.g., 2527-TP8-Sat Stiff Clay)
-            # If not found, fall back to the project-wide assigned_curve.
+            # Search for a specific curve named "Project-Location" (e.g., 2527-TP8)
             pipe_specific_id = f"{selected_project}-{loc}"
+            
+            # Only show curves for locations that look like Temp Pipes
+            is_temp_pipe = any(x in loc.upper().replace(" ", "") for x in ["TP", "PIPE", "TEMP", "THERMAL"])
             
             fig = build_high_speed_graph(
                 df=loc_df, 
@@ -494,9 +499,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_label=unit_label, 
                 display_tz=display_tz,
                 f_start_date=f_start_date,
-                # Pass the specific pipe ID or the general curve
-                curve_id=pipe_specific_id if show_ref else None,
-                fallback_curve=assigned_curve if show_ref else None
+                mobile_mode=mobile_mode,
+                # Pass both so the engine can try the specific pipe name first
+                curve_id=pipe_specific_id if (show_ref and is_temp_pipe) else None
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
