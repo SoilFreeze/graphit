@@ -234,7 +234,8 @@ st.session_state["active_refs"] = tuple(active_refs)
 #############
 # - Graph - #
 #############
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", mobile_mode=False):
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
+                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Optimized Graphing Engine: Handles unit conversion, timezone alignment, 
     status-based styling, and SMOOTH SPLINE lines without markers.
@@ -419,6 +420,25 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     Shows all pipes/banks for a selected project in one scrolling view.
     Includes Dynamic Freezedown Day Tracking and optional Masked Data filtering.
     """
+
+    # 1. EXTRACT METADATA
+    # Safety: Use .get() to prevent KeyErrors if columns are missing
+    f_start_date = project_metadata.get('Date_Freezedown') if project_metadata else None
+    # Convert f_start_date to a date object if it's not already
+    if f_start_date and not isinstance(f_start_date, (datetime.date, datetime.datetime)):
+        f_start_date = pd.to_datetime(f_start_date).date()
+
+    assigned_curve = project_metadata.get('SoilType', 'None') if project_metadata else 'None'
+
+    # 2. SIDEBAR TOGGLES
+    st.sidebar.subheader("👁️ Visibility Settings")
+    show_masked = st.sidebar.toggle("Show Masked Points", value=False)
+    
+    # Only show the Reference Toggle if a curve is actually assigned to this project
+    show_ref = False
+    if assigned_curve != "None":
+        show_ref = st.sidebar.toggle(f"Show Reference ({assigned_curve})", value=True)
+    
     # 1. HEADER & FREEZEDOWN TRACKER
     p_name = selected_project
     status = "Active"
@@ -468,7 +488,20 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     if p_df.empty:
         st.warning(f"No engineering data found for '{p_name}'.")
         return
-
+        
+    # 3. PLOTTING LOOP
+    for loc in locations:
+        with st.expander(f"📍 Location: {loc}", expanded=True):
+            # Pass assigned_curve ONLY if the toggle is ON
+            fig = build_high_speed_graph(
+                df=loc_df, 
+                title=f"Thermal Trends: {loc}", 
+                # ... [other args] ...
+                f_start_date=f_start_date,
+                curve_id=assigned_curve if show_ref else None
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
     # --- 4. MASKING FILTER LOGIC ---
     if not show_masked and 'approve' in p_df.columns:
         masked_points = p_df[p_df['approve'] == 'MASKED']
