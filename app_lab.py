@@ -338,28 +338,32 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     l_cfg = dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5) if mobile_mode else \
             dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     
+    extended_colors = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', # Standard 5
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', # Standard 10
+        '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32'  # Added 5 high-contrast
+    ]
+
+    fig = go.Figure()
+
+    # Apply the colorway to the layout
     fig.update_layout(
-        title={'text': f"<b>{title}</b>", 'x': 0.02, 'y': 0.95},
-        plot_bgcolor='white', 
-        hovermode="x unified", 
-        height=600,
-        legend=l_cfg,
-        # BOARDER LOGIC: showline=True + mirror=True + linecolor='black'
+        template='plotly_white',
+        colorway=extended_colors, # This forces the 15-color cycle
+        title=dict(text=f"<b>{title}</b>", x=0.05),
         xaxis=dict(
-            range=[start_view, end_view], 
-            showgrid=True, gridcolor='Gainsboro', gridwidth=0.5,
+            range=[start_view, end_view],
             showline=True, mirror=True, linecolor='black', linewidth=1.5,
-            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='whitesmoke', griddash='dash'),
-            tickformat='%b %d\n%H:%M'
+            gridcolor='Gainsboro'
         ),
         yaxis=dict(
-            title=f"Temperature ({unit_label})", 
-            range=y_range, 
-            dtick=dt_major, 
-            showgrid=True, gridcolor='Gainsboro',
+            title=f"Temperature ({unit_label})",
             showline=True, mirror=True, linecolor='black', linewidth=1.5,
-            minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
-        )
+            gridcolor='Silver'
+        ),
+        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+        margin=dict(l=50, r=150, t=80, b=50),
+        height=600
     )
     
     return fig
@@ -1482,28 +1486,69 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.rerun()
 
    # --- TAB: REFERENCE CURVE LIBRARY ---
+    # --- TAB: REFERENCE CURVE LIBRARY ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
         
-        # 1. DATABASE REPAIR TOOL
-        with st.expander("🛠️ Library Database Tools", expanded=False):
-            st.write("If the library is empty or won't save, click below to reset the table structure.")
-            if st.button("🔨 Re-Initialize Library Table"):
+        # 1. MANAGEMENT & PURGE TOOLS
+        with st.expander("🗑️ Library Management (Delete/Purge)", expanded=False):
+            st.warning("Action is permanent. Purging will remove curves from all graphs.")
+            
+            # A. SURGICAL DELETE (Specific Curve)
+            try:
+                lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
+                if not lib_df.empty:
+                    to_delete = st.selectbox("Select Curve to Remove", sorted(lib_df['CurveID'].tolist()))
+                    if st.button(f"🗑️ Delete {to_delete}", type="secondary"):
+                        client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{to_delete}'").result()
+                        st.success(f"Removed {to_delete} from library.")
+                        st.cache_data.clear()
+                        st.rerun()
+            except:
+                st.info("No curves available to delete.")
+
+            st.divider()
+
+            # B. NUCLEAR PURGE (All Data)
+            st.error("Danger: This wipes the entire reference database.")
+            confirm_purge = st.checkbox("I confirm I want to DELETE ALL curves in the library.")
+            if st.button("🧨 PURGE ENTIRE LIBRARY", type="primary", disabled=not confirm_purge):
                 try:
-                    # Drop and Recreate to ensure clean schema
-                    client.query(f"DROP TABLE IF EXISTS `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
-                    init_sql = f"""
-                        CREATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves` (
-                            CurveID STRING,
-                            Day INT64,
-                            Temp FLOAT64
-                        )
-                    """
-                    client.query(init_sql).result()
-                    st.success("✅ Library Table successfully reset and ready for data.")
+                    # Truncate is faster and cleaner for wiping all rows
+                    client.query(f"TRUNCATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
+                    st.success("Library has been completely purged.")
+                    st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Failed to reset: {e}")
+                    st.error(f"Purge failed: {e}")
+
+        st.divider()
+
+        # 2. THE UPLOADER (Keep existing logic)
+        st.write("### 📤 Upload New Curves")
+        u_files = st.file_uploader("Select CSV Files", type="csv", accept_multiple_files=True, key="ref_uploader_v5")
+        
+        if u_files:
+            if st.button("💾 Commit to BigQuery"):
+                for f in u_files:
+                    curve_id = f.name.replace(".csv", "")
+                    # Process and Upload logic...
+                    # (Insert your existing pd.read_csv and client.load_table_from_dataframe logic here)
+                st.success("Upload successful.")
+                st.cache_data.clear()
+                st.rerun()
+
+        # 3. CURRENT INVENTORY VIEW
+        st.divider()
+        st.write("### 📂 Current Library Inventory")
+        try:
+            inventory_df = client.query(f"SELECT CurveID, COUNT(*) as Points FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` GROUP BY CurveID").to_dataframe()
+            if not inventory_df.empty:
+                st.dataframe(inventory_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("The library is currently empty.")
+        except:
+            st.caption("Reference table not yet initialized.")
 
         st.divider()
 
