@@ -478,11 +478,14 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
-            # --- SMART CURVE MATCHING ---
-            # Create ID to match uploaded files (e.g., "2527-TP8")
-            pipe_specific_id = f"{selected_project}-{loc}"
+            # --- THE FIX ---
+            # We only want the ID (2527), not the full name (2527-Elizabeth)
+            # This extracts '2527' from '2527-Elizabeth'
+            clean_proj_id = str(selected_project).split('-')[0] 
             
-            # Identify if this is a Temperature Pipe to avoid cluttering other graphs
+            # This creates "2527-TP4" (matching your library files)
+            search_id = f"{clean_proj_id}-{loc}" 
+            
             is_temp_pipe = any(x in loc.upper() for x in ["TP", "T", "PIPE", "TEMP"])
             
             fig = build_high_speed_graph(
@@ -494,10 +497,8 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_mode=unit_mode, 
                 unit_label=unit_label, 
                 display_tz=display_tz,
-                mobile_mode=mobile_mode,
                 f_start_date=f_start_date,
-                # Pass the specific pipe ID only if the Switch is ON and it's a TP
-                curve_id=pipe_specific_id if (show_ref and is_temp_pipe) else None
+                curve_id=search_id if (show_ref and is_temp_pipe) else None
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
@@ -743,10 +744,10 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 today_day = (pd.Timestamp.now().date() - f_start_date).days
                 
                 ref_q = f"""
-                    SELECT CurveID, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE UPPER(CurveID) LIKE UPPER('%{search_id}%')
-                    AND Day <= {today_day}
-                    ORDER BY Day DESC LIMIT 1
+                    SELECT CurveID, Day, Temp 
+                    FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                    WHERE UPPER(CurveID) LIKE UPPER('%{curve_id}%')
+                    ORDER BY Day
                 """
                 try:
                     ref_res = client.query(ref_q).to_dataframe()
