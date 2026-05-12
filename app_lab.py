@@ -237,7 +237,7 @@ st.session_state["active_refs"] = tuple(active_refs)
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz="UTC", mobile_mode=False):
     """
     Optimized Graphing Engine: Handles unit conversion, timezone alignment, 
-    and status-based styling with high-performance vectorization.
+    status-based styling, and SMOOTH SPLINE lines without markers.
     """
     if df.empty:
         return go.Figure().update_layout(title="No data available for the selected period.")
@@ -245,12 +245,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df = df.copy()
     
     # 1. TIMEZONE & UNIT CONVERSION
-    # Ensure timestamps are timezone-aware UTC before converting to display timezone
     if plot_df['timestamp'].dt.tz is None:
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Helper to ensure view-bounds are timezone aligned
     def localize_bound(dt):
         if dt.tzinfo is None:
             return dt.tz_localize('UTC').tz_convert(display_tz)
@@ -260,7 +258,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     end_local = localize_bound(end_view)
     now_local = pd.Timestamp.now(tz=display_tz)
     
-    # Range Logic: Don't show empty space before the first actual data point
     actual_min_data = plot_df['timestamp'].min()
     range_start = max(start_local, actual_min_data) - pd.Timedelta(hours=12)
     range_end = end_local + pd.Timedelta(hours=12)
@@ -271,17 +268,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     else:
         y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
-    # 2. VECTORIZED LABELING & SORTING (High Speed)
-    # Avoids .apply() which is slow on large datasets
+    # 2. VECTORIZED LABELING & SORTING
     plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
     plot_df['sort_val'] = 1000.0
     
-    # Apply Depth labels if present
     depth_mask = plot_df['Depth'].notnull()
     plot_df.loc[depth_mask, 'depth_label'] = plot_df.loc[depth_mask, 'Depth'].astype(str) + "ft"
     plot_df.loc[depth_mask, 'sort_val'] = pd.to_numeric(plot_df.loc[depth_mask, 'Depth'], errors='coerce')
     
-    # Apply Bank labels if present
     bank_mask = plot_df['Bank'].notnull() & (plot_df['Bank'].astype(str).str.strip() != "")
     plot_df.loc[bank_mask & ~depth_mask, 'depth_label'] = "Bank " + plot_df.loc[bank_mask, 'Bank'].astype(str)
     plot_df.loc[bank_mask & ~depth_mask, 'sort_val'] = 999.0
@@ -307,37 +301,36 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             line_dash = 'solid' if status == 'Active' else 'dot'
             opacity = 1.0 if status == 'Active' else 0.5
             
-            # Gap Handling: break line if gap > 6 hours (Prevents misleading straight lines)
+            # Gap Handling
             if not is_surgical:
                 s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
                 if (s_df['gap'] > 6.0).any():
-                    # Injecting None values to force line breaks in Plotly
                     gaps = s_df[s_df['gap'] > 6.0].copy()
                     gaps['temperature'] = None
                     gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                     s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-            # Inside your build_high_speed_graph function (or where you define the trace)
+            # --- PLOTLY TRACE (Updated for Smoothness) ---
             fig.add_trace(go.Scatter(
-                x=loc_df['timestamp'],
-                y=loc_df['temperature'],
-                name=str(node_id),
+                x=s_df['timestamp'],     # Fixed from loc_df
+                y=s_df['temperature'],   # Fixed from loc_df
+                name=f"{group_lbl} (N:{sn})", 
                 
-                # 1. REMOVE POINTS: Set mode to 'lines' only (removes the dots)
-                mode='lines',
+                mode='lines',            # Only lines, no points/markers
                 
-                # 2. SMOOTH LINES: Set shape to 'spline'
                 line=dict(
-                    shape='spline', 
-                    smoothing=1.3, # Adjust between 0 and 1.3 for "curviness"
-                    width=2        # Optional: adjust line thickness
+                    shape='spline',      # Smooth cubic spline interpolation
+                    smoothing=1.3,       # Maximum smoothness
+                    width=2,
+                    color=color,         # Maintain group color
+                    dash=line_dash       # Respect status (Active/Diag)
                 ),
-                
-                connectgaps=True, # Recommended for sensor data
-                hovertemplate="Temp: %{y:.1f}°F<br>Time: %{x}<extra></extra>"
+                opacity=opacity,
+                connectgaps=False,       # Set to False so Gap Handling actually works
+                hovertemplate=f"<b>{group_lbl}</b> (Node {sn})<br>Temp: %{{y:.1f}}{unit_label}<br>Time: %{{x}}<extra></extra>"
             ))
 
-    # 4. REFERENCE LINES & MARKERS
+    # 4. REFERENCE LINES
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
@@ -368,11 +361,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         )
     )
     
-    # Weekly Markers (Mondays)
-    mondays = pd.date_range(start=range_start, end=range_end, freq='W-MON', tz=display_tz)
-    for mon in mondays:
-        fig.add_vline(x=mon, line_width=1.5, line_color="gray", layer="below")
-
     return fig
 
 
