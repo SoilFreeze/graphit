@@ -242,23 +242,31 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     client = get_bq_client()
     fig = go.Figure()
 
-    # --- 1. THEORETICAL REFERENCE CURVES ---
+   # --- 1. THEORETICAL REFERENCE CURVES ---
     if curve_id and curve_id != "None" and f_start_date:
-        # If curve_id is a single string, wrap it in a list for the loop
+        # Normalize curve_id into a list so we can handle one or multiple soil types
         curve_list = [curve_id] if isinstance(curve_id, str) else curve_id
-        
-        # Define dash styles to rotate through if multiple curves exist
         dash_styles = ['dashdot', 'dash', 'dot']
         
         for idx, cid in enumerate(curve_list):
             try:
-                ref_q = f"SELECT Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID = '{cid}' ORDER BY Day"
+                # Use UPPER() to ensure 'tp2' matches 'TP2' in BigQuery
+                ref_q = f"""
+                    SELECT Day, Temp 
+                    FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                    WHERE UPPER(CurveID) = UPPER('{cid}') 
+                    ORDER BY Day
+                """
                 ref_df = client.query(ref_q).to_dataframe()
                 
                 if not ref_df.empty:
-                    # Map Day 0 to the start of the project
-                    ref_df['timestamp'] = ref_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                    # Convert Day Offset (0, 1, 2...) to actual Timestamps based on Project Start
+                    # We use pd.Timestamp(f_start_date) to ensure f_start_date is handled correctly
+                    ref_df['timestamp'] = ref_df['Day'].apply(
+                        lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
+                    )
                     
+                    # Unit conversion if user is in Celsius mode
                     if unit_mode == "Celsius":
                         ref_df['Temp'] = (ref_df['Temp'] - 32) * 5/9
 
@@ -268,18 +276,17 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         name=f"REF: {cid}",
                         mode='lines',
                         line=dict(
-                            color='rgba(120, 120, 120, 0.5)', # Professional Grey
+                            color='rgba(120, 120, 120, 0.6)', # Slightly darker grey for better visibility
                             width=2.5, 
                             dash=dash_styles[idx % len(dash_styles)],
-                            shape='spline'
+                            shape='spline' # Match the smooth look of your sensors
                         ),
-                        hoverinfo='skip',
-                        legendrank=1000 
+                        hoverinfo='skip', # Don't let theoretical lines interfere with data tooltips
+                        legendrank=1000   # Push these to the bottom of the legend list
                     ))
-            except Exception:
-                pass
-                
-    plot_df = df.copy()
+            except Exception as e:
+                # Log error to console but don't crash the UI
+                print(f"Error fetching curve {cid}: {e}")
     
     # 1. TIMEZONE & UNIT CONVERSION
     if plot_df['timestamp'].dt.tz is None:
@@ -532,7 +539,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
             # Contextual Reference Check: Only show curves on TP locations
-            is_temp_pipe = any(x in loc.upper() for x in ["TP", "PIPE", "TEMP", "THERMAL"])
+            is_temp_pipe = any(x in loc.upper().replace(" ", "") for x in ["TP", "PIPE", "TEMP", "THERMAL"])
             
             fig = build_high_speed_graph(
                 df=loc_df, 
