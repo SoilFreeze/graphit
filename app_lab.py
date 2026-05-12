@@ -239,18 +239,34 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     """
     Smooth spline graph with multiple theoretical 'Day 0' background curves.
     """
+    # 1. INITIALIZE DATA & CLIENT (Define plot_df FIRST)
+    if df.empty:
+        return go.Figure().update_layout(title="No data available")
+
     client = get_bq_client()
+    plot_df = df.copy() # <--- Move this to the top
     fig = go.Figure()
 
-   # --- 1. THEORETICAL REFERENCE CURVES ---
+    # 2. TIMEZONE & UNIT CONVERSION (Standardize everything immediately)
+    if plot_df['timestamp'].dt.tz is None:
+        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
+    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
+    
+    if unit_mode == "Celsius":
+        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
+        y_range = [-30, 30]
+    else:
+        y_range = [-20, 80]
+
+    # --- 3. THEORETICAL REFERENCE CURVES ---
     if curve_id and curve_id != "None" and f_start_date:
-        # Normalize curve_id into a list so we can handle one or multiple soil types
+        # Handle both single string or list of IDs
         curve_list = [curve_id] if isinstance(curve_id, str) else curve_id
         dash_styles = ['dashdot', 'dash', 'dot']
         
         for idx, cid in enumerate(curve_list):
             try:
-                # Use UPPER() to ensure 'tp2' matches 'TP2' in BigQuery
+                # Use UPPER() for case-insensitive matching in BigQuery
                 ref_q = f"""
                     SELECT Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -260,141 +276,36 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 ref_df = client.query(ref_q).to_dataframe()
                 
                 if not ref_df.empty:
-                    # Convert Day Offset (0, 1, 2...) to actual Timestamps based on Project Start
-                    # We use pd.Timestamp(f_start_date) to ensure f_start_date is handled correctly
+                    # Convert Day Offset to actual calendar dates starting from Day 0
                     ref_df['timestamp'] = ref_df['Day'].apply(
                         lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
                     )
                     
-                    # Unit conversion if user is in Celsius mode
+                    # Convert theoretical temps to Celsius if needed
                     if unit_mode == "Celsius":
                         ref_df['Temp'] = (ref_df['Temp'] - 32) * 5/9
 
                     fig.add_trace(go.Scatter(
                         x=ref_df['timestamp'],
                         y=ref_df['Temp'],
-                        name=f"REF: {cid}",
+                        name=f"THEORY: {cid}",
                         mode='lines',
                         line=dict(
-                            color='rgba(120, 120, 120, 0.6)', # Slightly darker grey for better visibility
+                            color='rgba(120, 120, 120, 0.6)', 
                             width=2.5, 
                             dash=dash_styles[idx % len(dash_styles)],
-                            shape='spline' # Match the smooth look of your sensors
+                            shape='spline'
                         ),
-                        hoverinfo='skip', # Don't let theoretical lines interfere with data tooltips
-                        legendrank=1000   # Push these to the bottom of the legend list
+                        hoverinfo='skip',
+                        legendrank=1000 
                     ))
             except Exception as e:
-                # Log error to console but don't crash the UI
-                print(f"Error fetching curve {cid}: {e}")
-    
-    # 1. TIMEZONE & UNIT CONVERSION
-    if plot_df['timestamp'].dt.tz is None:
-        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
-    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
-    
-    def localize_bound(dt):
-        if dt.tzinfo is None:
-            return dt.tz_localize('UTC').tz_convert(display_tz)
-        return dt.tz_convert(display_tz)
+                print(f"Ref Curve Error: {e}")
 
-    start_local = localize_bound(start_view)
-    end_local = localize_bound(end_view)
-    now_local = pd.Timestamp.now(tz=display_tz)
-    
-    actual_min_data = plot_df['timestamp'].min()
-    range_start = max(start_local, actual_min_data) - pd.Timedelta(hours=12)
-    range_end = end_local + pd.Timedelta(hours=12)
-    
-    if unit_mode == "Celsius":
-        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range, dt_major, dt_minor = [-30, 30], 10, 5
-    else:
-        y_range, dt_major, dt_minor = [-20, 80], 10, 5
+    # --- 4. SENSOR TRACE GENERATION (Using plot_df) ---
+    # Now you can safely proceed with your unique_groups loop...
 
-    # 2. VECTORIZED LABELING & SORTING
-    plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
-    plot_df['sort_val'] = 1000.0
-    
-    depth_mask = plot_df['Depth'].notnull()
-    plot_df.loc[depth_mask, 'depth_label'] = plot_df.loc[depth_mask, 'Depth'].astype(str) + "ft"
-    plot_df.loc[depth_mask, 'sort_val'] = pd.to_numeric(plot_df.loc[depth_mask, 'Depth'], errors='coerce')
-    
-    bank_mask = plot_df['Bank'].notnull() & (plot_df['Bank'].astype(str).str.strip() != "")
-    plot_df.loc[bank_mask & ~depth_mask, 'depth_label'] = "Bank " + plot_df.loc[bank_mask, 'Bank'].astype(str)
-    plot_df.loc[bank_mask & ~depth_mask, 'sort_val'] = 999.0
-    
-   # 3. TRACE GENERATION
-    fig = go.Figure()
-
-    # --- 1. ADD THEORETICAL REFERENCE CURVE ---
-    if curve_id and curve_id != "None" and f_start_date:
-        ref_q = f"SELECT Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID = '{curve_id}' ORDER BY Day"
-        ref_df = client.query(ref_q).to_dataframe()
-        
-        if not ref_df.empty:
-            # Shift Day 0 to the actual Freezedown Start Date
-            ref_df['timestamp'] = ref_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-            
-            if unit_mode == "Celsius":
-                ref_df['Temp'] = (ref_df['Temp'] - 32) * 5/9
-
-            fig.add_trace(go.Scatter(
-                x=ref_df['timestamp'],
-                y=ref_df['Temp'],
-                name=f"THEORY: {curve_id}",
-                mode='lines',
-                line=dict(color='rgba(150, 150, 150, 0.5)', width=3, dash='dashdot', shape='spline'),
-                hoverinfo='skip',
-                legendrank=1000 # Keep it at the bottom of the list
-            ))
-            
-    is_surgical = any(word in title for word in ["Scrubbing", "Surgical", "Diag"])
-    unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
-    
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-
-    for i, (_, g_row) in enumerate(unique_groups.iterrows()):
-        group_lbl = g_row['depth_label']
-        group_data = plot_df[plot_df['depth_label'] == group_lbl]
-        color = colors[i % len(colors)]
-        sensors = group_data['NodeNum'].unique()
-        
-        for j, sn in enumerate(sensors):
-            s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
-            
-            # --- FORCED SOLID STYLING ---
-            # We removed the 'dot' logic here to ensure all lines are solid
-            line_dash = 'solid' 
-            opacity = 1.0 
-            
-            # Gap Handling
-            if not is_surgical:
-                s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-                if (s_df['gap'] > 6.0).any():
-                    gaps = s_df[s_df['gap'] > 6.0].copy()
-                    gaps['temperature'] = None
-                    gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-                    s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-
-            # --- PLOTLY TRACE ---
-            fig.add_trace(go.Scatter(
-                x=s_df['timestamp'],
-                y=s_df['temperature'],
-                name=f"{group_lbl} (N:{sn})", 
-                mode='lines',            # No markers
-                line=dict(
-                    shape='spline',      # Smooth curves
-                    smoothing=1.3,
-                    width=2,
-                    color=color,
-                    dash='solid'         # Forced solid line
-                ),
-                opacity=opacity,
-                connectgaps=False,       # Breaks line at 6h+ gaps
-                hovertemplate=f"<b>{group_lbl}</b> (Node {sn})<br>Temp: %{{y:.1f}}{unit_label}<br>Time: %{{x}}<extra></extra>"
-            ))
-
+                               
     # 4. REFERENCE LINES
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
