@@ -783,7 +783,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                             dash='solid'
                         marker=dict(size=6),
                         hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
-                    ))
+                    )))
 
             # Add Reference Lines
             fig.add_hline(y=0, line_width=2, line_color="black") # Represents ground level
