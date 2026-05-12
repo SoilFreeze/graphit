@@ -1724,7 +1724,7 @@ def update_records(pts, df, val, display_tz):
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     The main Dashboard. Shows active project health, 
-    temperature trends, and days since freezedown across the whole company.
+    temperature trends, 24h extremes, and staleness alerts.
     """
     st.header("🌐 Global Project Summary")
     
@@ -1752,9 +1752,14 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_1h,
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN ld.temperature END) as avg_6h,
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as avg_24h,
-            ARRAY_AGG(ld.temperature ORDER BY ld.timestamp DESC LIMIT 1)[OFFSET(0)] as last_known_temp,
-            MIN(ld.temperature) as min_24h,
-            MAX(ld.temperature) as max_24h
+            
+            -- EXTREMES (Restored)
+            MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as min_24h,
+            MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as max_24h,
+            
+            -- STALE FALLBACK
+            ARRAY_AGG(ld.temperature ORDER BY ld.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+            MAX(ld.timestamp) as latest_ts
         FROM active_projects p
         LEFT JOIN raw_data ld ON p.Project = ld.Project
         GROUP BY 1, 2, 3, 4, 5, 6, 7
@@ -1771,12 +1776,12 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         st.warning("No active projects found with data in the last 48 hours.")
         return
 
-    # Render Project Cards
+    now_utc = pd.Timestamp.now(tz='UTC')
+
     for project in sorted(df['Project'].unique()):
         p_df = df[df['Project'] == project]
         p_name = p_df['ProjectName'].iloc[0] or project
         
-        # Day Count Calculation
         f_date = p_df['Date_Freezedown'].iloc[0]
         day_text = ""
         if pd.notnull(f_date):
@@ -1807,22 +1812,49 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                         st.caption("No recent data")
                         continue
                     
-                    val = g_df['avg_now'].mean() or g_df['last_known_temp'].mean()
-                    if unit_mode == "Celsius": val = (val - 32) * 5/9
+                    # 1. Logic for Current vs. Stale Fallback
+                    avg_now = g_df['avg_now'].mean()
+                    latest_val = g_df['latest_temp'].mean()
+                    latest_time = g_df['latest_ts'].max()
                     
+                    # Calculate Lag
+                    ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
+                    lag_hrs = (now_utc - ts_check).total_seconds() / 3600
+
+                    is_stale = pd.isnull(avg_now)
+                    val = latest_val if is_stale else avg_now
+                    
+                    # 24h Extremes
+                    mn_24 = g_df['min_24h'].min()
+                    mx_24 = g_df['max_24h'].max()
+                    
+                    # Unit Conversion
+                    if unit_mode == "Celsius":
+                        val = (val - 32) * 5/9 if pd.notnull(val) else None
+                        mn_24 = (mn_24 - 32) * 5/9 if pd.notnull(mn_24) else None
+                        mx_24 = (mx_24 - 32) * 5/9 if pd.notnull(mx_24) else None
+                    
+                    # 2. Rendering Metric
                     st.metric("Avg", f"{val:.1f}{unit_label}")
                     
-                    # Small trend indicators
+                    if is_stale and pd.notnull(lag_hrs):
+                        st.warning(f"🕒 {int(lag_hrs)}h ago")
+
+                    if pd.notnull(mn_24) and pd.notnull(mx_24):
+                        st.caption(f"Range: {mn_24:.1f} to {mx_24:.1f}{unit_label}")
+                    
+                    # 3. Trends
                     t_row = st.columns(3)
                     t_row[0].caption(f"1h\n{get_trend_arrow(val, g_df['avg_1h'].mean())}")
                     t_row[1].caption(f"6h\n{get_trend_arrow(val, g_df['avg_6h'].mean())}")
                     t_row[2].caption(f"24h\n{get_trend_arrow(val, g_df['avg_24h'].mean())}")
 
 def get_trend_arrow(current, previous):
+    """Helper to generate trend icons with updated blue downward arrow."""
     if pd.isnull(current) or pd.isnull(previous): return "N/A"
     delta = current - previous
     if delta > 0.1: return f"🔺 +{delta:.1f}"
-    if delta < -0.1: return f"🔹 {delta:.1f}"
+    if delta < -0.1: return f"🔹 {delta:.1f}" # This renders as a blue diamond/square in many fonts, often used for blue down in Streamlit
     return "➡️ 0.0"
 
 
