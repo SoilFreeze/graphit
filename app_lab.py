@@ -238,8 +238,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Smooth spline graph with multiple theoretical 'Day 0' background curves.
+    Ensures now_local is defined internally to prevent NameErrors.
     """
-    # 1. INITIALIZE DATA & CLIENT (Define plot_df FIRST to prevent NameErrors)
+    # 1. INITIALIZE DATA & CLIENT
     if df.empty:
         return go.Figure().update_layout(title="No data available")
 
@@ -260,12 +261,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # --- 3. THEORETICAL REFERENCE CURVES (e.g., Sat Stiff Clay) ---
     if curve_id and curve_id != "None" and f_start_date:
+        # Search for curve matches (e.g. searching 'TP8' finds '2527-TP8-Sat Stiff Clay')
         curve_list = [curve_id] if isinstance(curve_id, str) else curve_id
         dash_styles = ['dashdot', 'dash', 'dot']
         
         for idx, cid in enumerate(curve_list):
             try:
-                # Case-insensitive search to find the uploaded CSV data (Matches 2527-TP8)
                 ref_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -276,7 +277,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 
                 if not ref_df.empty:
                     for full_cid, g_df in ref_df.groupby('CurveID'):
-                        # Name Cleaning: '2527-TP8-Sat Stiff Clay' -> 'Sat Stiff Clay'
+                        # Legend Cleanup: '2527-TP8-Sat Stiff Clay' -> 'Sat Stiff Clay'
                         clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
                         
                         g_df['timestamp'] = g_df['Day'].apply(
@@ -304,7 +305,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 print(f"Ref Curve Error: {e}")
 
     # --- 4. SENSOR TRACE GENERATION (Smooth Solid Lines) ---
-    # Prepare depth labels and colors
     plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
     plot_df['sort_val'] = 1000.0
     depth_mask = plot_df['Depth'].notnull()
@@ -322,7 +322,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for sn in group_data['NodeNum'].unique():
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # Gap Handling: break line if gap > 6 hours
+            # Gap Handling
             s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             if (s_df['gap'] > 6.0).any():
                 gaps = s_df[s_df['gap'] > 6.0].copy()
@@ -340,13 +340,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<br>Time: %{x}<extra></extra>"
             ))
 
-    # --- 5. REFERENCE LINES (FIX FOR NameError: now_local) ---
+    # --- 5. REFERENCE LINES ---
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right", layer="below")
 
-    # CRITICAL FIX: Define now_local right here inside the function
+    # CRITICAL FIX: Generate now_local internally so it's never missing
     now_local = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
