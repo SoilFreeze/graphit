@@ -418,91 +418,70 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Includes Dynamic Freezedown Day Tracking and optional Masked Data filtering.
+    Includes Dynamic Freezedown Day Tracking, Reference Curves, and Masked Data filtering.
     """
-
-    # 1. EXTRACT METADATA
-    # Safety: Use .get() to prevent KeyErrors if columns are missing
-    f_start_date = project_metadata.get('Date_Freezedown') if project_metadata else None
-    # Convert f_start_date to a date object if it's not already
-    if f_start_date and not isinstance(f_start_date, (datetime.date, datetime.datetime)):
-        f_start_date = pd.to_datetime(f_start_date).date()
-
-    assigned_curve = project_metadata.get('SoilType', 'None') if project_metadata else 'None'
-
-    # 2. SIDEBAR TOGGLES
-    st.sidebar.subheader("👁️ Visibility Settings")
-    show_masked = st.sidebar.toggle("Show Masked Points", value=False)
     
-    # Only show the Reference Toggle if a curve is actually assigned to this project
-    show_ref = False
-    if assigned_curve != "None":
-        show_ref = st.sidebar.toggle(f"Show Reference ({assigned_curve})", value=True)
-    
-    # 1. HEADER & FREEZEDOWN TRACKER
-    p_name = selected_project
-    status = "Active"
-    f_date_raw = None
-
-    if project_metadata:
-        p_name = project_metadata.get('ProjectName', selected_project)
-        status = project_metadata.get('ProjectStatus', 'Active')
-        f_date_raw = project_metadata.get('Date_Freezedown')
-
-    st.header(f"📈 Time vs Temp: {p_name} [{status}]")
-    
-    if pd.notnull(f_date_raw):
-        try:
-            f_start = pd.to_datetime(f_date_raw).date()
-            today = pd.Timestamp.now(tz=display_tz).date()
-            days_since = (today - f_start).days
-            st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
-            st.caption(f"Freezedown began: {f_start.strftime('%B %d, %Y')}")
-        except Exception:
-            st.caption("⚠️ Error calculating freeze duration.")
-    else:
-        st.caption("ℹ️ Freeze start date not yet initialized.")
-
-    # 2. UI STATE & PRE-FLIGHT CHECKS
+    # 1. PRE-FLIGHT CHECKS
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view detailed engineering trends.")
         return
 
-    # --- VISIBILITY SETTINGS ---
+    # 2. EXTRACT METADATA
+    p_name = selected_project
+    status = "Active"
+    f_start_date = None
+    assigned_curve = "None"
+
+    if project_metadata:
+        p_name = project_metadata.get('ProjectName', selected_project)
+        status = project_metadata.get('ProjectStatus', 'Active')
+        assigned_curve = project_metadata.get('SoilType', 'None')
+        
+        # Safe Date Conversion to prevent AttributeError
+        raw_f_date = project_metadata.get('Date_Freezedown')
+        if pd.notnull(raw_f_date):
+            f_start_date = pd.to_datetime(raw_f_date).date()
+
+    # 3. HEADER & FREEZEDOWN TRACKER
+    st.header(f"📈 Time vs Temp: {p_name} [{status}]")
+    
+    if f_start_date:
+        try:
+            today = pd.Timestamp.now(tz=display_tz).date()
+            days_since = (today - f_start_date).days
+            st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
+            st.caption(f"Freezedown began: {f_start_date.strftime('%B %d, %Y')}")
+        except Exception:
+            st.caption("⚠️ Error calculating freeze duration.")
+    else:
+        st.caption("ℹ️ Freeze start date not yet initialized in Project Registry.")
+
+    # 4. SIDEBAR SETTINGS (Unified)
     st.sidebar.subheader("👁️ Visibility Settings")
+    
+    # Data Masking Toggle
     show_masked = st.sidebar.toggle(
         "Show Masked Points", 
         value=False, 
         help="When OFF, data points marked as 'MASKED' in Admin Tools are hidden."
     )
-
-    mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
-    active_refs = st.session_state.get("active_refs", [])
-    unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
-    unit_label = st.session_state.get("unit_label", "°F")
     
-    # 3. DATA FETCHING (Engineering Mode)
+    # Reference Curve Toggle
+    show_ref = False
+    if assigned_curve != "None" and f_start_date:
+        show_ref = st.sidebar.toggle(f"Show Reference Curve ({assigned_curve})", value=True)
+    elif assigned_curve != "None" and not f_start_date:
+        st.sidebar.warning("⚠️ Reference curve hidden: Missing Freeze Start Date.")
+
+    # 5. DATA FETCHING (Engineering Mode)
     with st.spinner(f"Syncing {p_name} telemetry..."):
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if p_df.empty:
         st.warning(f"No engineering data found for '{p_name}'.")
         return
-        
-    # 3. PLOTTING LOOP
-    for loc in locations:
-        with st.expander(f"📍 Location: {loc}", expanded=True):
-            # Pass assigned_curve ONLY if the toggle is ON
-            fig = build_high_speed_graph(
-                df=loc_df, 
-                title=f"Thermal Trends: {loc}", 
-                # ... [other args] ...
-                f_start_date=f_start_date,
-                curve_id=assigned_curve if show_ref else None
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-    # --- 4. MASKING FILTER LOGIC ---
+
+    # 6. MASKING FILTER LOGIC
     if not show_masked and 'approve' in p_df.columns:
         masked_points = p_df[p_df['approve'] == 'MASKED']
         if not masked_points.empty:
@@ -511,7 +490,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         else:
             st.sidebar.caption("✨ Clean Data: No masked points found.")
 
-    # 5. FRESHNESS AUDIT
+    # 7. FRESHNESS AUDIT
     last_reading = p_df['timestamp'].max()
     last_reading_utc = last_reading if last_reading.tzinfo else last_reading.tz_localize('UTC')
     now_utc = pd.Timestamp.now(tz='UTC')
@@ -520,15 +499,11 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     if latency_hrs > 24:
         st.error(f"⚠️ **Stale Data Warning:** Last packet received {int(latency_hrs)} hours ago.")
 
-    # 6. TIMELINE CONFIGURATION (Updated Cushion Logic)
+    # 8. TIMELINE CONFIGURATION (1-Day Cushion)
     st.sidebar.subheader("📅 Timeline Controls")
     lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
     
-    # Current time in site timezone
     now_local = pd.Timestamp.now(tz=display_tz)
-    
-    # NEW CUSHION LOGIC: 
-    # Sets the graph end to tomorrow at midnight (providing a ~24h cushion)
     end_view = (now_local + pd.Timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -536,13 +511,20 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     if lookback == 0:
         start_view = p_df['timestamp'].min()
     else:
-        start_view = end_view - timedelta(weeks=lookback)
+        start_view = end_view - pd.Timedelta(weeks=lookback)
 
-    # 7. LOCATION-BASED PLOTTING
+    # 9. LOCATION-BASED PLOTTING LOOP
+    # Get general session state variables
+    mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
+    active_refs = st.session_state.get("active_refs", [])
+    unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+    unit_label = st.session_state.get("unit_label", "°F")
+
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
     
     for loc in locations:
         with st.expander(f"📍 Location: {loc}", expanded=True):
+            # Filter main dataframe for this specific location
             loc_df = p_df[p_df['Location'] == loc].copy()
             
             fig = build_high_speed_graph(
@@ -554,7 +536,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_mode=unit_mode, 
                 unit_label=unit_label, 
                 display_tz=display_tz,
-                mobile_mode=mobile_mode 
+                mobile_mode=mobile_mode,
+                f_start_date=f_start_date,
+                curve_id=assigned_curve if show_ref else None
             )
             
             st.plotly_chart(
