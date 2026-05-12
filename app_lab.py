@@ -239,7 +239,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     """
     Smooth spline graph with multiple theoretical 'Day 0' background curves.
     """
-    # 1. INITIALIZE DATA & CLIENT
+    # 1. INITIALIZE DATA & CLIENT (Define plot_df FIRST to prevent NameErrors)
     if df.empty:
         return go.Figure().update_layout(title="No data available")
 
@@ -265,7 +265,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         
         for idx, cid in enumerate(curve_list):
             try:
-                # Case-insensitive search to find the uploaded CSV data
+                # Case-insensitive search to find the uploaded CSV data (Matches 2527-TP8)
                 ref_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -304,20 +304,53 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 print(f"Ref Curve Error: {e}")
 
     # --- 4. SENSOR TRACE GENERATION (Smooth Solid Lines) ---
-    # ... (Your logic for depth labeling and sensor loops goes here) ...
-    # Ensure s_df uses 'lines' mode and 'spline' shape for the solid look.
+    # Prepare depth labels and colors
+    plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
+    plot_df['sort_val'] = 1000.0
+    depth_mask = plot_df['Depth'].notnull()
+    plot_df.loc[depth_mask, 'depth_label'] = plot_df.loc[depth_mask, 'Depth'].astype(str) + "ft"
+    plot_df.loc[depth_mask, 'sort_val'] = pd.to_numeric(plot_df.loc[depth_mask, 'Depth'], errors='coerce')
+    
+    unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
-    # --- 5. REFERENCE LINES (Fixes the NameError: now_local) ---
+    for i, (_, g_row) in enumerate(unique_groups.iterrows()):
+        group_lbl = g_row['depth_label']
+        group_data = plot_df[plot_df['depth_label'] == group_lbl]
+        color = colors[i % len(colors)]
+        
+        for sn in group_data['NodeNum'].unique():
+            s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
+            
+            # Gap Handling: break line if gap > 6 hours
+            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            if (s_df['gap'] > 6.0).any():
+                gaps = s_df[s_df['gap'] > 6.0].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
+            fig.add_trace(go.Scatter(
+                x=s_df['timestamp'],
+                y=s_df['temperature'],
+                name=f"{group_lbl} (N:{sn})",
+                mode='lines',
+                line=dict(shape='spline', smoothing=1.3, width=2, color=color, dash='solid'),
+                connectgaps=False,
+                hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<br>Time: %{x}<extra></extra>"
+            ))
+
+    # --- 5. REFERENCE LINES (FIX FOR NameError: now_local) ---
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right", layer="below")
 
-    # DEFINE now_local HERE to prevent NameError
+    # CRITICAL FIX: Define now_local right here inside the function
     now_local = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 6. LAYOUT & GRID CONFIG
+    # --- 6. LAYOUT ---
     l_cfg = dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5) if mobile_mode else \
             dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     
