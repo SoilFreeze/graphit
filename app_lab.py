@@ -253,38 +253,33 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Define Y-Axis ranges and tick intervals
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
         y_range, dt_major, dt_minor = [-30, 30], 10, 5
     else:
         y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
-    # 3. THEORETICAL REFERENCE CURVES (Aligned to Day 0)
+    # 3. THEORETICAL REFERENCE CURVES (e.g., Sat Stiff Clay)
     if curve_id and curve_id != "None" and f_start_date:
-        # Handle single ID or list of IDs
         curve_list = [curve_id] if isinstance(curve_id, str) else curve_id
         dash_styles = ['dashdot', 'dash', 'dot']
         
         for idx, cid in enumerate(curve_list):
             try:
-                # Case-insensitive search for specific pipe/soil curves
+                # Case-insensitive search to find the uploaded CSV data
                 ref_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE UPPER(CurveID) = UPPER('{cid}') 
-                    OR UPPER(CurveID) LIKE UPPER('%{cid}%')
+                    WHERE UPPER(CurveID) LIKE UPPER('%{cid}%')
                     ORDER BY Day
                 """
                 ref_df = client.query(ref_q).to_dataframe()
                 
                 if not ref_df.empty:
-                    # Logic to clean up the name (e.g., '2527-TP8-Sat Stiff Clay' -> 'Sat Stiff Clay')
-                    # We group in case the LIKE query returned multiple versions
                     for full_cid, g_df in ref_df.groupby('CurveID'):
+                        # Name Cleaning: '2527-TP8-Sat Stiff Clay' -> 'Sat Stiff Clay'
                         clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
                         
-                        # Map relative days to absolute timestamps
                         g_df['timestamp'] = g_df['Day'].apply(
                             lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
                         )
@@ -309,15 +304,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             except Exception as e:
                 print(f"Ref Curve Error: {e}")
 
-    # 4. SENSOR TRACE GENERATION (Vectorized Labeling)
+    # 4. SENSOR TRACE GENERATION (Smooth Solid Lines)
     plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
     plot_df['sort_val'] = 1000.0
-    
     depth_mask = plot_df['Depth'].notnull()
     plot_df.loc[depth_mask, 'depth_label'] = plot_df.loc[depth_mask, 'Depth'].astype(str) + "ft"
     plot_df.loc[depth_mask, 'sort_val'] = pd.to_numeric(plot_df.loc[depth_mask, 'Depth'], errors='coerce')
     
-    # Sorting groups by depth
     unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
@@ -329,7 +322,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for sn in group_data['NodeNum'].unique():
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # Gap Handling: break line if gap > 6 hours
+            # Gap Handling
             s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             if (s_df['gap'] > 6.0).any():
                 gaps = s_df[s_df['gap'] > 6.0].copy()
@@ -341,49 +334,32 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 x=s_df['timestamp'],
                 y=s_df['temperature'],
                 name=f"{group_lbl} (N:{sn})",
-                mode='lines', # Force solid lines, no markers
-                line=dict(
-                    shape='spline',
-                    smoothing=1.3,
-                    width=2,
-                    color=color,
-                    dash='solid'
-                ),
+                mode='lines',
+                line=dict(shape='spline', smoothing=1.3, width=2, color=color, dash='solid'),
                 connectgaps=False,
                 hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<br>Time: %{x}<extra></extra>"
             ))
 
-    # 5. REFERENCE LINES (Horizontal Limits & Vertical "Now")
+    # 5. REFERENCE LINES (Fixes the NameError: now_local)
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right", layer="below")
 
-    # Define now_local inside the function scope to avoid NameError
+    # Define now_local inside the function so it is always available
     now_local = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 6. LAYOUT & GRID CONFIG
+    # 6. LAYOUT
     l_cfg = dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5) if mobile_mode else \
             dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     
-    m_cfg = dict(t=80, l=40, r=20, b=120) if mobile_mode else dict(t=80, l=50, r=180, b=50)
-
     fig.update_layout(
         title={'text': f"<b>{title}</b>", 'x': 0.02, 'y': 0.95},
         plot_bgcolor='white', hovermode="x unified", height=600,
-        margin=m_cfg, legend=l_cfg,
-        xaxis=dict(
-            range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
-            showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=0.5,
-            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
-            tickformat='%b %d\n%H:%M'
-        ),
-        yaxis=dict(
-            title=f"Temperature ({unit_label})", range=y_range, dtick=dt_major, 
-            gridcolor='DarkGray', showline=True, mirror=True, linecolor='black',
-            minor=dict(dtick=dt_minor, showgrid=True, gridcolor='whitesmoke')
-        )
+        legend=l_cfg,
+        xaxis=dict(range=[start_view, end_view], showgrid=True, gridcolor='DarkGray', gridwidth=0.5),
+        yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, gridcolor='DarkGray')
     )
     
     return fig
@@ -1484,68 +1460,54 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.success("Project updated.")
                     st.cache_data.clear()
 
-   # --- TAB: REFERENCE CURVE LIBRARY (Updated for your CSV format) ---
+   # --- TAB: REFERENCE CURVE LIBRARY ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
-        st.write("Upload CSVs (e.g., `2527-TP8-Sat Stiff Clay.csv`) from Excel/S-G.")
         
-        u_files = st.file_uploader("Upload Reference CSVs", type="csv", accept_multiple_files=True)
+        # 1. INITIALIZATION (Hidden in expander)
+        with st.expander("🛠️ Table Setup"):
+            if st.button("Initialize Reference Table", key="init_ref_btn"):
+                init_sql = f"""
+                CREATE TABLE IF NOT EXISTS `{PROJECT_ID}.{DATASET_ID}.reference_curves` (
+                    CurveID STRING,
+                    Day INT64,
+                    Temp FLOAT64
+                )
+                """
+                client.query(init_sql).result()
+                st.success("Table ready.")
+
+        st.divider()
+
+        # 2. UPLOADER (UNIQUE KEY ADDED TO FIX YOUR ERROR)
+        st.write("Upload CSVs (e.g., `2527-TP8-Sat Stiff Clay.csv`). Format: Skip 2 rows, Col 1: Day, Col 2: Temp")
+        
+        # Added key="ref_csv_uploader_unique" to prevent Duplicate ID error
+        u_files = st.file_uploader(
+            "Upload Reference CSVs", 
+            type="csv", 
+            accept_multiple_files=True, 
+            key="ref_csv_uploader_unique" 
+        )
+        
         if u_files:
-            if st.button("💾 Save to Library"):
+            if st.button("💾 Save to Library", key="save_ref_btn"):
                 for f in u_files:
                     try:
-                        # 1. Parse Curve ID from filename
                         curve_id = f.name.replace(".csv", "")
                         
-                        # 2. Read CSV (Skipping the 2 metadata/header rows from your file)
-                        # We use 'latin-1' encoding to handle hidden Excel characters
+                        # Use your specific file structure: Skip first 2 lines
                         try:
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
                         except UnicodeDecodeError:
                             f.seek(0)
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
 
-                        # 3. Clean Data (Ensures no text rows survive)
+                        # Clean Data
                         ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
                         ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
                         ref_df = ref_df.dropna()
                         ref_df['CurveID'] = curve_id
-
-                        # 4. Save to BigQuery
-                        client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
-                        client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
-                        st.write(f"✅ Processed: {curve_id}")
-                        
-                    except Exception as e:
-                        st.error(f"Error processing {f.name}: {e}")
-                
-                st.success("Library Updated.")
-                st.cache_data.clear()
-
-        st.divider()
-
-        # 2. UPLOADER WITH ENCODING FIX
-        st.write("Upload CSVs named `TP1-Silt.csv`. Format: `Day,Temp` (Fahrenheit)")
-        u_files = st.file_uploader("Upload Reference CSVs", type="csv", accept_multiple_files=True)
-        
-        if u_files:
-            if st.button("💾 Save to Library"):
-                for f in u_files:
-                    try:
-                        curve_id = f.name.replace(".csv", "")
-                        
-                        # FIX: Try UTF-8 first, fallback to Latin-1 if Excel adds weird characters
-                        try:
-                            ref_df = pd.read_csv(f, names=['Day', 'Temp'], encoding='utf-8')
-                        except UnicodeDecodeError:
-                            f.seek(0) # Reset file pointer
-                            ref_df = pd.read_csv(f, names=['Day', 'Temp'], encoding='latin-1')
-
-                        # Data Cleaning
-                        ref_df['CurveID'] = curve_id
-                        ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
-                        ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
-                        ref_df = ref_df.dropna()
 
                         # Upload to BQ
                         client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
@@ -1559,13 +1521,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 st.cache_data.clear()
                 st.rerun()
 
-        # 3. SHOW CURRENT INVENTORY
+        # 3. CURRENT INVENTORY
         try:
             lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
             if not lib_df.empty:
-                st.write("Current Curves:", sorted(lib_df['CurveID'].tolist()))
+                st.write("Current Curves in Library:", sorted(lib_df['CurveID'].tolist()))
         except:
-            st.caption("No curves found in library.")
+            st.caption("No curves found.")
         
     # --- TAB 4: MAINTENANCE ---
     with tab_scrub:
