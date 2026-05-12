@@ -261,6 +261,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     ORDER BY Day
                 """
                 ref_df = client.query(ref_q).to_dataframe()
+
+
                 
                 if not ref_df.empty:
                     for full_cid, g_df in ref_df.groupby('CurveID'):
@@ -290,6 +292,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         ))
             except Exception as e:
                 print(f"Ref Curve Error: {e}")
+
+           # Temporary Debug Line
+        if curve_id:
+            st.write(f"Searching for: {curve_id} | Found: {len(ref_df)} rows")                            
+                               
 
     # --- 4. SENSOR TRACE GENERATION (Smooth Solid Lines) ---
     plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
