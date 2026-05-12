@@ -776,7 +776,11 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         y=snap['Depth_Num'], 
                         mode='lines+markers', 
                         name=target_ts.strftime('%Y-%m-%d'),
-                        line=dict(shape='spline', smoothing=0.3),
+                        line=dict(
+                            shape='spline',
+                            smoothing=1.3,
+                            width=2,
+                            dash='solid'
                         marker=dict(size=6),
                         hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
                     ))
