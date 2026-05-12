@@ -237,84 +237,133 @@ st.session_state["active_refs"] = tuple(active_refs)
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
-    Smooth spline graph with multiple theoretical 'Day 0' background curves.
+    Optimized Graphing Engine: Handles unit conversion, timezone alignment,
+    smooth splines, and project-aligned theoretical reference curves.
     """
-    # 1. INITIALIZE DATA & CLIENT (Define plot_df FIRST)
+    # 1. INITIALIZE DATA & CLIENT
     if df.empty:
         return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
-    plot_df = df.copy() # <--- Move this to the top
+    plot_df = df.copy()
     fig = go.Figure()
 
-    # 2. TIMEZONE & UNIT CONVERSION (Standardize everything immediately)
+    # 2. TIMEZONE & UNIT CONVERSION
     if plot_df['timestamp'].dt.tz is None:
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
+    # Define Y-Axis ranges and tick intervals
     if unit_mode == "Celsius":
         plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range = [-30, 30]
+        y_range, dt_major, dt_minor = [-30, 30], 10, 5
     else:
-        y_range = [-20, 80]
+        y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
-    # --- 3. THEORETICAL REFERENCE CURVES ---
+    # 3. THEORETICAL REFERENCE CURVES (Aligned to Day 0)
     if curve_id and curve_id != "None" and f_start_date:
-        # Handle both single string or list of IDs
+        # Handle single ID or list of IDs
         curve_list = [curve_id] if isinstance(curve_id, str) else curve_id
         dash_styles = ['dashdot', 'dash', 'dot']
         
         for idx, cid in enumerate(curve_list):
             try:
-                # Use UPPER() for case-insensitive matching in BigQuery
+                # Case-insensitive search for specific pipe/soil curves
                 ref_q = f"""
-                    SELECT Day, Temp 
+                    SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                     WHERE UPPER(CurveID) = UPPER('{cid}') 
+                    OR UPPER(CurveID) LIKE UPPER('%{cid}%')
                     ORDER BY Day
                 """
                 ref_df = client.query(ref_q).to_dataframe()
                 
                 if not ref_df.empty:
-                    # Convert Day Offset to actual calendar dates starting from Day 0
-                    ref_df['timestamp'] = ref_df['Day'].apply(
-                        lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
-                    )
-                    
-                    # Convert theoretical temps to Celsius if needed
-                    if unit_mode == "Celsius":
-                        ref_df['Temp'] = (ref_df['Temp'] - 32) * 5/9
+                    # Logic to clean up the name (e.g., '2527-TP8-Sat Stiff Clay' -> 'Sat Stiff Clay')
+                    # We group in case the LIKE query returned multiple versions
+                    for full_cid, g_df in ref_df.groupby('CurveID'):
+                        clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
+                        
+                        # Map relative days to absolute timestamps
+                        g_df['timestamp'] = g_df['Day'].apply(
+                            lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
+                        )
+                        
+                        if unit_mode == "Celsius":
+                            g_df['Temp'] = (g_df['Temp'] - 32) * 5/9
 
-                    fig.add_trace(go.Scatter(
-                        x=ref_df['timestamp'],
-                        y=ref_df['Temp'],
-                        name=f"THEORY: {cid}",
-                        mode='lines',
-                        line=dict(
-                            color='rgba(120, 120, 120, 0.6)', 
-                            width=2.5, 
-                            dash=dash_styles[idx % len(dash_styles)],
-                            shape='spline'
-                        ),
-                        hoverinfo='skip',
-                        legendrank=1000 
-                    ))
+                        fig.add_trace(go.Scatter(
+                            x=g_df['timestamp'],
+                            y=g_df['Temp'],
+                            name=f"REF: {clean_name}",
+                            mode='lines',
+                            line=dict(
+                                color='rgba(120, 120, 120, 0.6)', 
+                                width=2.5, 
+                                dash=dash_styles[idx % len(dash_styles)],
+                                shape='spline'
+                            ),
+                            hoverinfo='skip',
+                            legendrank=1000 
+                        ))
             except Exception as e:
                 print(f"Ref Curve Error: {e}")
 
-    # --- 4. SENSOR TRACE GENERATION (Using plot_df) ---
-    # Now you can safely proceed with your unique_groups loop...
+    # 4. SENSOR TRACE GENERATION (Vectorized Labeling)
+    plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
+    plot_df['sort_val'] = 1000.0
+    
+    depth_mask = plot_df['Depth'].notnull()
+    plot_df.loc[depth_mask, 'depth_label'] = plot_df.loc[depth_mask, 'Depth'].astype(str) + "ft"
+    plot_df.loc[depth_mask, 'sort_val'] = pd.to_numeric(plot_df.loc[depth_mask, 'Depth'], errors='coerce')
+    
+    # Sorting groups by depth
+    unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
-                               
-    # 4. REFERENCE LINES
+    for i, (_, g_row) in enumerate(unique_groups.iterrows()):
+        group_lbl = g_row['depth_label']
+        group_data = plot_df[plot_df['depth_label'] == group_lbl]
+        color = colors[i % len(colors)]
+        
+        for sn in group_data['NodeNum'].unique():
+            s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
+            
+            # Gap Handling: break line if gap > 6 hours
+            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            if (s_df['gap'] > 6.0).any():
+                gaps = s_df[s_df['gap'] > 6.0].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
+            fig.add_trace(go.Scatter(
+                x=s_df['timestamp'],
+                y=s_df['temperature'],
+                name=f"{group_lbl} (N:{sn})",
+                mode='lines', # Force solid lines, no markers
+                line=dict(
+                    shape='spline',
+                    smoothing=1.3,
+                    width=2,
+                    color=color,
+                    dash='solid'
+                ),
+                connectgaps=False,
+                hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<br>Time: %{x}<extra></extra>"
+            ))
+
+    # 5. REFERENCE LINES (Horizontal Limits & Vertical "Now")
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right", layer="below")
 
+    # Define now_local inside the function scope to avoid NameError
+    now_local = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_local, line_width=2, line_color="Red", layer='above', line_dash="dash")
 
-    # 5. LAYOUT & GRID CONFIG
+    # 6. LAYOUT & GRID CONFIG
     l_cfg = dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5) if mobile_mode else \
             dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     
@@ -325,7 +374,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         plot_bgcolor='white', hovermode="x unified", height=600,
         margin=m_cfg, legend=l_cfg,
         xaxis=dict(
-            range=[range_start, range_end], showline=True, mirror=True, linecolor='black',
+            range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
             showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=0.5,
             minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='Gainsboro', griddash='dash'),
             tickformat='%b %d\n%H:%M'
@@ -442,15 +491,15 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     else:
         start_view = end_view - pd.Timedelta(weeks=lookback)
 
-    # 8. LOCATION-BASED PLOTTING LOOP
-    locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
-    
+   # 9. LOCATION-BASED PLOTTING LOOP
     for loc in locations:
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
-            # Contextual Reference Check: Only show curves on TP locations
-            is_temp_pipe = any(x in loc.upper().replace(" ", "") for x in ["TP", "PIPE", "TEMP", "THERMAL"])
+            # --- SMART CURVE MATCHING ---
+            # Search for a specific curve named "Project-Location-Soil" (e.g., 2527-TP8-Sat Stiff Clay)
+            # If not found, fall back to the project-wide assigned_curve.
+            pipe_specific_id = f"{selected_project}-{loc}"
             
             fig = build_high_speed_graph(
                 df=loc_df, 
@@ -461,9 +510,10 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_mode=unit_mode, 
                 unit_label=unit_label, 
                 display_tz=display_tz,
-                mobile_mode=mobile_mode, # Variable is now safely defined at top
                 f_start_date=f_start_date,
-                curve_id=assigned_curve if (show_ref and is_temp_pipe) else None
+                # Pass the specific pipe ID or the general curve
+                curve_id=pipe_specific_id if show_ref else None,
+                fallback_curve=assigned_curve if show_ref else None
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
@@ -1434,23 +1484,43 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.success("Project updated.")
                     st.cache_data.clear()
 
-    # --- TAB: REFERENCE CURVE LIBRARY ---
+   # --- TAB: REFERENCE CURVE LIBRARY (Updated for your CSV format) ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
+        st.write("Upload CSVs (e.g., `2527-TP8-Sat Stiff Clay.csv`) from Excel/S-G.")
         
-        # 1. INITIALIZATION TOOL
-        with st.expander("🛠️ Table Initialization"):
-            st.info("If this is your first time using Reference Curves, click below to set up the BigQuery Table.")
-            if st.button("Initialize Reference Table"):
-                init_sql = f"""
-                CREATE TABLE IF NOT EXISTS `{PROJECT_ID}.{DATASET_ID}.reference_curves` (
-                    CurveID STRING,
-                    Day INT64,
-                    Temp FLOAT64
-                )
-                """
-                client.query(init_sql).result()
-                st.success("Table ready.")
+        u_files = st.file_uploader("Upload Reference CSVs", type="csv", accept_multiple_files=True)
+        if u_files:
+            if st.button("💾 Save to Library"):
+                for f in u_files:
+                    try:
+                        # 1. Parse Curve ID from filename
+                        curve_id = f.name.replace(".csv", "")
+                        
+                        # 2. Read CSV (Skipping the 2 metadata/header rows from your file)
+                        # We use 'latin-1' encoding to handle hidden Excel characters
+                        try:
+                            ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
+                        except UnicodeDecodeError:
+                            f.seek(0)
+                            ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
+
+                        # 3. Clean Data (Ensures no text rows survive)
+                        ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
+                        ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
+                        ref_df = ref_df.dropna()
+                        ref_df['CurveID'] = curve_id
+
+                        # 4. Save to BigQuery
+                        client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
+                        client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
+                        st.write(f"✅ Processed: {curve_id}")
+                        
+                    except Exception as e:
+                        st.error(f"Error processing {f.name}: {e}")
+                
+                st.success("Library Updated.")
+                st.cache_data.clear()
 
         st.divider()
 
