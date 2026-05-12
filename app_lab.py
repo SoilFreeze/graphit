@@ -1491,113 +1491,100 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.rerun()
 
    # --- TAB: REFERENCE CURVE LIBRARY ---
-    # --- TAB: REFERENCE CURVE LIBRARY ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
+        st.write("Manage the target temperature curves used for visual goal-tracking on graphs.")
         
         # 1. MANAGEMENT & PURGE TOOLS
+        # Using an expander to keep the UI clean and prevent accidental "Nuclear" purges.
         with st.expander("🗑️ Library Management (Delete/Purge)", expanded=False):
             st.warning("Action is permanent. Purging will remove curves from all graphs.")
             
             # A. SURGICAL DELETE (Specific Curve)
             try:
+                # Fetch distinct CurveIDs for the dropdown
                 lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
+                
                 if not lib_df.empty:
-                    to_delete = st.selectbox("Select Curve to Remove", sorted(lib_df['CurveID'].tolist()))
-                    if st.button(f"🗑️ Delete {to_delete}", type="secondary"):
+                    to_delete = st.selectbox("Select Curve to Remove", sorted(lib_df['CurveID'].tolist()), key="delete_curve_picker")
+                    if st.button(f"🗑️ Delete {to_delete}", type="secondary", key="delete_single_curve_btn"):
                         client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{to_delete}'").result()
                         st.success(f"Removed {to_delete} from library.")
                         st.cache_data.clear()
+                        time.sleep(0.5)
                         st.rerun()
-            except:
-                st.info("No curves available to delete.")
+                else:
+                    st.info("No curves available to delete.")
+            except Exception:
+                st.info("Reference table is empty or not yet initialized.")
 
             st.divider()
 
-            # B. NUCLEAR PURGE (All Data)
+            # B. NUCLEAR PURGE (Delete All)
             st.error("Danger: This wipes the entire reference database.")
-            confirm_purge = st.checkbox("I confirm I want to DELETE ALL curves in the library.")
-            if st.button("🧨 PURGE ENTIRE LIBRARY", type="primary", disabled=not confirm_purge):
+            confirm_purge = st.checkbox("I confirm I want to DELETE ALL curves in the library.", key="confirm_purge_check")
+            if st.button("🧨 PURGE ENTIRE LIBRARY", type="primary", disabled=not confirm_purge, key="nuclear_purge_btn"):
                 try:
-                    # Truncate is faster and cleaner for wiping all rows
+                    # TRUNCATE is the standard way to wipe a table in BigQuery
                     client.query(f"TRUNCATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
                     st.success("Library has been completely purged.")
                     st.cache_data.clear()
+                    time.sleep(1)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Purge failed: {e}")
 
         st.divider()
 
-        # 2. THE UPLOADER (Keep existing logic)
-        st.write("### 📤 Upload New Curves")
-        u_files = st.file_uploader("Select CSV Files", type="csv", accept_multiple_files=True, key="ref_uploader_v5")
-        
-        if u_files:
-            if st.button("💾 Commit to BigQuery"):
-                for f in u_files:
-                    curve_id = f.name.replace(".csv", "")
-                    # Process and Upload logic...
-                    # (Insert your existing pd.read_csv and client.load_table_from_dataframe logic here)
-                st.success("Upload successful.")
-                st.cache_data.clear()
-                st.rerun()
-
-        # 3. CURRENT INVENTORY VIEW
-        st.divider()
-        st.write("### 📂 Current Library Inventory")
-        try:
-            inventory_df = client.query(f"SELECT CurveID, COUNT(*) as Points FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` GROUP BY CurveID").to_dataframe()
-            if not inventory_df.empty:
-                st.dataframe(inventory_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("The library is currently empty.")
-        except:
-            st.caption("Reference table not yet initialized.")
-
-        st.divider()
-
         # 2. THE UPLOADER
-        st.write("Upload CSVs (e.g., `2527-TP1-Sat Soft Clay.csv`). Format: Skip 2 rows, Col 1: Day, Col 2: Temp")
+        # This section handles the ingestion of CSV files (Skip 2 rows, Col 1: Day, Col 2: Temp)
+        st.write("### 📤 Upload New Curves")
+        st.caption("Expected Format: CSV files (e.g., `2527-TP1.csv`). Data should start on Row 3. Col 1: Day, Col 2: Temp.")
         
         u_files = st.file_uploader(
             "Select CSV Files", 
             type="csv", 
             accept_multiple_files=True, 
-            key="ref_uploader_fixed_v4" 
+            key="ref_uploader_v6" 
         )
         
         if u_files:
-            if st.button("💾 Commit Files to BigQuery", key="commit_ref_btn"):
+            if st.button("💾 Commit Files to BigQuery", key="commit_ref_btn_final", use_container_width=True):
                 progress_bar = st.progress(0)
+                
                 for idx, f in enumerate(u_files):
                     try:
+                        # Extract CurveID from the filename (e.g., '2527-TP1.csv' -> '2527-TP1')
                         curve_id = f.name.replace(".csv", "")
                         
-                        # Handle standard SoilFreeze CSV export format (Skip 2 rows)
+                        # Handle encoding variants (standard for many sensor exports)
                         try:
                             f.seek(0)
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
-                        except:
+                        except Exception:
                             f.seek(0)
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
 
-                        # Data Cleanup
+                        # Data Cleaning: Convert to numeric and drop invalid rows
                         ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
                         ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
-                        ref_df = ref_df.dropna()
+                        ref_df = ref_df.dropna(subset=['Day', 'Temp'])
                         ref_df['CurveID'] = curve_id
 
                         if not ref_df.empty:
-                            # 1. Delete old version of this specific curve
+                            # 1. Clean out the old version of this specific curve to avoid data stacking
                             client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
-                            # 2. Load new version
-                            client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
-                            st.write(f"✅ Successfully Uploaded: **{curve_id}**")
+                            
+                            # 2. Load the new cleaned data to BigQuery
+                            table_ref = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+                            client.load_table_from_dataframe(ref_df, table_ref).result()
+                            
+                            st.toast(f"Success: {curve_id}", icon="✅")
                         else:
-                            st.error(f"❌ {f.name} appears to be empty after skipping headers.")
+                            st.error(f"❌ {f.name} contained no valid numeric data after row 2.")
                             
                         progress_bar.progress((idx + 1) / len(u_files))
+                        
                     except Exception as e:
                         st.error(f"❌ Error processing {f.name}: {e}")
                 
@@ -1606,17 +1593,23 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 time.sleep(1)
                 st.rerun()
 
-        # 3. LIVE INVENTORY VIEW
+        # 3. CURRENT INVENTORY VIEW
         st.divider()
         st.write("### 📂 Current Library Inventory")
         try:
-            inventory_df = client.query(f"SELECT CurveID, COUNT(*) as Points FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` GROUP BY CurveID").to_dataframe()
+            # Query the table to show a summary of what's stored
+            inventory_df = client.query(
+                f"SELECT CurveID, COUNT(*) as Data_Points, MIN(Day) as Start_Day, MAX(Day) as End_Day "
+                f"FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` "
+                f"GROUP BY CurveID ORDER BY CurveID"
+            ).to_dataframe()
+            
             if not inventory_df.empty:
                 st.dataframe(inventory_df, use_container_width=True, hide_index=True)
             else:
                 st.info("The library table is currently empty.")
-        except:
-            st.warning("⚠️ Reference table not found. Use the 'Re-Initialize' tool above.")
+        except Exception:
+            st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
         
     # --- TAB 4: MAINTENANCE ---
     with tab_scrub:
