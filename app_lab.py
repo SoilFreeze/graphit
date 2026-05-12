@@ -453,16 +453,16 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
 
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
-    Shows all pipes/banks for a selected project in one scrolling view.
-    Includes Dynamic Freezedown Day Tracking, Reference Curves, and Masked Data filtering.
+    Shows all pipes/banks for a selected project.
+    Includes Masking, Reference Curves, and 1-Day Cushion Logic.
     """
-    
-    # 1. PRE-FLIGHT CHECKS
-    if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view detailed engineering trends.")
-        return
+    # 1. INITIALIZE UI STATE VARIABLES (Prevents NameError)
+    mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
+    active_refs = st.session_state.get("active_refs", [])
+    unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+    unit_label = st.session_state.get("unit_label", "°F")
 
-    # 2. EXTRACT METADATA
+    # 2. EXTRACT PROJECT METADATA
     p_name = selected_project
     status = "Active"
     f_start_date = None
@@ -473,43 +473,34 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         status = project_metadata.get('ProjectStatus', 'Active')
         assigned_curve = project_metadata.get('SoilType', 'None')
         
-        # Safe Date Conversion to prevent AttributeError
         raw_f_date = project_metadata.get('Date_Freezedown')
         if pd.notnull(raw_f_date):
+            # Ensure datetime/date object is handled safely
             f_start_date = pd.to_datetime(raw_f_date).date()
 
-    # 3. HEADER & FREEZEDOWN TRACKER
+    # 3. HEADER & DASHBOARD
     st.header(f"📈 Time vs Temp: {p_name} [{status}]")
     
     if f_start_date:
-        try:
-            today = pd.Timestamp.now(tz=display_tz).date()
-            days_since = (today - f_start_date).days
-            st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
-            st.caption(f"Freezedown began: {f_start_date.strftime('%B %d, %Y')}")
-        except Exception:
-            st.caption("⚠️ Error calculating freeze duration.")
+        today = pd.Timestamp.now(tz=display_tz).date()
+        days_since = (today - f_start_date).days
+        st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
     else:
-        st.caption("ℹ️ Freeze start date not yet initialized in Project Registry.")
+        st.caption("ℹ️ Freeze start date not yet initialized.")
 
-    # 4. SIDEBAR SETTINGS (Unified)
+    # 4. SIDEBAR TOGGLES
     st.sidebar.subheader("👁️ Visibility Settings")
+    show_masked = st.sidebar.toggle("Show Masked Points", value=False)
     
-    # Data Masking Toggle
-    show_masked = st.sidebar.toggle(
-        "Show Masked Points", 
-        value=False, 
-        help="When OFF, data points marked as 'MASKED' in Admin Tools are hidden."
-    )
-    
-    # Reference Curve Toggle
     show_ref = False
     if assigned_curve != "None" and f_start_date:
         show_ref = st.sidebar.toggle(f"Show Reference Curve ({assigned_curve})", value=True)
-    elif assigned_curve != "None" and not f_start_date:
-        st.sidebar.warning("⚠️ Reference curve hidden: Missing Freeze Start Date.")
 
-    # 5. DATA FETCHING (Engineering Mode)
+    # 5. DATA FETCHING
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Select a project in the sidebar.")
+        return
+
     with st.spinner(f"Syncing {p_name} telemetry..."):
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
@@ -517,48 +508,31 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         st.warning(f"No engineering data found for '{p_name}'.")
         return
 
-    # 6. MASKING FILTER LOGIC
+    # 6. MASKING FILTER
     if not show_masked and 'approve' in p_df.columns:
-        masked_points = p_df[p_df['approve'] == 'MASKED']
-        if not masked_points.empty:
-            p_df = p_df[p_df['approve'] != 'MASKED'].copy()
-            st.sidebar.info(f"🧹 Hidden {len(masked_points)} noise spikes.")
-        else:
-            st.sidebar.caption("✨ Clean Data: No masked points found.")
+        p_df = p_df[p_df['approve'] != 'MASKED'].copy()
 
-    # 7. FRESHNESS AUDIT
-    last_reading = p_df['timestamp'].max()
-    last_reading_utc = last_reading if last_reading.tzinfo else last_reading.tz_localize('UTC')
-    now_utc = pd.Timestamp.now(tz='UTC')
-    latency_hrs = (now_utc - last_reading_utc).total_seconds() / 3600
-    
-    if latency_hrs > 24:
-        st.error(f"⚠️ **Stale Data Warning:** Last packet received {int(latency_hrs)} hours ago.")
-
-    # 8. TIMELINE CONFIGURATION (1-Day Cushion)
+    # 7. TIMELINE CONFIG (1-Day Cushion)
     st.sidebar.subheader("📅 Timeline Controls")
     lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
     
     now_local = pd.Timestamp.now(tz=display_tz)
-    end_view = (now_local + pd.Timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     
     if lookback == 0:
         start_view = p_df['timestamp'].min()
     else:
         start_view = end_view - pd.Timedelta(weeks=lookback)
 
-    # 9. LOCATION-BASED PLOTTING LOOP
+    # 8. LOCATION-BASED PLOTTING LOOP
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
     
     for loc in locations:
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
-            # Identify if this is a Temperature Pipe (TP)
-            # This looks for "TP" or "Pipe" in the location name
-            is_temp_pipe = any(x in loc.upper() for x in ["TP", "PIPE", "TEMP"])
+            # Contextual Reference Check: Only show curves on TP locations
+            is_temp_pipe = any(x in loc.upper() for x in ["TP", "PIPE", "TEMP", "THERMAL"])
             
             fig = build_high_speed_graph(
                 df=loc_df, 
@@ -569,9 +543,8 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_mode=unit_mode, 
                 unit_label=unit_label, 
                 display_tz=display_tz,
-                mobile_mode=mobile_mode,
+                mobile_mode=mobile_mode, # Variable is now safely defined at top
                 f_start_date=f_start_date,
-                # ONLY pass the curve_id if it's a Temp Pipe and the user wants to see it
                 curve_id=assigned_curve if (show_ref and is_temp_pipe) else None
             )
             
