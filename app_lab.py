@@ -249,18 +249,24 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # --- 3. THEORETICAL REFERENCE CURVES (e.g., Sat Stiff Clay) ---
     # --- Inside build_high_speed_graph ---
     if curve_id and f_start_date:
+        # curve_id is currently "2527-T8"
+        parts = curve_id.split('-')
+        p_id = parts[0] # "2527"
+        l_id = parts[1] # "T8"
+
         try:
-            # We wrap the curve_id in % symbols so BigQuery finds it anywhere in the name
+            # This query looks for rows that contain BOTH the project and the location
             ref_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{curve_id}%')
+                WHERE UPPER(CurveID) LIKE UPPER('%{p_id}%') 
+                  AND UPPER(CurveID) LIKE UPPER('%{l_id}%')
                 ORDER BY Day
             """
             ref_df = client.query(ref_q).to_dataframe()
             
-            # Keep this debug line to see it working in real-time
-            # st.write(f"Graph Location: {curve_id} | Matches Found: {len(ref_df)}")
+            # Temporary Debug - this will tell us what BigQuery found
+            st.write(f"🔍 Fuzzy Search: '{p_id}' + '{l_id}' | Found: {len(ref_df)} rows")
 
             if not ref_df.empty:
                 for full_cid, g_df in ref_df.groupby('CurveID'):
@@ -477,7 +483,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
             pipe_specific_id = f"{selected_project}-{loc}"
             
             # Identify if this is a Temperature Pipe to avoid cluttering other graphs
-            is_temp_pipe = any(x in loc.upper().replace(" ", "") for x in ["TP", "PIPE", "TEMP", "THERMAL"])
+            is_temp_pipe = any(x in loc.upper() for x in ["TP", "T", "PIPE", "TEMP"])
             
             fig = build_high_speed_graph(
                 df=loc_df, 
