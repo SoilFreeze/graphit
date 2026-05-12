@@ -247,51 +247,46 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         y_range, dt_major, dt_minor = [-20, 80], 10, 5
 
     # --- 3. THEORETICAL REFERENCE CURVES (e.g., Sat Stiff Clay) ---
-    if curve_id and curve_id != "None" and f_start_date:
-        curve_list = [curve_id] if isinstance(curve_id, str) else curve_id
-        dash_styles = ['dashdot', 'dash', 'dot']
-        
-        for idx, cid in enumerate(curve_list):
-            try:
-                # Case-insensitive search to find the uploaded CSV data
-                ref_q = f"""
-                    SELECT CurveID, Day, Temp 
-                    FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE UPPER(CurveID) LIKE UPPER('%{cid}%')
-                    ORDER BY Day
-                """
-                ref_df = client.query(ref_q).to_dataframe()
+    # --- Inside build_high_speed_graph ---
+    if curve_id and f_start_date:
+        try:
+            # We wrap the curve_id in % symbols so BigQuery finds it anywhere in the name
+            ref_q = f"""
+                SELECT CurveID, Day, Temp 
+                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE UPPER(CurveID) LIKE UPPER('%{curve_id}%')
+                ORDER BY Day
+            """
+            ref_df = client.query(ref_q).to_dataframe()
+            
+            # Keep this debug line to see it working in real-time
+            # st.write(f"Graph Location: {curve_id} | Matches Found: {len(ref_df)}")
 
+            if not ref_df.empty:
+                for full_cid, g_df in ref_df.groupby('CurveID'):
+                    # This pulls 'Sat Soft Clay' out for the legend
+                    clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
+                    
+                    # Convert Day offset to a real calendar date
+                    g_df['timestamp'] = g_df['Day'].apply(
+                        lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
+                    )
+                    
+                    # Unit conversion
+                    if unit_mode == "Celsius":
+                        g_df['Temp'] = (g_df['Temp'] - 32) * 5/9
 
-                
-                if not ref_df.empty:
-                    for full_cid, g_df in ref_df.groupby('CurveID'):
-                        # Name Cleaning: '2527-TP8-Sat Stiff Clay' -> 'Sat Stiff Clay'
-                        clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
-                        
-                        g_df['timestamp'] = g_df['Day'].apply(
-                            lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
-                        )
-                        
-                        if unit_mode == "Celsius":
-                            g_df['Temp'] = (g_df['Temp'] - 32) * 5/9
-
-                        fig.add_trace(go.Scatter(
-                            x=g_df['timestamp'],
-                            y=g_df['Temp'],
-                            name=f"REF: {clean_name}",
-                            mode='lines',
-                            line=dict(
-                                color='rgba(130, 130, 130, 0.7)', 
-                                width=2.5, 
-                                dash=dash_styles[idx % len(dash_styles)],
-                                shape='spline'
-                            ),
-                            hoverinfo='skip',
-                            legendrank=1000 
-                        ))
-            except Exception as e:
-                print(f"Ref Curve Error: {e}")
+                    fig.add_trace(go.Scatter(
+                        x=g_df['timestamp'], 
+                        y=g_df['Temp'],
+                        name=f"REF: {clean_name}",
+                        mode='lines',
+                        line=dict(color='rgba(150, 150, 150, 0.5)', width=2, dash='dashdot', shape='spline'),
+                        hoverinfo='skip', 
+                        legendrank=1000
+                    ))
+        except Exception as e:
+            print(f"Plotting Error: {e}")
 
            # Temporary Debug Line
         if curve_id:
