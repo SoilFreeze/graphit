@@ -380,10 +380,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Includes Dynamic Freezedown Day Tracking and data freshness alerts.
+    Includes Dynamic Freezedown Day Tracking and optional Masked Data filtering.
     """
     # 1. HEADER & FREEZEDOWN TRACKER
-    # Default values if metadata is missing
     p_name = selected_project
     status = "Active"
     f_date_raw = None
@@ -395,25 +394,30 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 
     st.header(f"📈 Time vs Temp: {p_name} [{status}]")
     
-    # Calculate and display Day Count
     if pd.notnull(f_date_raw):
         try:
             f_start = pd.to_datetime(f_date_raw).date()
             today = pd.Timestamp.now(tz=display_tz).date()
             days_since = (today - f_start).days
-            
-            # Use max(0, ...) to handle pre-freeze status gracefully
             st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
             st.caption(f"Freezedown began: {f_start.strftime('%B %d, %Y')}")
         except Exception:
-            st.caption("⚠️ Error calculating freeze duration. Check registry date format.")
+            st.caption("⚠️ Error calculating freeze duration.")
     else:
-        st.caption("ℹ️ Freeze start date not yet initialized in Project Registry.")
+        st.caption("ℹ️ Freeze start date not yet initialized.")
 
     # 2. UI STATE & PRE-FLIGHT CHECKS
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view detailed engineering trends.")
         return
+
+    # --- NEW: VISIBILITY SETTINGS ---
+    st.sidebar.subheader("👁️ Visibility Settings")
+    show_masked = st.sidebar.toggle(
+        "Show Masked Points", 
+        value=False, 
+        help="When OFF, data points marked as 'MASKED' in Admin Tools are hidden."
+    )
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
     active_refs = st.session_state.get("active_refs", [])
@@ -426,31 +430,32 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 
     if p_df.empty:
         st.warning(f"No engineering data found for '{p_name}'.")
-        st.info("Verify sensor mapping in **Admin Tools > Node Registry**.")
         return
 
-    # 4. FRESHNESS AUDIT
+    # --- 4. MASKING FILTER LOGIC ---
+    if not show_masked and 'approve' in p_df.columns:
+        # Identify points explicitly marked as MASKED
+        masked_points = p_df[p_df['approve'] == 'MASKED']
+        if not masked_points.empty:
+            p_df = p_df[p_df['approve'] != 'MASKED'].copy()
+            st.sidebar.info(f"🧹 Hidden {len(masked_points)} noise spikes.")
+        else:
+            st.sidebar.caption("✨ Clean Data: No masked points found.")
+
+    # 5. FRESHNESS AUDIT
     last_reading = p_df['timestamp'].max()
-    # Ensure localized comparison
     last_reading_utc = last_reading if last_reading.tzinfo else last_reading.tz_localize('UTC')
     now_utc = pd.Timestamp.now(tz='UTC')
-    
     latency_hrs = (now_utc - last_reading_utc).total_seconds() / 3600
     
     if latency_hrs > 24:
         st.error(f"⚠️ **Stale Data Warning:** Last packet received {int(latency_hrs)} hours ago.")
-        st.info("Note: Lord nodes often upload in daily batches during business hours.")
 
-    # 5. TIMELINE CONFIGURATION
+    # 6. TIMELINE CONFIGURATION
     st.sidebar.subheader("📅 Timeline Controls")
-    lookback = st.sidebar.slider(
-        "Lookback (Weeks)", 0, 52, 4, 
-        key="global_lookback_slider", 
-        help="Set to 0 to view the full project history."
-    )
+    lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
     
     now_local = pd.Timestamp.now(tz=display_tz)
-    # Snap the end of the view to the coming Sunday midnight for a clean weekly grid
     end_view = (now_local + pd.Timedelta(days=(7 - now_local.weekday()) % 7 or 7)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -460,8 +465,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     else:
         start_view = end_view - timedelta(weeks=lookback)
 
-    # 6. LOCATION-BASED PLOTTING
-    # Filter out empty locations and sort alphabetically
+    # 7. LOCATION-BASED PLOTTING
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
     
     for loc in locations:
