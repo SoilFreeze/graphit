@@ -550,18 +550,15 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         start_view = end_view - pd.Timedelta(weeks=lookback)
 
     # 9. LOCATION-BASED PLOTTING LOOP
-    # Get general session state variables
-    mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
-    active_refs = st.session_state.get("active_refs", [])
-    unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
-    unit_label = st.session_state.get("unit_label", "°F")
-
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
     
     for loc in locations:
         with st.expander(f"📍 Location: {loc}", expanded=True):
-            # Filter main dataframe for this specific location
             loc_df = p_df[p_df['Location'] == loc].copy()
+            
+            # Identify if this is a Temperature Pipe (TP)
+            # This looks for "TP" or "Pipe" in the location name
+            is_temp_pipe = any(x in loc.upper() for x in ["TP", "PIPE", "TEMP"])
             
             fig = build_high_speed_graph(
                 df=loc_df, 
@@ -574,15 +571,12 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 display_tz=display_tz,
                 mobile_mode=mobile_mode,
                 f_start_date=f_start_date,
-                curve_id=assigned_curve if show_ref else None
+                # ONLY pass the curve_id if it's a Temp Pipe and the user wants to see it
+                curve_id=assigned_curve if (show_ref and is_temp_pipe) else None
             )
             
-            st.plotly_chart(
-                fig, 
-                use_container_width=True, 
-                key=f"tvt_chart_{selected_project}_{loc}"
-            )
-        
+            st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
+
 ###########
 # - 6. PAGE: SENSOR STATUS - #
 ###########
