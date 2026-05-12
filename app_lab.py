@@ -411,7 +411,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         st.info("💡 Please select a specific project in the sidebar to view detailed engineering trends.")
         return
 
-    # --- NEW: VISIBILITY SETTINGS ---
+    # --- VISIBILITY SETTINGS ---
     st.sidebar.subheader("👁️ Visibility Settings")
     show_masked = st.sidebar.toggle(
         "Show Masked Points", 
@@ -434,7 +434,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 
     # --- 4. MASKING FILTER LOGIC ---
     if not show_masked and 'approve' in p_df.columns:
-        # Identify points explicitly marked as MASKED
         masked_points = p_df[p_df['approve'] == 'MASKED']
         if not masked_points.empty:
             p_df = p_df[p_df['approve'] != 'MASKED'].copy()
@@ -451,12 +450,16 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     if latency_hrs > 24:
         st.error(f"⚠️ **Stale Data Warning:** Last packet received {int(latency_hrs)} hours ago.")
 
-    # 6. TIMELINE CONFIGURATION
+    # 6. TIMELINE CONFIGURATION (Updated Cushion Logic)
     st.sidebar.subheader("📅 Timeline Controls")
     lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
     
+    # Current time in site timezone
     now_local = pd.Timestamp.now(tz=display_tz)
-    end_view = (now_local + pd.Timedelta(days=(7 - now_local.weekday()) % 7 or 7)).replace(
+    
+    # NEW CUSHION LOGIC: 
+    # Sets the graph end to tomorrow at midnight (providing a ~24h cushion)
+    end_view = (now_local + pd.Timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     
