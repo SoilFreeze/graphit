@@ -1488,49 +1488,92 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.cache_data.clear()
                     st.rerun()
 
-   ## --- TAB: REFERENCE CURVE LIBRARY ---
+   # --- TAB: REFERENCE CURVE LIBRARY ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
-        st.write("Upload CSVs (e.g., `2527-TP8-Sat Stiff Clay.csv`). Format: Skip 2 rows, Col 1: Day, Col 2: Temp")
         
-        # Added key to prevent Duplicate ID error
+        # 1. DATABASE REPAIR TOOL
+        with st.expander("🛠️ Library Database Tools", expanded=False):
+            st.write("If the library is empty or won't save, click below to reset the table structure.")
+            if st.button("🔨 Re-Initialize Library Table"):
+                try:
+                    # Drop and Recreate to ensure clean schema
+                    client.query(f"DROP TABLE IF EXISTS `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
+                    init_sql = f"""
+                        CREATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves` (
+                            CurveID STRING,
+                            Day INT64,
+                            Temp FLOAT64
+                        )
+                    """
+                    client.query(init_sql).result()
+                    st.success("✅ Library Table successfully reset and ready for data.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to reset: {e}")
+
+        st.divider()
+
+        # 2. THE UPLOADER
+        st.write("Upload CSVs (e.g., `2527-TP1-Sat Soft Clay.csv`). Format: Skip 2 rows, Col 1: Day, Col 2: Temp")
+        
         u_files = st.file_uploader(
-            "Upload Reference CSVs", 
+            "Select CSV Files", 
             type="csv", 
             accept_multiple_files=True, 
-            key="ref_csv_uploader_unique" 
+            key="ref_uploader_fixed_v4" 
         )
         
         if u_files:
-            if st.button("💾 Save to Library", key="save_ref_btn"):
-                for f in u_files:
+            if st.button("💾 Commit Files to BigQuery", key="commit_ref_btn"):
+                progress_bar = st.progress(0)
+                for idx, f in enumerate(u_files):
                     try:
                         curve_id = f.name.replace(".csv", "")
                         
-                        # PARSE LOGIC: Handles the 'Node 2938...' and 'Time, Temp' header lines
+                        # Handle standard SoilFreeze CSV export format (Skip 2 rows)
                         try:
+                            f.seek(0)
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
-                        except UnicodeDecodeError:
+                        except:
                             f.seek(0)
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
 
-                        # CLEANING: Ensure BigQuery gets clean numbers
+                        # Data Cleanup
                         ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
                         ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
                         ref_df = ref_df.dropna()
                         ref_df['CurveID'] = curve_id
 
-                        # TRANSACTIONAL UPDATE: Delete old, Insert new
-                        client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
-                        client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
-                        st.write(f"✅ Processed: {curve_id}")
-                        
+                        if not ref_df.empty:
+                            # 1. Delete old version of this specific curve
+                            client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
+                            # 2. Load new version
+                            client.load_table_from_dataframe(ref_df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
+                            st.write(f"✅ Successfully Uploaded: **{curve_id}**")
+                        else:
+                            st.error(f"❌ {f.name} appears to be empty after skipping headers.")
+                            
+                        progress_bar.progress((idx + 1) / len(u_files))
                     except Exception as e:
-                        st.error(f"Failed to process {f.name}: {e}")
+                        st.error(f"❌ Error processing {f.name}: {e}")
                 
-                st.success("Library Updated.")
+                st.success("Library Processing Complete.")
                 st.cache_data.clear()
+                time.sleep(1)
                 st.rerun()
+
+        # 3. LIVE INVENTORY VIEW
+        st.divider()
+        st.write("### 📂 Current Library Inventory")
+        try:
+            inventory_df = client.query(f"SELECT CurveID, COUNT(*) as Points FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` GROUP BY CurveID").to_dataframe()
+            if not inventory_df.empty:
+                st.dataframe(inventory_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("The library table is currently empty.")
+        except:
+            st.warning("⚠️ Reference table not found. Use the 'Re-Initialize' tool above.")
         
     # --- TAB 4: MAINTENANCE ---
     with tab_scrub:
