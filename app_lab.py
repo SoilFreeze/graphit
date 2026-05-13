@@ -654,37 +654,29 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
-    Visualizes the thermal gradient across soil depths over time.
-    Includes theoretical soil targets and full chart borders.
+    Visualizes the thermal gradient across soil depths over time using historical snapshots.
     """
-    # 1. FETCH METADATA & PROJECT ANCHOR
-    project_metadata = st.session_state.get('project_metadata')
-    f_start_date = None
-    if project_metadata:
-        raw_f_date = project_metadata.get('Date_Freezedown')
-        if pd.notnull(raw_f_date):
-            f_start_date = pd.to_datetime(raw_f_date).date()
-
-    # 2. HEADER
+    # 1. HEADER
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
     
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
         return
 
-    # 3. SIDEBAR TOGGLE (Switch for Theoretical Lines)
+    # 2. SIDEBAR SETTINGS
     st.sidebar.subheader("📐 Profile Settings")
-    show_ref = st.sidebar.toggle("Show Theoretical Goal", value=True, help="Display the target soil temp for the current day.")
     lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
 
-    with st.spinner("Fetching historical depth telemetry..."):
+    with st.spinner("Fetching historical telemetry..."):
+        # Fetches the master data filtered for the selected project
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
-    if p_df.empty:
+    if p_df is None or p_df.empty:
         st.warning("No data found for this project.")
         return
 
-    # 4. PRE-PROCESS DATA
+    # 3. PRE-PROCESS DATA
+    # Ensure Depth is numeric for proper Y-axis scaling
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
@@ -695,13 +687,12 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
     x_range = [-20, 40] if unit_mode == "Celsius" else [-10, 80]
     
-    # 5. GENERATE SNAPSHOTS
+    # 4. GENERATE SNAPSHOTS (Weekly Monday 6:00 AM capture)
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
     locations = sorted(depth_df['Location'].unique())
     
     for loc in locations:
-        # TITLE UPDATE: "Temp vs Depth - [Pipe Number]"
         with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
@@ -709,12 +700,14 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             # --- A. PLOT HISTORICAL SNAPSHOTS ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
+                # 12-hour window to find the closest reading to Monday morning
                 window = loc_data[
                     (loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                     (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))
                 ]
                 
                 if not window.empty:
+                    # Capture the single closest reading per sensor for this snapshot
                     snap = (
                         window.assign(diff=(window['timestamp'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
@@ -735,49 +728,15 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
                     ))
 
-            # --- B. THEORETICAL CURVE MATCHING (Depth Specific) ---
-            if show_ref and f_start_date:
-                client = get_bq_client()
-                search_id = f"{selected_project}-{loc}"
-                
-                # We fetch the current Day's goal
-                today_day = (pd.Timestamp.now().date() - f_start_date).days
-                
-                ref_q = f"""
-                    SELECT CurveID, Day, Temp 
-                    FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE UPPER(CurveID) LIKE UPPER('%{curve_id}%')
-                    ORDER BY Day
-                """
-                try:
-                    ref_res = client.query(ref_q).to_dataframe()
-                    if not ref_res.empty:
-                        ref_temp = ref_res.iloc[0]['Temp']
-                        clean_name = ref_res.iloc[0]['CurveID'].split('-')[-1]
-                        
-                        if unit_mode == "Celsius":
-                            ref_temp = (ref_temp - 32) * 5/9
-                        
-                        # Add target as a vertical dotted line across all depths
-                        fig.add_vline(
-                            x=ref_temp, 
-                            line_dash="dashdot", 
-                            line_color="rgba(255, 0, 0, 0.4)",
-                            annotation_text=f"GOAL: {clean_name} (Day {today_day})",
-                            annotation_position="bottom right"
-                        )
-                except:
-                    pass
-
-            # --- C. LAYOUT & BORDERS ---
-            max_depth = depth_df['Depth_Num'].max()
+            # --- B. LAYOUT & BORDERS ---
+            max_depth = loc_data['Depth_Num'].max()
+            # Dynamic Y-limit rounded up to the nearest 10ft
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
             fig.update_layout(
-                title=f"<b>Temp vs Depth - {loc}</b>", # Bolded Title
+                title=f"<b>Temp vs Depth - {loc}</b>",
                 plot_bgcolor='white', 
                 height=700,
-                # FULL BORDER CONFIG
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
                     range=x_range, 
@@ -786,7 +745,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
-                    range=[y_limit, 0], 
+                    range=[y_limit, 0], # Inverted Y-axis: Surface (0) at top
                     dtick=5, 
                     gridcolor='Silver', 
                     showline=True, mirror=True, linecolor='black', linewidth=1.5
@@ -795,7 +754,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
-
 ###########
 # - 7. PAGE: CLIENT PORTAL - #
 ###########
