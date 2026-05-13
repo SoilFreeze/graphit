@@ -161,64 +161,77 @@ if "Audit" in admin_page:
 
 
 # ===============================================================
-# TOOL 2: NODE LOGISTICS (Transactional & Bulk Engine)
+# TOOL 2: NODE LOGISTICS (Auto-Mapping Search)
 # ===============================================================
 elif "Logistics" in admin_page:
     st.header("📋 Hardware Assignment & Deployment")
     
-    # --- 1. PLAYGROUND & DATA SETUP ---
+    # 1. DATABASE SETUP
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
     TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
-    
-    # Sync Dummy Table Logic
-    if is_dev:
-        with st.expander("🛠️ Playground Setup & Reset"):
-            if st.button("♻️ Sync Dummy with Live Registry"):
-                client.query(f"CREATE OR REPLACE TABLE `{TARGET_REGISTRY}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").result()
-                st.success("Playground initialized.")
-                st.rerun()
-
-    # Load fresh registry data
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
-    # Clean Project column for sorting/lookup
     full_reg_df['Project'] = full_reg_df['Project'].fillna("UNASSIGNED")
     active_reg = full_reg_df[full_reg_df['End_Date'].isna()].copy()
 
-    # --- 2. SEARCH & LOOKUP ENGINE ---
+    # 2. SEARCH & Look-up Engine
     st.subheader("🔍 Find & Verify Hardware")
+    
+    # Initialize session state for cross-selection if not exists
+    if 'search_node_id' not in st.session_state: st.session_state.search_node_id = ""
+    if 'auto_sel_p' not in st.session_state: st.session_state.auto_sel_p = "Select..."
+    if 'auto_sel_l' not in st.session_state: st.session_state.auto_sel_l = None
+
     lookup_col1, lookup_col2 = st.columns(2)
     found_row = None
 
-    # METHOD A: HARDWARE-FIRST (Search by ID)
+    # --- METHOD A: HARDWARE SEARCH (The "Master" Search) ---
     with lookup_col1:
         st.caption("Search by Node ID or S/N")
-        search_id = st.text_input("Enter Hardware ID", placeholder="TP-0001 or 1703...", key="hw_search")
-        if search_id:
-            search_clean = str(search_id).strip().upper()
+        search_input = st.text_input("Enter Hardware ID", placeholder="TP-0001...", value=st.session_state.search_node_id)
+        
+        if search_input:
+            search_clean = str(search_input).strip().upper()
             match = active_reg[
                 (active_reg['NodeNum'].astype(str).str.upper().str.contains(search_clean)) | 
                 (active_reg['PhysicalID'].astype(str).str.contains(search_clean))
             ]
             if not match.empty:
                 found_row = match.iloc[0]
-                st.success(f"**Found:** {found_row['NodeNum']} is at **{found_row['Project']}**")
+                # AUTO-UPDATE dropdown variables in session state
+                st.session_state.auto_sel_p = found_row['Project']
+                st.session_state.auto_sel_l = found_row['Location']
+                st.success(f"📍 **Mapped to:** {found_row['Project']} | {found_row['Location']}")
             else:
-                st.error("No active assignment found for this ID.")
+                st.error("No active project found for this node.")
 
-    # METHOD B: SITE-FIRST (Cascading Dropdowns)
+    # --- METHOD B: SITE BROWSE (Follows Method A) ---
     with lookup_col2:
         st.caption("Browse by Project")
         p_list = sorted([p for p in active_reg['Project'].unique().tolist() if p])
-        sel_p = st.selectbox("1. Select Project", ["Select..."] + p_list, key="site_p")
+        
+        # Selectbox for Project - tied to session state
+        sel_p = st.selectbox(
+            "1. Select Project", 
+            ["Select..."] + p_list, 
+            index=(["Select..."] + p_list).index(st.session_state.auto_sel_p) if st.session_state.auto_sel_p in (["Select..."] + p_list) else 0
+        )
+        
         if sel_p != "Select...":
             loc_list = sorted(active_reg[active_reg['Project'] == sel_p]['Location'].unique().tolist())
-            sel_l = st.selectbox("2. Select Location", loc_list, key="site_l")
             
+            # Selectbox for Location - tied to session state
+            sel_l = st.selectbox(
+                "2. Select Location", 
+                loc_list,
+                index=loc_list.index(st.session_state.auto_sel_l) if st.session_state.auto_sel_l in loc_list else 0
+            )
+            
+            # Identify the final specific node currently assigned
             slot_match = active_reg[(active_reg['Project'] == sel_p) & (active_reg['Location'] == sel_l)]
             if not slot_match.empty:
-                # Shows "Which node they currently have"
-                options = slot_match.apply(lambda r: f"{r['NodeNum']} (S/N: {r['PhysicalID']} | Depth: {r['Depth']}ft)", axis=1).tolist()
-                sel_n = st.selectbox("3. Active Node in Slot", options, key="site_n")
+                options = slot_match.apply(lambda r: f"{r['NodeNum']} (S/N: {r['PhysicalID']})", axis=1).tolist()
+                sel_n = st.selectbox("3. Current Hardware in Slot", options)
+                # Ensure the found_row is prioritized by dropdown if user manually changes it
                 found_row = slot_match.iloc[options.index(sel_n)]
 
     # --- 3. SURGICAL ACTIONS ---
