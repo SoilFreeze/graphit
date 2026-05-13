@@ -30,12 +30,14 @@ client = get_bq_client()
 
 # --- NEW GLOBAL REGISTRY CONFIGURATION ---
 # This block must exist BEFORE the admin_page logic
+# --- GLOBAL CONFIGURATION (Run once at the top) ---
 st.sidebar.markdown("---")
-is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
+# We add a unique 'key' argument just to be safe
+is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True, key="global_dev_toggle")
 
-# Construct the table paths
 BASE_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
 TARGET_REGISTRY = BASE_REGISTRY + ("_dummy" if is_dev else "")
+st.sidebar.markdown("---")
 
 st.sidebar.info(f"Connected to: **{TARGET_REGISTRY.split('.')[-1]}**")
 st.sidebar.markdown("---")
