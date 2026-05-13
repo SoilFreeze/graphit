@@ -235,102 +235,111 @@ elif admin_page == "⚙️ Project Master":
             st.rerun()
 
 # ===============================================================
-# TOOL 4: REF CURVE LIBRARY (Inventory + Management)
+# TOOL 4: REF CURVE LIBRARY (Inventory + Management + Tracking)
 # ===============================================================
 elif admin_page == "📈 Ref Curve Library":
     st.header("📈 Theoretical Curve Management")
     
-    # 1. CURRENT INVENTORY (New Section)
+    # 1. CURRENT INVENTORY (Shows summary of curves and upload dates)
     st.subheader("📚 Current Library Inventory")
     try:
-        # Query to show summary of each curve in the system
+        # Query to show summary of each curve, including the upload date
+        # If multiple dates exist for one CurveID, it shows the most recent
         inv_q = f"""
             SELECT 
                 CurveID, 
                 MAX(Day) as Max_Day, 
-                COUNT(*) as Total_Points 
+                COUNT(*) as Total_Points,
+                MAX(upload_date) as Last_Upload
             FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`
             GROUP BY CurveID
-            ORDER BY CurveID
+            ORDER BY Last_Upload DESC, CurveID ASC
         """
         inventory_df = client.query(inv_q).to_dataframe()
         
         if not inventory_df.empty:
+            # Ensure date is formatted cleanly
+            inventory_df['Last_Upload'] = pd.to_datetime(inventory_df['Last_Upload']).dt.strftime('%Y-%m-%d')
+            
             st.dataframe(
                 inventory_df.rename(columns={
-                    "CurveID": "Curve Identifier (Filename)",
+                    "CurveID": "Curve Identifier",
                     "Max_Day": "Duration (Days)",
-                    "Total_Points": "Data Density"
+                    "Total_Points": "Density",
+                    "Last_Upload": "Upload Date"
                 }),
                 use_container_width=True,
                 hide_index=True
             )
         else:
-            st.info("The library is currently empty. Upload CSVs below to begin.")
+            st.info("The library is currently empty.")
     except Exception as e:
         st.error(f"Error loading inventory: {e}")
 
     st.divider()
 
     # 2. MANAGEMENT & PURGE TOOLS
-    c1, c2 = st.columns(2)
-    
-    with c1.expander("🗑️ Surgical Delete (Single Curve)"):
+    c1, col_purge = st.columns(2)
+    with c1.expander("🗑️ Surgical Delete"):
         if not inventory_df.empty:
             to_delete = st.selectbox("Select Curve to Remove", sorted(inventory_df['CurveID'].tolist()))
             if st.button(f"Delete {to_delete}", type="primary"):
                 client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID = '{to_delete}'").result()
-                st.success(f"Successfully removed {to_delete}")
+                st.success(f"Removed {to_delete}")
                 st.rerun()
-        else:
-            st.caption("No curves available to delete.")
 
-    with c2.expander("🧨 Nuclear Purge (Wipe All)"):
-        st.warning("This will permanently delete EVERY theoretical curve in the database.")
+    with col_purge.expander("🧨 Nuclear Purge"):
         if st.button("EXECUTE TOTAL PURGE", key="purge_all"):
             client.query(f"TRUNCATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
-            st.success("Library wiped clean.")
+            st.success("Library wiped.")
             st.rerun()
 
     st.divider()
 
-    # 3. BULK UPLOAD ENGINE (Row 3 Start)
+    # 3. BULK UPLOAD ENGINE (Stamps with current date)
     st.subheader("📤 Upload New Curves")
     u_files = st.file_uploader(
         "Upload Curve CSVs", 
         type=['csv'], 
         accept_multiple_files=True,
-        help="Max 200MB per file. Data must start on Row 3 (Day, Temp)."
+        help="Data starts on Row 3 (Col 1: Day, Col 2: Temp)."
     )
 
     if u_files:
         if st.button("🚀 Commit Uploads to Database"):
             total_rows = 0
-            progress_bar = st.progress(0)
+            today_str = datetime.now().strftime('%Y-%m-%d')
             
-            for idx, f in enumerate(u_files):
+            for f in u_files:
                 try:
                     # Skip first 2 rows, take first 2 columns
                     df = pd.read_csv(f, skiprows=2, usecols=[0, 1], names=['Day', 'Temp'])
                     df['CurveID'] = f.name.rsplit('.', 1)[0]
                     
-                    # Numeric enforcement
+                    # ADD UPLOAD DATE STAMP
+                    df['upload_date'] = today_str
+                    
+                    # Cleanup data
                     df['Day'] = pd.to_numeric(df['Day'], errors='coerce')
                     df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
                     df = df.dropna(subset=['Day', 'Temp'])
 
                     if not df.empty:
+                        # Upload to BigQuery (Schema update is handled by write_disposition)
+                        job_config = bigquery.LoadTableConfig(write_disposition="WRITE_APPEND")
                         client.load_table_from_dataframe(
-                            df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+                            df, 
+                            f"{PROJECT_ID}.{DATASET_ID}.reference_curves",
+                            job_config=job_config
                         ).result()
                         total_rows += len(df)
-                    
-                    progress_bar.progress((idx + 1) / len(u_files))
                 except Exception as e:
                     st.error(f"Error processing {f.name}: {e}")
 
-            st.success(f"✅ Success! Imported {len(u_files)} files ({total_rows} points).")
+            st.success(f"✅ Success! Imported {len(u_files)} files with Upload Date: {today_str}")
             st.rerun()
+
+
 # ===============================================================
 # TOOL 5: SURGICAL DATA MANAGEMENT
 # ===============================================================
