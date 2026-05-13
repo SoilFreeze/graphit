@@ -145,107 +145,115 @@ if "Audit" in admin_page:
         c2.caption(f"**Max Site Gap:** {df['max_gap_mins'].max() or 0} minutes")
 
 # ===============================================================
-# TOOL: SENSOR STATUS AUDIT (Lifecycle Tracker)
+# TOOL: SENSOR STATUS AUDIT (Upgraded)
 # ===============================================================
-elif "Sensor status Audit" in admin_page:
-    st.header("🔍 Sensor Status Audit")
+elif "Sensor Status Audit" in admin_page:
+    st.header("🔍 Sensor Status & Reliability Audit")
     
-    # 1. TOP LEVEL FLEET METRICS
-    # Fetch registry to calculate fleet-wide stats
-    registry_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
+    # 1. FLEET METRICS (Top Level)
+    # Fetching the most recent state of all sensors
+    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
+    registry_df = client.query(reg_q).to_dataframe()
     
-    m1, m2, m3, m4 = st.columns(4)
-    total_sensors = registry_df['PhysicalID'].nunique()
-    active_assignments = registry_df[registry_df['End_Date'].isna()]
-    
-    m1.metric("Total Unique Sensors", total_sensors)
-    m2.metric("Currently Assigned", len(active_assignments))
-    m3.metric("Available / In Stock", len(registry_df[registry_df['SensorStatus'] == 'Available']))
-    m4.metric("Flagged / Dead", len(registry_df[registry_df['SensorStatus'].isin(['Dead', 'Need Repair'])]))
+    if not registry_df.empty:
+        m1, m2, m3, m4 = st.columns(4)
+        
+        total_qty = registry_df['PhysicalID'].nunique()
+        # Assigned = currently has no End_Date
+        assigned_qty = len(registry_df[registry_df['End_Date'].isna()])
+        available_qty = len(registry_df[registry_df['SensorStatus'] == 'Available'])
+        other_qty = len(registry_df[~registry_df['SensorStatus'].isin(['Active', 'Available'])])
+
+        m1.metric("Total Sensors", total_qty)
+        m2.metric("Currently Assigned", assigned_qty)
+        m3.metric("Available In-Stock", available_qty)
+        m4.metric("Other (Dead/Repair)", other_qty)
 
     st.divider()
 
-    # 2. LOOKUP ENGINE
-    st.subheader("🔦 Sensor Lifecycle Lookup")
-    lookup_tab1, lookup_tab2 = st.tabs(["Search by Node Number", "Search by Project Location"])
-    
-    selected_sn = None
+    # 2. SEARCH & INVESTIGATION
+    st.subheader("🔦 Hardware Investigator")
+    search_query = st.text_input("Search by Serial Number (PhysicalID) or Node Number (TP-xxxx)")
 
-    with lookup_tab1:
-        search_node = st.text_input("Enter Node ID (e.g. TP-0001)", key="audit_node_search")
-        if search_node:
-            match = registry_df[registry_df['NodeNum'].astype(str).str.contains(search_node.upper())]
-            if not match.empty:
-                selected_sn = match.iloc[0]['PhysicalID']
-            else:
-                st.error("No sensor found with that Node Number.")
-
-    with lookup_tab2:
-        proj_list = sorted(registry_df['Project'].dropna().unique().tolist())
-        sel_p = st.selectbox("Select Project", ["Select..."] + proj_list, key="audit_proj")
-        if sel_p != "Select...":
-            loc_list = sorted(registry_df[registry_df['Project'] == sel_p]['Location'].unique().tolist())
-            sel_l = st.selectbox("Select Location", loc_list, key="audit_loc")
-            
-            # Find the hardware currently at this spot
-            current_hardware = active_assignments[(active_assignments['Project'] == sel_p) & (active_assignments['Location'] == sel_l)]
-            if not current_hardware.empty:
-                selected_sn = current_hardware.iloc[0]['PhysicalID']
-                st.info(f"Current sensor at this location is S/N: **{selected_sn}** ({current_hardware.iloc[0]['NodeNum']})")
-            else:
-                st.warning("No active sensor currently assigned to this location.")
-
-    # 3. HISTORIC DATA & TRENDS
-    if selected_sn:
-        st.divider()
-        st.subheader(f"📜 History for Sensor S/N: {selected_sn}")
+    if search_query:
+        # Filter registry for the specific hardware
+        lookup = registry_df[
+            (registry_df['PhysicalID'].astype(str).str.contains(search_query)) | 
+            (registry_df['NodeNum'].astype(str).str.contains(search_query.upper()))
+        ]
         
-        # A. TABLE: Historical Locations
-        history_df = registry_df[registry_df['PhysicalID'] == selected_sn].sort_values('Start_Date', ascending=False)
-        st.markdown("### Deployment History")
-        st.dataframe(
-            history_df[['Project', 'Location', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']].rename(columns={
-                'SensorStatus': 'Status at Time'
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # B. GRAPH: Long-term Thermal Trend
-        st.markdown("### Long-term Temperature Data")
-        # Query ALL raw data for this specific hardware serial across all time
-        raw_history_q = f"""
-            SELECT timestamp, temperature 
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
-            WHERE PhysicalID = {selected_sn} 
-            ORDER BY timestamp DESC
-        """
-        raw_history_df = client.query(raw_history_q).to_dataframe()
-        
-        if not raw_history_df.empty:
-            fig_hist = go.Figure()
-            fig_hist.add_trace(go.Scatter(
-                x=raw_history_df['timestamp'], 
-                y=raw_history_df['temperature'],
-                mode='lines',
-                name='Temp History',
-                line=dict(color='#1f77b4', width=1)
-            ))
-            
-            # Add horizontal freezing line
-            fig_hist.add_hline(y=32, line_dash="dash", line_color="red", annotation_text="32°F")
-            
-            fig_hist.update_layout(
-                title=f"All-Time Thermal Profile for S/N {selected_sn}",
-                xaxis_title="Time",
-                yaxis_title="Temperature (°F)",
-                height=400,
-                hovermode="x unified",
-                plot_bgcolor='white'
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
+        if lookup.empty:
+            st.error("No sensor found matching that ID.")
         else:
-            st.info("No thermal telemetry found in the master database for this serial number.")
+            target_sn = lookup.iloc[0]['PhysicalID']
+            current_node = lookup[lookup['End_Date'].isna()]
+            
+            # Display Current Location Status
+            if not current_node.empty:
+                st.info(f"📍 **Current Status:** Assigned to **{current_node.iloc[0]['Project']}** at {current_node.iloc[0]['Location']}")
+            else:
+                st.warning("📍 **Current Status:** Unassigned / In Storage")
+
+            # 3. RELIABILITY ANALYTICS (Pings per Hour)
+            st.markdown("### 📊 Check-in Reliability (Pings/Hour)")
+            
+            # Query to get count of pings in specific windows
+            stats_q = f"""
+            SELECT 
+                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)) as pings_7d,
+                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 28 DAY)) as pings_28d,
+                COUNT(*) as pings_total,
+                TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), HOUR) as total_hours_lifetime
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            WHERE PhysicalID = {target_sn}
+            """
+            stats_df = client.query(stats_q).to_dataframe().iloc[0]
+
+            s1, s2, s3 = st.columns(3)
+            # Calculations (Assuming 1 ping per minute = 60/hr is perfect)
+            rate_7d = round(stats_df['pings_7d'] / (7 * 24), 2)
+            rate_28d = round(stats_df['pings_28d'] / (28 * 24), 2)
+            
+            # Lifetime rate logic
+            life_hrs = stats_df['total_hours_lifetime'] if stats_df['total_hours_lifetime'] > 0 else 1
+            rate_life = round(stats_df['pings_total'] / life_hrs, 2)
+
+            s1.metric("Last 7 Days", f"{rate_7d} / hr")
+            s2.metric("Last 4 Weeks", f"{rate_28d} / hr")
+            s3.metric("Lifetime Avg", f"{rate_life} / hr")
+
+            # 4. DEPLOYMENT HISTORY TABLE
+            st.markdown("### 📜 Deployment History")
+            history = registry_df[registry_df['PhysicalID'] == target_sn].sort_values('Start_Date', ascending=False)
+            st.dataframe(
+                history[['Project', 'Location', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']], 
+                use_container_width=True, 
+                hide_index=True
+            )
+
+            # 5. THERMAL TREND GRAPH
+            st.markdown("### 📈 All-Time Thermal Profile")
+            raw_h_q = f"""
+                SELECT timestamp, temperature 
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
+                WHERE PhysicalID = {target_sn} 
+                ORDER BY timestamp ASC
+            """
+            raw_h = client.query(raw_h_q).to_dataframe()
+            
+            if not raw_h.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=raw_h['timestamp'], y=raw_h['temperature'], name="Reading", line=dict(color='#1f77b4')))
+                fig.update_layout(
+                    height=350, 
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    xaxis_title="Time",
+                    yaxis_title="Temp (°F)",
+                    plot_bgcolor='white'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No thermal data found for this sensor.")
 
 
 # ===============================================================
