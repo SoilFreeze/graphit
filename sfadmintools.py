@@ -61,47 +61,33 @@ proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].tolist())
 selected_project = st.sidebar.selectbox("🎯 Target Project", proj_list)
 
 # ===============================================================
-# TOOL 1: SETUP AUDIT
+# TOOL 1: SETUP AUDIT (Hardened Formatting & Color Scales)
 # ===============================================================
-if admin_page == "📡 Setup Audit":
+if "Audit" in admin_page:
     st.header(f"🏗️ Setup Audit: {selected_project}")
-    st.write("Comprehensive hardware health check for project initialization.")
+    st.write("Left-justified integrity report. Thermal data includes °F suffix.")
 
-    # Optimized SQL for Latency, 24h Range, and Max Gap analysis
+    # SQL remains same as previous (fetches min/max/last/gap)
     audit_q = f"""
         WITH RawData AS (
-            SELECT 
-                NodeNum, 
-                timestamp, 
-                temperature,
-                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_ts
+            SELECT NodeNum, timestamp, temperature,
+            LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_ts
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE Project = @proj_id
-            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
         ),
         Gaps AS (
-            SELECT 
-                NodeNum,
-                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, MINUTE)) as max_gap_mins,
-                MIN(temperature) as min_24h,
-                MAX(temperature) as max_24h,
-                COUNT(*) as point_count
-            FROM RawData
-            GROUP BY NodeNum
+            SELECT NodeNum, MAX(TIMESTAMP_DIFF(timestamp, prev_ts, MINUTE)) as max_gap_mins,
+            MIN(temperature) as min_24h, MAX(temperature) as max_24h
+            FROM RawData GROUP BY NodeNum
         ),
         Latest AS (
-            SELECT 
-                NodeNum, 
-                MAX(timestamp) as last_ping,
-                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp
+            SELECT NodeNum, MAX(timestamp) as last_ping,
+            ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE Project = @proj_id
-            GROUP BY NodeNum
+            WHERE Project = @proj_id GROUP BY NodeNum
         )
-        SELECT 
-            n.NodeNum, n.Location, n.Bank, n.Depth,
-            l.last_ping, l.last_temp,
-            g.min_24h, g.max_24h, g.max_gap_mins, g.point_count
+        SELECT n.NodeNum, n.Location, n.Bank, n.Depth, l.last_ping, l.last_temp,
+        g.min_24h, g.max_24h, g.max_gap_mins
         FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
         LEFT JOIN Latest l ON n.NodeNum = l.NodeNum
         LEFT JOIN Gaps g ON n.NodeNum = g.NodeNum
@@ -113,68 +99,65 @@ if admin_page == "📡 Setup Audit":
     )).to_dataframe()
 
     if df.empty:
-        st.warning("⚠️ No hardware records or data found for this project in the registry.")
+        st.warning("⚠️ No records found.")
     else:
         now_utc = pd.Timestamp.now(tz='UTC')
 
-        def evaluate_health(row):
-            # 1. Latency Logic & Scale
+        def apply_audit_logic(row):
+            # 1. TEMPERATURE FORMATTING (With °F)
+            last_t = f"{row['last_temp']:.1f}°F" if pd.notnull(row['last_temp']) else "Not Seen"
+            
+            # 2. 24H RANGE FORMATTING & COLOR LOGIC
+            if pd.isnull(row['min_24h']):
+                range_txt = "N/A"
+                range_color = "" 
+            else:
+                range_txt = f"{row['min_24h']:.1f}°F to {row['max_24h']:.1f}°F"
+                # Color Range based on Average of the range
+                avg_t = (row['min_24h'] + row['max_24h']) / 2
+                if avg_t > 32: range_color = 'background-color: #ffcccb' # Light Red
+                elif avg_t > 28: range_color = 'background-color: #ffe4b5' # Orange
+                else: range_color = 'background-color: #ccffcc' # Green
+
+            # 3. LAST SEEN COLOR SCALE (Green < 1h | Orange < 24h | Red 24h+)
             ping = row['last_ping']
             if pd.isnull(ping):
-                return "⚪ Not Seen", "Not Seen", "N/A", "grey"
-            
-            ping_utc = ping if ping.tzinfo else ping.tz_localize('UTC')
-            diff_min = (now_utc - ping_utc).total_seconds() / 60
-            
-            # Scaled Categories
-            if diff_min <= 60:
-                color, label = "green", f"{int(diff_min)}m ago"
-            elif diff_min <= 1440: # 1hr to 24hr
-                color, label = "orange", f"{round(diff_min/60, 1)}h ago"
-            else: # 24hr+
-                color, label = "red", f"{round(diff_min/1440, 1)}d ago"
-
-            # 2. Temp Range Logic
-            if pd.isnull(row['min_24h']):
-                t_range = "N/A"
+                seen_txt, seen_color = "Not Seen", "background-color: #d3d3d3" # Grey
             else:
-                t_range = f"{row['min_24h']:.1f}° to {row['max_24h']:.1f}°"
+                diff = (now_utc - (ping if ping.tzinfo else ping.tz_localize('UTC'))).total_seconds() / 60
+                if diff <= 60:
+                    seen_txt, seen_color = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
+                elif diff <= 1440:
+                    seen_txt, seen_color = f"{round(diff/60, 1)}h ago", "background-color: #ffe4b5; color: black"
+                else:
+                    seen_txt, seen_color = f"{round(diff/1440, 1)}d ago", "background-color: #ffcccb; color: black"
 
-            # 3. Gap Logic
-            gap = f"{row['max_gap_mins']}m" if pd.notnull(row['max_gap_mins']) else "None"
+            gap_txt = f"{row['max_gap_mins']}m" if pd.notnull(row['max_gap_mins']) else "---"
+            pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
             
-            return label, t_range, gap, color
+            return pd.Series([pos_txt, last_t, range_txt, seen_txt, gap_txt, seen_color, range_color])
 
-        # Apply logic
-        df[['Last Seen', '24h Range', 'Max Gap', 'StatusColor']] = df.apply(
-            lambda x: pd.Series(evaluate_health(x)), axis=1
-        )
+        # Apply transformations
+        df[['Position', 'Last Temp', '24h Range', 'Last Seen', 'Max Gap', 'SeenStyle', 'RangeStyle']] = df.apply(apply_audit_logic, axis=1)
 
-        # Build combined Location/Pos column for clarity
-        df['Pos'] = df.apply(lambda r: f"{r['Depth']}ft" if pd.notnull(r['Depth']) and str(r['Depth']) != '' else f"Bank {r['Bank']}", axis=1)
+        # RENDER WITH STYLING
+        st.subheader("📋 Hardware Integrity Table")
         
-        # Display Final Audit Table
-        st.subheader("📋 Hardware Status & Packet Integrity")
+        # Select and Rename columns for display
+        display_df = df[['NodeNum', 'Location', 'Position', 'Last Temp', '24h Range', 'Last Seen', 'Max Gap']]
         
-        # Stylized table with your specific scale
-        def style_audit(row):
-            # Map colors for the background of the 'Last Seen' column
-            return ['' for _ in row] # Default
+        # Apply Left Justification and Background Colors
+        styled_df = display_df.style.apply(lambda x: df['SeenStyle'], subset=['Last Seen'])\
+                                   .apply(lambda x: df['RangeStyle'], subset=['24h Range'])\
+                                   .set_properties(**{'text-align': 'left'})\
+                                   .set_table_styles([dict(selector='th', props=[('text-align', 'left')])])
 
-        st.dataframe(
-            df[['NodeNum', 'Location', 'Pos', 'last_temp', '24h Range', 'Last Seen', 'Max Gap']].rename(columns={
-                'last_temp': 'Last Temp',
-                'Pos': 'Position/Depth'
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-        # Audit Summary Metrics
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Nodes", len(df))
-        c2.metric("Offline (>24h)", len(df[df['StatusColor'] == "red"]))
-        c3.metric("Largest Site Gap", f"{df['max_gap_mins'].max()} mins")
+        # Footer Metrics
+        c1, c2 = st.columns(2)
+        c1.caption(f"**Audit Timestamp:** {now_utc.strftime('%Y-%m-%d %H:%M UTC')}")
+        c2.caption(f"**Max Site Gap:** {df['max_gap_mins'].max() or 0} minutes")
 
 
 # ===============================================================
