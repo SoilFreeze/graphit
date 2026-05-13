@@ -223,128 +223,84 @@ st.session_state["active_refs"] = tuple(active_refs)
 #############
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
-    """
-    Final Master Function: 
-    - Fix: Plots multiple theoretical curves separately if they exist.
-    - Style: Smooth Dark Gray (60% Opacity)
-    - Border: Full Black Engineering Box
-    """
     import plotly.graph_objects as go
-    
-    if df.empty:
-        return go.Figure().update_layout(title="No data available")
+    if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
     plot_df = df.copy() 
     fig = go.Figure()
 
-    # 1. TIMEZONE & UNIT CONVERSION
+    # 1. TIMEZONE & UNITS
     if plot_df['timestamp'].dt.tz is None:
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
-    
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. SENSOR TRACE GENERATION
-    extended_colors = [
-        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
-        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', 
-        '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32'  
-    ]
-
-    plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
-    plot_df['sort_val'] = 1000.0
-    depth_mask = plot_df['Depth'].notnull()
-    plot_df.loc[depth_mask, 'depth_label'] = plot_df.loc[depth_mask, 'Depth'].astype(str) + "ft"
-    plot_df.loc[depth_mask, 'sort_val'] = pd.to_numeric(plot_df.loc[depth_mask, 'Depth'], errors='coerce')
+    # 2. SENSOR DATA
+    extended_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    plot_df['depth_label'] = plot_df['Depth'].apply(lambda x: f"{x}ft" if pd.notnull(x) else "Surface")
     
-    unique_groups = plot_df[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
-
-    for i, (_, g_row) in enumerate(unique_groups.iterrows()):
-        group_lbl = g_row['depth_label']
-        group_data = plot_df[plot_df['depth_label'] == group_lbl]
+    for i, loc_lbl in enumerate(sorted(plot_df['depth_label'].unique())):
+        g_data = plot_df[plot_df['depth_label'] == loc_lbl]
         color = extended_colors[i % len(extended_colors)]
-        
-        for sn in group_data['NodeNum'].unique():
-            s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
-            
-            s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            if (s_df['gap'] > 6.0).any():
-                gaps = s_df[s_df['gap'] > 6.0].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
-
+        for sn in g_data['NodeNum'].unique():
+            s_df = g_data[g_data['NodeNum'] == sn].sort_values('timestamp')
             fig.add_trace(go.Scatter(
                 x=s_df['timestamp'], y=s_df['temperature'],
-                name=f"{group_lbl} (N:{sn})",
-                mode='lines',
+                name=f"{loc_lbl} (N:{sn})", mode='lines',
                 line=dict(shape='spline', smoothing=1.3, width=2, color=color),
-                connectgaps=False,
                 hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
             ))
 
-    # 3. THEORETICAL REFERENCE CURVES (Handles Multiple Distinct Lines)
+    # 3. THEORETICAL CURVES (Plotting the WHOLE curve)
     if curve_id and curve_id != "None" and f_start_date:
         try:
             parts = str(curve_id).split('-')
-            proj_num = parts[0].strip()
-            loc_num = parts[1].strip() if len(parts) > 1 else ""
-
-            # Fetch all curves associated with this Project + Location combo
-            ref_q = f"""
-                SELECT CurveID, Day, Temp 
-                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%')
-                AND UPPER(CurveID) LIKE UPPER('%{loc_num}%')
-                ORDER BY CurveID, Day
-            """
+            proj_num, loc_num = parts[0].strip(), parts[1].strip() if len(parts) > 1 else ""
+            ref_q = f"SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%') AND UPPER(CurveID) LIKE UPPER('%{loc_num}%') ORDER BY Day"
             ref_df = client.query(ref_q).to_dataframe()
             
             if not ref_df.empty:
-                # Loop through each unique CurveID found to plot separate lines
                 for cid in ref_df['CurveID'].unique():
                     c_df = ref_df[ref_df['CurveID'] == cid].copy()
-                    
-                    # Align 'Day' with the project's 'Date_Freezedown'
-                    c_df['timestamp'] = c_df['Day'].apply(
-                        lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
-                    )
+                    c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     
-                    ref_y = c_df['Temp']
-                    if unit_mode == "Celsius":
-                        ref_y = (ref_y - 32) * 5/9
-
+                    ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                    
                     fig.add_trace(go.Scatter(
                         x=c_df['timestamp'], y=ref_y,
-                        name=f"<b>GOAL: {cid}</b>",
-                        mode='lines',
-                        line=dict(
-                            color='rgba(40, 40, 40, 0.6)', # Dark Gray
-                            width=4,
-                            dash='dashdot',
-                            shape='spline',
-                            smoothing=1.3
-                        ),
+                        name=f"<b>GOAL: {cid}</b>", mode='lines',
+                        line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
         except: pass
 
-    # 4. LAYOUT & BOX BORDER
-    for val, ref_label in active_refs:
-        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-        fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
-                      annotation_text=ref_label, annotation_position="top right", layer="below")
+    # 4. BOLD MONDAY MIDNIGHT LINES
+    date_range = pd.date_range(start=start_view, end=end_view, freq='W-MON')
+    for m_dt in date_range:
+        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", line_dash="solid", opacity=0.3)
 
+    # 5. FREEZE LINES
+    for val, label in active_refs:
+        c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+        fig.add_hline(y=c_val, line_dash="dash", line_color="cyan", annotation_text=label)
+
+    # 6. BOX BORDER & MAJOR/MINOR GRID
     fig.update_layout(
         plot_bgcolor='white', hovermode="x unified", height=650,
-        xaxis=dict(range=[start_view, end_view], showgrid=True, gridcolor='Gainsboro', 
-                   showline=True, mirror=True, linecolor='black', linewidth=2),
-        yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, showgrid=True, 
-                   gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2)
+        xaxis=dict(
+            range=[start_view, end_view], showgrid=True, gridcolor='Gainsboro',
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8') # Minor grid: 1 day
+        ),
+        yaxis=dict(
+            title=f"Temperature ({unit_label})", range=y_range, dtick=10,
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+            showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
+        ),
+        legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5)
     )
-    
     return fig
                                
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
@@ -809,6 +765,7 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6, key="client_weeks_slider")
         show_ref = st.sidebar.toggle("Show Progress Goals", value=True)
         
+        # Calculate viewport
         now_utc = pd.Timestamp.now(tz='UTC')
         start_view = now_utc - timedelta(weeks=weeks_view)
         
@@ -817,9 +774,9 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = p_df[p_df['Location'] == loc].copy()
                 
-                # --- FIX: Align CID with the library format (e.g., 2527-TP1) ---
-                # We use the raw selected_project which usually contains the ID
-                cid = f"{selected_project}-{loc}" if show_ref else None
+                # --- CRITICAL FIX: Build the search ID and pass f_start_date ---
+                clean_proj_id = str(selected_project).split('-')[0]
+                cid = f"{clean_proj_id}-{loc}" if show_ref else None
 
                 fig = build_high_speed_graph(
                     df=loc_data, 
@@ -830,7 +787,7 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
                     unit_mode=unit_mode, 
                     unit_label=unit_label, 
                     display_tz=display_tz,
-                    f_start_date=f_start_date, # Required for the goal to know where 'Day 0' is
+                    f_start_date=f_start_date, # Passed from metadata
                     curve_id=cid
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
