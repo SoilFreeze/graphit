@@ -273,7 +273,7 @@ elif "Sensor Status" in admin_page:
 # ===============================================================
 # TOOL: Sensor Replace
 # ===============================================================
-elif admin_page == "📋 Node Logistics":
+elif admin_page == "🔄 Sensor Replace":
     st.header("📋 Hardware Surgical Switch")
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
     TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
