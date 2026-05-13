@@ -225,7 +225,7 @@ elif "Logistics" in admin_page:
     if found_row is not None:
         st.divider()
         st.subheader(f"⚡ Hardware Switch: {found_row['NodeNum']}")
-        
+            
         # --- GRAPH 1: THE OLD NODE ---
         st.markdown(f"**1. Current Assigned Hardware Telemetry** (S/N: {found_row['PhysicalID']})")
         old_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
@@ -252,30 +252,69 @@ elif "Logistics" in admin_page:
 
         # --- FINAL EXECUTION ---
         st.divider()
-        with st.form("final_switch_form"):
-            st.write("### 3. Decide Switch Parameters")
-            switch_ts = st.datetime_input("Exact Date & Time to Switch Nodes", value=datetime.now())
-            confirm_check = st.checkbox("I have verified the timestamps on both graphs and want to switch nodes.")
-            
-            if st.form_submit_button("🚀 SWITCH NODES"):
-                if not new_sn or not confirm_check:
-                    st.error("Please provide a new serial number and check the confirmation box.")
-                else:
+    with st.form("final_switch_form"):
+        st.write("### 3. Decide Switch Parameters")
+        switch_ts = st.datetime_input("Exact Date & Time to Switch Nodes", value=datetime.now())
+        confirm_check = st.checkbox("I have verified the timestamps on both graphs and want to switch nodes.")
+        
+        if st.form_submit_button("🚀 SWITCH NODES"):
+            # Validation 1: Ensure we have the data needed
+            if not new_sn:
+                st.error("❌ New Serial Number is required.")
+            elif not confirm_check:
+                st.error("❌ Please check the confirmation box.")
+            elif found_row['Project'] == "UNASSIGNED":
+                st.error("❌ Cannot switch a node that isn't currently assigned to a project.")
+            else:
+                try:
+                    # Logic: BigQuery requires timestamps in 'YYYY-MM-DD HH:MM:SS' format
                     ts_str = switch_ts.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Ensure Physical IDs are treated as integers for the database
+                    # Use regex to strip any accidental spaces or non-numeric chars
+                    clean_new_sn = re.sub(r'[^0-9]', '', str(new_sn))
+                    
+                    # Hardened Transactional SQL
                     sql = f"""
                     BEGIN TRANSACTION;
-                    -- End the old node assignment
-                    UPDATE `{TARGET_REGISTRY}` SET End_Date='{ts_str}', SensorStatus='Dead' 
-                    WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date='{found_row['Start_Date']}';
+                    -- 1. Close out the old hardware record
+                    UPDATE `{TARGET_REGISTRY}` 
+                    SET End_Date = CAST('{ts_str}' AS TIMESTAMP), 
+                        SensorStatus = 'Dead' 
+                    WHERE NodeNum = '{found_row['NodeNum']}' 
+                      AND Project = '{found_row['Project']}'
+                      AND Start_Date = CAST('{found_row['Start_Date']}' AS TIMESTAMP)
+                      AND End_Date IS NULL;
                     
-                    -- Start the new node assignment at same location/depth
-                    INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                    VALUES ('{found_row['NodeNum']}', {new_sn}, '{found_row['Project']}', '{found_row['Location']}', '{found_row['Bank']}', {found_row['Depth']}, '{ts_str}', 'Active');
+                    -- 2. Create the new hardware record at the same location
+                    INSERT INTO `{TARGET_REGISTRY}` 
+                    (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                    VALUES (
+                        '{found_row['NodeNum']}', 
+                        {clean_new_sn}, 
+                        '{found_row['Project']}', 
+                        '{found_row['Location']}', 
+                        '{found_row.get('Bank', '')}', 
+                        {found_row.get('Depth', 0)}, 
+                        CAST('{ts_str}' AS TIMESTAMP), 
+                        'Active'
+                    );
                     COMMIT;
                     """
-                    client.query(sql).result()
-                    st.success(f"Successfully switched {found_row['NodeNum']} to New S/N {new_sn} at {ts_str}")
+                    
+                    with st.spinner("Executing database transaction..."):
+                        client.query(sql).result()
+                    
+                    st.success(f"✅ Success! {found_row['NodeNum']} switched to S/N {clean_new_sn} at {ts_str}")
                     st.balloons()
+                    time.sleep(2)
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Database Error: {e}")
+                    st.code(sql) # Displays the failed SQL for your debugging
+
+    
     # --- 3. SURGICAL ACTIONS ---
     if found_row is not None:
         st.divider()
