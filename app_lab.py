@@ -161,6 +161,11 @@ if sidebar_client is not None:
         
 st.sidebar.divider()
 show_ref = st.sidebar.toggle("Show Theoretical Curves", value=True)
+mobile_optimized = st.sidebar.toggle(
+    "Mobile Layout", 
+    value=False, 
+    key="mobile_optimized_toggle"
+)
 st.sidebar.divider()
 # --- UNIT & MEASUREMENT
 unit_mode = st.sidebar.radio(
@@ -198,11 +203,7 @@ tz_mode = st.sidebar.selectbox(
 display_tz = tz_lookup[tz_mode]
 st.session_state["display_tz"] = display_tz
 
-mobile_optimized = st.sidebar.toggle(
-    "Mobile Layout", 
-    value=False, 
-    key="mobile_optimized_toggle"
-)
+
 
 st.sidebar.divider()
 
@@ -252,7 +253,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     if f_start_date:
         try:
             # Extract project ID to find the longest curve in the library
-            proj_num = str(selected_project).split('-')[0].strip()
+            proj_num = str(title).split(':')[0].strip() if ":" in str(title) else str(curve_id).split('-')[0]
             
             ref_q = f"""
                 SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -301,14 +302,21 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
-    # 5. REFERENCE LINES
+    ## 5. REFERENCE LINES
     # Cyan Freeze Line
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="solid", line_color="cyan", annotation_text="32°F FREEZE", layer="above")
     
-    # Red "NOW" Line
+    # Red "NOW" Line - FIX: Convert to Python Datetime to prevent Plotly/Pandas TypeError
     now_ts = pd.Timestamp.now(tz=display_tz)
-    fig.add_vline(x=now_ts, line_width=2, line_color="red", line_dash="dash", layer='above', annotation_text="NOW")
-
+    fig.add_vline(
+        x=now_ts.to_pydatetime(), 
+        line_width=2, 
+        line_color="red", 
+        line_dash="dash", 
+        layer='above', 
+        annotation_text="NOW"
+    )
+                               
     # Bold Monday Lines
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
