@@ -227,11 +227,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Final Engineering-Grade Plotting Engine:
-    - Restored: Theoretical Curves (Smooth Dark Gray).
-    - Sync: Global X-Axis shift applied to ALL charts (including Brine).
-    - Title: Project - Thermal Trend - Location.
-    - Legend: Position (NodeNum) only.
-    - Style: RoyalBlue Dashed Freeze Line, Major(10)/Minor(2) Grid, Bold Mondays.
+    - RESTORED: Theoretical Curves (Smooth Dark Gray).
+    - RESTORED: Global X-Axis shift (Project Day 0 to End of Goal).
+    - TITLE: Project - Thermal Trend - Location.
+    - LEGEND: Position (NodeNum) only, right-aligned.
+    - STYLE: Med Blue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
     """
     import plotly.graph_objects as go
     import re
@@ -249,18 +249,18 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. GLOBAL TIMELINE SYNC (Improved Label/ID Recognition)
+    # 2. GLOBAL TIMELINE SYNC (Improved Project ID extraction)
     final_end_view, final_start_view = end_view, start_view
     
     if f_start_date:
         try:
-            # Extract Project Number (e.g., '2527') from the session state project string
+            # Extract Project Number (e.g., '2527') even if project name is '2527-Elizabeth'
             proj_str = str(st.session_state.get('selected_project', ''))
             proj_match = re.findall(r'\d+', proj_str)
             proj_num = proj_match[0] if proj_match else ""
             
             if proj_num:
-                # Find the longest curve in the library for this project to set the global window
+                # Find the longest curve in the library to set the global project window
                 ref_q = f"""
                     SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                     WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
@@ -270,7 +270,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 
                 if not ref_meta.empty:
                     max_days = int(ref_meta['Day'].max())
-                    # Shift window: Freezedown - 1 Day through Goal End + 1 Day
+                    # Window: Day 0 - 1 day through Final Goal Day + 1 day
                     final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
                     final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
@@ -318,7 +318,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         ))
 
     # 5. REFERENCE LINES
-    # Medium Blue Dashed Freeze Line
+    # Med Blue Dashed Freeze Line (RoyalBlue)
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     
     # Red "NOW" Line
@@ -331,7 +331,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
     # 6. BOX BORDER & TITLING
-    # Format: Project - Type - Location
     p_name = st.session_state.get('selected_project')
     full_title = f"<b>{p_name} - Thermal Trend - {title}</b>"
 
@@ -341,12 +340,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         xaxis=dict(
             range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'),
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'), # 1 Day Minor
             tickformat='%b %d'
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})", range=y_range, dtick=10,
-            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'), # 2 Degree Minor
             showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
         ),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
