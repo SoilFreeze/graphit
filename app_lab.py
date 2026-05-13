@@ -160,8 +160,9 @@ if sidebar_client is not None:
         st.sidebar.error(f"Registry Link Offline: {e}")
         
 st.sidebar.divider()
-
-# --- UNIT & MEASUREMENT ---
+show_ref = st.sidebar.toggle("Show Theoretical Curves", value=True)
+st.sidebar.divider()
+# --- UNIT & MEASUREMENT
 unit_mode = st.sidebar.radio(
     "Temperature Unit", 
     ["Fahrenheit", "Celsius"], 
@@ -225,10 +226,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
-    - 15 High-Contrast Colors restored.
-    - Blue-shading for Brine (S/R) lines.
-    - Dynamic X-axis locked to Freezedown + Theoretical Curve length.
-    - Major (10) / Minor (2) grid with Bold Monday Midnight lines.
+    - Unified 15-color palette for ALL sensors (including Brine).
+    - Legend locked to Right-Hand Side.
+    - Global X-axis synchronization for all plots.
     """
     import plotly.graph_objects as go
     if df.empty: return go.Figure().update_layout(title="No data available")
@@ -243,34 +243,44 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. THEORETICAL CURVE & DYNAMIC TIMELINE
+    # 2. DYNAMIC TIMELINE (Applied to ALL graphs if curve_id exists)
     final_end_view, final_start_view = end_view, start_view
+    
+    # We fetch the curve data if requested to determine the X-axis window
     if curve_id and curve_id != "None" and f_start_date:
         try:
+            # Extract project and location for matching
             parts = str(curve_id).split('-')
             proj_num, loc_num = parts[0].strip(), parts[1].strip() if len(parts) > 1 else ""
-            ref_q = f"SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%') AND UPPER(CurveID) LIKE UPPER('%{loc_num}%') ORDER BY Day"
+            
+            ref_q = f"""
+                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%') 
+                AND UPPER(CurveID) LIKE UPPER('%{loc_num}%') 
+                ORDER BY Day
+            """
             ref_df = client.query(ref_q).to_dataframe()
+            
             if not ref_df.empty:
+                # Calculate window: Day 0 - 1 through Max Day + 1
                 max_days = ref_df['Day'].max()
                 final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
                 final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
+
                 for cid in ref_df['CurveID'].unique():
                     c_df = ref_df[ref_df['CurveID'] == cid].copy()
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                    
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>GOAL: {cid}</b>", mode='lines',
+                        x=c_df['timestamp'], y=ref_y, name=f"GOAL: {cid}", mode='lines',
                         line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
         except: pass
 
-    # 3. SENSOR DATA (15 High-Contrast Palette)
-    brine_blues = ['#0000FF', '#4169E1', '#1E90FF', '#00BFFF', '#87CEEB', '#00008B', '#4682B4']
-    
-    # YOUR ORIGINAL 15 COLORS
+    # 3. SENSOR DATA (Unified 15-Color Palette)
     sf_15_palette = [
         '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', 
@@ -282,13 +292,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         loc_lbl = str(s_df['Location'].iloc[0])
         depth_val = s_df['Depth'].iloc[0]
-        display_name = f"{loc_lbl} - {depth_val}ft ({sn})" if pd.notnull(depth_val) else f"{loc_lbl} ({sn})"
         
-        # Color Logic: Brine gets Blues, Soil/Ambient gets the 15-color palette
-        if any(x in loc_lbl.upper() for x in ['S', 'R', 'SUPPLY', 'RETURN', 'BRINE']):
-            color = brine_blues[i % len(brine_blues)]
-        else:
-            color = sf_15_palette[i % len(sf_15_palette)]
+        display_name = f"{loc_lbl} - {depth_val}ft" if pd.notnull(depth_val) else f"{loc_lbl}"
+        color = sf_15_palette[i % len(sf_15_palette)]
 
         fig.add_trace(go.Scatter(
             x=s_df['timestamp'], y=s_df['temperature'],
@@ -302,7 +308,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
-    # 5. GRID & FRAME
+    # 5. BOX BORDER & MAJOR/MINOR GRID
     fig.update_layout(
         plot_bgcolor='white', hovermode="x unified", height=650,
         xaxis=dict(
@@ -316,7 +322,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
             showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
         ),
-        legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5)
+        # LEGEND ON THE RIGHT SIDE
+        legend=dict(
+            orientation="v", 
+            x=1.02, 
+            y=1, 
+            xanchor="left", 
+            yanchor="top",
+            bgcolor='rgba(255,255,255,0.5)'
+        )
     )
     return fig
                                
