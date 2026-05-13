@@ -145,115 +145,108 @@ if "Audit" in admin_page:
         c2.caption(f"**Max Site Gap:** {df['max_gap_mins'].max() or 0} minutes")
 
 # ===============================================================
-# TOOL: SENSOR STATUS AUDIT (Upgraded)
+# TOOL: SENSOR STATUS AUDIT (Fleet & Reliability Tracker)
 # ===============================================================
 elif "Sensor Status Audit" in admin_page:
     st.header("🔍 Sensor Status & Reliability Audit")
     
-    # 1. FLEET METRICS (Top Level)
-    # Fetching the most recent state of all sensors
-    reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
-    registry_df = client.query(reg_q).to_dataframe()
+    # 1. FLEET METRICS (Inventory Overview)
+    # We query the registry once to get the global state
+    reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
     
-    if not registry_df.empty:
-        m1, m2, m3, m4 = st.columns(4)
-        
-        total_qty = registry_df['PhysicalID'].nunique()
-        # Assigned = currently has no End_Date
-        assigned_qty = len(registry_df[registry_df['End_Date'].isna()])
-        available_qty = len(registry_df[registry_df['SensorStatus'] == 'Available'])
-        other_qty = len(registry_df[~registry_df['SensorStatus'].isin(['Active', 'Available'])])
+    if not reg_df.empty:
+        # Calculate distinct counts
+        total_unique = reg_df['PhysicalID'].nunique()
+        active_now = len(reg_df[reg_df['End_Date'].isna()])
+        available = len(reg_df[reg_df['SensorStatus'] == 'Available'])
+        faulty = len(reg_df[reg_df['SensorStatus'].isin(['Dead', 'Need Repair'])])
 
-        m1.metric("Total Sensors", total_qty)
-        m2.metric("Currently Assigned", assigned_qty)
-        m3.metric("Available In-Stock", available_qty)
-        m4.metric("Other (Dead/Repair)", other_qty)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Inventory", total_unique)
+        m2.metric("Active Deployments", active_now)
+        m3.metric("Available (Stock)", available)
+        m4.metric("Flagged/Faulty", faulty)
 
     st.divider()
 
-    # 2. SEARCH & INVESTIGATION
-    st.subheader("🔦 Hardware Investigator")
-    search_query = st.text_input("Search by Serial Number (PhysicalID) or Node Number (TP-xxxx)")
+    # 2. SENSOR INVESTIGATOR (Deep Dive)
+    st.subheader("🔦 Individual Hardware Investigator")
+    search_input = st.text_input("Search by Serial Number (PhysicalID) or Node Number (e.g. TP-0001)")
 
-    if search_query:
-        # Filter registry for the specific hardware
-        lookup = registry_df[
-            (registry_df['PhysicalID'].astype(str).str.contains(search_query)) | 
-            (registry_df['NodeNum'].astype(str).str.contains(search_query.upper()))
+    if search_input:
+        # Filter for the target hardware
+        match = reg_df[
+            (reg_df['PhysicalID'].astype(str).str.contains(search_input)) | 
+            (reg_df['NodeNum'].astype(str).str.upper().str.contains(search_input.upper()))
         ]
         
-        if lookup.empty:
-            st.error("No sensor found matching that ID.")
+        if match.empty:
+            st.error("No hardware matching that ID found.")
         else:
-            target_sn = lookup.iloc[0]['PhysicalID']
-            current_node = lookup[lookup['End_Date'].isna()]
-            
-            # Display Current Location Status
-            if not current_node.empty:
-                st.info(f"📍 **Current Status:** Assigned to **{current_node.iloc[0]['Project']}** at {current_node.iloc[0]['Location']}")
+            target_sn = match.iloc[0]['PhysicalID']
+            current_assignment = match[match['End_Date'].isna()]
+
+            # A. Current Placement Card
+            if not current_assignment.empty:
+                row = current_assignment.iloc[0]
+                st.info(f"📍 **Current Location:** {row['Project']} | {row['Location']} ({row['NodeNum']})")
             else:
-                st.warning("📍 **Current Status:** Unassigned / In Storage")
+                st.warning("📍 **Current Status:** Unassigned / Available in Stock")
 
-            # 3. RELIABILITY ANALYTICS (Pings per Hour)
-            st.markdown("### 📊 Check-in Reliability (Pings/Hour)")
+            # B. RELIABILITY ANALYTICS (Pings Per Hour)
+            # We calculate this using a specialized query for efficiency
+            st.markdown("### 📊 Check-in Reliability")
             
-            # Query to get count of pings in specific windows
-            stats_q = f"""
-            SELECT 
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)) as pings_7d,
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 28 DAY)) as pings_28d,
-                COUNT(*) as pings_total,
-                TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), HOUR) as total_hours_lifetime
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE PhysicalID = {target_sn}
+            # This query counts pings in specific windows
+            ping_stats_q = f"""
+                SELECT 
+                    COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)) as pings_7d,
+                    COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 28 DAY)) as pings_28d,
+                    COUNT(*) as pings_total,
+                    TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), HOUR) as life_hours
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                WHERE PhysicalID = {target_sn}
             """
-            stats_df = client.query(stats_q).to_dataframe().iloc[0]
+            stats = client.query(ping_stats_q).to_dataframe().iloc[0]
 
-            s1, s2, s3 = st.columns(3)
-            # Calculations (Assuming 1 ping per minute = 60/hr is perfect)
-            rate_7d = round(stats_df['pings_7d'] / (7 * 24), 2)
-            rate_28d = round(stats_df['pings_28d'] / (28 * 24), 2)
+            # Calculate rates (Pings/Hour)
+            # Assuming 1-minute intervals = 60 pings/hr is 100%
+            c1, c2, c3 = st.columns(3)
+            rate_7d = round(stats['pings_7d'] / (7 * 24), 2)
+            rate_28d = round(stats['pings_28d'] / (28 * 24), 2)
             
-            # Lifetime rate logic
-            life_hrs = stats_df['total_hours_lifetime'] if stats_df['total_hours_lifetime'] > 0 else 1
-            rate_life = round(stats_df['pings_total'] / life_hrs, 2)
+            life_h = stats['life_hours'] if stats['life_hours'] > 0 else 1
+            rate_life = round(stats['pings_total'] / life_h, 2)
 
-            s1.metric("Last 7 Days", f"{rate_7d} / hr")
-            s2.metric("Last 4 Weeks", f"{rate_28d} / hr")
-            s3.metric("Lifetime Avg", f"{rate_life} / hr")
+            c1.metric("L7D Avg Pings/Hr", f"{rate_7d}")
+            c2.metric("L4W Avg Pings/Hr", f"{rate_28d}")
+            c3.metric("Lifetime Avg", f"{rate_life}")
 
-            # 4. DEPLOYMENT HISTORY TABLE
+            # C. LIFECYCLE TIMELINE
             st.markdown("### 📜 Deployment History")
-            history = registry_df[registry_df['PhysicalID'] == target_sn].sort_values('Start_Date', ascending=False)
+            history_df = reg_df[reg_df['PhysicalID'] == target_sn].sort_values('Start_Date', ascending=False)
             st.dataframe(
-                history[['Project', 'Location', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']], 
+                history_df[['Project', 'Location', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']], 
                 use_container_width=True, 
                 hide_index=True
             )
 
-            # 5. THERMAL TREND GRAPH
-            st.markdown("### 📈 All-Time Thermal Profile")
-            raw_h_q = f"""
+            # D. ALL-TIME THERMAL GRAPH
+            st.markdown("### 📈 All-Time Telemetry")
+            telemetry_q = f"""
                 SELECT timestamp, temperature 
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
                 WHERE PhysicalID = {target_sn} 
                 ORDER BY timestamp ASC
             """
-            raw_h = client.query(raw_h_q).to_dataframe()
+            tel_df = client.query(telemetry_q).to_dataframe()
             
-            if not raw_h.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=raw_h['timestamp'], y=raw_h['temperature'], name="Reading", line=dict(color='#1f77b4')))
-                fig.update_layout(
-                    height=350, 
-                    margin=dict(l=20, r=20, t=20, b=20),
-                    xaxis_title="Time",
-                    yaxis_title="Temp (°F)",
-                    plot_bgcolor='white'
-                )
+            if not tel_df.empty:
+                fig = go.Figure(go.Scatter(x=tel_df['timestamp'], y=tel_df['temperature'], mode='lines', name=f"S/N {target_sn}"))
+                fig.update_layout(height=300, margin=dict(t=10, b=10), plot_bgcolor='white', xaxis_title="Time", yaxis_title="Temp (°F)")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("No thermal data found for this sensor.")
+                st.info("No telemetry data found for this physical hardware ID.")
 
 # ===============================================================
 # TOOL: NODE LOGISTICS (Visual Switch)
