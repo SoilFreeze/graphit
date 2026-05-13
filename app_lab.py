@@ -715,7 +715,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     name=f'Baseline ({b_date_str})',
                     line=dict(color='black', width=2.5),
                     marker=dict(size=7, symbol='diamond'),
-                    hovertemplate=f"Baseline: {b_date_str}<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
+                    # Use %%{y} and %%{x} to escape the Python string formatter
+                    hovertemplate=f"Baseline: {b_date_str}<br>Depth: %%{{y}}ft<br>Temp: %%{{x:.1f}}{unit_label}<extra></extra>"
                 ))
             
             # --- B. PLOT WEEKLY SNAPSHOTS ---
@@ -743,7 +744,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         name=target_ts.strftime('%Y-%m-%d'),
                         line=dict(shape='spline', smoothing=1.1, width=1.5),
                         marker=dict(size=4),
-                        hovertemplate="%{fullData.name}<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
+                        # Use %%{y} and %%{x} here as well
+                        hovertemplate=f"Date: {target_ts.strftime('%Y-%m-%d')}<br>Depth: %%{{y}}ft<br>Temp: %%{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
             # --- C. FREEZING REFERENCE LINE ---
