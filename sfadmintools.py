@@ -298,80 +298,76 @@ elif admin_page == "📋 Node Logistics":
 
         # ... (keep your existing search and graph code) ...
 
-        # FINAL FORM
-        st.divider()
-        with st.form("final_switch_form"):
-            st.write("### 3. Finalize Node Switch")
-            # Default to current time, but allow adjustment
-            switch_ts = st.datetime_input("Switch Time (from graphs above)", value=datetime.now())
-            confirm_check = st.checkbox("I verify the data overlap and want to commit the switch.")
-            
-            if st.form_submit_button("🚀 SWITCH NODES"):
-                # 1. Clean and Validate Serial Number
-                clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
+       # FINAL FORM
+st.divider()
+with st.form("final_switch_form"):
+    st.write("### 3. Finalize Node Switch")
+    # We use date_input since the column is a DATE type
+    switch_date = st.date_input("Switch Date", value=datetime.now().date())
+    confirm_check = st.checkbox("I verify the data overlap and want to commit the switch.")
+    
+    if st.form_submit_button("🚀 SWITCH NODES"):
+        # 1. Clean Serial Number
+        clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
+        
+        if not clean_sn or not confirm_check:
+            st.error("Invalid Serial Number or confirmation missing.")
+        else:
+            try:
+                # 2. Format variables for SQL
+                # Use .isoformat() to get 'YYYY-MM-DD'
+                date_str = switch_date.isoformat()
+                node_num = found_row['NodeNum']
+                project = found_row['Project']
+                location = found_row['Location']
                 
-                if not clean_sn or not confirm_check:
-                    st.error("Invalid Serial Number or confirmation missing.")
-                else:
-                    try:
-                        # 2. Prepare Variables
-                        ts_str = switch_ts.strftime('%Y-%m-%d %H:%M:%S')
-                        node_num = found_row['NodeNum']
-                        project = found_row['Project']
-                        location = found_row['Location']
-                        bank = found_row.get('Bank', '')
-                        
-                        # Handle Depth: ensure it is a float or NULL
-                        try:
-                            depth_val = float(found_row['Depth']) if pd.notnull(found_row['Depth']) else "NULL"
-                        except:
-                            depth_val = "NULL"
+                # Handle potentially null fields
+                bank_val = found_row.get('Bank', '')
+                depth_val = found_row.get('Depth')
+                # Format depth for SQL: numeric or the word NULL
+                sql_depth = float(depth_val) if pd.notnull(depth_val) else "NULL"
 
-                        # 3. Construct Transaction
-                        # We use a f-string for the table name, but logic for data integrity
-                        sql = f"""
-                        BEGIN TRANSACTION;
-                        
-                        -- Step A: Close the old record
-                        UPDATE `{TARGET_REGISTRY}` 
-                        SET End_Date = CAST('{ts_str}' AS TIMESTAMP), 
-                            SensorStatus = 'Dead' 
-                        WHERE NodeNum = '{node_num}' 
-                          AND Project = '{project}'
-                          AND End_Date IS NULL;
-                        
-                        -- Step B: Insert the new record
-                        INSERT INTO `{TARGET_REGISTRY}` 
-                        (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                        VALUES (
-                            '{node_num}', 
-                            SAFE_CAST('{clean_sn}' AS FLOAT64), 
-                            '{project}', 
-                            '{location}', 
-                            '{bank}', 
-                            {depth_val}, 
-                            CAST('{ts_str}' AS TIMESTAMP), 
-                            'Active'
-                        );
-                        
-                        COMMIT;
-                        """
-                        
-                        # 4. Execute
-                        with st.spinner("Writing to BigQuery..."):
-                            query_job = client.query(sql)
-                            query_job.result() # Wait for completion
-                        
-                        st.success(f"Success! Node {node_num} is now S/N {clean_sn}")
-                        st.balloons()
-                        time.sleep(2)
-                        st.rerun()
-                        
-                    except Exception as e:
-                        st.error(f"Transaction Failed: {e}")
-                        # Displaying the SQL in an expander for debugging purposes
-                        with st.expander("View Debug SQL"):
-                            st.code(sql)
+                # 3. Transaction with Correct Casting
+                sql = f"""
+                BEGIN TRANSACTION;
+                
+                -- Step A: Close the old record by setting the DATE
+                UPDATE `{TARGET_REGISTRY}` 
+                SET End_Date = DATE('{date_str}'), 
+                    SensorStatus = 'Dead' 
+                WHERE NodeNum = '{node_num}' 
+                  AND Project = '{project}'
+                  AND End_Date IS NULL;
+                
+                -- Step B: Insert the new record with DATE
+                INSERT INTO `{TARGET_REGISTRY}` 
+                (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                VALUES (
+                    '{node_num}', 
+                    SAFE_CAST('{clean_sn}' AS FLOAT64), 
+                    '{project}', 
+                    '{location}', 
+                    '{bank_val}', 
+                    {sql_depth}, 
+                    DATE('{date_str}'), 
+                    'Active'
+                );
+                
+                COMMIT;
+                """
+                
+                with st.spinner("Updating Registry..."):
+                    client.query(sql).result()
+                
+                st.success(f"Successfully switched {node_num} to S/N {clean_sn}")
+                st.balloons()
+                time.sleep(2)
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"Transaction Failed: {e}")
+                with st.expander("View Debug SQL"):
+                    st.code(sql)
 
 # ===============================================================
 # TOOL: BULK REGISTRY MANAGER
