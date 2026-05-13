@@ -227,15 +227,16 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Final Engineering-Grade Plotting Engine:
-    - Removed: All Theoretical Curve logic.
-    - Updated: Freezing line is now a Medium Blue dashed line.
+    - Restored: Theoretical Curves (Smooth Dark Gray).
+    - Restored: Global X-Axis Sync (All charts shift to match the project goal window).
+    - Updated: Freezing line is a Medium Blue (RoyalBlue) dashed line.
     - Style: 15-Color Palette, Right-Hand Legend, Major(10)/Minor(2) Grid.
-    - Monday Bold Lines: Vertical black dividers at midnight.
-    - Red 'Now' Line: Simple dashed line (no text).
     """
     import plotly.graph_objects as go
+    import re
     if df.empty: return go.Figure().update_layout(title="No data available")
 
+    client = get_bq_client()
     plot_df = df.copy() 
     fig = go.Figure()
 
@@ -247,12 +248,50 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. SENSOR DATA (Restored 15-Color Palette)
-    sf_15_palette = [
-        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
-        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', 
-        '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32'
-    ]
+    # 2. GLOBAL TIMELINE SYNC (The "Shift" Logic)
+    final_end_view, final_start_view = end_view, start_view
+    
+    if f_start_date:
+        try:
+            # Extract Project ID (e.g., 2527) to find the longest curve in the library
+            proj_id_raw = str(curve_id).split('-')[0] if curve_id and '-' in str(curve_id) else str(title)
+            proj_match = re.findall(r'\d+', proj_id_raw)
+            proj_num = proj_match[0] if proj_match else ""
+            
+            if proj_num:
+                ref_q = f"""
+                    SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                    WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
+                    ORDER BY Day DESC LIMIT 1
+                """
+                ref_meta = client.query(ref_q).to_dataframe()
+                
+                if not ref_meta.empty:
+                    max_days = int(ref_meta['Day'].max())
+                    # Lock window: Freezedown Day - 1 to Final Goal Day + 1
+                    final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
+                    final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
+        except: pass
+
+    # 3. THEORETICAL CURVE (Restored)
+    if curve_id and curve_id != "None" and f_start_date:
+        try:
+            target_q = f"SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) = UPPER('{curve_id}') ORDER BY Day"
+            target_df = client.query(target_q).to_dataframe()
+            if not target_df.empty:
+                target_df['timestamp'] = target_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                target_df['timestamp'] = target_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
+                ref_y = target_df['Temp'] if unit_mode == "Fahrenheit" else (target_df['Temp'] - 32) * 5/9
+                
+                fig.add_trace(go.Scatter(
+                    x=target_df['timestamp'], y=ref_y, name=f"GOAL: {curve_id}", mode='lines',
+                    line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
+                    legendrank=1 
+                ))
+        except: pass
+
+    # 4. SENSOR DATA (15-Color Palette)
+    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     unique_nodes = sorted(plot_df['NodeNum'].unique())
     
     for i, sn in enumerate(unique_nodes):
@@ -268,38 +307,31 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
-    # 3. REFERENCE LINES
-    # Med Blue Dashed Freeze Line
-    fig.add_hline(
-        y=freeze_pt, 
-        line_width=2, 
-        line_dash="dash", 
-        line_color="RoyalBlue", 
-        annotation_text="32°F FREEZE", 
-        layer="above"
-    )
+    # 5. REFERENCE LINES
+    # Medium Blue Dashed Freeze Line
+    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     
-    # Red "NOW" Line (Line only)
+    # Red "NOW" Line (Line only to prevent crashes)
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
 
     # Bold Monday Lines
-    m_range = pd.date_range(start=start_view, end=end_view, freq='W-MON')
+    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
-    # 4. BOX BORDER & GRID FORMATTING
+    # 6. BOX BORDER & GRID FORMATTING
     fig.update_layout(
         plot_bgcolor='white', hovermode="x unified", height=650,
         xaxis=dict(
-            range=[start_view, end_view], showgrid=True, gridcolor='Gainsboro',
+            range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'), # 1 Day Minor Grid
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'),
             tickformat='%b %d'
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})", range=y_range, dtick=10,
-            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'), # 2 degree Minor Grid
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
             showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
         ),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
