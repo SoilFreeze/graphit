@@ -226,9 +226,9 @@ st.session_state["active_refs"] = tuple(active_refs)
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
-    Final Engineering-Grade Plotting Engine:
-    - Legend (Goals): Shows ONLY Soil Type (removed 'GOAL').
-    - Legend (Brine): Shows ONLY short ID (e.g., S1, R1) and NodeNum.
+    Engineering-grade Trend Graph.
+    - Legend (Goals): Soil Type only.
+    - Legend (Sensors): Prioritizes specific Bank IDs (S1, R3) over Bank letters.
     - Title: Project - Thermal Trend - Location.
     - Style: RoyalBlue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
     """
@@ -275,36 +275,32 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
-            
             if not target_df.empty:
                 for cid, c_df in target_df.groupby('CurveID'):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                    
-                    # Clean label: Just the Soil Type
                     soil_label = str(cid).split('-')[-1].strip()
-
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, 
-                        name=f"<b>{soil_label}</b>", 
-                        mode='lines',
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>{soil_label}</b>", mode='lines',
                         line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
         except: pass
 
-    # 4. SENSOR DATA (Brine Cleaned)
+    # 4. SENSOR DATA (Cleaned Legend Logic)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     unique_nodes = sorted(plot_df['NodeNum'].unique())
     for i, sn in enumerate(unique_nodes):
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
         
-        # Brine Logic: Strip "Brine Temperature Bank" and similar long prefixes
-        if any(x in str(loc_val).upper() for x in ['BRINE', 'BANK']):
-            clean_loc = re.sub(r'(?i)Brine\s*Temperature\s*Bank', '', str(loc_val)).strip()
-            display_name = f"{clean_loc} ({sn})"
+        # Priority Legend Logic:
+        # 1. If it's a Brine pipe and has a specific ID (S1, R3), use that.
+        # 2. If it has a depth, use depth.
+        # 3. Fallback to location name.
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+            display_name = f"{bank_val} ({sn})"
         elif pd.notnull(depth_val): 
             display_name = f"{depth_val}ft ({sn})"
         elif pd.notnull(bank_val): 
@@ -323,7 +319,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
-    
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
