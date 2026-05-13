@@ -227,10 +227,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Final Engineering-Grade Plotting Engine:
-    - FIXED: Robust fuzzy matching for CurveIDs (ProjectID + Location).
-    - RESTORED: Smooth Dark Gray Theoretical Curves.
-    - SYNC: Global X-Axis shift (Project Day 0 to End of Goal).
-    - STYLE: Med Blue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
+    - Legend: Now shows ONLY Soil Type for theoretical curves.
+    - Legend (Sensors): Position (NodeNum) only.
+    - Title: Project - Thermal Trend - Location.
+    - Style: RoyalBlue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
     """
     import plotly.graph_objects as go
     import re
@@ -248,38 +248,26 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. GLOBAL TIMELINE SYNC & CURVE DATA
+    # 2. GLOBAL TIMELINE SYNC
     final_end_view, final_start_view = end_view, start_view
-    
-    # Extract Project Number (e.g., '2527')
     proj_str = str(st.session_state.get('selected_project', ''))
     proj_match = re.findall(r'\d+', proj_str)
     proj_num = proj_match[0] if proj_match else ""
-    
-    # Extract Location Part (e.g., 'TP1')
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
     if f_start_date:
         try:
-            # Shift Logic: Find longest curve for the project to set page-wide X-axis
-            ref_q = f"""
-                SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
-                ORDER BY Day DESC LIMIT 1
-            """
+            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') ORDER BY Day DESC LIMIT 1"
             ref_meta = client.query(ref_q).to_dataframe()
-            
             if not ref_meta.empty:
                 max_days = int(ref_meta['Day'].max())
                 final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
                 final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
-    # 3. PLOT THEORETICAL CURVES
-    # DEBUG: st.write(f"Searching for: {proj_num} AND {loc_part}") 
+    # 3. THEORETICAL REFERENCE CURVES (Legend Cleaned for Soil Type)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # Fuzzy match: ID must contain project number AND the location label
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                 WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%') 
@@ -289,15 +277,17 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             target_df = client.query(target_q).to_dataframe()
             
             if not target_df.empty:
-                # Group by CurveID in case there are multiple matches
                 for cid, c_df in target_df.groupby('CurveID'):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     
+                    # CLEAN LEGEND: Split by hyphen and take the last element (Soil Type)
+                    soil_label = str(cid).split('-')[-1].strip()
+
                     fig.add_trace(go.Scatter(
                         x=c_df['timestamp'], y=ref_y, 
-                        name=f"<b>GOAL: {cid}</b>", 
+                        name=f"<b>GOAL: {soil_label}</b>", 
                         mode='lines',
                         line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
                         legendrank=1 
@@ -307,14 +297,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 4. SENSOR DATA (15-Color Palette)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     unique_nodes = sorted(plot_df['NodeNum'].unique())
-    
     for i, sn in enumerate(unique_nodes):
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
-        depth_val = s_df['Depth'].iloc[0]
-        bank_val = s_df['Bank'].iloc[0]
-        loc_val = s_df['Location'].iloc[0]
-        
-        # Legend: Position (NodeNum)
+        depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
         if pd.notnull(depth_val): display_name = f"{depth_val}ft ({sn})"
         elif pd.notnull(bank_val): display_name = f"{bank_val} {loc_val} ({sn})"
         else: display_name = f"{loc_val} ({sn})"
@@ -328,10 +313,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # 5. REFERENCE LINES
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
-    
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
-
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
