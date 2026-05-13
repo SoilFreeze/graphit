@@ -654,9 +654,10 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
-    Fixed: Synchronized scale (-20 to 80), baseline date label, and hover formatting.
+    Baseline: First Monday after system start.
+    Scale: Locked -20 to 80.
     """
-    # 1. HEADER
+    # 1. HEADER & METADATA
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
     
     if not selected_project or selected_project == "All Projects":
@@ -695,13 +696,28 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
-            # --- A. PLOT BASELINE (With Date Label) ---
-            baseline_raw = loc_data.sort_values('timestamp', ascending=True)
-            if not baseline_raw.empty:
-                b_date_str = baseline_raw['timestamp'].min().strftime('%Y-%m-%d')
-                
+            # --- A. CALCULATE BASELINE (First Monday after system start) ---
+            # Find the absolute earliest timestamp for this location
+            abs_start = loc_data['timestamp'].min()
+            
+            # Find the first Monday at or after that start date
+            # 'W-MON' offset moves us forward to the nearest Monday
+            first_monday = abs_start + pd.offsets.Week(weekday=0) 
+            # Ensure we are looking for a reading around 6:00 AM on that Monday
+            baseline_ts = first_monday.replace(hour=6, minute=0, second=0)
+            
+            # Pull the snapshot for that specific Baseline Monday
+            b_window = loc_data[
+                (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
+                (loc_data['timestamp'] <= baseline_ts + pd.Timedelta(hours=12))
+            ]
+            
+            if not b_window.empty:
+                b_date_label = baseline_ts.strftime('%Y-%m-%d')
                 baseline_snap = (
-                    baseline_raw.drop_duplicates('NodeNum')
+                    b_window.assign(diff=(b_window['timestamp'] - baseline_ts).abs())
+                    .sort_values(['NodeNum', 'diff'])
+                    .drop_duplicates('NodeNum')
                     .sort_values('Depth_Num')
                 )
                 
@@ -711,11 +727,10 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 fig.add_trace(go.Scatter(
                     x=b_temps, y=baseline_snap['Depth_Num'], 
                     mode='lines+markers', 
-                    name=f'Baseline ({b_date_str})',
-                    line=dict(color='black', width=2.5),
-                    marker=dict(size=7, symbol='diamond'),
-                    # FIX: Escaped braces for hovertemplate
-                    hovertemplate=f"Baseline: {b_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                    name=f'Baseline ({b_date_label})',
+                    line=dict(color='black', width=3),
+                    marker=dict(size=8, symbol='diamond'),
+                    hovertemplate=f"Baseline: {b_date_label}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
             
             # --- B. PLOT WEEKLY SNAPSHOTS ---
@@ -743,7 +758,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         name=target_ts.strftime('%Y-%m-%d'),
                         line=dict(shape='spline', smoothing=1.1, width=1.5),
                         marker=dict(size=4),
-                        # FIX: Escaped braces for hovertemplate
                         hovertemplate=f"Date: {target_ts.strftime('%Y-%m-%d')}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
@@ -760,31 +774,26 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 height=800,
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
-                    range=[-20, 80], # STANDARD SCALE
+                    range=[-20, 80], # Constant Project Scale
                     dtick=10,
-                    minor=dict(dtick=2, showgrid=True, gridcolor='#f0f0f0'),
+                    minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
                     gridcolor='Gainsboro', 
-                    showline=True, 
-                    linewidth=2, 
-                    linecolor='black',
-                    mirror=True 
+                    showline=True, linewidth=2, linecolor='black', mirror=True
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
-                    range=[y_limit, 0], 
+                    range=[y_limit, 0], # Surface at top
                     dtick=10,
-                    minor=dict(dtick=2, showgrid=True, gridcolor='#f0f0f0'),
+                    minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
                     gridcolor='Silver', 
-                    showline=True, 
-                    linewidth=2, 
-                    linecolor='black',
-                    mirror=True 
+                    showline=True, linewidth=2, linecolor='black', mirror=True
                 ),
                 legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
-            
+
+
 ##############################            
 # - 7. PAGE: CLIENT PORTAL - #
 ##############################
