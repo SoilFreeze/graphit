@@ -296,61 +296,82 @@ elif admin_page == "📋 Node Logistics":
                 fig_new.update_layout(height=250, margin=dict(t=0,b=0), hovermode="x unified")
                 st.plotly_chart(fig_new, use_container_width=True)
 
+        # ... (keep your existing search and graph code) ...
+
         # FINAL FORM
         st.divider()
         with st.form("final_switch_form"):
             st.write("### 3. Finalize Node Switch")
+            # Default to current time, but allow adjustment
             switch_ts = st.datetime_input("Switch Time (from graphs above)", value=datetime.now())
             confirm_check = st.checkbox("I verify the data overlap and want to commit the switch.")
             
             if st.form_submit_button("🚀 SWITCH NODES"):
-                # Safety check: Ensure new_sn is numeric for the FLOAT64 column
+                # 1. Clean and Validate Serial Number
                 clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
                 
                 if not clean_sn or not confirm_check:
-                    st.error("Invalid Serial Number (must be numbers only) or confirmation missing.")
+                    st.error("Invalid Serial Number or confirmation missing.")
                 else:
                     try:
+                        # 2. Prepare Variables
                         ts_str = switch_ts.strftime('%Y-%m-%d %H:%M:%S')
+                        node_num = found_row['NodeNum']
+                        project = found_row['Project']
+                        location = found_row['Location']
+                        bank = found_row.get('Bank', '')
                         
-                        # Handle Potential NaT in the Start_Date of the found_row
-                        old_start = found_row['Start_Date']
-                        start_filter = f"CAST('{old_start}' AS TIMESTAMP)" if pd.notnull(old_start) else "NULL"
-                        
-                        # Hardened SQL Logic
+                        # Handle Depth: ensure it is a float or NULL
+                        try:
+                            depth_val = float(found_row['Depth']) if pd.notnull(found_row['Depth']) else "NULL"
+                        except:
+                            depth_val = "NULL"
+
+                        # 3. Construct Transaction
+                        # We use a f-string for the table name, but logic for data integrity
                         sql = f"""
                         BEGIN TRANSACTION;
-                        -- Close the old record
+                        
+                        -- Step A: Close the old record
                         UPDATE `{TARGET_REGISTRY}` 
-                        SET End_Date = CAST('{ts_str}' AS TIMESTAMP), SensorStatus = 'Dead' 
-                        WHERE NodeNum = '{found_row['NodeNum']}' 
-                          AND Project = '{found_row['Project']}'
-                          AND (Start_Date = {start_filter} OR Start_Date IS NULL)
+                        SET End_Date = CAST('{ts_str}' AS TIMESTAMP), 
+                            SensorStatus = 'Dead' 
+                        WHERE NodeNum = '{node_num}' 
+                          AND Project = '{project}'
                           AND End_Date IS NULL;
                         
-                        -- Insert the new record
+                        -- Step B: Insert the new record
                         INSERT INTO `{TARGET_REGISTRY}` 
                         (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
                         VALUES (
-                            '{found_row['NodeNum']}', 
+                            '{node_num}', 
                             SAFE_CAST('{clean_sn}' AS FLOAT64), 
-                            '{found_row['Project']}', 
-                            '{found_row['Location']}', 
-                            '{found_row.get('Bank', '')}', 
-                            SAFE_CAST('{found_row['Depth']}' AS FLOAT64), 
+                            '{project}', 
+                            '{location}', 
+                            '{bank}', 
+                            {depth_val}, 
                             CAST('{ts_str}' AS TIMESTAMP), 
                             'Active'
                         );
+                        
                         COMMIT;
                         """
-                        client.query(sql).result()
-                        st.success(f"Success! Switched to S/N {clean_sn}")
+                        
+                        # 4. Execute
+                        with st.spinner("Writing to BigQuery..."):
+                            query_job = client.query(sql)
+                            query_job.result() # Wait for completion
+                        
+                        st.success(f"Success! Node {node_num} is now S/N {clean_sn}")
                         st.balloons()
                         time.sleep(2)
                         st.rerun()
+                        
                     except Exception as e:
                         st.error(f"Transaction Failed: {e}")
-                        st.code(sql)
+                        # Displaying the SQL in an expander for debugging purposes
+                        with st.expander("View Debug SQL"):
+                            st.code(sql)
 
 # ===============================================================
 # TOOL: BULK REGISTRY MANAGER
