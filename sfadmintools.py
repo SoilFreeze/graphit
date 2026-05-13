@@ -10,22 +10,10 @@ import re
 # 1. CONFIGURATION & SECURITY
 st.set_page_config(page_title="SF Engineering Admin", page_icon="🛠️", layout="wide")
 
-# --- GLOBAL DATA LOADING ---
-# This runs on every refresh, ensuring 'reg_df' is always defined
-try:
-    # Use the global target table (production or dummy)
-    reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
-except Exception as e:
-    st.error(f"❌ Failed to load registry: {e}")
-    # Fallback to an empty dataframe so the rest of the app doesn't crash
-    reg_df = pd.DataFrame(columns=['NodeNum', 'PhysicalID', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'])
-
-# ---------------------------------------------------------
-
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
 
-# DATABASE CLIENT
+# 2. DATABASE CLIENT FUNCTION
 @st.cache_resource
 def get_bq_client():
     try:
@@ -38,18 +26,30 @@ def get_bq_client():
         st.error(f"❌ Database Link Offline: {e}")
         return None
 
+# 3. INITIALIZE CLIENT & TARGETS
 client = get_bq_client()
 
-# --- NEW GLOBAL REGISTRY CONFIGURATION ---
-# This block must exist BEFORE the admin_page logic
-# --- GLOBAL CONFIGURATION (Run once at the top) ---
+# We define the toggle and registry target BEFORE loading data
 st.sidebar.markdown("---")
-# We add a unique 'key' argument just to be safe
 is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True, key="global_dev_toggle")
 
+BASE_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+TARGET_REGISTRY = BASE_REGISTRY + ("_dummy" if is_dev else "")
 
+# 4. GLOBAL DATA LOADING
+# Now this works because 'client' and 'TARGET_REGISTRY' are defined above
+if client:
+    try:
+        reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
+    except Exception as e:
+        st.error(f"❌ Failed to load registry: {e}")
+        reg_df = pd.DataFrame(columns=['NodeNum', 'PhysicalID', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'])
+else:
+    # If client failed to initialize, provide empty DF
+    reg_df = pd.DataFrame(columns=['NodeNum', 'PhysicalID', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'])
 
-# 2. SIDEBAR NAVIGATION
+# ---------------------------------------------------------
+# 5. SIDEBAR NAVIGATION 
 st.sidebar.title("🛠️ Admin Command Center")
 admin_page = st.sidebar.radio("Management Tool", [
     "📡 Setup Audit", 
