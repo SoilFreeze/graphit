@@ -238,22 +238,82 @@ elif admin_page == "⚙️ Project Master":
             st.rerun()
 
 # ===============================================================
-# TOOL 4: REF CURVE LIBRARY
+# TOOL 4: REF CURVE LIBRARY (2026 Admin Spec)
 # ===============================================================
 elif admin_page == "📈 Ref Curve Library":
     st.header("📈 Theoretical Curve Management")
-    with st.expander("🗑️ Delete/Purge Library"):
-        if st.button("🧨 PURGE ENTIRE LIBRARY", type="primary"):
-            client.query(f"TRUNCATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
-            st.success("Library wiped.")
+    st.write("Manage soil freeze goals. CSV Format: Col 1=Day, Col 2=Temp. Data starts on Row 3.")
 
-    u_files = st.file_uploader("Upload Curve CSVs (Row 3 Start, Col 1: Day, Col 2: Temp)", accept_multiple_files=True)
-    if u_files and st.button("Commit to Database"):
-        for f in u_files:
-            df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'])
-            df['CurveID'] = f.name.replace(".csv", "")
-            client.load_table_from_dataframe(df.dropna(), f"{PROJECT_ID}.{DATASET_ID}.reference_curves").result()
-        st.success("Curves imported.")
+    # 1. MANAGEMENT & PURGE TOOLS
+    c1, c2 = st.columns(2)
+    
+    with c1.expander("🗑️ Surgical Delete (Single Curve)"):
+        try:
+            # Fetch unique curves currently in the library
+            lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
+            if not lib_df.empty:
+                to_delete = st.selectbox("Select Curve to Remove", sorted(lib_df['CurveID'].tolist()))
+                if st.button(f"Delete {to_delete}", type="primary"):
+                    client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID = '{to_delete}'").result()
+                    st.success(f"Successfully removed {to_delete}")
+                    st.rerun()
+            else:
+                st.info("Library is currently empty.")
+        except Exception as e:
+            st.error(f"Error fetching library: {e}")
+
+    with c2.expander("🧨 Nuclear Purge (Wipe All)"):
+        st.warning("This will permanently delete EVERY theoretical curve in the database.")
+        if st.button("EXECUTE TOTAL PURGE", key="purge_all"):
+            client.query(f"TRUNCATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
+            st.success("Library wiped clean.")
+            st.rerun()
+
+    st.divider()
+
+    # 2. BULK UPLOAD ENGINE
+    st.subheader("📤 Upload New Curves")
+    u_files = st.file_uploader(
+        "Upload Curve CSVs", 
+        type=['csv'], 
+        accept_multiple_files=True,
+        help="Max 200MB per file. Data must start on Row 3 (Day, Temp)."
+    )
+
+    if u_files:
+        if st.button("🚀 Commit Uploads to Database"):
+            total_rows = 0
+            progress_bar = st.progress(0)
+            
+            for idx, f in enumerate(u_files):
+                try:
+                    # Logic: Skip first 2 rows, take first 2 columns
+                    # This satisfies 'Row 3 Start, Col 1: Day, Col 2: Temp'
+                    df = pd.read_csv(f, skiprows=2, usecols=[0, 1], names=['Day', 'Temp'])
+                    
+                    # Use Filename as the CurveID (stripping .csv)
+                    df['CurveID'] = f.name.rsplit('.', 1)[0]
+                    
+                    # Data Cleaning: Remove empty rows or non-numeric values
+                    df['Day'] = pd.to_numeric(df['Day'], errors='coerce')
+                    df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
+                    df = df.dropna(subset=['Day', 'Temp'])
+
+                    if not df.empty:
+                        # Upload to BigQuery
+                        job = client.load_table_from_dataframe(
+                            df, 
+                            f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+                        )
+                        job.result() # Wait for completion
+                        total_rows += len(df)
+                    
+                    progress_bar.progress((idx + 1) / len(u_files))
+                except Exception as e:
+                    st.error(f"Error processing {f.name}: {e}")
+
+            st.success(f"✅ Success! Imported {len(u_files)} files ({total_rows} data points).")
+            st.cache_data.clear() # Clear dashboard cache to show new curves immediately
 
 # ===============================================================
 # TOOL 5: SURGICAL DATA MANAGEMENT
