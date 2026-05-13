@@ -235,32 +235,36 @@ elif admin_page == "⚙️ Project Master":
             st.rerun()
 
 # ===============================================================
-# TOOL 4: REF CURVE LIBRARY (Inventory + Management + Tracking)
+# TOOL 4: REF CURVE LIBRARY (Fixed for Schema Errors)
 # ===============================================================
 elif admin_page == "📈 Ref Curve Library":
     st.header("📈 Theoretical Curve Management")
     
-    # 1. CURRENT INVENTORY (Shows summary of curves and upload dates)
-    st.subheader("📚 Current Library Inventory")
+    # 1. DATABASE SCHEMA CHECK & INVENTORY FETCH
+    # We initialize inventory_df as empty to prevent NameErrors
+    inventory_df = pd.DataFrame()
+    
     try:
-        # Query to show summary of each curve, including the upload date
-        # If multiple dates exist for one CurveID, it shows the most recent
+        # Check if upload_date column exists to avoid 400 errors
+        schema_q = f"SELECT column_name FROM `{PROJECT_ID}.{DATASET_ID}.INFORMATION_SCHEMA.COLUMNS` WHERE table_name = 'reference_curves' AND column_name = 'upload_date'"
+        has_date_col = not client.query(schema_q).to_dataframe().empty
+        
+        date_select = "MAX(upload_date)" if has_date_col else "CAST(NULL AS STRING)"
+        
         inv_q = f"""
             SELECT 
                 CurveID, 
                 MAX(Day) as Max_Day, 
                 COUNT(*) as Total_Points,
-                MAX(upload_date) as Last_Upload
+                {date_select} as Last_Upload
             FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`
             GROUP BY CurveID
-            ORDER BY Last_Upload DESC, CurveID ASC
+            ORDER BY CurveID ASC
         """
         inventory_df = client.query(inv_q).to_dataframe()
         
+        st.subheader("📚 Current Library Inventory")
         if not inventory_df.empty:
-            # Ensure date is formatted cleanly
-            inventory_df['Last_Upload'] = pd.to_datetime(inventory_df['Last_Upload']).dt.strftime('%Y-%m-%d')
-            
             st.dataframe(
                 inventory_df.rename(columns={
                     "CurveID": "Curve Identifier",
@@ -272,7 +276,7 @@ elif admin_page == "📈 Ref Curve Library":
                 hide_index=True
             )
         else:
-            st.info("The library is currently empty.")
+            st.info("The library is currently empty. Upload CSVs below to create the schema.")
     except Exception as e:
         st.error(f"Error loading inventory: {e}")
 
@@ -281,6 +285,7 @@ elif admin_page == "📈 Ref Curve Library":
     # 2. MANAGEMENT & PURGE TOOLS
     c1, col_purge = st.columns(2)
     with c1.expander("🗑️ Surgical Delete"):
+        # Fixed: Check if inventory_df exists before using .empty
         if not inventory_df.empty:
             to_delete = st.selectbox("Select Curve to Remove", sorted(inventory_df['CurveID'].tolist()))
             if st.button(f"Delete {to_delete}", type="primary"):
@@ -296,7 +301,7 @@ elif admin_page == "📈 Ref Curve Library":
 
     st.divider()
 
-    # 3. BULK UPLOAD ENGINE (Stamps with current date)
+    # 3. BULK UPLOAD ENGINE (Self-Healing Schema)
     st.subheader("📤 Upload New Curves")
     u_files = st.file_uploader(
         "Upload Curve CSVs", 
@@ -315,17 +320,14 @@ elif admin_page == "📈 Ref Curve Library":
                     # Skip first 2 rows, take first 2 columns
                     df = pd.read_csv(f, skiprows=2, usecols=[0, 1], names=['Day', 'Temp'])
                     df['CurveID'] = f.name.rsplit('.', 1)[0]
+                    df['upload_date'] = today_str # Stamping new data
                     
-                    # ADD UPLOAD DATE STAMP
-                    df['upload_date'] = today_str
-                    
-                    # Cleanup data
                     df['Day'] = pd.to_numeric(df['Day'], errors='coerce')
                     df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
                     df = df.dropna(subset=['Day', 'Temp'])
 
                     if not df.empty:
-                        # Upload to BigQuery (Schema update is handled by write_disposition)
+                        # WRITE_APPEND automatically adds missing columns like upload_date
                         job_config = bigquery.LoadTableConfig(write_disposition="WRITE_APPEND")
                         client.load_table_from_dataframe(
                             df, 
@@ -336,7 +338,7 @@ elif admin_page == "📈 Ref Curve Library":
                 except Exception as e:
                     st.error(f"Error processing {f.name}: {e}")
 
-            st.success(f"✅ Success! Imported {len(u_files)} files with Upload Date: {today_str}")
+            st.success(f"✅ Success! Imported {len(u_files)} files. Refreshing library...")
             st.rerun()
 
 
