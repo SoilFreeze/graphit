@@ -161,85 +161,89 @@ if "Audit" in admin_page:
 
 
 # ===============================================================
-# TOOL 2: NODE LOGISTICS (With Commissioning Verification)
+# TOOL 2: NODE LOGISTICS (Transactional Engineering Logic)
 # ===============================================================
 elif admin_page == "📋 Node Logistics":
     st.header("📋 Hardware Assignment & Deployment")
     
-    # 1. DATABASE SELECTOR (Safe Playground)
+    # Database Selector (Playground Toggle)
     is_dev = st.sidebar.toggle("🛠️ Use Registry Playground (Dummy Table)", value=True)
     TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
     
-    if is_dev:
-        st.info("🧪 **Operating in Playground Mode.** Updates written to dummy table.")
-        client.query(f"CREATE TABLE IF NOT EXISTS `{TARGET_REGISTRY}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` LIMIT 10").result()
-
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
-    reg_mode = st.radio("Logistics Mode", ["Search & Manage", "Bulk CSV Upload", "Global Status Audit"], horizontal=True)
+    
+    # LOGISTICS CASE SELECTOR
+    log_case = st.selectbox("Action Required:", [
+        "Select Action...",
+        "📍 Start New Assignment (Install)",
+        "🔄 Switch Sensor (Incorrect Initial Setup)",
+        "🔚 Retire Sensor (Take off Project)",
+        "🔋 Swap Sensor (Hardware Replacement at Date/Time)"
+    ])
 
-    if reg_mode == "Search & Manage":
-        search_id = st.text_input("🔍 Find Node (Enter NodeNum or Physical ID)")
-        if search_id:
-            # 2. ASSIGNMENT VISUALIZER (The "Commissioning Graph")
-            st.subheader(f"📡 Hardware Assignment Timeline: {search_id}")
-            
-            # Fetch ALL raw data for this node regardless of assignment
-            raw_q = f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE CAST(NodeNum AS STRING) = '{search_id}' ORDER BY timestamp"
-            raw_node_data = client.query(raw_q).to_dataframe()
-            
-            if not raw_node_data.empty:
-                fig_comm = go.Figure()
-                fig_comm.add_trace(go.Scatter(x=raw_node_data['timestamp'], y=raw_node_data['temperature'], name="Raw Telemetry", line=dict(color='lightgrey', width=1)))
-                
-                # Overlay current registry assignments as shaded boxes
-                node_assignments = full_reg_df[full_reg_df['NodeNum'] == search_id]
-                for _, assign in node_assignments.iterrows():
-                    start = assign['Start_Date']
-                    end = assign['End_Date'] if pd.notnull(assign['End_Date']) else pd.Timestamp.now(tz='UTC')
-                    
-                    fig_comm.add_vrect(
-                        x0=start, x1=end, 
-                        fillcolor="rgba(0, 255, 0, 0.1)", opacity=0.3, line_width=2, line_color="green",
-                        annotation_text=f"Assigned: {assign['Project']}", annotation_position="top left"
-                    )
-                
-                fig_comm.update_layout(title="Registry Assignment vs. Raw Data", height=400, plot_bgcolor='white')
-                st.plotly_chart(fig_comm, use_container_width=True)
-            else:
-                st.warning("No raw telemetry found for this hardware ID in the master view.")
+    if log_case == "📍 Start New Assignment (Install)":
+        with st.form("install_form"):
+            st.subheader("Assign Node to Location")
+            c1, c2 = st.columns(2)
+            n_id = c1.text_input("NodeNum (Display ID)")
+            p_id = c2.text_input("Physical ID (Hardware S/N)")
+            proj = c1.text_input("Project ID")
+            loc = c2.text_input("Location Name")
+            start = st.date_input("Deployment Start Date")
+            if st.form_submit_button("🚀 Commit Deployment"):
+                sql = f"INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Start_Date, SensorStatus) VALUES ('{n_id}', {p_id}, '{proj}', '{loc}', '{start}', 'Active')"
+                client.query(sql).result()
+                st.success(f"Node {n_id} deployed to {proj}.")
 
-            # 3. SURGICAL EDIT FORM (Copied from existing logic)
-            matches = node_assignments.sort_values('Start_Date', ascending=False)
+    elif log_case == "🔄 Switch Sensor (Incorrect Initial Setup)":
+        st.info("Use this if you accidentally assigned the wrong serial number to a location and need to fix the history.")
+        n_id = st.text_input("Search NodeNum")
+        if n_id:
+            matches = full_reg_df[full_reg_df['NodeNum'] == n_id].sort_values('Start_Date', ascending=False)
             if not matches.empty:
-                options = matches.apply(lambda r: f"{r['Project']} | {r['Location']} (Start: {r['Start_Date']})", axis=1).tolist()
-                selection = st.selectbox("Select specific assignment to manage:", options)
-                row = matches.iloc[options.index(selection)]
-                
-                with st.form("surgical_node_edit_form_v4"):
-                    st.subheader("📝 Edit Selected Assignment")
-                    c1, c2 = st.columns(2)
-                    u_proj = c1.text_input("Project", value=str(row['Project']))
-                    u_loc = c2.text_input("Location", value=str(row['Location']))
-                    u_bank = c1.text_input("Bank", value=str(row['Bank']) if pd.notnull(row['Bank']) else "")
-                    u_depth = c2.number_input("Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
-                    
-                    d1, d2 = st.columns(2)
-                    raw_start = pd.to_datetime(row['Start_Date'])
-                    u_start = d1.date_input("Start Date", value=raw_start.date() if pd.notnull(raw_start) else datetime.now().date())
-                    
-                    raw_end = pd.to_datetime(row['End_Date'])
-                    u_end = d2.date_input("End Date", value=raw_end.date() if pd.notnull(raw_end) else datetime.now().date())
-                    apply_end = d2.checkbox("Apply End Date", value=pd.notnull(raw_end))
-
-                    status_list = ["Active", "Diagnostic", "Available", "Need Repair", "Dead"]
-                    u_stat = st.selectbox("Status", status_list, index=status_list.index(row['SensorStatus']) if row['SensorStatus'] in status_list else 0)
-                    
-                    if st.form_submit_button("💾 Commit Registry Change"):
-                        sql = f"UPDATE `{TARGET_REGISTRY}` SET Project='{u_proj}', Location='{u_loc}', Bank='{u_bank}', Depth={u_depth}, SensorStatus='{u_stat}', Start_Date='{u_start}', End_Date={'NULL' if not apply_end else f"'{u_end}'"} WHERE NodeNum='{row['NodeNum']}' AND Start_Date='{row['Start_Date']}'"
+                row = matches.iloc[0]
+                with st.form("fix_setup"):
+                    new_phys = st.text_input("Correct Physical ID", value=str(row['PhysicalID']))
+                    if st.form_submit_button("💾 Overwrite Setup"):
+                        sql = f"UPDATE `{TARGET_REGISTRY}` SET PhysicalID={new_phys} WHERE NodeNum='{n_id}' AND Start_Date='{row['Start_Date']}'"
                         client.query(sql).result()
-                        st.success("Record updated successfully.")
-                        st.rerun()
+                        st.success("Corrected Physical ID. All historical data for this assignment is now correctly mapped.")
 
+    elif log_case == "🔚 Retire Sensor (Take off Project)":
+        n_id = st.text_input("Search NodeNum to Retire")
+        if n_id:
+            matches = full_reg_df[(full_reg_df['NodeNum'] == n_id) & (full_reg_df['End_Date'].isna())]
+            if not matches.empty:
+                row = matches.iloc[0]
+                st.warning(f"Currently assigned to {row['Project']} | {row['Location']}")
+                end_d = st.date_input("Retirement Date", value=datetime.now().date())
+                if st.button("🔚 Finalize Retirement"):
+                    sql = f"UPDATE `{TARGET_REGISTRY}` SET End_Date='{end_d}', SensorStatus='Available' WHERE NodeNum='{n_id}' AND End_Date IS NULL"
+                    client.query(sql).result()
+                    st.success("Sensor retired. It is now hidden from the client portal after this date.")
+
+    elif log_case == "🔋 Swap Sensor (Hardware Replacement at Date/Time)":
+        st.info("Case: Old sensor failed or battery died. Put New sensor in its place starting now.")
+        old_node = st.text_input("Existing NodeNum (e.g. TP-0001)")
+        if old_node:
+            matches = full_reg_df[(full_reg_df['NodeNum'] == old_node) & (full_reg_df['End_Date'].isna())]
+            if not matches.empty:
+                row = matches.iloc[0]
+                with st.form("swap_engine"):
+                    st.subheader(f"Replacing Hardware at {row['Location']}")
+                    new_phys = st.text_input("NEW Physical ID (New Serial Number)")
+                    swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
+                    if st.form_submit_button("⚡ Execute Hardware Swap"):
+                        # TRANSACTION: Retire old, Start new in same spot
+                        sql = f"""
+                        BEGIN TRANSACTION;
+                        UPDATE `{TARGET_REGISTRY}` SET End_Date='{swap_date}', SensorStatus='Dead' WHERE NodeNum='{old_node}' AND End_Date IS NULL;
+                        INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                        VALUES ('{old_node}', {new_phys}, '{row['Project']}', '{row['Location']}', '{row['Bank']}', {row['Depth']}, '{swap_date}', 'Active');
+                        COMMIT;
+                        """
+                        client.query(sql).result()
+                        st.success("Swap complete. Data before this date belongs to the old serial; data after belongs to the new one.")
 # ===============================================================
 # TOOL 3: PROJECT MASTER (Updated Fix)
 # ===============================================================
