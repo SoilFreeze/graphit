@@ -653,14 +653,14 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
-    Engineering-grade Vertical Temperature Profiles with 
-    Baseline tracking and full chart framing.
+    Engineering-grade Vertical Temperature Profiles.
+    Fixed: Full 4-sided frame and dynamic Baseline date label.
     """
     # 1. HEADER
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
     
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar.")
+        st.info("💡 Please select a project to view profiles.")
         return
 
     # 2. SIDEBAR SETTINGS
@@ -679,7 +679,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
     if depth_df.empty:
-        st.info("No sensors with valid 'Depth' values found in the Node Registry.")
+        st.info("No sensors with valid 'Depth' values found.")
         return
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
@@ -695,25 +695,27 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
-            # --- A. PLOT BASELINE (The very first reading for this location) ---
-            # This stays on the chart regardless of the weekly lookback
-            baseline_snap = (
-                loc_data.sort_values('timestamp', ascending=True)
-                .drop_duplicates('NodeNum')
-                .sort_values('Depth_Num')
-            )
-            
-            if not baseline_snap.empty:
+            # --- A. PLOT BASELINE (With Date Label) ---
+            baseline_raw = loc_data.sort_values('timestamp', ascending=True)
+            if not baseline_raw.empty:
+                # Extract the earliest date for the label
+                b_date_str = baseline_raw['timestamp'].min().strftime('%Y-%m-%d')
+                
+                baseline_snap = (
+                    baseline_raw.drop_duplicates('NodeNum')
+                    .sort_values('Depth_Num')
+                )
+                
                 b_temps = baseline_snap['temperature']
                 if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
                 
                 fig.add_trace(go.Scatter(
                     x=b_temps, y=baseline_snap['Depth_Num'], 
                     mode='lines+markers', 
-                    name='BASELINE',
-                    line=dict(color='black', width=3, dash='solid'),
-                    marker=dict(size=8, symbol='diamond'),
-                    hovertemplate="BASELINE<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
+                    name=f'Baseline ({b_date_str})',
+                    line=dict(color='black', width=2.5),
+                    marker=dict(size=7, symbol='diamond'),
+                    hovertemplate=f"Baseline: {b_date_str}<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
                 ))
             
             # --- B. PLOT WEEKLY SNAPSHOTS ---
@@ -739,8 +741,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         x=temps, y=snap['Depth_Num'], 
                         mode='lines+markers', 
                         name=target_ts.strftime('%Y-%m-%d'),
-                        line=dict(shape='spline', smoothing=1.1, width=2),
-                        marker=dict(size=5),
+                        line=dict(shape='spline', smoothing=1.1, width=1.5),
+                        marker=dict(size=4),
                         hovertemplate="%{fullData.name}<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
                     ))
 
@@ -748,7 +750,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="cyan")
 
             # --- D. DYNAMIC X-AXIS CALCULATION ---
-            # Use 60 as default max, but expand if baseline or data is higher
             current_max = loc_data['temperature'].max()
             if unit_mode == "Celsius":
                 current_max = (current_max - 32) * 5/9
@@ -758,7 +759,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 temp_upper = max(60, current_max + 5)
                 temp_lower = -10
 
-            # --- E. LAYOUT & BORDERS ---
+            # --- E. LAYOUT & BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
@@ -766,28 +767,32 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 title=f"<b>Temp vs Depth - {loc}</b>",
                 plot_bgcolor='white', 
                 height=800,
-                # FULL BOX FRAME: mirror=True and showline=True on both axes
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
                     range=[temp_lower, temp_upper],
                     dtick=10,
-                    minor=dict(dtick=2, showgrid=True, gridcolor='whitesmoke'),
+                    minor=dict(dtick=2, showgrid=True, gridcolor='#f0f0f0'),
                     gridcolor='Gainsboro', 
-                    showline=True, mirror=True, linecolor='black', linewidth=2
+                    showline=True, 
+                    linewidth=2, 
+                    linecolor='black',
+                    mirror=True  # This forces the line to the TOP as well
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
                     range=[y_limit, 0], 
                     dtick=10,
-                    minor=dict(dtick=2, showgrid=True, gridcolor='whitesmoke'),
+                    minor=dict(dtick=2, showgrid=True, gridcolor='#f0f0f0'),
                     gridcolor='Silver', 
-                    showline=True, mirror=True, linecolor='black', linewidth=2
+                    showline=True, 
+                    linewidth=2, 
+                    linecolor='black',
+                    mirror=True  # This forces the line to the RIGHT as well
                 ),
                 legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
             )
             
-            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
-            
+            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")            
 
 ##############################            
 # - 7. PAGE: CLIENT PORTAL - #
