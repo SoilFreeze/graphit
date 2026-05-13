@@ -161,9 +161,9 @@ if "Audit" in admin_page:
 
 
 # ===============================================================
-# TOOL 2: NODE LOGISTICS (Assign, Swap, Retire)
+# TOOL 2: NODE LOGISTICS (Transactional & Bulk Engine)
 # ===============================================================
-elif admin_page == "📋 Node Logistics":
+elif "Logistics" in admin_page:
     st.header("📋 Hardware Assignment & Deployment")
     
     # --- 1. PLAYGROUND & DATA SETUP ---
@@ -180,17 +180,19 @@ elif admin_page == "📋 Node Logistics":
 
     # Load fresh registry data
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
+    # Clean Project column for sorting/lookup
+    full_reg_df['Project'] = full_reg_df['Project'].fillna("UNASSIGNED")
     active_reg = full_reg_df[full_reg_df['End_Date'].isna()].copy()
 
     # --- 2. SEARCH & LOOKUP ENGINE ---
     st.subheader("🔍 Find & Verify Hardware")
     lookup_col1, lookup_col2 = st.columns(2)
+    found_row = None
 
     # METHOD A: HARDWARE-FIRST (Search by ID)
     with lookup_col1:
         st.caption("Search by Node ID or S/N")
-        search_id = st.text_input("Enter Hardware ID", placeholder="TP-0001 or 1703...")
-        found_row = None
+        search_id = st.text_input("Enter Hardware ID", placeholder="TP-0001 or 1703...", key="hw_search")
         if search_id:
             search_clean = str(search_id).strip().upper()
             match = active_reg[
@@ -199,87 +201,91 @@ elif admin_page == "📋 Node Logistics":
             ]
             if not match.empty:
                 found_row = match.iloc[0]
-                st.success(f"**Found:** {found_row['NodeNum']} is at **{found_row['Project']}** ({found_row['Location']})")
+                st.success(f"**Found:** {found_row['NodeNum']} is at **{found_row['Project']}**")
             else:
                 st.error("No active assignment found for this ID.")
 
     # METHOD B: SITE-FIRST (Cascading Dropdowns)
     with lookup_col2:
         st.caption("Browse by Project")
-        p_list = sorted(active_reg['Project'].unique().tolist())
-        sel_p = st.selectbox("1. Project", ["Select..."] + p_list)
+        p_list = sorted([p for p in active_reg['Project'].unique().tolist() if p])
+        sel_p = st.selectbox("1. Select Project", ["Select..."] + p_list, key="site_p")
         if sel_p != "Select...":
             loc_list = sorted(active_reg[active_reg['Project'] == sel_p]['Location'].unique().tolist())
-            sel_l = st.selectbox("2. Location", loc_list)
-            # Find current hardware in this slot
+            sel_l = st.selectbox("2. Select Location", loc_list, key="site_l")
+            
             slot_match = active_reg[(active_reg['Project'] == sel_p) & (active_reg['Location'] == sel_l)]
             if not slot_match.empty:
-                # This shows the "Currently have on them" requirement
+                # Shows "Which node they currently have"
                 options = slot_match.apply(lambda r: f"{r['NodeNum']} (S/N: {r['PhysicalID']} | Depth: {r['Depth']}ft)", axis=1).tolist()
-                sel_n = st.selectbox("3. Active Node in Slot", options)
+                sel_n = st.selectbox("3. Active Node in Slot", options, key="site_n")
                 found_row = slot_match.iloc[options.index(sel_n)]
 
+    # --- 3. SURGICAL ACTIONS ---
     if found_row is not None:
         st.divider()
-        
-        # --- 3. SURGICAL ACTIONS ---
         st.subheader(f"⚡ Actions for {found_row['NodeNum']} at {found_row['Location']}")
         
-        # CASE A: PHYSICAL HARDWARE SWAP (Battery/Fault)
-        with st.expander("🔋 Swap Sensor (Hardware Replacement at Date/Time)"):
-            st.info("Use this if a sensor died and you are putting NEW hardware in its place.")
-            # Show Visual Health check
-            old_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
-            if not old_data.empty: st.line_chart(old_data.set_index('timestamp')['temperature'], height=150)
+        # VISUAL TELEMETRY CHECK
+        old_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
+        if not old_data.empty:
+            st.caption(f"Last 3 days of telemetry for {found_row['NodeNum']}:")
+            st.line_chart(old_data.set_index('timestamp')['temperature'], height=150)
 
+        action_tab1, action_tab2 = st.tabs(["🔋 Physical Hardware Swap", "🔄 Data/Mapping Correction"])
+
+        with action_tab1:
+            st.info("Case: Sensor died/faulty. Replace with NEW serial number starting at a specific time.")
             with st.form("swap_form"):
-                new_sn = st.text_input("New Physical S/N (Serial Number)")
+                new_sn = st.text_input("New Physical S/N (New Hardware Serial)")
                 swap_ts = st.datetime_input("Effective Swap Time", value=datetime.now())
                 if st.form_submit_button("⚡ Execute Physical Swap"):
-                    sql = f"""
-                    BEGIN TRANSACTION;
-                    UPDATE `{TARGET_REGISTRY}` SET End_Date='{swap_ts.strftime('%Y-%m-%d %H:%M:%S')}', SensorStatus='Dead' 
-                    WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date='{found_row['Start_Date']}';
-                    INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                    VALUES ('{found_row['NodeNum']}', {new_sn}, '{found_row['Project']}', '{found_row['Location']}', '{found_row['Bank']}', {found_row['Depth']}, '{swap_ts.strftime('%Y-%m-%d %H:%M:%S')}', 'Active');
-                    COMMIT;"""
-                    client.query(sql).result()
-                    st.success("Physical swap recorded.")
-                    st.rerun()
+                    if not new_sn: st.error("New Serial required.")
+                    else:
+                        sql = f"""
+                        BEGIN TRANSACTION;
+                        UPDATE `{TARGET_REGISTRY}` SET End_Date='{swap_ts.strftime('%Y-%m-%d %H:%M:%S')}', SensorStatus='Dead' 
+                        WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date='{found_row['Start_Date']}';
+                        INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                        VALUES ('{found_row['NodeNum']}', {new_sn}, '{found_row['Project']}', '{found_row['Location']}', '{found_row['Bank']}', {found_row['Depth']}, '{swap_ts.strftime('%Y-%m-%d %H:%M:%S')}', 'Active');
+                        COMMIT;"""
+                        client.query(sql).result()
+                        st.success("Swap recorded. History split at timestamp.")
+                        st.rerun()
 
-        # CASE B: DATA SWITCH (Mapping Correction)
-        with st.expander("🔄 Correct Serial Number (Wrong Assignment)"):
-            st.info("Use this if you accidentally typed the wrong S/N during install. This moves ALL data to the correct link.")
+        with action_tab2:
+            st.info("Case: Assignment was wrong. Move ALL data from this assignment to a different serial number.")
             with st.form("fix_data"):
-                corr_sn = st.text_input("Correct Physical ID (Serial Number)", value=str(found_row['PhysicalID']))
-                if st.form_submit_button("💾 Overwrite Registry link"):
-                    # No transaction needed, just a surgical update to the link
+                corr_sn = st.text_input("Correct Physical S/N", value=str(found_row['PhysicalID']))
+                if st.form_submit_button("💾 Overwrite Registry Link"):
                     sql = f"UPDATE `{TARGET_REGISTRY}` SET PhysicalID={corr_sn} WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date='{found_row['Start_Date']}'"
                     client.query(sql).result()
-                    st.success("Serial Number link corrected for all history.")
+                    st.success("Link corrected. History updated.")
                     st.rerun()
 
     # --- 4. BULK OPERATIONS ---
     st.divider()
     st.subheader("📦 Bulk Site Operations")
-    bulk_tab1, bulk_tab2 = st.tabs(["New Project Additions", "Project Retirement"])
+    bulk_tab1, bulk_tab2 = st.tabs(["New Site Deployment (Additions)", "Full Site Decommission (Retirement)"])
     
     with bulk_tab1:
-        st.write("Upload CSV to add a whole site at once.")
-        u_csv = st.file_uploader("Upload Installation CSV", type="csv")
+        st.write("Upload CSV to initialize a whole project.")
+        u_csv = st.file_uploader("Upload Node CSV", type="csv", help="Required columns: NodeNum, PhysicalID, Project, Location, Depth, Start_Date")
         if u_csv and st.button("🚀 Push Bulk Additions"):
             up_df = pd.read_csv(u_csv)
             client.load_table_from_dataframe(up_df, TARGET_REGISTRY).result()
-            st.success("Site added to registry.")
+            st.success(f"Success: {len(up_df)} nodes added to registry.")
 
     with bulk_tab2:
-        st.warning("Retires all active sensors for a specific Project ID.")
-        ret_p = st.text_input("Enter Project ID to Close Out")
-        ret_date = st.date_input("Final Site Date")
+        st.warning("This will set an End Date for every active sensor on a specific Project.")
+        ret_p = st.text_input("Enter Project ID to Close Out", placeholder="e.g. 2538")
+        ret_date = st.date_input("Decommission Date", value=datetime.now().date())
         if st.button("🔚 Retire Entire Site", type="primary"):
-             sql = f"UPDATE `{TARGET_REGISTRY}` SET End_Date='{ret_date}', SensorStatus='Available' WHERE Project='{ret_p}' AND End_Date IS NULL"
-             client.query(sql).result()
-             st.success(f"Project {ret_p} retired.")
+             if ret_p:
+                 sql = f"UPDATE `{TARGET_REGISTRY}` SET End_Date='{ret_date}', SensorStatus='Available' WHERE Project='{ret_p}' AND End_Date IS NULL"
+                 client.query(sql).result()
+                 st.success(f"Project {ret_p} retired.")
+             else: st.error("Project ID required.")
 
 
 # ===============================================================
