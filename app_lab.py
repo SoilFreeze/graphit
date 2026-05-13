@@ -654,7 +654,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
-    Visualizes the thermal gradient across soil depths over time using historical snapshots.
+    Includes 32°F/0°C reference line and Major (10) / Minor (2) grid spacing.
     """
     # 1. HEADER
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
@@ -668,7 +668,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
 
     with st.spinner("Fetching historical telemetry..."):
-        # Fetches the master data filtered for the selected project
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if p_df is None or p_df.empty:
@@ -676,7 +675,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         return
 
     # 3. PRE-PROCESS DATA
-    # Ensure Depth is numeric for proper Y-axis scaling
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
@@ -686,8 +684,9 @@ def render_depth_charts(selected_project, unit_label, display_tz):
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
     x_range = [-20, 40] if unit_mode == "Celsius" else [-10, 80]
+    freeze_pt = 0 if unit_mode == "Celsius" else 32
     
-    # 4. GENERATE SNAPSHOTS (Weekly Monday 6:00 AM capture)
+    # 4. GENERATE SNAPSHOTS
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
     locations = sorted(depth_df['Location'].unique())
@@ -700,14 +699,12 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             # --- A. PLOT HISTORICAL SNAPSHOTS ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
-                # 12-hour window to find the closest reading to Monday morning
                 window = loc_data[
                     (loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                     (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))
                 ]
                 
                 if not window.empty:
-                    # Capture the single closest reading per sensor for this snapshot
                     snap = (
                         window.assign(diff=(window['timestamp'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
@@ -728,9 +725,18 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
                     ))
 
-            # --- B. LAYOUT & BORDERS ---
+            # --- B. FREEZING REFERENCE LINE ---
+            fig.add_vline(
+                x=freeze_pt, 
+                line_width=2, 
+                line_dash="solid", 
+                line_color="rgba(0, 255, 255, 0.8)", # Cyan Freeze Line
+                annotation_text="FREEZE LINE", 
+                annotation_position="top left"
+            )
+
+            # --- C. LAYOUT & GRID SCALING ---
             max_depth = loc_data['Depth_Num'].max()
-            # Dynamic Y-limit rounded up to the nearest 10ft
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
             fig.update_layout(
@@ -739,14 +745,19 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 height=700,
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
-                    range=x_range, 
+                    range=x_range,
+                    # Grid Settings: Major=10, Minor=2
+                    dtick=10,
+                    minor=dict(ticklen=4, tickmode="linear", dtick=2, showgrid=True, gridcolor='whitesmoke'),
                     gridcolor='Gainsboro', 
                     showline=True, mirror=True, linecolor='black', linewidth=1.5
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
-                    range=[y_limit, 0], # Inverted Y-axis: Surface (0) at top
-                    dtick=5, 
+                    range=[y_limit, 0], # Inverted
+                    # Grid Settings: Major=10, Minor=2
+                    dtick=10,
+                    minor=dict(ticklen=4, tickmode="linear", dtick=2, showgrid=True, gridcolor='whitesmoke'),
                     gridcolor='Silver', 
                     showline=True, mirror=True, linecolor='black', linewidth=1.5
                 ),
@@ -754,9 +765,11 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
-###########
+
+
+##############################            
 # - 7. PAGE: CLIENT PORTAL - #
-###########
+##############################
 
 def render_client_portal(selected_project, project_metadata, display_tz, unit_mode, unit_label, active_refs):
     """
