@@ -46,7 +46,7 @@ def get_bq_client():
 # 3. PAGE ROUTER
 st.sidebar.title("🛠️ Project & Node Admin")
 admin_page = st.sidebar.radio("Management Tool", [
-    "📡 Commissioning Audit", 
+    "📡 Setup Audit", 
     "📋 Node Logistics", 
     "⚙️ Project Master", 
     "📈 Ref Curve Library", 
