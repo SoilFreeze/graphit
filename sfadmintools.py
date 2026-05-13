@@ -446,51 +446,6 @@ elif admin_page == "⚙️ Project Master":
             st.rerun()
 
 # ===============================================================
-# TOOL: SENSOR STATUS AUDIT
-# ===============================================================
-elif admin_page == "🔍 Sensor Status Audit":
-    st.header("🔍 Sensor Status Audit")
-    
-    # 1. FLEET METRICS
-    registry_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
-    
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("System Total", registry_df['PhysicalID'].nunique())
-    m2.metric("Assigned to Projects", len(registry_df[registry_df['End_Date'].isna()]))
-    m3.metric("Available", len(registry_df[registry_df['SensorStatus'] == 'Available']))
-    m4.metric("Faulty/Dead", len(registry_df[registry_df['SensorStatus'] == 'Dead']))
-
-    st.divider()
-
-    # 2. INVESTIGATOR
-    st.subheader("🔦 Sensor Investigation")
-    sn_look = st.text_input("Look up by Serial Number or Node Number")
-    
-    if sn_look:
-        # Find PhysicalID from input
-        lookup = registry_df[
-            (registry_df['PhysicalID'].astype(str).str.contains(sn_look)) | 
-            (registry_df['NodeNum'].astype(str).str.contains(sn_look.upper()))
-        ]
-        
-        if not lookup.empty:
-            target_sn = lookup.iloc[0]['PhysicalID']
-            st.markdown(f"### Historical Timeline: S/N {target_sn}")
-            
-            # Show Table
-            history = registry_df[registry_df['PhysicalID'] == target_sn].sort_values('Start_Date', ascending=False)
-            st.dataframe(history[['Project', 'Location', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
-            
-            # Show All-Time Graph
-            raw_h = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE PhysicalID={target_sn} ORDER BY timestamp DESC").to_dataframe()
-            if not raw_h.empty:
-                fig_h = go.Figure(go.Scatter(x=raw_h['timestamp'], y=raw_h['temperature'], name="All-Time Data"))
-                fig_h.update_layout(title="All-Time Temperature History", height=300)
-                st.plotly_chart(fig_h, use_container_width=True)
-        else:
-            st.error("No hardware matching that ID found in registry.")
-
-# ===============================================================
 # TOOL 4: REF CURVE LIBRARY (Fixed for Schema Errors)
 # ===============================================================
 elif admin_page == "📈 Ref Curve Library":
