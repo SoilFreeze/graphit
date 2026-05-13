@@ -35,13 +35,7 @@ st.sidebar.markdown("---")
 # We add a unique 'key' argument just to be safe
 is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True, key="global_dev_toggle")
 
-BASE_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-TARGET_REGISTRY = BASE_REGISTRY + ("_dummy" if is_dev else "")
-st.sidebar.markdown("---")
 
-st.sidebar.info(f"Connected to: **{TARGET_REGISTRY.split('.')[-1]}**")
-st.sidebar.markdown("---")
-# ------------------------------------------
 
 # 2. SIDEBAR NAVIGATION
 st.sidebar.title("🛠️ Admin Command Center")
@@ -57,11 +51,21 @@ admin_page = st.sidebar.radio("Management Tool", [
     "🧨 Surgical Data Management"
 ])
 
+
+
 # Global Project Selection for context
 # (This still works perfectly here as it uses the client and constants)
 proj_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
 proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].tolist())
 selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list)
+
+BASE_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+TARGET_REGISTRY = BASE_REGISTRY + ("_dummy" if is_dev else "")
+st.sidebar.markdown("---")
+
+st.sidebar.info(f"Connected to: **{TARGET_REGISTRY.split('.')[-1]}**")
+st.sidebar.markdown("---")
+# ------------------------------------------
 
 # ===============================================================
 # TOOL 1: SETUP AUDIT (Hardened Formatting & Color Scales)
@@ -207,50 +211,62 @@ elif "Sensor Status" in admin_page:
         
         st.divider()
 
-    # 2. HARDWARE INVESTIGATOR
-    st.subheader("🔦 Hardware Investigator")
-    search_id = st.text_input("Enter Physical ID or Node ID (e.g., TP-0009)", placeholder="Search...")
+   # ===============================================================
+# 2. HARDWARE INVESTIGATOR (REWRITTEN)
+# ===============================================================
+st.subheader("🔦 Hardware Investigator")
+search_id = st.text_input("Enter Physical ID or Node ID (e.g., TP-0009)", placeholder="Search...")
 
-    if search_id:
-        # Filter the registry for the specific piece of hardware
-        match = reg_df[
-            (reg_df['PhysicalID'].astype(str).str.contains(search_id)) | 
-            (reg_df['NodeNum'].astype(str).str.upper().str.contains(search_id.upper()))
-        ]
+if search_id:
+    # 1. NORMALIZE AND MATCH
+    # We search both NodeNum and PhysicalID to find any mention of this hardware
+    search_id_clean = str(search_id).strip().upper()
+    
+    match = reg_df[
+        (reg_df['NodeNum'].astype(str).str.upper() == search_id_clean) | 
+        (reg_df['PhysicalID'].astype(str).str.replace('.0', '', regex=False) == search_id_clean.replace('.0', ''))
+    ]
+    
+    if match.empty:
+        st.error("No record found for that ID. Please check the registry.")
+    else:
+        # 2. COLLECT ALL RELEVANT IDs
+        # A node might have records with NULL IDs and records with Numeric IDs. 
+        # We need the numeric ones to pull telemetry.
+        target_node = match.iloc[0]['NodeNum']
+        all_phys_ids = match['PhysicalID'].dropna().unique().tolist()
         
-        if match.empty:
-            st.error("No record found for that ID. Please check the registry.")
+        # 3. CURRENT STATUS HEADER
+        current_assignment = match[match['End_Date'].isna()]
+        if not current_assignment.empty:
+            row = current_assignment.iloc[0]
+            st.info(f"📍 **Current Location:** {row['Project']} | {row['Location']} (Status: {row['SensorStatus']})")
         else:
-            target_sn = match.iloc[0]['PhysicalID']
-            current_assignment = match[match['End_Date'].isna()]
+            st.warning("📍 **Current Status:** Archived or Available (Not currently at a project site).")
 
-            # A. Current Deployment Status
-            if not current_assignment.empty:
-                row = current_assignment.iloc[0]
-                st.info(f"📍 **Current Location:** {row['Project']} | {row['Location']} (Node: {row['NodeNum']})")
-            else:
-                st.warning("📍 **Current Status:** Available / Not currently assigned to a project.")
-
-            # B. PERFORMANCE HISTORY (Windowed Stats per Assignment)
-            st.markdown("### 📜 Deployment & Performance History")
-            
-            # This SQL correlates telemetry to the specific time windows in the registry
+        # 4. DEPLOYMENT & PERFORMANCE HISTORY
+        st.markdown("### 📜 Deployment & Performance History")
+        
+        if not all_phys_ids:
+            st.warning("This node is in the registry but has no Physical IDs assigned to pull telemetry from.")
+        else:
+            # SQL: Correlate registry time-windows with actual pings
             history_q = f"""
                 SELECT 
                     r.Project, 
                     r.Location, 
                     r.Start_Date, 
                     r.End_Date,
-                    r.SensorStatus as Status_At_Time,
+                    r.SensorStatus,
                     DATE_DIFF(IFNULL(r.End_Date, CURRENT_DATE()), r.Start_Date, DAY) as Days_On_Site,
                     COUNT(m.temperature) as Total_Pings,
-                    ROUND(AVG(m.temperature), 2) as Avg_Temp_At_Loc
+                    ROUND(AVG(m.temperature), 2) as Avg_Temp
                 FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
                 LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
                   ON SAFE_CAST(r.PhysicalID AS STRING) = SAFE_CAST(m.PhysicalID AS STRING)
                   AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
                   AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
-                WHERE SAFE_CAST(r.PhysicalID AS STRING) = SAFE_CAST('{target_sn}' AS STRING)
+                WHERE r.NodeNum = '{target_node}'
                 GROUP BY 1, 2, 3, 4, 5
                 ORDER BY r.Start_Date DESC
             """
@@ -259,38 +275,54 @@ elif "Sensor Status" in admin_page:
                 hist_df = client.query(history_q).to_dataframe()
                 
                 if not hist_df.empty:
-                    # Calculate Reliability (Pings per Hour) for each assignment
-                    def calc_reliability(row):
-                        hours = row['Days_On_Site'] * 24
-                        if hours <= 0: return 0
+                    # Logic: Calculate Pings per Hour to check health
+                    def get_health(row):
+                        hours = max(row['Days_On_Site'] * 24, 1)
                         return round(row['Total_Pings'] / hours, 2)
-
-                    hist_df['Pings/Hr'] = hist_df.apply(calc_reliability, axis=1)
+                    
+                    hist_df['Pings/Hr'] = hist_df.apply(get_health, axis=1)
                     
                     st.dataframe(
-                        hist_df[['Project', 'Location', 'Start_Date', 'End_Date', 'Days_On_Site', 'Pings/Hr', 'Avg_Temp_At_Loc', 'Status_At_Time']],
+                        hist_df[['Project', 'Location', 'Start_Date', 'End_Date', 'Pings/Hr', 'Avg_Temp', 'SensorStatus']],
                         use_container_width=True,
                         hide_index=True
                     )
                 else:
-                    st.warning("No deployment history found for this Serial Number.")
+                    st.warning("No historical telemetry windows found.")
             except Exception as e:
-                st.error(f"Error fetching history: {e}")
+                st.error(f"History Query Error: {e}")
 
-            # C. LONG-TERM TREND GRAPH
-            st.markdown("### 📈 Lifetime Thermal Profile")
+        # 5. LIFETIME THERMAL PROFILE
+        st.markdown("### 📈 Lifetime Thermal Profile")
+        if all_phys_ids:
+            # Note: We query all IDs associated with this NodeNum to get the full story
             telemetry_q = f"""
                 SELECT timestamp, temperature 
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
-                WHERE SAFE_CAST(PhysicalID AS STRING) = SAFE_CAST('{target_sn}' AS STRING)
+                WHERE SAFE_CAST(PhysicalID AS STRING) IN UNNEST({[str(int(i)) if isinstance(i, float) else str(i) for i in all_phys_ids]})
                 ORDER BY timestamp ASC
             """
-            tel_df = client.query(telemetry_q).to_dataframe()
-            
-            if not tel_df.empty:
-                fig = go.Figure(go.Scatter(x=tel_df['timestamp'], y=tel_df['temperature'], mode='lines', line=dict(color='#00CC96')))
-                fig.update_layout(height=300, margin=dict(t=10, b=10), plot_bgcolor='white', xaxis_title="Timeline", yaxis_title="Temp (°F)")
-                st.plotly_chart(fig, use_container_width=True)
+            try:
+                tel_df = client.query(telemetry_q).to_dataframe()
+                if not tel_df.empty:
+                    fig = go.Figure(go.Scatter(
+                        x=tel_df['timestamp'], 
+                        y=tel_df['temperature'], 
+                        mode='lines', 
+                        line=dict(color='#00d4ff', width=1.5)
+                    ))
+                    fig.update_layout(
+                        height=350, 
+                        template="plotly_dark",
+                        xaxis_title="Time", 
+                        yaxis_title="Temp (°C)",
+                        margin=dict(l=20, r=20, t=20, b=20)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No temperature data found in the master view for these IDs.")
+            except Exception as e:
+                st.error(f"Telemetry Graph Error: {e}")
 
     # 3. REGISTRY MAINTENANCE UTILITY
     st.divider()
