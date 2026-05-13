@@ -32,9 +32,11 @@ client = get_bq_client()
 st.sidebar.title("🛠️ Admin Command Center")
 admin_page = st.sidebar.radio("Management Tool", [
     "📡 Setup Audit", 
-    "📋 Node Logistics", 
+    "🔍 Sensor Status",
+    "🔄 Sensor Replace",      # Renamed from Node Logistics
+    "🩹 Sensor Switch",       # New: For ID corrections
+    "📝 Sensor Edit",         # New: For manual row editing/deletion
     "📦 Bulk Registry Manager",
-    "🔍 Sensor Status Audit",
     "⚙️ Project Master", 
     "📈 Ref Curve Library", 
     "🧨 Surgical Data Management"
@@ -145,9 +147,9 @@ if "Setup Audit" in admin_page:
         c2.caption(f"**Max Site Gap:** {df['max_gap_mins'].max() or 0} minutes")
 
 # ===============================================================
-# TOOL: SENSOR STATUS AUDIT (The Hardware Ledger)
+# TOOL: SENSOR STATUS 
 # ===============================================================
-elif "Sensor Status Audit" in admin_page:
+elif "Sensor Status" in admin_page:
     st.header("🔍 Sensor Status & Reliability Audit")
     
     # 1. FLEET SUMMARY METRICS
@@ -269,7 +271,7 @@ elif "Sensor Status Audit" in admin_page:
             st.dataframe(maint_results, use_container_width=True)
 
 # ===============================================================
-# TOOL: NODE LOGISTICS (Visual Switch)
+# TOOL: Sensor Replace
 # ===============================================================
 elif admin_page == "📋 Node Logistics":
     st.header("📋 Hardware Surgical Switch")
@@ -389,6 +391,83 @@ elif admin_page == "📋 Node Logistics":
                     st.error(f"Transaction Failed: {e}")
                     with st.expander("View Debug SQL"):
                         st.code(sql)
+
+
+# ===============================================================
+# TOOL: Sensor Switch
+# ===============================================================
+elif admin_page == "🩹 Sensor Switch":
+    st.header("🩹 Sensor ID Correction")
+    st.info("Use this to fix a typo in the Serial Number without ending the current deployment.")
+
+    search_node = st.text_input("Enter Node ID to correct (e.g., TP-0001)")
+    
+    if search_node:
+        reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}` WHERE NodeNum = '{search_node}' AND End_Date IS NULL").to_dataframe()
+        
+        if not reg_df.empty:
+            row = reg_df.iloc[0]
+            st.write(f"Current ID assigned to **{row['Location']}**: `{row['PhysicalID']}`")
+            
+            new_id = st.text_input("Enter Correct Physical ID")
+            if st.button("Apply Correction"):
+                sql = f"""
+                    UPDATE `{TARGET_REGISTRY}`
+                    SET PhysicalID = SAFE_CAST('{new_id}' AS FLOAT64)
+                    WHERE NodeNum = '{row['NodeNum']}' 
+                      AND Project = '{row['Project']}' 
+                      AND End_Date IS NULL
+                """
+                client.query(sql).result()
+                st.success("ID Updated successfully.")
+                st.rerun()
+
+# ===============================================================
+# TOOL: Sensor Edit
+# ===============================================================
+elif admin_page == "📝 Sensor Edit":
+    st.header("📝 Registry Editor")
+    
+    # Fetch registry
+    edit_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}` ORDER BY Start_Date DESC").to_dataframe()
+    
+    # Search filter
+    search = st.text_input("Filter by Node or Project")
+    if search:
+        edit_df = edit_df[edit_df.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)]
+
+    # Display Dataframe with Selection
+    st.write("Select a row to modify:")
+    selected_row = st.dataframe(edit_df, on_select="rerun", selection_mode="single_row", hide_index=True)
+
+    if selected_row and len(selected_row['selection']['rows']) > 0:
+        idx = selected_row['selection']['rows'][0]
+        data = edit_df.iloc[idx]
+        
+        st.divider()
+        st.subheader(f"Editing: {data['NodeNum']} at {data['Project']}")
+        
+        with st.form("edit_row_form"):
+            new_loc = st.text_input("Location", value=data['Location'])
+            new_status = st.selectbox("Status", ["Active", "Available", "Dead", "Archived", "Diagnostic"], index=0)
+            
+            col1, col2 = st.columns(2)
+            if col1.form_submit_button("💾 Save Changes"):
+                update_sql = f"""
+                    UPDATE `{TARGET_REGISTRY}`
+                    SET Location = '{new_loc}', SensorStatus = '{new_status}'
+                    WHERE NodeNum = '{data['NodeNum']}' 
+                      AND Start_Date = CAST('{data['Start_Date']}' AS DATE)
+                """
+                client.query(update_sql).result()
+                st.success("Row updated.")
+                st.rerun()
+                
+            if col2.form_submit_button("🗑️ DELETE ENTRY", type="primary"):
+                delete_sql = f"DELETE FROM `{TARGET_REGISTRY}` WHERE NodeNum='{data['NodeNum']}' AND Start_Date=CAST('{data['Start_Date']}' AS DATE)"
+                client.query(delete_sql).result()
+                st.warning("Row deleted.")
+                st.rerun()
 
 # ===============================================================
 # TOOL: BULK REGISTRY MANAGER
@@ -564,7 +643,6 @@ elif admin_page == "📈 Ref Curve Library":
 
             st.success(f"✅ Success! Imported {len(u_files)} files. Refreshing library...")
             st.rerun()
-
 
 # ===============================================================
 # TOOL 5: SURGICAL DATA MANAGEMENT
