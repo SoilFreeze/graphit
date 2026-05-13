@@ -227,10 +227,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
-    - Red 'Now' Line: Fixed vertical line at current time.
-    - Global X-axis Sync: All graphs (including Brine) locked to project window.
-    - 15-Color Palette: Unified for all sensors.
-    - Grid: Major 10 / Minor 2 with Bold Monday lines and Cyan Freeze line.
+    - Fix: TypeError on NOW line by converting to pydatetime.
+    - Fix: Brine charts now shift to project window via global project ID extraction.
+    - Legend: Right-hand side.
+    - Styling: 15-color palette and Cyan Freeze line.
     """
     import plotly.graph_objects as go
     if df.empty: return go.Figure().update_layout(title="No data available")
@@ -247,25 +247,27 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. GLOBAL TIMELINE SYNC
+    # 2. GLOBAL TIMELINE SYNC (Improved Project ID Extraction)
     final_end_view, final_start_view = end_view, start_view
     
     if f_start_date:
         try:
-            # Extract project ID to find the longest curve in the library
-            proj_num = str(title).split(':')[0].strip() if ":" in str(title) else str(curve_id).split('-')[0]
+            # Extract Project ID from curve_id or title (e.g., '2527')
+            proj_id_raw = str(curve_id).split('-')[0] if curve_id and '-' in str(curve_id) else str(title)
+            proj_num = re.findall(r'\d+', proj_id_raw)[0] if re.findall(r'\d+', proj_id_raw) else ""
             
-            ref_q = f"""
-                SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
-                ORDER BY Day DESC LIMIT 1
-            """
-            ref_meta = client.query(ref_q).to_dataframe()
-            
-            if not ref_meta.empty:
-                max_days = ref_meta['Day'].max()
-                final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
-                final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
+            if proj_num:
+                ref_q = f"""
+                    SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                    WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
+                    ORDER BY Day DESC LIMIT 1
+                """
+                ref_meta = client.query(ref_q).to_dataframe()
+                
+                if not ref_meta.empty:
+                    max_days = ref_meta['Day'].max()
+                    final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
+                    final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
     # 3. THEORETICAL CURVE
@@ -302,21 +304,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
-    ## 5. REFERENCE LINES
+    # 5. REFERENCE LINES
     # Cyan Freeze Line
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="solid", line_color="cyan", annotation_text="32°F FREEZE", layer="above")
     
-    # Red "NOW" Line - FIX: Convert to Python Datetime to prevent Plotly/Pandas TypeError
+    # Red "NOW" Line (FIXED: Added .to_pydatetime() to resolve TypeError)
     now_ts = pd.Timestamp.now(tz=display_tz)
-    fig.add_vline(
-        x=now_ts.to_pydatetime(), 
-        line_width=2, 
-        line_color="red", 
-        line_dash="dash", 
-        layer='above', 
-        annotation_text="NOW"
-    )
-                               
+    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above', annotation_text="NOW")
+
     # Bold Monday Lines
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
