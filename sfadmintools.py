@@ -210,8 +210,8 @@ elif "Sensor Status" in admin_page:
         col4.metric("Flagged/Dead/Diagnostic", flagged_dead_diag)
         
         st.divider()
-
-   # ===============================================================
+        
+# ===============================================================
 # 2. HARDWARE INVESTIGATOR (REWRITTEN)
 # ===============================================================
 st.subheader("🔦 Hardware Investigator")
@@ -254,7 +254,7 @@ if search_id:
             history_q = f"""
                 -- 1. Find all hardware IDs ever linked to this specific Node Name
                 WITH HardwareIDs AS (
-                    SELECT DISTINCT PhysicalID 
+                    SELECT DISTINCT NodeNum
                     FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` 
                     WHERE NodeNum = '{target_node}' 
                       AND PhysicalID IS NOT NULL
