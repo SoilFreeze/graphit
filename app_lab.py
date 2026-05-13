@@ -225,8 +225,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Final Master Function: 
-    - 15 High-Contrast Colors for sensors
-    - Red (80% Opacity) Goals plotted LAST for visibility
+    - Precision Matching: Goals only appear on specific Location plots.
+    - Thick Red Dash-Dot Goals (Top Layer)
     - Full Black Engineering Box Borders
     """
     import plotly.graph_objects as go
@@ -245,7 +245,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. SENSOR TRACE GENERATION (Engineering Palette)
+    # 2. SENSOR TRACE GENERATION
     extended_colors = [
         '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', 
@@ -268,7 +268,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         for sn in group_data['NodeNum'].unique():
             s_df = group_data[group_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # Gap Handling
             s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
             if (s_df['gap'] > 6.0).any():
                 gaps = s_df[s_df['gap'] > 6.0].copy()
@@ -285,71 +284,50 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
             ))
 
-    # 3. THEORETICAL REFERENCE CURVES (Top Layer)
+    # 3. PRECISION THEORETICAL MATCHING
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # We look for the curve that matches the project ID and location string
-            parts = str(curve_id).split('-')
-            p_id = parts[0]
-            
+            # We enforce a strict naming convention check: e.g., '2527-TP1'
             ref_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{p_id}%') 
+                WHERE UPPER(CurveID) = UPPER('{curve_id}') 
                 ORDER BY Day
             """
             ref_df = client.query(ref_q).to_dataframe()
             
             if not ref_df.empty:
-                for idx, (full_cid, g_df) in enumerate(ref_df.groupby('CurveID')):
-                    clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
-                    
-                    # Align 'Day' with the project's 'Date_Freezedown'
-                    g_df['timestamp'] = g_df['Day'].apply(
-                        lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
-                    )
-                    # Localize to current display TZ
-                    g_df['timestamp'] = g_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
-                    
-                    ref_y = g_df['Temp']
-                    if unit_mode == "Celsius":
-                        ref_y = (ref_y - 32) * 5/9
+                # Localize and plot the specific goal
+                ref_df['timestamp'] = ref_df['Day'].apply(
+                    lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
+                )
+                ref_df['timestamp'] = ref_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
+                
+                ref_y = ref_df['Temp']
+                if unit_mode == "Celsius":
+                    ref_y = (ref_y - 32) * 5/9
 
-                    fig.add_trace(go.Scatter(
-                        x=g_df['timestamp'], y=ref_y,
-                        name=f"<b>GOAL: {clean_name}</b>",
-                        mode='lines',
-                        line=dict(
-                            color='rgba(255, 0, 0, 0.8)', # THICK RED
-                            width=4,
-                            dash='dashdot'
-                        ),
-                        legendrank=1 # Keeps Goal at the top of the list
-                    ))
+                fig.add_trace(go.Scatter(
+                    x=ref_df['timestamp'], y=ref_y,
+                    name=f"<b>GOAL: {curve_id.split('-')[-1]}</b>",
+                    mode='lines',
+                    line=dict(color='rgba(255, 0, 0, 0.8)', width=4, dash='dashdot'),
+                    legendrank=1
+                ))
         except: pass
 
-    # 4. REFERENCE LINES & BOX BORDER
+    # 4. LAYOUT & BOX BORDER
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right", layer="below")
 
-    # Final Engineering Layout
     fig.update_layout(
-        plot_bgcolor='white', 
-        hovermode="x unified", 
-        height=650,
-        xaxis=dict(
-            range=[start_view, end_view], 
-            showgrid=True, gridcolor='Gainsboro', 
-            showline=True, mirror=True, linecolor='black', linewidth=2
-        ),
-        yaxis=dict(
-            title=f"Temperature ({unit_label})", 
-            range=y_range, 
-            showgrid=True, gridcolor='Gainsboro',
-            showline=True, mirror=True, linecolor='black', linewidth=2
-        )
+        plot_bgcolor='white', hovermode="x unified", height=650,
+        xaxis=dict(range=[start_view, end_view], showgrid=True, gridcolor='Gainsboro', 
+                   showline=True, mirror=True, linecolor='black', linewidth=2),
+        yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, showgrid=True, 
+                   gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2)
     )
     
     return fig
