@@ -654,7 +654,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
-    Fixed: Full 4-sided frame and dynamic Baseline date label.
+    Fixed: Synchronized scale (-20 to 80), baseline date label, and hover formatting.
     """
     # 1. HEADER
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
@@ -698,7 +698,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             # --- A. PLOT BASELINE (With Date Label) ---
             baseline_raw = loc_data.sort_values('timestamp', ascending=True)
             if not baseline_raw.empty:
-                # Extract the earliest date for the label
                 b_date_str = baseline_raw['timestamp'].min().strftime('%Y-%m-%d')
                 
                 baseline_snap = (
@@ -715,8 +714,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     name=f'Baseline ({b_date_str})',
                     line=dict(color='black', width=2.5),
                     marker=dict(size=7, symbol='diamond'),
-                    # Use %%{y} and %%{x} to escape the Python string formatter
-                    hovertemplate=f"Baseline: {b_date_str}<br>Depth: %%{{y}}ft<br>Temp: %%{{x:.1f}}{unit_label}<extra></extra>"
+                    # FIX: Escaped braces for hovertemplate
+                    hovertemplate=f"Baseline: {b_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
             
             # --- B. PLOT WEEKLY SNAPSHOTS ---
@@ -744,24 +743,14 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         name=target_ts.strftime('%Y-%m-%d'),
                         line=dict(shape='spline', smoothing=1.1, width=1.5),
                         marker=dict(size=4),
-                        # Use %%{y} and %%{x} here as well
-                        hovertemplate=f"Date: {target_ts.strftime('%Y-%m-%d')}<br>Depth: %%{{y}}ft<br>Temp: %%{{x:.1f}}{unit_label}<extra></extra>"
+                        # FIX: Escaped braces for hovertemplate
+                        hovertemplate=f"Date: {target_ts.strftime('%Y-%m-%d')}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
             # --- C. FREEZING REFERENCE LINE ---
             fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="cyan")
 
-            # --- D. DYNAMIC X-AXIS CALCULATION ---
-            current_max = loc_data['temperature'].max()
-            if unit_mode == "Celsius":
-                current_max = (current_max - 32) * 5/9
-                temp_upper = max(20, current_max + 5)
-                temp_lower = -20
-            else:
-                temp_upper = max(60, current_max + 5)
-                temp_lower = -10
-
-            # --- E. LAYOUT & BOX FRAME ---
+            # --- D. STANDARDIZED SCALING & BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
@@ -771,14 +760,14 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 height=800,
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
-                    range=[temp_lower, temp_upper],
+                    range=[-20, 80], # STANDARD SCALE
                     dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f0f0f0'),
                     gridcolor='Gainsboro', 
                     showline=True, 
                     linewidth=2, 
                     linecolor='black',
-                    mirror=True  # This forces the line to the TOP as well
+                    mirror=True 
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
@@ -789,13 +778,13 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     showline=True, 
                     linewidth=2, 
                     linecolor='black',
-                    mirror=True  # This forces the line to the RIGHT as well
+                    mirror=True 
                 ),
                 legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
             )
             
-            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")            
-
+            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
+            
 ##############################            
 # - 7. PAGE: CLIENT PORTAL - #
 ##############################
