@@ -227,10 +227,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Final Engineering-Grade Plotting Engine:
-    - Title: Project - Type of Graph - Location
+    - Restored: Theoretical Curves (Smooth Dark Gray).
+    - Sync: Global X-Axis shift applied to ALL charts (including Brine).
+    - Title: Project - Thermal Trend - Location.
     - Legend: Position (NodeNum) only.
-    - Match: Recognizes project numbers with labels.
-    - Sync: Forces all charts to shift if a theoretical curve is toggled.
+    - Style: RoyalBlue Dashed Freeze Line, Major(10)/Minor(2) Grid, Bold Mondays.
     """
     import plotly.graph_objects as go
     import re
@@ -248,18 +249,18 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. GLOBAL TIMELINE SYNC (Improved Label Recognition)
+    # 2. GLOBAL TIMELINE SYNC (Improved Label/ID Recognition)
     final_end_view, final_start_view = end_view, start_view
     
     if f_start_date:
         try:
-            # Extract Project ID (e.g., '2527') even if it has labels like '2527-Elizabeth'
+            # Extract Project Number (e.g., '2527') from the session state project string
             proj_str = str(st.session_state.get('selected_project', ''))
             proj_match = re.findall(r'\d+', proj_str)
             proj_num = proj_match[0] if proj_match else ""
             
             if proj_num:
-                # Determine the total window based on the project's longest curve
+                # Find the longest curve in the library for this project to set the global window
                 ref_q = f"""
                     SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                     WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
@@ -269,6 +270,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 
                 if not ref_meta.empty:
                     max_days = int(ref_meta['Day'].max())
+                    # Shift window: Freezedown - 1 Day through Goal End + 1 Day
                     final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
                     final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
@@ -276,7 +278,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. THEORETICAL CURVE (Smooth Dark Gray)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # Match the specific curve (e.g., 2527-TP1)
             target_q = f"SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) = UPPER('{curve_id}') ORDER BY Day"
             target_df = client.query(target_q).to_dataframe()
             if not target_df.empty:
@@ -291,7 +292,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 ))
         except: pass
 
-    # 4. SENSOR DATA (Clean Legend Formatting)
+    # 4. SENSOR DATA (15-Color Palette & Clean Legend)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     unique_nodes = sorted(plot_df['NodeNum'].unique())
     
@@ -301,7 +302,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         bank_val = s_df['Bank'].iloc[0]
         loc_val = s_df['Location'].iloc[0]
         
-        # Legend Formatting: Depth (NodeNum) or Bank Loc (NodeNum)
+        # Legend: Position (NodeNum) only
         if pd.notnull(depth_val):
             display_name = f"{depth_val}ft ({sn})"
         elif pd.notnull(bank_val) and str(bank_val).strip() != "":
@@ -317,7 +318,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         ))
 
     # 5. REFERENCE LINES
-    # Med Blue Dashed Freeze Line
+    # Medium Blue Dashed Freeze Line
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     
     # Red "NOW" Line
@@ -329,12 +330,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
-    # 6. LAYOUT & TITLING
-    # Format: Project - Type of Graph - Location
-    clean_title = f"<b>{st.session_state.get('selected_project')} - Thermal Trend - {title}</b>"
+    # 6. BOX BORDER & TITLING
+    # Format: Project - Type - Location
+    p_name = st.session_state.get('selected_project')
+    full_title = f"<b>{p_name} - Thermal Trend - {title}</b>"
 
     fig.update_layout(
-        title=dict(text=clean_title, x=0.02, y=0.98, font=dict(size=18)),
+        title=dict(text=full_title, x=0.02, y=0.98, font=dict(size=18)),
         plot_bgcolor='white', hovermode="x unified", height=650,
         xaxis=dict(
             range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
