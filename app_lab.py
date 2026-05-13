@@ -225,10 +225,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Final Master Function: 
-    - 15 High-Contrast Colors
-    - Dark Gray (60% Opacity) Goals plotted LAST (Top Layer)
-    - Full Black Engineering Box Borders (LineWidth 2)
-    - Gap Detection & Spline Smoothing
+    - 15 High-Contrast Colors for sensors
+    - Red (80% Opacity) Goals plotted LAST for visibility
+    - Full Black Engineering Box Borders
     """
     import plotly.graph_objects as go
     
@@ -244,21 +243,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    if unit_mode == "Celsius":
-        plot_df['temperature'] = (plot_df['temperature'] - 32) * 5/9
-        y_range = [-30, 30]
-    else:
-        y_range = [-20, 80]
+    y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. SENSOR TRACE GENERATION (Bottom Layer)
-    # 15-Color Engineering Palette
+    # 2. SENSOR TRACE GENERATION (Engineering Palette)
     extended_colors = [
         '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', 
         '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32'  
     ]
 
-    # Labeling Logic
     plot_df['depth_label'] = "Node " + plot_df['NodeNum'].astype(str)
     plot_df['sort_val'] = 1000.0
     depth_mask = plot_df['Depth'].notnull()
@@ -293,30 +286,30 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             ))
 
     # 3. THEORETICAL REFERENCE CURVES (Top Layer)
-    # Plotted after sensors so they appear on top.
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # Fuzzy Logic: Match Project and Location
+            # We look for the curve that matches the project ID and location string
             parts = str(curve_id).split('-')
-            p_id, l_id = parts[0], parts[1] if len(parts) > 1 else parts[0]
+            p_id = parts[0]
             
             ref_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                 WHERE UPPER(CurveID) LIKE UPPER('%{p_id}%') 
-                  AND UPPER(CurveID) LIKE UPPER('%{l_id}%')
                 ORDER BY Day
             """
             ref_df = client.query(ref_q).to_dataframe()
             
             if not ref_df.empty:
-                dash_patterns = ['dash', 'dot', 'dashdot', 'longdash']
                 for idx, (full_cid, g_df) in enumerate(ref_df.groupby('CurveID')):
                     clean_name = full_cid.split('-')[-1] if '-' in full_cid else full_cid
                     
+                    # Align 'Day' with the project's 'Date_Freezedown'
                     g_df['timestamp'] = g_df['Day'].apply(
                         lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
                     )
+                    # Localize to current display TZ
+                    g_df['timestamp'] = g_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     
                     ref_y = g_df['Temp']
                     if unit_mode == "Celsius":
@@ -327,47 +320,35 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         name=f"<b>GOAL: {clean_name}</b>",
                         mode='lines',
                         line=dict(
-                            color='rgba(40, 40, 40, 0.6)', # Dark Gray, 60% Opacity
-                            width=4,                       # Bold Shape
-                            dash=dash_patterns[idx % len(dash_patterns)]
+                            color='rgba(255, 0, 0, 0.8)', # THICK RED
+                            width=4,
+                            dash='dashdot'
                         ),
-                        legendrank=1 # Force Goals to top of legend
+                        legendrank=1 # Keeps Goal at the top of the list
                     ))
         except: pass
 
-    # 4. REFERENCE LINES (Freezing/Now)
+    # 4. REFERENCE LINES & BOX BORDER
     for val, ref_label in active_refs:
         c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
         fig.add_hline(y=c_val, line_dash="dash", line_color="RoyalBlue", 
                       annotation_text=ref_label, annotation_position="top right", layer="below")
 
-    now_local = pd.Timestamp.now(tz=display_tz)
-    fig.add_vline(x=now_local, line_width=2, line_color="Red", line_dash="dash", layer='above')
-
-    # 5. LAYOUT & BOX BORDER
-    l_cfg = dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5) if mobile_mode else \
-            dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
-    
+    # Final Engineering Layout
     fig.update_layout(
-        title={'text': f"<b>{title}</b>", 'x': 0.02, 'y': 0.95, 'font': {'size': 18}},
         plot_bgcolor='white', 
         hovermode="x unified", 
         height=650,
-        legend=l_cfg,
-        margin=dict(l=60, r=20, t=80, b=60),
-        # FULL ENGINEERING BORDER
         xaxis=dict(
             range=[start_view, end_view], 
             showgrid=True, gridcolor='Gainsboro', 
-            showline=True, mirror=True, linecolor='black', linewidth=2,
-            tickformat='%b %d\n%H:%M'
+            showline=True, mirror=True, linecolor='black', linewidth=2
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})", 
             range=y_range, 
             showgrid=True, gridcolor='Gainsboro',
-            showline=True, mirror=True, linecolor='black', linewidth=2,
-            zeroline=False
+            showline=True, mirror=True, linecolor='black', linewidth=2
         )
     )
     
@@ -654,14 +635,16 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
-    Baseline: First Monday after system start.
-    Scale: Locked -20 to 80.
+    - Empirical data only (no theoretical lines).
+    - Baseline: First Monday at 06:00 AM.
+    - Scale: Fixed -20 to 80.
+    - Frame: Full 4-sided black box.
     """
-    # 1. HEADER & METADATA
+    # 1. HEADER
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
     
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a project to view profiles.")
+        st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
         return
 
     # 2. SIDEBAR SETTINGS
@@ -680,7 +663,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
     if depth_df.empty:
-        st.info("No sensors with valid 'Depth' values found.")
+        st.info("No sensors with valid 'Depth' values found in the Node Registry.")
         return
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
@@ -697,16 +680,10 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             fig = go.Figure()
 
             # --- A. CALCULATE BASELINE (First Monday after system start) ---
-            # Find the absolute earliest timestamp for this location
             abs_start = loc_data['timestamp'].min()
-            
-            # Find the first Monday at or after that start date
-            # 'W-MON' offset moves us forward to the nearest Monday
             first_monday = abs_start + pd.offsets.Week(weekday=0) 
-            # Ensure we are looking for a reading around 6:00 AM on that Monday
             baseline_ts = first_monday.replace(hour=6, minute=0, second=0)
             
-            # Pull the snapshot for that specific Baseline Monday
             b_window = loc_data[
                 (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
                 (loc_data['timestamp'] <= baseline_ts + pd.Timedelta(hours=12))
@@ -714,18 +691,18 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             
             if not b_window.empty:
                 b_date_label = baseline_ts.strftime('%Y-%m-%d')
-                baseline_snap = (
+                snap = (
                     b_window.assign(diff=(b_window['timestamp'] - baseline_ts).abs())
                     .sort_values(['NodeNum', 'diff'])
                     .drop_duplicates('NodeNum')
                     .sort_values('Depth_Num')
                 )
                 
-                b_temps = baseline_snap['temperature']
+                b_temps = snap['temperature']
                 if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
                 
                 fig.add_trace(go.Scatter(
-                    x=b_temps, y=baseline_snap['Depth_Num'], 
+                    x=b_temps, y=snap['Depth_Num'], 
                     mode='lines+markers', 
                     name=f'Baseline ({b_date_label})',
                     line=dict(color='black', width=3),
@@ -792,8 +769,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
-
-
 ##############################            
 # - 7. PAGE: CLIENT PORTAL - #
 ##############################
