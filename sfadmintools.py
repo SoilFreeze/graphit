@@ -3,34 +3,17 @@ import pandas as pd
 import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta
 import time
-import os
+import re
 
 # 1. CONFIGURATION & SECURITY
 st.set_page_config(page_title="SF Engineering Admin", page_icon="🛠️", layout="wide")
 
-# Global Database Constants
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
-OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
-# LOGIN GATE
-if "authenticated" not in st.session_state:
-    st.session_state['authenticated'] = False
-
-if not st.session_state['authenticated']:
-    st.markdown("## 🔐 Engineering Admin Access")
-    pwd = st.text_input("Enter Admin Password", type="password")
-    if st.button("Unlock Management Tools"):
-        if pwd == st.secrets["admin_password"]:
-            st.session_state['authenticated'] = True
-            st.rerun()
-        else:
-            st.error("Access Denied.")
-    st.stop()
-
-# 2. CORE DATABASE ENGINE
+# DATABASE CLIENT
 @st.cache_resource
 def get_bq_client():
     try:
@@ -43,24 +26,24 @@ def get_bq_client():
         st.error(f"❌ Database Link Offline: {e}")
         return None
 
-# 3. PAGE ROUTER
-st.sidebar.title("🛠️ Project & Node Admin")
+client = get_bq_client()
+
+# 2. SIDEBAR NAVIGATION
+st.sidebar.title("🛠️ Admin Command Center")
 admin_page = st.sidebar.radio("Management Tool", [
     "📡 Setup Audit", 
-    "📋 Hardware Assignment & Deployment",
     "📋 Node Logistics", 
-    "📦 Bulk Registry Manager",  # New Tool
+    "📦 Bulk Registry Manager",
+    "🔍 Sensor Status Audit",
+    "📈 Ref Curve Library",
     "⚙️ Project Master", 
-    "📈 Ref Curve Library", 
     "🧨 Surgical Data Management"
 ])
 
-client = get_bq_client()
-
-# --- PROJECT SELECTION (Global for Admin) ---
+# Global Project Selection for context
 proj_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
 proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].tolist())
-selected_project = st.sidebar.selectbox("🎯 Target Project", proj_list)
+selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list)
 
 # ===============================================================
 # TOOL 1: SETUP AUDIT (Hardened Formatting & Color Scales)
