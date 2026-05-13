@@ -653,14 +653,14 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
-    Engineering-grade Vertical Temperature Profiles.
-    Includes 32°F/0°C reference line and Major (10) / Minor (2) grid spacing.
+    Engineering-grade Vertical Temperature Profiles with 
+    Baseline tracking and full chart framing.
     """
     # 1. HEADER
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
     
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
+        st.info("💡 Please select a specific project in the sidebar.")
         return
 
     # 2. SIDEBAR SETTINGS
@@ -683,7 +683,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         return
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
-    x_range = [-20, 40] if unit_mode == "Celsius" else [-10, 80]
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     
     # 4. GENERATE SNAPSHOTS
@@ -695,8 +694,29 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
+
+            # --- A. PLOT BASELINE (The very first reading for this location) ---
+            # This stays on the chart regardless of the weekly lookback
+            baseline_snap = (
+                loc_data.sort_values('timestamp', ascending=True)
+                .drop_duplicates('NodeNum')
+                .sort_values('Depth_Num')
+            )
             
-            # --- A. PLOT HISTORICAL SNAPSHOTS ---
+            if not baseline_snap.empty:
+                b_temps = baseline_snap['temperature']
+                if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
+                
+                fig.add_trace(go.Scatter(
+                    x=b_temps, y=baseline_snap['Depth_Num'], 
+                    mode='lines+markers', 
+                    name='BASELINE',
+                    line=dict(color='black', width=3, dash='solid'),
+                    marker=dict(size=8, symbol='diamond'),
+                    hovertemplate="BASELINE<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
+                ))
+            
+            # --- B. PLOT WEEKLY SNAPSHOTS ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 window = loc_data[
@@ -713,59 +733,61 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     )
                     
                     temps = snap['temperature']
-                    if unit_mode == "Celsius":
-                        temps = (temps - 32) * 5/9
+                    if unit_mode == "Celsius": temps = (temps - 32) * 5/9
                     
                     fig.add_trace(go.Scatter(
                         x=temps, y=snap['Depth_Num'], 
                         mode='lines+markers', 
                         name=target_ts.strftime('%Y-%m-%d'),
-                        line=dict(shape='spline', smoothing=1.3, width=2),
-                        marker=dict(size=6),
-                        hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
+                        line=dict(shape='spline', smoothing=1.1, width=2),
+                        marker=dict(size=5),
+                        hovertemplate="%{fullData.name}<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label
                     ))
 
-            # --- B. FREEZING REFERENCE LINE ---
-            fig.add_vline(
-                x=freeze_pt, 
-                line_width=2, 
-                line_dash="solid", 
-                line_color="rgba(0, 255, 255, 0.8)", # Cyan Freeze Line
-                annotation_text="FREEZE LINE", 
-                annotation_position="top left"
-            )
+            # --- C. FREEZING REFERENCE LINE ---
+            fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="cyan")
 
-            # --- C. LAYOUT & GRID SCALING ---
+            # --- D. DYNAMIC X-AXIS CALCULATION ---
+            # Use 60 as default max, but expand if baseline or data is higher
+            current_max = loc_data['temperature'].max()
+            if unit_mode == "Celsius":
+                current_max = (current_max - 32) * 5/9
+                temp_upper = max(20, current_max + 5)
+                temp_lower = -20
+            else:
+                temp_upper = max(60, current_max + 5)
+                temp_lower = -10
+
+            # --- E. LAYOUT & BORDERS ---
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
             fig.update_layout(
                 title=f"<b>Temp vs Depth - {loc}</b>",
                 plot_bgcolor='white', 
-                height=700,
+                height=800,
+                # FULL BOX FRAME: mirror=True and showline=True on both axes
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
-                    range=x_range,
-                    # Grid Settings: Major=10, Minor=2
+                    range=[temp_lower, temp_upper],
                     dtick=10,
-                    minor=dict(ticklen=4, tickmode="linear", dtick=2, showgrid=True, gridcolor='whitesmoke'),
+                    minor=dict(dtick=2, showgrid=True, gridcolor='whitesmoke'),
                     gridcolor='Gainsboro', 
-                    showline=True, mirror=True, linecolor='black', linewidth=1.5
+                    showline=True, mirror=True, linecolor='black', linewidth=2
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
-                    range=[y_limit, 0], # Inverted
-                    # Grid Settings: Major=10, Minor=2
+                    range=[y_limit, 0], 
                     dtick=10,
-                    minor=dict(ticklen=4, tickmode="linear", dtick=2, showgrid=True, gridcolor='whitesmoke'),
+                    minor=dict(dtick=2, showgrid=True, gridcolor='whitesmoke'),
                     gridcolor='Silver', 
-                    showline=True, mirror=True, linecolor='black', linewidth=1.5
+                    showline=True, mirror=True, linecolor='black', linewidth=2
                 ),
-                legend=dict(orientation="h", y=-0.15, xanchor="center", x=0.5)
+                legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
-
+            
 
 ##############################            
 # - 7. PAGE: CLIENT PORTAL - #
