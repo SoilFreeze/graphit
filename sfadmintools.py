@@ -250,8 +250,14 @@ if search_id:
         if not all_phys_ids:
             st.warning("This node is in the registry but has no Physical IDs assigned to pull telemetry from.")
         else:
-            # SQL: Correlate registry time-windows with actual pings
+            # Updated SQL: Correlate telemetry by NodeNum and its associated PhysicalID history
             history_q = f"""
+                WITH NodeHardware AS (
+                    -- Step 1: Find all PhysicalIDs associated with this NodeNum
+                    SELECT DISTINCT PhysicalID 
+                    FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                    WHERE NodeNum = '{target_node}' AND PhysicalID IS NOT NULL
+                )
                 SELECT 
                     r.Project, 
                     r.Location, 
@@ -259,15 +265,23 @@ if search_id:
                     r.End_Date,
                     r.SensorStatus,
                     DATE_DIFF(IFNULL(r.End_Date, CURRENT_DATE()), r.Start_Date, DAY) as Days_On_Site,
-                    COUNT(m.temperature) as Total_Pings,
-                    ROUND(AVG(m.temperature), 2) as Avg_Temp
+                    -- Step 2: Count pings by joining on the Hardware IDs found in Step 1
+                    (
+                        SELECT COUNT(m.temperature) 
+                        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                        WHERE m.PhysicalID IN (SELECT PhysicalID FROM NodeHardware)
+                          AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
+                          AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
+                    ) as Total_Pings,
+                    (
+                        SELECT ROUND(AVG(m.temperature), 2)
+                        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                        WHERE m.PhysicalID IN (SELECT PhysicalID FROM NodeHardware)
+                          AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
+                          AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
+                    ) as Avg_Temp
                 FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
-                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                  ON SAFE_CAST(r.PhysicalID AS STRING) = SAFE_CAST(m.PhysicalID AS STRING)
-                  AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
-                  AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
                 WHERE r.NodeNum = '{target_node}'
-                GROUP BY 1, 2, 3, 4, 5
                 ORDER BY r.Start_Date DESC
             """
             
