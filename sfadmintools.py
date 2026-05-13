@@ -145,98 +145,99 @@ if "Setup Audit" in admin_page:
         c2.caption(f"**Max Site Gap:** {df['max_gap_mins'].max() or 0} minutes")
 
 # ===============================================================
-# TOOL: SENSOR STATUS AUDIT (Hardened Reliability Tracker)
+# TOOL: SENSOR STATUS AUDIT (The Hardware Ledger)
 # ===============================================================
 elif "Sensor Status Audit" in admin_page:
     st.header("🔍 Sensor Status & Reliability Audit")
     
-    # 1. FLEET METRICS
-    # Pulling from registry to see global hardware state
+    # 1. FLEET SUMMARY METRICS
+    # Fetch registry to see the current state of all hardware
     reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
     
     if not reg_df.empty:
-        # Standardizing status strings for counting
+        # Standardize status for accurate counting
         reg_df['SensorStatus'] = reg_df['SensorStatus'].fillna('Unknown')
         
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Inventory", reg_df['PhysicalID'].nunique())
-        m2.metric("Currently Active", len(reg_df[reg_df['End_Date'].isna()]))
-        m3.metric("Available (Stock)", len(reg_df[reg_df['SensorStatus'].str.contains('Available', case=False)]))
-        m4.metric("Faulty/Dead", len(reg_df[reg_df['SensorStatus'].str.contains('Dead|Repair', case=False, regex=True)]))
+        m1.metric("Total Unique Sensors", reg_df['PhysicalID'].nunique())
+        m2.metric("Currently Assigned", len(reg_df[reg_df['End_Date'].isna()]))
+        m3.metric("Available In Stock", len(reg_df[reg_df['SensorStatus'].str.contains('Available', case=False)]))
+        m4.metric("Flagged/Dead", len(reg_df[reg_df['SensorStatus'].str.contains('Dead|Repair', case=False, regex=True)]))
 
     st.divider()
 
-    # 2. SENSOR INVESTIGATOR
-    st.subheader("🔦 Individual Hardware Investigator")
-    search_input = st.text_input("Search by Serial Number (PhysicalID) or Node Number (TP-xxxx)")
+    # 2. HARDWARE INVESTIGATOR
+    st.subheader("🔦 Hardware Investigator")
+    search_id = st.text_input("Enter Physical ID or Node ID (e.g., TP-0009)", placeholder="Search...")
 
-    if search_input:
-        # Flexible search logic
+    if search_id:
+        # Filter the registry for the specific piece of hardware
         match = reg_df[
-            (reg_df['PhysicalID'].astype(str).str.contains(search_input)) | 
-            (reg_df['NodeNum'].astype(str).str.upper().str.contains(search_input.upper()))
+            (reg_df['PhysicalID'].astype(str).str.contains(search_id)) | 
+            (reg_df['NodeNum'].astype(str).str.upper().str.contains(search_id.upper()))
         ]
         
         if match.empty:
-            st.error("No hardware matching that ID found in the registry.")
+            st.error("No record found for that ID. Please check the registry.")
         else:
-            # Extract clean PhysicalID for the SQL query
             target_sn = match.iloc[0]['PhysicalID']
             current_assignment = match[match['End_Date'].isna()]
 
-            # Display Location Context
+            # A. Current Deployment Status
             if not current_assignment.empty:
                 row = current_assignment.iloc[0]
                 st.info(f"📍 **Current Location:** {row['Project']} | {row['Location']} (Node: {row['NodeNum']})")
             else:
-                st.warning("📍 **Current Status:** Not currently assigned to a project.")
+                st.warning("📍 **Current Status:** Available / Not currently assigned to a project.")
 
-            # 3. RELIABILITY ANALYTICS (Pings per Hour)
-            st.markdown("### 📊 Check-in Reliability")
+            # B. PERFORMANCE HISTORY (Windowed Stats per Assignment)
+            st.markdown("### 📜 Deployment & Performance History")
             
-            # This query uses SAFE_DIVIDE and IFNULL to prevent 400/500 errors
-            ping_stats_q = f"""
+            # This SQL correlates telemetry to the specific time windows in the registry
+            history_q = f"""
                 SELECT 
-                    COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)) as pings_7d,
-                    COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 28 DAY)) as pings_28d,
-                    COUNT(*) as pings_total,
-                    IFNULL(TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), HOUR), 0) as life_hours
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-                WHERE SAFE_CAST(PhysicalID AS STRING) = SAFE_CAST('{target_sn}' AS STRING)
+                    r.Project, 
+                    r.Location, 
+                    r.Start_Date, 
+                    r.End_Date,
+                    r.SensorStatus as Status_At_Time,
+                    DATE_DIFF(IFNULL(r.End_Date, CURRENT_DATE()), r.Start_Date, DAY) as Days_On_Site,
+                    COUNT(m.temperature) as Total_Pings,
+                    ROUND(AVG(m.temperature), 2) as Avg_Temp_At_Loc
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
+                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                  ON SAFE_CAST(r.PhysicalID AS STRING) = SAFE_CAST(m.PhysicalID AS STRING)
+                  AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
+                  AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
+                WHERE SAFE_CAST(r.PhysicalID AS STRING) = SAFE_CAST('{target_sn}' AS STRING)
+                GROUP BY 1, 2, 3, 4, 5
+                ORDER BY r.Start_Date DESC
             """
             
             try:
-                stats = client.query(ping_stats_q).to_dataframe().iloc[0]
-
-                # Calculations (Assuming 1-minute intervals = 60 pings/hr is 100% health)
-                c1, c2, c3 = st.columns(3)
+                hist_df = client.query(history_q).to_dataframe()
                 
-                # Math: (Total Pings) / (Total Hours in period)
-                rate_7d = round(stats['pings_7d'] / (7 * 24), 2)
-                rate_28d = round(stats['pings_28d'] / (28 * 24), 2)
-                
-                # Lifetime avoid division by zero
-                denom = stats['life_hours'] if stats['life_hours'] > 0 else 1
-                rate_life = round(stats['pings_total'] / denom, 2)
+                if not hist_df.empty:
+                    # Calculate Reliability (Pings per Hour) for each assignment
+                    def calc_reliability(row):
+                        hours = row['Days_On_Site'] * 24
+                        if hours <= 0: return 0
+                        return round(row['Total_Pings'] / hours, 2)
 
-                c1.metric("L7D Pings/Hr", f"{rate_7d}")
-                c2.metric("L4W Pings/Hr", f"{rate_28d}")
-                c3.metric("Lifetime Avg", f"{rate_life}")
-
+                    hist_df['Pings/Hr'] = hist_df.apply(calc_reliability, axis=1)
+                    
+                    st.dataframe(
+                        hist_df[['Project', 'Location', 'Start_Date', 'End_Date', 'Days_On_Site', 'Pings/Hr', 'Avg_Temp_At_Loc', 'Status_At_Time']],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.warning("No deployment history found for this Serial Number.")
             except Exception as e:
-                st.error(f"Could not calculate reliability: {e}")
+                st.error(f"Error fetching history: {e}")
 
-            # 4. DEPLOYMENT HISTORY
-            st.markdown("### 📜 Deployment History")
-            history_df = reg_df[reg_df['PhysicalID'] == target_sn].sort_values('Start_Date', ascending=False)
-            st.dataframe(
-                history_df[['Project', 'Location', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']], 
-                use_container_width=True, 
-                hide_index=True
-            )
-
-            # 5. ALL-TIME THERMAL GRAPH
-            st.markdown("### 📈 All-Time Telemetry")
+            # C. LONG-TERM TREND GRAPH
+            st.markdown("### 📈 Lifetime Thermal Profile")
             telemetry_q = f"""
                 SELECT timestamp, temperature 
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
@@ -246,22 +247,26 @@ elif "Sensor Status Audit" in admin_page:
             tel_df = client.query(telemetry_q).to_dataframe()
             
             if not tel_df.empty:
-                fig = go.Figure(go.Scatter(
-                    x=tel_df['timestamp'], 
-                    y=tel_df['temperature'], 
-                    mode='lines', 
-                    line=dict(color='#00CC96', width=1)
-                ))
-                fig.update_layout(
-                    height=300, 
-                    margin=dict(t=10, b=10, l=10, r=10),
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    xaxis_title="Lifetime Timeline",
-                    yaxis_title="Temp (°F)"
-                )
+                fig = go.Figure(go.Scatter(x=tel_df['timestamp'], y=tel_df['temperature'], mode='lines', line=dict(color='#00CC96')))
+                fig.update_layout(height=300, margin=dict(t=10, b=10), plot_bgcolor='white', xaxis_title="Timeline", yaxis_title="Temp (°F)")
                 st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No telemetry data found for this specific hardware serial.")
+
+    # 3. REGISTRY MAINTENANCE UTILITY
+    st.divider()
+    with st.expander("🛠️ Registry Health Check"):
+        st.write("Detecting orphaned records or missing dates...")
+        maint_q = f"""
+            SELECT NodeNum, PhysicalID, Project, Start_Date, End_Date 
+            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
+            WHERE Start_Date IS NULL 
+               OR (End_Date IS NOT NULL AND End_Date < Start_Date)
+        """
+        maint_results = client.query(maint_q).to_dataframe()
+        if maint_results.empty:
+            st.success("✅ Registry Integrity looks good!")
+        else:
+            st.warning(f"⚠️ Found {len(maint_results)} records with missing or illogical dates:")
+            st.dataframe(maint_results, use_container_width=True)
 
 # ===============================================================
 # TOOL: NODE LOGISTICS (Visual Switch)
@@ -343,18 +348,19 @@ elif admin_page == "📋 Node Logistics":
                     sql_depth = float(depth_val) if pd.notnull(depth_val) else "NULL"
     
                     # 3. Transaction with Correct Casting
+                    # Inside the "Node Logistics" form submission:
                     sql = f"""
                     BEGIN TRANSACTION;
                     
-                    -- Step A: Close the old record by setting the DATE
+                    -- 1. Close the current assignment
                     UPDATE `{TARGET_REGISTRY}` 
                     SET End_Date = DATE('{date_str}'), 
-                        SensorStatus = 'Dead' 
+                        SensorStatus = 'Moved' 
                     WHERE NodeNum = '{node_num}' 
                       AND Project = '{project}'
                       AND End_Date IS NULL;
                     
-                    -- Step B: Insert the new record with DATE
+                    -- 2. Open the new assignment (The "Paper Trail")
                     INSERT INTO `{TARGET_REGISTRY}` 
                     (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
                     VALUES (
