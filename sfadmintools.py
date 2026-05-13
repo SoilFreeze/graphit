@@ -170,30 +170,42 @@ elif "Sensor Status" in admin_page:
     
     # 1. FLEET SUMMARY METRICS
     # Fetch registry to see the current state of all hardware
-    reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
+    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
+    reg_df = client.query(query).to_dataframe()
     
     if not reg_df.empty:
-        # 1. Total Unique Sensors (Distinct count of all hardware)
-        total_unique = full_df['NodeNum'].nunique()
+        # Ensure date columns are actual datetime objects for accurate filtering
+        reg_df['End_Date'] = pd.to_datetime(reg_df['End_Date'], errors='coerce')
+    
+        # --- CALCULATIONS ---
         
-        # 2. Currently Assigned (Active sensors at project sites)
-        # We exclude 'Office' and ensure the assignment hasn't ended
-        currently_assigned = len(full_df[(full_df['Project'] != 'Office') & (full_df['End_Date'].isna())])
+        # 1. Total Unique Sensors: Count every unique NodeNum ever entered in the system
+        total_unique = reg_df['NodeNum'].nunique()
         
-        # 3. Available In Stock (In the Office and ready to go)
-        available_stock = len(full_df[(full_df['Project'] == 'Office') & (full_df['SensorStatus'] == 'Available') & (full_df['End_Date'].isna())])
+        # Define a helper for "Active" records (those without an End_Date)
+        active_mask = reg_df['End_Date'].isna()
         
-        # 4. Flagged / Dead / Diagnostic (Including your new requirement)
-        # This looks for specific status strings
-        flagged_dead_diag = len(full_df[full_df['SensorStatus'].isin(['Dead', 'Flagged', 'Diagnostic']) & (full_df['End_Date'].isna())])
+        # 2. Currently Assigned: Active sensors NOT in the Office
+        currently_assigned = len(reg_df[active_mask & (reg_df['Project'] != 'Office')])
+        
+        # 3. Available In Stock: Active sensors IN the Office with 'Available' status
+        available_stock = len(reg_df[active_mask & (reg_df['Project'] == 'Office') & (reg_df['SensorStatus'] == 'Available')])
+        
+        # 4. Flagged / Dead / Diagnostic: Active sensors with specific warning statuses
+        # We use .isin() to group these three categories together
+        warning_statuses = ['Dead', 'Flagged', 'Diagnostic']
+        flagged_dead_diag = len(reg_df[active_mask & reg_df['SensorStatus'].isin(warning_statuses)])
         
         # --- DISPLAYING THE METRICS ---
+        st.subheader("📊 Fleet Inventory Overview")
         col1, col2, col3, col4 = st.columns(4)
+        
         col1.metric("Total Unique Sensors", total_unique)
         col2.metric("Currently Assigned", currently_assigned)
         col3.metric("Available In Stock", available_stock)
         col4.metric("Flagged/Dead/Diagnostic", flagged_dead_diag)
-            st.divider()
+        
+        st.divider()
 
     # 2. HARDWARE INVESTIGATOR
     st.subheader("🔦 Hardware Investigator")
