@@ -173,16 +173,27 @@ elif "Sensor Status" in admin_page:
     reg_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
     
     if not reg_df.empty:
-        # Standardize status for accurate counting
-        reg_df['SensorStatus'] = reg_df['SensorStatus'].fillna('Unknown')
+        # 1. Total Unique Sensors (Distinct count of all hardware)
+        total_unique = full_df['NodeNum'].nunique()
         
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Unique Sensors", reg_df['PhysicalID'].nunique())
-        m2.metric("Currently Assigned", len(reg_df[reg_df['End_Date'].isna()]))
-        m3.metric("Available In Stock", len(reg_df[reg_df['SensorStatus'].str.contains('Available', case=False)]))
-        m4.metric("Flagged/Dead", len(reg_df[reg_df['SensorStatus'].str.contains('Dead|Repair', case=False, regex=True)]))
-
-    st.divider()
+        # 2. Currently Assigned (Active sensors at project sites)
+        # We exclude 'Office' and ensure the assignment hasn't ended
+        currently_assigned = len(full_df[(full_df['Project'] != 'Office') & (full_df['End_Date'].isna())])
+        
+        # 3. Available In Stock (In the Office and ready to go)
+        available_stock = len(full_df[(full_df['Project'] == 'Office') & (full_df['SensorStatus'] == 'Available') & (full_df['End_Date'].isna())])
+        
+        # 4. Flagged / Dead / Diagnostic (Including your new requirement)
+        # This looks for specific status strings
+        flagged_dead_diag = len(full_df[full_df['SensorStatus'].isin(['Dead', 'Flagged', 'Diagnostic']) & (full_df['End_Date'].isna())])
+        
+        # --- DISPLAYING THE METRICS ---
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Unique Sensors", total_unique)
+        col2.metric("Currently Assigned", currently_assigned)
+        col3.metric("Available In Stock", available_stock)
+        col4.metric("Flagged/Dead/Diagnostic", flagged_dead_diag)
+            st.divider()
 
     # 2. HARDWARE INVESTIGATOR
     st.subheader("🔦 Hardware Investigator")
