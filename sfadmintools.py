@@ -437,66 +437,84 @@ if admin_page == "🩹 Sensor Switch":
                 st.rerun()
                 
 # ===============================================================
-# TOOL: SENSOR EDIT (Backward-Compatible Version)
+# TOOL: SENSOR EDIT (Robust Filtering Version)
 # ===============================================================
 elif admin_page == "📝 Sensor Edit":
     st.header("📝 Registry Editor")
     
-    # 1. Fetch the data
-    edit_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}` ORDER BY Start_Date DESC").to_dataframe()
+    # 1. Fetch Fresh Data
+    full_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}` ORDER BY Start_Date DESC").to_dataframe()
     
-    # 2. Search Filter
-    search_term = st.text_input("Search Registry")
-    if search_term:
-        edit_df = edit_df[edit_df.astype(str).apply(lambda x: x.str.contains(search_term, case=False)).any(axis=1)]
-
-    # 3. Display the Dataframe (Standard View)
-    st.dataframe(edit_df, hide_index=False) # Showing index so we can pick a row
+    # 2. Advanced Filtering UI
+    st.subheader("🔍 Filter Records")
+    col_f1, col_f2, col_f3 = st.columns(3)
     
-    # 4. Selection via Selectbox (Compatible with older versions)
-    st.info("To edit a row, select its Index number from the list below.")
-    
-    # Create a list of labels like "Index 0: TP-0001 (Elizabeth)"
-    row_options = [f"Index {i}: {row['NodeNum']} at {row['Project']}" for i, row in edit_df.iterrows()]
-    
-    selection = st.selectbox("Select Row to Modify", ["-- Select a Row --"] + row_options)
-
-    if selection != "-- Select a Row --":
-        # Extract the index number back out of the string
-        selected_index = int(selection.split(":")[0].replace("Index ", ""))
-        data = edit_df.iloc[selected_index]
+    with col_f1:
+        u_projects = ["All"] + sorted(full_df['Project'].unique().tolist())
+        sel_proj = st.selectbox("Filter by Project", u_projects)
         
-        st.divider()
-        with st.form("edit_form_compatible"):
-            st.subheader(f"🛠️ Editing {data['NodeNum']}")
+    with col_f2:
+        u_status = ["All"] + sorted(full_df['SensorStatus'].unique().tolist())
+        sel_stat = st.selectbox("Filter by Status", u_status)
+        
+    with col_f3:
+        search_node = st.text_input("Search Node ID", "").strip()
+
+    # 3. Apply Logic to Filter Dataframe
+    edit_df = full_df.copy()
+    if sel_proj != "All":
+        edit_df = edit_df[edit_df['Project'] == sel_proj]
+    if sel_stat != "All":
+        edit_df = edit_df[edit_df['SensorStatus'] == sel_stat]
+    if search_node:
+        edit_df = edit_df[edit_df['NodeNum'].str.contains(search_node, case=False)]
+
+    # CRITICAL: Reset index so that the selection tool matches the filtered rows
+    edit_df = edit_df.reset_index(drop=True)
+
+    # 4. Display & Selection
+    st.write(f"Showing **{len(edit_df)}** matching records.")
+    st.dataframe(edit_df, use_container_width=True)
+    
+    if not edit_df.empty:
+        # Create a safe list of options
+        row_options = [f"{i} | {row['NodeNum']} | {row['Location']} ({row['Start_Date']})" for i, row in edit_df.iterrows()]
+        selection = st.selectbox("Select Record to Edit", ["-- Choose --"] + row_options)
+
+        if selection != "-- Choose --":
+            # Safely get the local index
+            local_idx = int(selection.split(" | ")[0])
+            data = edit_df.iloc[local_idx]
             
-            # Form Inputs
-            new_loc = st.text_input("Location", value=str(data['Location']))
-            new_stat = st.selectbox("Status", ["Active", "Available", "Archived", "Dead", "Diagnostic"], 
-                                   index=0) # You can refine the index logic here later
-            
-            c1, c2 = st.columns(2)
-            
-            if c1.form_submit_button("💾 Save Changes"):
-                update_sql = f"""
-                    UPDATE `{TARGET_REGISTRY}`
-                    SET Location = '{new_loc}', SensorStatus = '{new_stat}'
-                    WHERE NodeNum = '{data['NodeNum']}' 
-                      AND Start_Date = DATE('{data['Start_Date']}')
-                """
-                client.query(update_sql).result()
-                st.success(f"Updated {data['NodeNum']}.")
-                st.rerun()
+            st.divider()
+            with st.form("edit_entry_form"):
+                st.subheader(f"🛠️ Modifying {data['NodeNum']}")
                 
-            if c2.form_submit_button("🗑️ DELETE", type="primary"):
-                delete_sql = f"""
-                    DELETE FROM `{TARGET_REGISTRY}` 
-                    WHERE NodeNum = '{data['NodeNum']}' 
-                      AND Start_Date = DATE('{data['Start_Date']}')
-                """
-                client.query(delete_sql).result()
-                st.warning("Row deleted.")
-                st.rerun()
+                new_loc = st.text_input("Location", value=str(data['Location']))
+                new_status = st.selectbox("Update Status", 
+                                        ["Active", "Available", "Archived", "Dead", "Diagnostic"],
+                                        index=0)
+                
+                c1, c2 = st.columns(2)
+                if c1.form_submit_button("💾 Save Changes"):
+                    # Update uses NodeNum and the original Start_Date as a unique key
+                    sql = f"""
+                        UPDATE `{TARGET_REGISTRY}`
+                        SET Location = '{new_loc}', SensorStatus = '{new_status}'
+                        WHERE NodeNum = '{data['NodeNum']}' 
+                          AND Start_Date = DATE('{data['Start_Date']}')
+                    """
+                    client.query(sql).result()
+                    st.success("Entry Updated!")
+                    st.rerun()
+
+                if c2.form_submit_button("🗑️ DELETE", type="primary"):
+                    del_sql = f"DELETE FROM `{TARGET_REGISTRY}` WHERE NodeNum = '{data['NodeNum']}' AND Start_Date = DATE('{data['Start_Date']}')"
+                    client.query(del_sql).result()
+                    st.warning("Entry Deleted.")
+                    st.rerun()
+    else:
+        st.warning("No records match your filters.")
 
 # ===============================================================
 # TOOL: BULK REGISTRY MANAGER
