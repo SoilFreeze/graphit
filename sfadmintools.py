@@ -161,91 +161,134 @@ if "Audit" in admin_page:
 
 
 # ===============================================================
-# TOOL 2: NODE LOGISTICS (Playground + Fuzzy Search)
+# TOOL 2: NODE LOGISTICS (Transactional Engineering Logic)
 # ===============================================================
 elif admin_page == "📋 Node Logistics":
     st.header("📋 Hardware Assignment & Deployment")
     
-    # 1. DATABASE SELECTOR (Safe Playground)
+    # --- 1. PLAYGROUND HANDLER ---
+    # Toggle to use a dummy table for safe testing
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
     TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
     
-    # 2. INITIALIZATION / SYNC TOOL
     if is_dev:
         with st.expander("🛠️ Playground Setup & Reset"):
-            st.warning("Playground allows you to test swaps without affecting live client data.")
             if st.button("♻️ Sync Dummy with Live Registry"):
-                with st.spinner("Cloning live registry to dummy table..."):
-                    # Wipes dummy and copies live data
-                    client.query(f"CREATE OR REPLACE TABLE `{TARGET_REGISTRY}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").result()
-                    st.success("Dummy table is now an exact copy of the Live Registry.")
-                    st.rerun()
+                # Atomic clone of live registry to dummy
+                client.query(f"CREATE OR REPLACE TABLE `{TARGET_REGISTRY}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").result()
+                st.success("Playground initialized with Live Data.")
+                st.rerun()
 
-    # Fetch registry data (cached for 10s to keep it snappy)
+    # Fetch fresh registry data
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
+    
+    # Prepare list of existing slots (Location + Depth) for the current project
+    proj_slots = full_reg_df[full_reg_df['Project'] == selected_project].copy()
+    proj_slots['SlotLabel'] = proj_slots.apply(lambda r: f"{r['Location']} | {r['Depth']}ft" if pd.notnull(r['Depth']) else f"{r['Location']} | Bank {r['Bank']}", axis=1)
+    available_slots = sorted(proj_slots['SlotLabel'].unique().tolist())
 
-    # 3. CASE SELECTOR
+    # --- 2. LOGISTICS ACTION ROUTER ---
     log_case = st.selectbox("Action Required:", [
         "Select Action...",
         "📍 Start New Assignment (Install)",
-        "🔄 Switch Serial Number (Correction)",
+        "🔄 Switch Serial Number (Incorrect Initial Setup)",
         "🔚 Retire Sensor (Take off Project)",
-        "🔋 Swap Hardware (Failure Replacement)"
+        "🔋 Visual Swap (Hardware Replacement at Date/Time)"
     ])
 
-    # 4. SEARCH / FUZZY MATCH LOGIC
-    st.subheader("🔍 Find Hardware")
-    search_id = st.text_input("Enter NodeNum or Serial Number", placeholder="e.g. TP-0001 or 17030652")
-    
-    if search_id:
-        # Fuzzy Match: Ignore case and whitespace
-        search_clean = str(search_id).strip().upper()
-        matches = full_reg_df[
-            (full_reg_df['NodeNum'].astype(str).str.upper().str.contains(search_clean)) | 
-            (full_reg_df['PhysicalID'].astype(str).str.contains(search_clean))
-        ].sort_values('Start_Date', ascending=False)
+    # -----------------------------------------------------------
+    # CASE 1: START NEW ASSIGNMENT (INSTALL)
+    # -----------------------------------------------------------
+    if log_case == "📍 Start New Assignment (Install)":
+        st.subheader("New Hardware Deployment")
+        c1, c2 = st.columns(2)
+        n_id = c1.text_input("New NodeNum (Display ID)", placeholder="e.g. TP-100")
+        p_id = c2.text_input("New Physical ID (Serial #)")
+        
+        # Signal Verification for the new sensor
+        if p_id:
+            st.caption(f"🔍 Checking Signal for S/N: {p_id}")
+            check_df = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE CAST(PhysicalID AS STRING) LIKE '%{p_id}%' ORDER BY timestamp DESC LIMIT 100").to_dataframe()
+            if not check_df.empty:
+                st.line_chart(check_df.set_index('timestamp')['temperature'], height=150)
 
-        if matches.empty:
-            st.warning(f"No records found for '{search_id}' in {TARGET_REGISTRY.split('.')[-1]}")
-        else:
-            st.success(f"Found {len(matches)} historical assignments.")
-            options = matches.apply(lambda r: f"{r['Project']} | {r['Location']} | S/N: {r['PhysicalID']} (Start: {r['Start_Date']})", axis=1).tolist()
-            selection = st.selectbox("Select specific assignment to manage:", options)
-            row = matches.iloc[options.index(selection)]
+        with st.form("install_form"):
+            loc = st.text_input("Location Name")
+            depth = st.number_input("Depth (ft)", value=0.0)
+            start = st.date_input("Install Date", value=datetime.now().date())
+            if st.form_submit_button("🚀 Commit Deployment"):
+                sql = f"INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Depth, Start_Date, SensorStatus) VALUES ('{n_id}', {p_id}, '{selected_project}', '{loc}', {depth}, '{start}', 'Active')"
+                client.query(sql).result()
+                st.success(f"Node {n_id} deployed.")
+                st.rerun()
 
-            # --- CASE: SWAP HARDWARE (Atomic Transaction) ---
-            if log_case == "🔋 Swap Hardware (Failure Replacement)":
-                with st.form("swap_engine"):
-                    st.subheader(f"Replacing Hardware at {row['Location']}")
-                    new_phys = st.text_input("NEW Physical ID (New Serial Number)")
-                    swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
-                    
-                    if st.form_submit_button("⚡ Execute Hardware Swap"):
-                        if not new_phys:
-                            st.error("Please enter the new serial number.")
-                        else:
-                            # TRANSACTION: Retire old, Start new in same spot
-                            sql = f"""
-                            BEGIN TRANSACTION;
-                            UPDATE `{TARGET_REGISTRY}` SET End_Date='{swap_date}', SensorStatus='Dead' 
-                            WHERE NodeNum='{row['NodeNum']}' AND End_Date IS NULL;
-                            
-                            INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                            VALUES ('{row['NodeNum']}', {new_phys}, '{row['Project']}', '{row['Location']}', '{row['Bank']}', {row['Depth']}, '{swap_date}', 'Active');
-                            COMMIT;
-                            """
-                            client.query(sql).result()
-                            st.success("Swap complete. History preserved.")
-                            st.rerun()
-
-            # --- CASE: RETIRE ---
-            elif log_case == "🔚 Retire Sensor (Take off Project)":
-                st.warning(f"Retiring {row['NodeNum']} from {row['Project']}")
-                retire_date = st.date_input("End Date", value=datetime.now().date())
-                if st.button("Confirm Retirement"):
-                    sql = f"UPDATE `{TARGET_REGISTRY}` SET End_Date='{retire_date}', SensorStatus='Available' WHERE NodeNum='{row['NodeNum']}' AND End_Date IS NULL"
+    # -----------------------------------------------------------
+    # CASE 2: INCORRECT INITIAL SETUP (FIXING THE DATA)
+    # -----------------------------------------------------------
+    elif log_case == "🔄 Switch Serial Number (Correction)":
+        st.info("Fixes history if the wrong S/N was assigned. Use to 'Switch all data'.")
+        target_slot = st.selectbox("Choose Slot to Correct:", available_slots)
+        if target_slot:
+            row = proj_slots[(proj_slots['SlotLabel'] == target_slot) & (proj_slots['End_Date'].isna())].iloc[0]
+            with st.form("fix_setup"):
+                new_phys = st.text_input("Correct Physical ID (Serial Number)", value=str(row['PhysicalID']))
+                if st.form_submit_button("💾 Overwrite Registry Setup"):
+                    # This corrects the link, instantly moving all raw data to this location
+                    sql = f"UPDATE `{TARGET_REGISTRY}` SET PhysicalID={new_phys} WHERE NodeNum='{row['NodeNum']}' AND Start_Date='{row['Start_Date']}' AND Project='{selected_project}'"
                     client.query(sql).result()
-                    st.success("Assignment ended.")
+                    st.success("Physical link corrected.")
+                    st.rerun()
+
+    # -----------------------------------------------------------
+    # CASE 3: RETIRE SENSOR (OFF PROJECT)
+    # -----------------------------------------------------------
+    elif log_case == "🔚 Retire Sensor (Take off Project)":
+        st.info("Ends the assignment without putting a new sensor in.")
+        target_slot = st.selectbox("Choose Slot to Retire:", available_slots)
+        if target_slot:
+            row = proj_slots[(proj_slots['SlotLabel'] == target_slot) & (proj_slots['End_Date'].isna())].iloc[0]
+            st.warning(f"Retiring {row['NodeNum']} from {target_slot}")
+            retire_date = st.date_input("Effective End Date", value=datetime.now().date())
+            if st.button("Confirm Retirement"):
+                sql = f"UPDATE `{TARGET_REGISTRY}` SET End_Date='{retire_date}', SensorStatus='Available' WHERE NodeNum='{row['NodeNum']}' AND End_Date IS NULL AND Project='{selected_project}'"
+                client.query(sql).result()
+                st.success("Assignment ended.")
+                st.rerun()
+
+    # -----------------------------------------------------------
+    # CASE 4: ATOMIC SWAP (REPLACE AT TIME)
+    # -----------------------------------------------------------
+    elif log_case == "🔋 Visual Swap (Hardware Replacement at Date/Time)":
+        st.info("Swap failing hardware at a specific time without losing history.")
+        target_slot = st.selectbox("Select Slot for Hardware Swap:", available_slots)
+        
+        if target_slot:
+            current_row = proj_slots[(proj_slots['SlotLabel'] == target_slot) & (proj_slots['End_Date'].isna())].iloc[0]
+            
+            # Graphs for visual confirmation of failure time
+            old_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{current_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
+            if not old_data.empty:
+                st.caption(f"Current Signal health for {current_row['NodeNum']}")
+                st.line_chart(old_data.set_index('timestamp')['temperature'], height=200)
+
+            with st.form("swap_engine_final"):
+                new_sn = st.text_input("New Serial Number (Physical ID)")
+                swap_ts = st.datetime_input("Effective Swap Time", value=datetime.now())
+                
+                if st.form_submit_button("⚡ Execute Atomic Swap"):
+                    # TRANSACTION: Retire Old and Insert New at the same timestamp
+                    ts_str = swap_ts.strftime('%Y-%m-%d %H:%M:%S')
+                    sql = f"""
+                    BEGIN TRANSACTION;
+                    UPDATE `{TARGET_REGISTRY}` SET End_Date='{ts_str}', SensorStatus='Diagnostic' 
+                    WHERE NodeNum='{current_row['NodeNum']}' AND Start_Date='{current_row['Start_Date']}';
+                    
+                    INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                    VALUES ('{current_row['NodeNum']}', {new_sn}, '{selected_project}', '{current_row['Location']}', '{current_row['Bank']}', {current_row['Depth']}, '{ts_str}', 'Active');
+                    COMMIT;
+                    """
+                    client.query(sql).result()
+                    st.success("Swap successful. Data correctly partitioned at swap time.")
                     st.rerun()
 
 
