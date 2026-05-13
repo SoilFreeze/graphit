@@ -256,7 +256,7 @@ elif admin_page == "📋 Node Logistics":
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
     TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
     
-    # Load fresh registry data
+    # Load registry data
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
     active_reg = full_reg_df[full_reg_df['End_Date'].isna()].copy()
 
@@ -277,32 +277,26 @@ elif admin_page == "📋 Node Logistics":
         st.divider()
         st.subheader(f"⚡ Verification: {found_row['NodeNum']}")
         
-        # --- GRAPH 1: THE OLD NODE ---
+        # Graphs remain the same for visual confirmation
         st.markdown(f"**1. Old Hardware Telemetry** (S/N: {found_row['PhysicalID']})")
-        old_q = f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp"
-        old_data = client.query(old_q).to_dataframe()
+        old_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
         if not old_data.empty:
             fig_old = go.Figure(go.Scatter(x=old_data['timestamp'], y=old_data['temperature'], name="Old Node"))
             fig_old.update_layout(height=250, margin=dict(t=0,b=0), hovermode="x unified")
-            fig_old.update_traces(hovertemplate="%{x|%Y-%m-%d %H:%M}<br>Temp: %{y:.2f}°F")
             st.plotly_chart(fig_old, use_container_width=True)
-        else: st.info("No recent data for old node.")
 
-        # --- INPUT FOR NEW NODE ---
         new_sn = st.text_input("Enter NEW Hardware Serial Number (Physical ID)")
 
-        # --- GRAPH 2: THE NEW NODE ---
         if new_sn:
             st.markdown(f"**2. New Hardware Telemetry** (S/N: {new_sn})")
-            new_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE CAST(PhysicalID AS STRING) LIKE '%{new_sn}%' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
+            # Using SAFE_CAST to prevent crashes on mixed ID types
+            new_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE SAFE_CAST(PhysicalID AS STRING) LIKE '%{new_sn}%' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
             if not new_data.empty:
                 fig_new = go.Figure(go.Scatter(x=new_data['timestamp'], y=new_data['temperature'], name="New Node", line=dict(color='orange')))
                 fig_new.update_layout(height=250, margin=dict(t=0,b=0), hovermode="x unified")
-                fig_new.update_traces(hovertemplate="%{x|%Y-%m-%d %H:%M}<br>Temp: %{y:.2f}°F")
                 st.plotly_chart(fig_new, use_container_width=True)
-            else: st.warning("No signal found for this new Serial Number yet.")
 
-        # --- FINAL EXECUTION ---
+        # FINAL FORM
         st.divider()
         with st.form("final_switch_form"):
             st.write("### 3. Finalize Node Switch")
@@ -310,27 +304,52 @@ elif admin_page == "📋 Node Logistics":
             confirm_check = st.checkbox("I verify the data overlap and want to commit the switch.")
             
             if st.form_submit_button("🚀 SWITCH NODES"):
-                if not new_sn or not confirm_check:
-                    st.error("Please provide a new serial number and check the confirmation box.")
+                # Safety check: Ensure new_sn is numeric for the FLOAT64 column
+                clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
+                
+                if not clean_sn or not confirm_check:
+                    st.error("Invalid Serial Number (must be numbers only) or confirmation missing.")
                 else:
                     try:
                         ts_str = switch_ts.strftime('%Y-%m-%d %H:%M:%S')
-                        clean_sn = str(new_sn).split('.')[0].strip()
                         
+                        # Handle Potential NaT in the Start_Date of the found_row
+                        old_start = found_row['Start_Date']
+                        start_filter = f"CAST('{old_start}' AS TIMESTAMP)" if pd.notnull(old_start) else "NULL"
+                        
+                        # Hardened SQL Logic
                         sql = f"""
                         BEGIN TRANSACTION;
-                        UPDATE `{TARGET_REGISTRY}` SET End_Date=CAST('{ts_str}' AS TIMESTAMP), SensorStatus='Dead' 
-                        WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date=CAST('{found_row['Start_Date']}' AS TIMESTAMP) AND End_Date IS NULL;
+                        -- Close the old record
+                        UPDATE `{TARGET_REGISTRY}` 
+                        SET End_Date = CAST('{ts_str}' AS TIMESTAMP), SensorStatus = 'Dead' 
+                        WHERE NodeNum = '{found_row['NodeNum']}' 
+                          AND Project = '{found_row['Project']}'
+                          AND (Start_Date = {start_filter} OR Start_Date IS NULL)
+                          AND End_Date IS NULL;
                         
-                        INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                        VALUES ('{found_row['NodeNum']}', CAST('{clean_sn}' AS FLOAT64), '{found_row['Project']}', '{found_row['Location']}', '{found_row['Bank']}', CAST('{found_row['Depth']}' AS FLOAT64), CAST('{ts_str}' AS TIMESTAMP), 'Active');
+                        -- Insert the new record
+                        INSERT INTO `{TARGET_REGISTRY}` 
+                        (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                        VALUES (
+                            '{found_row['NodeNum']}', 
+                            SAFE_CAST('{clean_sn}' AS FLOAT64), 
+                            '{found_row['Project']}', 
+                            '{found_row['Location']}', 
+                            '{found_row.get('Bank', '')}', 
+                            SAFE_CAST('{found_row['Depth']}' AS FLOAT64), 
+                            CAST('{ts_str}' AS TIMESTAMP), 
+                            'Active'
+                        );
                         COMMIT;
                         """
                         client.query(sql).result()
-                        st.success(f"Switched {found_row['NodeNum']} to S/N {clean_sn}")
+                        st.success(f"Success! Switched to S/N {clean_sn}")
+                        st.balloons()
+                        time.sleep(2)
                         st.rerun()
                     except Exception as e:
-                        st.error(f"SQL Error: {e}")
+                        st.error(f"Transaction Failed: {e}")
                         st.code(sql)
 
 # ===============================================================
