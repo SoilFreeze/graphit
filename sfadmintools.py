@@ -35,8 +35,8 @@ admin_page = st.sidebar.radio("Management Tool", [
     "📋 Node Logistics", 
     "📦 Bulk Registry Manager",
     "🔍 Sensor Status Audit",
-    "📈 Ref Curve Library",
     "⚙️ Project Master", 
+    "📈 Ref Curve Library", 
     "🧨 Surgical Data Management"
 ])
 
@@ -249,74 +249,38 @@ elif "Sensor status Audit" in admin_page:
 
 
 # ===============================================================
-# TOOL 2: NODE LOGISTICS (Visual Verification & Atomic Switch)
+# TOOL: NODE LOGISTICS (Visual Switch)
 # ===============================================================
-elif "Logistics" in admin_page:
-    st.header("📋 Hardware Assignment & Deployment")
-    
-    # 1. DATABASE & PLAYGROUND SETUP
+elif admin_page == "📋 Node Logistics":
+    st.header("📋 Hardware Surgical Switch")
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
     TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
     
-    if is_dev:
-        with st.expander("🛠️ Playground Setup & Reset"):
-            if st.button("♻️ Sync Dummy with Live Registry"):
-                client.query(f"CREATE OR REPLACE TABLE `{TARGET_REGISTRY}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").result()
-                st.success("Playground initialized.")
-                st.rerun()
-
     # Load fresh registry data
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
-    full_reg_df['Project'] = full_reg_df['Project'].fillna("UNASSIGNED")
     active_reg = full_reg_df[full_reg_df['End_Date'].isna()].copy()
 
-    # 2. SEARCH & AUTO-SELECTION LOGIC
-    st.subheader("🔍 Find & Verify Hardware")
-    
-    if 'auto_p' not in st.session_state: st.session_state.auto_p = "Select..."
-    if 'auto_l' not in st.session_state: st.session_state.auto_l = None
-
-    lookup_col1, lookup_col2 = st.columns(2)
+    # SEARCH
+    search_node = st.text_input("🔍 Search Node ID or Serial to begin switch", placeholder="TP-0001...")
     found_row = None
+    if search_node:
+        search_clean = str(search_node).strip().upper()
+        match = active_reg[
+            (active_reg['NodeNum'].astype(str).str.upper().str.contains(search_clean)) | 
+            (active_reg['PhysicalID'].astype(str).str.contains(search_clean))
+        ]
+        if not match.empty:
+            found_row = match.iloc[0]
+            st.success(f"📍 Node found at: {found_row['Project']} | {found_row['Location']}")
 
-    with lookup_col1:
-        search_input = st.text_input("Search by Node ID or S/N", placeholder="TP-0001...")
-        if search_input:
-            search_clean = str(search_input).strip().upper()
-            match = active_reg[
-                (active_reg['NodeNum'].astype(str).str.upper().str.contains(search_clean)) | 
-                (active_reg['PhysicalID'].astype(str).str.contains(search_clean))
-            ]
-            if not match.empty:
-                found_row = match.iloc[0]
-                st.session_state.auto_p = found_row['Project']
-                st.session_state.auto_l = found_row['Location']
-                st.success(f"📍 Node found at: {found_row['Project']} | {found_row['Location']}")
-
-    with lookup_col2:
-        p_list = sorted([p for p in active_reg['Project'].unique().tolist() if p])
-        sel_p = st.selectbox("Site Project", ["Select..."] + p_list, 
-                             index=(["Select..."] + p_list).index(st.session_state.auto_p) if st.session_state.auto_p in (["Select..."] + p_list) else 0)
-        
-        if sel_p != "Select...":
-            loc_list = sorted(active_reg[active_reg['Project'] == sel_p]['Location'].unique().tolist())
-            sel_l = st.selectbox("Site Location", loc_list,
-                                 index=loc_list.index(st.session_state.auto_l) if st.session_state.auto_l in loc_list else 0)
-            
-            slot_match = active_reg[(active_reg['Project'] == sel_p) & (active_reg['Location'] == sel_l)]
-            if not slot_match.empty:
-                options = slot_match.apply(lambda r: f"{r['NodeNum']} (S/N: {r['PhysicalID']} | {r['Depth']}ft)", axis=1).tolist()
-                sel_n = st.selectbox("Currently Assigned Hardware", options)
-                found_row = slot_match.iloc[options.index(sel_n)]
-
-    # 3. DUAL-GRAPH VERIFICATION & SWITCH ENGINE
     if found_row is not None:
         st.divider()
-        st.subheader(f"⚡ Hardware Switch: {found_row['NodeNum']}")
-            
+        st.subheader(f"⚡ Verification: {found_row['NodeNum']}")
+        
         # --- GRAPH 1: THE OLD NODE ---
-        st.markdown(f"**1. Current Assigned Hardware Telemetry** (S/N: {found_row['PhysicalID']})")
-        old_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
+        st.markdown(f"**1. Old Hardware Telemetry** (S/N: {found_row['PhysicalID']})")
+        old_q = f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp"
+        old_data = client.query(old_q).to_dataframe()
         if not old_data.empty:
             fig_old = go.Figure(go.Scatter(x=old_data['timestamp'], y=old_data['temperature'], name="Old Node"))
             fig_old.update_layout(height=250, margin=dict(t=0,b=0), hovermode="x unified")
@@ -329,7 +293,7 @@ elif "Logistics" in admin_page:
 
         # --- GRAPH 2: THE NEW NODE ---
         if new_sn:
-            st.markdown(f"**2. Incoming Hardware Telemetry** (S/N: {new_sn})")
+            st.markdown(f"**2. New Hardware Telemetry** (S/N: {new_sn})")
             new_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE CAST(PhysicalID AS STRING) LIKE '%{new_sn}%' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
             if not new_data.empty:
                 fig_new = go.Figure(go.Scatter(x=new_data['timestamp'], y=new_data['temperature'], name="New Node", line=dict(color='orange')))
@@ -341,118 +305,61 @@ elif "Logistics" in admin_page:
         # --- FINAL EXECUTION ---
         st.divider()
         with st.form("final_switch_form"):
-            st.write("### 3. Decide Switch Parameters")
-            switch_ts = st.datetime_input("Exact Date & Time to Switch Nodes", value=datetime.now())
-            new_sn = st.text_input("Enter NEW Hardware Serial Number (Physical ID)")
-            confirm_check = st.checkbox("I have verified the timestamps on both graphs and want to switch nodes.")
+            st.write("### 3. Finalize Node Switch")
+            switch_ts = st.datetime_input("Switch Time (from graphs above)", value=datetime.now())
+            confirm_check = st.checkbox("I verify the data overlap and want to commit the switch.")
             
             if st.form_submit_button("🚀 SWITCH NODES"):
                 if not new_sn or not confirm_check:
-                    st.error("Missing serial number or confirmation.")
+                    st.error("Please provide a new serial number and check the confirmation box.")
                 else:
                     try:
                         ts_str = switch_ts.strftime('%Y-%m-%d %H:%M:%S')
-                        # Clean Serial Number to avoid float issues (.0)
                         clean_sn = str(new_sn).split('.')[0].strip()
                         
-                        # Hardened Transactional SQL with explicit CASTING
                         sql = f"""
                         BEGIN TRANSACTION;
-                        UPDATE `{TARGET_REGISTRY}` 
-                        SET End_Date = CAST('{ts_str}' AS TIMESTAMP), SensorStatus = 'Dead' 
-                        WHERE NodeNum = '{found_row['NodeNum']}' 
-                          AND Project = '{found_row['Project']}'
-                          AND Start_Date = CAST('{found_row['Start_Date']}' AS TIMESTAMP)
-                          AND End_Date IS NULL;
+                        UPDATE `{TARGET_REGISTRY}` SET End_Date=CAST('{ts_str}' AS TIMESTAMP), SensorStatus='Dead' 
+                        WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date=CAST('{found_row['Start_Date']}' AS TIMESTAMP) AND End_Date IS NULL;
                         
-                        INSERT INTO `{TARGET_REGISTRY}` 
-                        (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                        VALUES (
-                            '{found_row['NodeNum']}', 
-                            CAST('{clean_sn}' AS FLOAT64), 
-                            '{found_row['Project']}', 
-                            '{found_row['Location']}', 
-                            '{found_row.get('Bank', '')}', 
-                            CAST('{found_row.get('Depth', 0)}' AS FLOAT64), 
-                            CAST('{ts_str}' AS TIMESTAMP), 
-                            'Active'
-                        );
+                        INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                        VALUES ('{found_row['NodeNum']}', CAST('{clean_sn}' AS FLOAT64), '{found_row['Project']}', '{found_row['Location']}', '{found_row['Bank']}', CAST('{found_row['Depth']}' AS FLOAT64), CAST('{ts_str}' AS TIMESTAMP), 'Active');
                         COMMIT;
                         """
                         client.query(sql).result()
-                        st.success("Switch successful.")
+                        st.success(f"Switched {found_row['NodeNum']} to S/N {clean_sn}")
                         st.rerun()
                     except Exception as e:
                         st.error(f"SQL Error: {e}")
-                        st.code(sql) # Help debug if it fails again
+                        st.code(sql)
 
+# ===============================================================
+# TOOL: BULK REGISTRY MANAGER
+# ===============================================================
+elif admin_page == "📦 Bulk Registry Manager":
+    st.header("📦 Bulk Project Operations")
     
-    # --- 3. SURGICAL ACTIONS ---
-    if found_row is not None:
-        st.divider()
-        st.subheader(f"⚡ Actions for {found_row['NodeNum']} at {found_row['Location']}")
-        
-        # VISUAL TELEMETRY CHECK
-        old_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
-        if not old_data.empty:
-            st.caption(f"Last 3 days of telemetry for {found_row['NodeNum']}:")
-            st.line_chart(old_data.set_index('timestamp')['temperature'], height=150)
+    is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True, key="bulk_dev")
+    TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
 
-        action_tab1, action_tab2 = st.tabs(["🔋 Physical Hardware Swap", "🔄 Data/Mapping Correction"])
+    bt1, bt2 = st.tabs(["📥 Site Deployment (CSV)", "🔚 Site Decommission"])
 
-        with action_tab1:
-            st.info("Case: Sensor died/faulty. Replace with NEW serial number starting at a specific time.")
-            with st.form("swap_form"):
-                new_sn = st.text_input("New Physical S/N (New Hardware Serial)")
-                swap_ts = st.datetime_input("Effective Swap Time", value=datetime.now())
-                if st.form_submit_button("⚡ Execute Physical Swap"):
-                    if not new_sn: st.error("New Serial required.")
-                    else:
-                        sql = f"""
-                        BEGIN TRANSACTION;
-                        UPDATE `{TARGET_REGISTRY}` SET End_Date='{swap_ts.strftime('%Y-%m-%d %H:%M:%S')}', SensorStatus='Dead' 
-                        WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date='{found_row['Start_Date']}';
-                        INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                        VALUES ('{found_row['NodeNum']}', {new_sn}, '{found_row['Project']}', '{found_row['Location']}', '{found_row['Bank']}', {found_row['Depth']}, '{swap_ts.strftime('%Y-%m-%d %H:%M:%S')}', 'Active');
-                        COMMIT;"""
-                        client.query(sql).result()
-                        st.success("Swap recorded. History split at timestamp.")
-                        st.rerun()
+    with bt1:
+        st.subheader("Import New Project Registry")
+        u_csv = st.file_uploader("Upload Node CSV", type="csv")
+        if u_csv and st.button("Commit New Site"):
+            df = pd.read_csv(u_csv)
+            client.load_table_from_dataframe(df, TARGET_REGISTRY).result()
+            st.success("Project Hardware Successfully Initialized.")
 
-        with action_tab2:
-            st.info("Case: Assignment was wrong. Move ALL data from this assignment to a different serial number.")
-            with st.form("fix_data"):
-                corr_sn = st.text_input("Correct Physical S/N", value=str(found_row['PhysicalID']))
-                if st.form_submit_button("💾 Overwrite Registry Link"):
-                    sql = f"UPDATE `{TARGET_REGISTRY}` SET PhysicalID={corr_sn} WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date='{found_row['Start_Date']}'"
-                    client.query(sql).result()
-                    st.success("Link corrected. History updated.")
-                    st.rerun()
-
-    # --- 4. BULK OPERATIONS ---
-    st.divider()
-    st.subheader("📦 Bulk Site Operations")
-    bulk_tab1, bulk_tab2 = st.tabs(["New Site Deployment (Additions)", "Full Site Decommission (Retirement)"])
-    
-    with bulk_tab1:
-        st.write("Upload CSV to initialize a whole project.")
-        u_csv = st.file_uploader("Upload Node CSV", type="csv", help="Required columns: NodeNum, PhysicalID, Project, Location, Depth, Start_Date")
-        if u_csv and st.button("🚀 Push Bulk Additions"):
-            up_df = pd.read_csv(u_csv)
-            client.load_table_from_dataframe(up_df, TARGET_REGISTRY).result()
-            st.success(f"Success: {len(up_df)} nodes added to registry.")
-
-    with bulk_tab2:
-        st.warning("This will set an End Date for every active sensor on a specific Project.")
-        ret_p = st.text_input("Enter Project ID to Close Out", placeholder="e.g. 2538")
+    with bt2:
+        st.subheader("Project-Wide Retirement")
+        ret_p = st.text_input("Enter Project ID to Close (e.g. 2538)")
         ret_date = st.date_input("Decommission Date", value=datetime.now().date())
-        if st.button("🔚 Retire Entire Site", type="primary"):
-             if ret_p:
-                 sql = f"UPDATE `{TARGET_REGISTRY}` SET End_Date='{ret_date}', SensorStatus='Available' WHERE Project='{ret_p}' AND End_Date IS NULL"
-                 client.query(sql).result()
-                 st.success(f"Project {ret_p} retired.")
-             else: st.error("Project ID required.")
-
+        if st.button("🔚 Retire All Nodes on Site", type="primary"):
+            if ret_p:
+                client.query(f"UPDATE `{TARGET_REGISTRY}` SET End_Date=CAST('{ret_date}' AS TIMESTAMP), SensorStatus='Available' WHERE Project='{ret_p}' AND End_Date IS NULL").result()
+                st.success(f"Project {ret_p} retired.")
 
 # ===============================================================
 # TOOL 3: PROJECT MASTER (Updated Fix)
@@ -493,6 +400,51 @@ elif admin_page == "⚙️ Project Master":
             client.query(update_q).result()
             st.success(f"✅ Project {selected_project} updated to {u_status}.")
             st.rerun()
+
+# ===============================================================
+# TOOL: SENSOR STATUS AUDIT
+# ===============================================================
+elif admin_page == "🔍 Sensor Status Audit":
+    st.header("🔍 Sensor Status Audit")
+    
+    # 1. FLEET METRICS
+    registry_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
+    
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("System Total", registry_df['PhysicalID'].nunique())
+    m2.metric("Assigned to Projects", len(registry_df[registry_df['End_Date'].isna()]))
+    m3.metric("Available", len(registry_df[registry_df['SensorStatus'] == 'Available']))
+    m4.metric("Faulty/Dead", len(registry_df[registry_df['SensorStatus'] == 'Dead']))
+
+    st.divider()
+
+    # 2. INVESTIGATOR
+    st.subheader("🔦 Sensor Investigation")
+    sn_look = st.text_input("Look up by Serial Number or Node Number")
+    
+    if sn_look:
+        # Find PhysicalID from input
+        lookup = registry_df[
+            (registry_df['PhysicalID'].astype(str).str.contains(sn_look)) | 
+            (registry_df['NodeNum'].astype(str).str.contains(sn_look.upper()))
+        ]
+        
+        if not lookup.empty:
+            target_sn = lookup.iloc[0]['PhysicalID']
+            st.markdown(f"### Historical Timeline: S/N {target_sn}")
+            
+            # Show Table
+            history = registry_df[registry_df['PhysicalID'] == target_sn].sort_values('Start_Date', ascending=False)
+            st.dataframe(history[['Project', 'Location', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
+            
+            # Show All-Time Graph
+            raw_h = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE PhysicalID={target_sn} ORDER BY timestamp DESC").to_dataframe()
+            if not raw_h.empty:
+                fig_h = go.Figure(go.Scatter(x=raw_h['timestamp'], y=raw_h['temperature'], name="All-Time Data"))
+                fig_h.update_layout(title="All-Time Temperature History", height=300)
+                st.plotly_chart(fig_h, use_container_width=True)
+        else:
+            st.error("No hardware matching that ID found in registry.")
 
 # ===============================================================
 # TOOL 4: REF CURVE LIBRARY (Fixed for Schema Errors)
