@@ -48,7 +48,7 @@ selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list
 # ===============================================================
 # TOOL 1: SETUP AUDIT (Hardened Formatting & Color Scales)
 # ===============================================================
-if "Audit" in admin_page:
+if "Setup Audit" in admin_page:
     st.header(f"🏗️ Setup Audit: {selected_project}")
     st.write("This is something to write")
 
