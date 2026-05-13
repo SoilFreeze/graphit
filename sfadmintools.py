@@ -10,6 +10,18 @@ import re
 # 1. CONFIGURATION & SECURITY
 st.set_page_config(page_title="SF Engineering Admin", page_icon="🛠️", layout="wide")
 
+# --- GLOBAL DATA LOADING ---
+# This runs on every refresh, ensuring 'reg_df' is always defined
+try:
+    # Use the global target table (production or dummy)
+    reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
+except Exception as e:
+    st.error(f"❌ Failed to load registry: {e}")
+    # Fallback to an empty dataframe so the rest of the app doesn't crash
+    reg_df = pd.DataFrame(columns=['NodeNum', 'PhysicalID', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'])
+
+# ---------------------------------------------------------
+
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
 
@@ -517,76 +529,98 @@ if admin_page == "🩹 Sensor Switch":
 elif admin_page == "📝 Sensor Edit":
     st.header("📝 Registry Editor")
     
-    # 1. Fetch Fresh Data
-    full_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}` ORDER BY Start_Date DESC").to_dataframe()
+    # 1. Reuse Global Data
+    # Assuming 'reg_df' was loaded at the top of the script as we discussed
+    if 'reg_df' in locals() or 'reg_df' in globals():
+        source_df = reg_df.copy()
+    else:
+        # Fallback if global fetch failed
+        source_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}` ORDER BY Start_Date DESC").to_dataframe()
     
     # 2. Advanced Filtering UI
-    st.subheader("🔍 Filter Records")
+    st.subheader("🔍 Find Record")
     col_f1, col_f2, col_f3 = st.columns(3)
     
     with col_f1:
-        u_projects = ["All"] + sorted(full_df['Project'].unique().tolist())
+        u_projects = ["All"] + sorted(source_df['Project'].unique().tolist())
         sel_proj = st.selectbox("Filter by Project", u_projects)
         
     with col_f2:
-        u_status = ["All"] + sorted(full_df['SensorStatus'].unique().tolist())
+        u_status = ["All"] + sorted(source_df['SensorStatus'].unique().tolist())
         sel_stat = st.selectbox("Filter by Status", u_status)
         
     with col_f3:
-        search_node = st.text_input("Search Node ID", "").strip()
+        # Standardize search to be case-insensitive
+        search_node = st.text_input("Search Node ID (e.g. TP-0001)", "").strip().upper()
 
-    # 3. Apply Logic to Filter Dataframe
-    edit_df = full_df.copy()
+    # 3. Apply Filtering Logic
+    edit_df = source_df.copy()
     if sel_proj != "All":
         edit_df = edit_df[edit_df['Project'] == sel_proj]
     if sel_stat != "All":
         edit_df = edit_df[edit_df['SensorStatus'] == sel_stat]
     if search_node:
-        edit_df = edit_df[edit_df['NodeNum'].str.contains(search_node, case=False)]
+        edit_df = edit_df[edit_df['NodeNum'].str.upper().str.contains(search_node)]
 
     # CRITICAL: Reset index so that the selection tool matches the filtered rows
     edit_df = edit_df.reset_index(drop=True)
 
     # 4. Display & Selection
     st.write(f"Showing **{len(edit_df)}** matching records.")
-    st.dataframe(edit_df, use_container_width=True)
+    st.dataframe(edit_df, use_container_width=True, hide_index=True)
     
     if not edit_df.empty:
-        # Create a safe list of options
-        row_options = [f"{i} | {row['NodeNum']} | {row['Location']} ({row['Start_Date']})" for i, row in edit_df.iterrows()]
+        # Create a descriptive list for the dropdown
+        row_options = [f"{i} | {row['NodeNum']} | {row['Location']} (Started: {row['Start_Date']})" for i, row in edit_df.iterrows()]
         selection = st.selectbox("Select Record to Edit", ["-- Choose --"] + row_options)
 
         if selection != "-- Choose --":
-            # Safely get the local index
+            # Extract the local index from the selection string
             local_idx = int(selection.split(" | ")[0])
             data = edit_df.iloc[local_idx]
             
             st.divider()
             with st.form("edit_entry_form"):
                 st.subheader(f"🛠️ Modifying {data['NodeNum']}")
+                st.info(f"Entry Date: {data['Start_Date']}")
                 
-                new_loc = st.text_input("Location", value=str(data['Location']))
-                new_status = st.selectbox("Update Status", 
-                                        ["Active", "Available", "Archived", "Dead", "Diagnostic"],
-                                        index=0)
+                # Edit inputs
+                new_loc = st.text_input("Update Location", value=str(data['Location']))
                 
+                # Dynamic Status Selection
+                status_list = ["Active", "Available", "Archived", "Dead", "Diagnostic"]
+                try:
+                    current_stat_idx = status_list.index(data['SensorStatus'])
+                except ValueError:
+                    current_stat_idx = 0
+                    
+                new_status = st.selectbox("Update Status", status_list, index=current_stat_idx)
+                
+                # Action Buttons
                 c1, c2 = st.columns(2)
+                
                 if c1.form_submit_button("💾 Save Changes"):
-                    # Update uses NodeNum and the original Start_Date as a unique key
-                    sql = f"""
+                    # We use NodeNum and Start_Date as a unique composite key
+                    update_sql = f"""
                         UPDATE `{TARGET_REGISTRY}`
-                        SET Location = '{new_loc}', SensorStatus = '{new_status}'
+                        SET Location = '{new_loc}', 
+                            SensorStatus = '{new_status}'
                         WHERE NodeNum = '{data['NodeNum']}' 
                           AND Start_Date = DATE('{data['Start_Date']}')
                     """
-                    client.query(sql).result()
-                    st.success("Entry Updated!")
+                    client.query(update_sql).result()
+                    st.success(f"Successfully updated {data['NodeNum']}")
                     st.rerun()
 
-                if c2.form_submit_button("🗑️ DELETE", type="primary"):
-                    del_sql = f"DELETE FROM `{TARGET_REGISTRY}` WHERE NodeNum = '{data['NodeNum']}' AND Start_Date = DATE('{data['Start_Date']}')"
-                    client.query(del_sql).result()
-                    st.warning("Entry Deleted.")
+                if c2.form_submit_button("🗑️ DELETE RECORD", type="primary"):
+                    # DELETE uses the same composite key for safety
+                    delete_sql = f"""
+                        DELETE FROM `{TARGET_REGISTRY}` 
+                        WHERE NodeNum = '{data['NodeNum']}' 
+                          AND Start_Date = DATE('{data['Start_Date']}')
+                    """
+                    client.query(delete_sql).result()
+                    st.warning(f"Deleted {data['NodeNum']} record from registry.")
                     st.rerun()
     else:
         st.warning("No records match your filters.")
