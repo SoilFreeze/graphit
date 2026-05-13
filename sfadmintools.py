@@ -437,41 +437,65 @@ if admin_page == "🩹 Sensor Switch":
                 st.rerun()
                 
 # ===============================================================
-# TOOL: SENSOR EDIT (CRUD Operations)
+# TOOL: SENSOR EDIT (Backward-Compatible Version)
 # ===============================================================
 elif admin_page == "📝 Sensor Edit":
     st.header("📝 Registry Editor")
     
-    # This query previously failed because of the NameError
+    # 1. Fetch the data
     edit_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}` ORDER BY Start_Date DESC").to_dataframe()
     
-    # Filter for easier management
+    # 2. Search Filter
     search_term = st.text_input("Search Registry")
     if search_term:
         edit_df = edit_df[edit_df.astype(str).apply(lambda x: x.str.contains(search_term, case=False)).any(axis=1)]
 
-    # Use Streamlit's new selection capability
-    event = st.dataframe(edit_df, on_select="rerun", selection_mode="single_row", hide_index=True)
+    # 3. Display the Dataframe (Standard View)
+    st.dataframe(edit_df, hide_index=False) # Showing index so we can pick a row
+    
+    # 4. Selection via Selectbox (Compatible with older versions)
+    st.info("To edit a row, select its Index number from the list below.")
+    
+    # Create a list of labels like "Index 0: TP-0001 (Elizabeth)"
+    row_options = [f"Index {i}: {row['NodeNum']} at {row['Project']}" for i, row in edit_df.iterrows()]
+    
+    selection = st.selectbox("Select Row to Modify", ["-- Select a Row --"] + row_options)
 
-    if event and len(event['selection']['rows']) > 0:
-        row_idx = event['selection']['rows'][0]
-        data = edit_df.iloc[row_idx]
+    if selection != "-- Select a Row --":
+        # Extract the index number back out of the string
+        selected_index = int(selection.split(":")[0].replace("Index ", ""))
+        data = edit_df.iloc[selected_index]
         
-        with st.form("edit_form"):
-            st.subheader(f"Edit {data['NodeNum']}")
-            new_loc = st.text_input("Location", value=data['Location'])
-            new_stat = st.selectbox("Status", ["Active", "Available", "Archived", "Dead"], index=0)
+        st.divider()
+        with st.form("edit_form_compatible"):
+            st.subheader(f"🛠️ Editing {data['NodeNum']}")
+            
+            # Form Inputs
+            new_loc = st.text_input("Location", value=str(data['Location']))
+            new_stat = st.selectbox("Status", ["Active", "Available", "Archived", "Dead", "Diagnostic"], 
+                                   index=0) # You can refine the index logic here later
             
             c1, c2 = st.columns(2)
-            if c1.form_submit_button("💾 Save"):
-                # Use NodeNum and Start_Date as a unique composite key for the update
-                client.query(f"UPDATE `{TARGET_REGISTRY}` SET Location='{new_loc}', SensorStatus='{new_stat}' WHERE NodeNum='{data['NodeNum']}' AND Start_Date=DATE('{data['Start_Date']}')").result()
-                st.success("Updated.")
-                st.rerun()
             
+            if c1.form_submit_button("💾 Save Changes"):
+                update_sql = f"""
+                    UPDATE `{TARGET_REGISTRY}`
+                    SET Location = '{new_loc}', SensorStatus = '{new_stat}'
+                    WHERE NodeNum = '{data['NodeNum']}' 
+                      AND Start_Date = DATE('{data['Start_Date']}')
+                """
+                client.query(update_sql).result()
+                st.success(f"Updated {data['NodeNum']}.")
+                st.rerun()
+                
             if c2.form_submit_button("🗑️ DELETE", type="primary"):
-                client.query(f"DELETE FROM `{TARGET_REGISTRY}` WHERE NodeNum='{data['NodeNum']}' AND Start_Date=DATE('{data['Start_Date']}')").result()
-                st.warning("Deleted.")
+                delete_sql = f"""
+                    DELETE FROM `{TARGET_REGISTRY}` 
+                    WHERE NodeNum = '{data['NodeNum']}' 
+                      AND Start_Date = DATE('{data['Start_Date']}')
+                """
+                client.query(delete_sql).result()
+                st.warning("Row deleted.")
                 st.rerun()
 
 # ===============================================================
