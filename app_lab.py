@@ -225,7 +225,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Final Master Function: 
-    - Precision Matching: Goals only appear on specific Location plots.
+    - Restores Theoretical Curves using robust fuzzy matching.
     - Thick Red Dash-Dot Goals (Top Layer)
     - Full Black Engineering Box Borders
     """
@@ -284,14 +284,19 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
             ))
 
-    # 3. PRECISION THEORETICAL MATCHING
+    # 3. RESTORED THEORETICAL MATCHING
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # We enforce a strict naming convention check: e.g., '2527-TP1'
+            # We break the search_id (e.g. 2527-TP1) into project and location
+            parts = str(curve_id).split('-')
+            proj_part = parts[0]
+            loc_part = parts[1] if len(parts) > 1 else ""
+
+            # Use LIKE to handle slight variations in the CurveID library naming
             ref_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) = UPPER('{curve_id}') 
+                WHERE UPPER(CurveID) LIKE UPPER('{proj_part}-{loc_part}%')
                 ORDER BY Day
             """
             ref_df = client.query(ref_q).to_dataframe()
@@ -301,6 +306,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 ref_df['timestamp'] = ref_df['Day'].apply(
                     lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
                 )
+                # Ensure the goal line matches the sensor data timezone
                 ref_df['timestamp'] = ref_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                 
                 ref_y = ref_df['Temp']
@@ -309,7 +315,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
                 fig.add_trace(go.Scatter(
                     x=ref_df['timestamp'], y=ref_y,
-                    name=f"<b>GOAL: {curve_id.split('-')[-1]}</b>",
+                    name=f"<b>GOAL: {loc_part}</b>",
                     mode='lines',
                     line=dict(color='rgba(255, 0, 0, 0.8)', width=4, dash='dashdot'),
                     legendrank=1
