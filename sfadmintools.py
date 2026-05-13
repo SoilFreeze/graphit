@@ -161,89 +161,94 @@ if "Audit" in admin_page:
 
 
 # ===============================================================
-# TOOL 2: NODE LOGISTICS (Transactional Engineering Logic)
+# TOOL 2: NODE LOGISTICS (Playground + Fuzzy Search)
 # ===============================================================
 elif admin_page == "📋 Node Logistics":
     st.header("📋 Hardware Assignment & Deployment")
     
-    # Database Selector (Playground Toggle)
-    is_dev = st.sidebar.toggle("🛠️ Use Registry Playground (Dummy Table)", value=True)
+    # 1. DATABASE SELECTOR (Safe Playground)
+    is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
     TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
     
+    # 2. INITIALIZATION / SYNC TOOL
+    if is_dev:
+        with st.expander("🛠️ Playground Setup & Reset"):
+            st.warning("Playground allows you to test swaps without affecting live client data.")
+            if st.button("♻️ Sync Dummy with Live Registry"):
+                with st.spinner("Cloning live registry to dummy table..."):
+                    # Wipes dummy and copies live data
+                    client.query(f"CREATE OR REPLACE TABLE `{TARGET_REGISTRY}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").result()
+                    st.success("Dummy table is now an exact copy of the Live Registry.")
+                    st.rerun()
+
+    # Fetch registry data (cached for 10s to keep it snappy)
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
-    
-    # LOGISTICS CASE SELECTOR
+
+    # 3. CASE SELECTOR
     log_case = st.selectbox("Action Required:", [
         "Select Action...",
         "📍 Start New Assignment (Install)",
-        "🔄 Switch Sensor (Incorrect Initial Setup)",
+        "🔄 Switch Serial Number (Correction)",
         "🔚 Retire Sensor (Take off Project)",
-        "🔋 Swap Sensor (Hardware Replacement at Date/Time)"
+        "🔋 Swap Hardware (Failure Replacement)"
     ])
 
-    if log_case == "📍 Start New Assignment (Install)":
-        with st.form("install_form"):
-            st.subheader("Assign Node to Location")
-            c1, c2 = st.columns(2)
-            n_id = c1.text_input("NodeNum (Display ID)")
-            p_id = c2.text_input("Physical ID (Hardware S/N)")
-            proj = c1.text_input("Project ID")
-            loc = c2.text_input("Location Name")
-            start = st.date_input("Deployment Start Date")
-            if st.form_submit_button("🚀 Commit Deployment"):
-                sql = f"INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Start_Date, SensorStatus) VALUES ('{n_id}', {p_id}, '{proj}', '{loc}', '{start}', 'Active')"
-                client.query(sql).result()
-                st.success(f"Node {n_id} deployed to {proj}.")
+    # 4. SEARCH / FUZZY MATCH LOGIC
+    st.subheader("🔍 Find Hardware")
+    search_id = st.text_input("Enter NodeNum or Serial Number", placeholder="e.g. TP-0001 or 17030652")
+    
+    if search_id:
+        # Fuzzy Match: Ignore case and whitespace
+        search_clean = str(search_id).strip().upper()
+        matches = full_reg_df[
+            (full_reg_df['NodeNum'].astype(str).str.upper().str.contains(search_clean)) | 
+            (full_reg_df['PhysicalID'].astype(str).str.contains(search_clean))
+        ].sort_values('Start_Date', ascending=False)
 
-    elif log_case == "🔄 Switch Sensor (Incorrect Initial Setup)":
-        st.info("Use this if you accidentally assigned the wrong serial number to a location and need to fix the history.")
-        n_id = st.text_input("Search NodeNum")
-        if n_id:
-            matches = full_reg_df[full_reg_df['NodeNum'] == n_id].sort_values('Start_Date', ascending=False)
-            if not matches.empty:
-                row = matches.iloc[0]
-                with st.form("fix_setup"):
-                    new_phys = st.text_input("Correct Physical ID", value=str(row['PhysicalID']))
-                    if st.form_submit_button("💾 Overwrite Setup"):
-                        sql = f"UPDATE `{TARGET_REGISTRY}` SET PhysicalID={new_phys} WHERE NodeNum='{n_id}' AND Start_Date='{row['Start_Date']}'"
-                        client.query(sql).result()
-                        st.success("Corrected Physical ID. All historical data for this assignment is now correctly mapped.")
+        if matches.empty:
+            st.warning(f"No records found for '{search_id}' in {TARGET_REGISTRY.split('.')[-1]}")
+        else:
+            st.success(f"Found {len(matches)} historical assignments.")
+            options = matches.apply(lambda r: f"{r['Project']} | {r['Location']} | S/N: {r['PhysicalID']} (Start: {r['Start_Date']})", axis=1).tolist()
+            selection = st.selectbox("Select specific assignment to manage:", options)
+            row = matches.iloc[options.index(selection)]
 
-    elif log_case == "🔚 Retire Sensor (Take off Project)":
-        n_id = st.text_input("Search NodeNum to Retire")
-        if n_id:
-            matches = full_reg_df[(full_reg_df['NodeNum'] == n_id) & (full_reg_df['End_Date'].isna())]
-            if not matches.empty:
-                row = matches.iloc[0]
-                st.warning(f"Currently assigned to {row['Project']} | {row['Location']}")
-                end_d = st.date_input("Retirement Date", value=datetime.now().date())
-                if st.button("🔚 Finalize Retirement"):
-                    sql = f"UPDATE `{TARGET_REGISTRY}` SET End_Date='{end_d}', SensorStatus='Available' WHERE NodeNum='{n_id}' AND End_Date IS NULL"
-                    client.query(sql).result()
-                    st.success("Sensor retired. It is now hidden from the client portal after this date.")
-
-    elif log_case == "🔋 Swap Sensor (Hardware Replacement at Date/Time)":
-        st.info("Case: Old sensor failed or battery died. Put New sensor in its place starting now.")
-        old_node = st.text_input("Existing NodeNum (e.g. TP-0001)")
-        if old_node:
-            matches = full_reg_df[(full_reg_df['NodeNum'] == old_node) & (full_reg_df['End_Date'].isna())]
-            if not matches.empty:
-                row = matches.iloc[0]
+            # --- CASE: SWAP HARDWARE (Atomic Transaction) ---
+            if log_case == "🔋 Swap Hardware (Failure Replacement)":
                 with st.form("swap_engine"):
                     st.subheader(f"Replacing Hardware at {row['Location']}")
                     new_phys = st.text_input("NEW Physical ID (New Serial Number)")
                     swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
+                    
                     if st.form_submit_button("⚡ Execute Hardware Swap"):
-                        # TRANSACTION: Retire old, Start new in same spot
-                        sql = f"""
-                        BEGIN TRANSACTION;
-                        UPDATE `{TARGET_REGISTRY}` SET End_Date='{swap_date}', SensorStatus='Dead' WHERE NodeNum='{old_node}' AND End_Date IS NULL;
-                        INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                        VALUES ('{old_node}', {new_phys}, '{row['Project']}', '{row['Location']}', '{row['Bank']}', {row['Depth']}, '{swap_date}', 'Active');
-                        COMMIT;
-                        """
-                        client.query(sql).result()
-                        st.success("Swap complete. Data before this date belongs to the old serial; data after belongs to the new one.")
+                        if not new_phys:
+                            st.error("Please enter the new serial number.")
+                        else:
+                            # TRANSACTION: Retire old, Start new in same spot
+                            sql = f"""
+                            BEGIN TRANSACTION;
+                            UPDATE `{TARGET_REGISTRY}` SET End_Date='{swap_date}', SensorStatus='Dead' 
+                            WHERE NodeNum='{row['NodeNum']}' AND End_Date IS NULL;
+                            
+                            INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                            VALUES ('{row['NodeNum']}', {new_phys}, '{row['Project']}', '{row['Location']}', '{row['Bank']}', {row['Depth']}, '{swap_date}', 'Active');
+                            COMMIT;
+                            """
+                            client.query(sql).result()
+                            st.success("Swap complete. History preserved.")
+                            st.rerun()
+
+            # --- CASE: RETIRE ---
+            elif log_case == "🔚 Retire Sensor (Take off Project)":
+                st.warning(f"Retiring {row['NodeNum']} from {row['Project']}")
+                retire_date = st.date_input("End Date", value=datetime.now().date())
+                if st.button("Confirm Retirement"):
+                    sql = f"UPDATE `{TARGET_REGISTRY}` SET End_Date='{retire_date}', SensorStatus='Available' WHERE NodeNum='{row['NodeNum']}' AND End_Date IS NULL"
+                    client.query(sql).result()
+                    st.success("Assignment ended.")
+                    st.rerun()
+
+
 # ===============================================================
 # TOOL 3: PROJECT MASTER (Updated Fix)
 # ===============================================================
