@@ -50,7 +50,7 @@ selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list
 # ===============================================================
 if "Audit" in admin_page:
     st.header(f"🏗️ Setup Audit: {selected_project}")
-    st.write("Left-justified integrity report. Thermal data includes °F suffix.")
+    st.write("This is something to write")
 
     # SQL remains same as previous (fetches min/max/last/gap)
     audit_q = f"""
@@ -254,7 +254,6 @@ elif "Sensor Status Audit" in admin_page:
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No thermal data found for this sensor.")
-
 
 # ===============================================================
 # TOOL: NODE LOGISTICS (Visual Switch)
