@@ -161,44 +161,62 @@ if "Audit" in admin_page:
 
 
 # ===============================================================
-# TOOL 2: NODE LOGISTICS (Playground Enabled)
+# TOOL 2: NODE LOGISTICS (With Commissioning Verification)
 # ===============================================================
 elif admin_page == "📋 Node Logistics":
     st.header("📋 Hardware Assignment & Deployment")
     
     # 1. DATABASE SELECTOR (Safe Playground)
-    is_dev = st.sidebar.toggle("🛠️ Use Registry Playground (Dummy Table)", value=True, 
-                               help="Enable this to test updates without affecting live data.")
+    is_dev = st.sidebar.toggle("🛠️ Use Registry Playground (Dummy Table)", value=True)
+    TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
     
-    TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
     if is_dev:
-        TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
-        st.info("🧪 **Operating in Playground Mode.** Updates will be written to the dummy table.")
-        
-        # CREATE DUMMY IF MISSING
+        st.info("🧪 **Operating in Playground Mode.** Updates written to dummy table.")
         client.query(f"CREATE TABLE IF NOT EXISTS `{TARGET_REGISTRY}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` LIMIT 10").result()
 
-    # Fetch fresh registry data
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
-
     reg_mode = st.radio("Logistics Mode", ["Search & Manage", "Bulk CSV Upload", "Global Status Audit"], horizontal=True)
 
     if reg_mode == "Search & Manage":
         search_id = st.text_input("🔍 Find Node (Enter NodeNum or Physical ID)")
         if search_id:
-            # Flexible filtering
-            matches = full_reg_df[
-                (full_reg_df['NodeNum'].astype(str) == search_id) | 
-                (full_reg_df['PhysicalID'].astype(str) == search_id)
-            ].sort_values('Start_Date', ascending=False)
+            # 2. ASSIGNMENT VISUALIZER (The "Commissioning Graph")
+            st.subheader(f"📡 Hardware Assignment Timeline: {search_id}")
+            
+            # Fetch ALL raw data for this node regardless of assignment
+            raw_q = f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE CAST(NodeNum AS STRING) = '{search_id}' ORDER BY timestamp"
+            raw_node_data = client.query(raw_q).to_dataframe()
+            
+            if not raw_node_data.empty:
+                fig_comm = go.Figure()
+                fig_comm.add_trace(go.Scatter(x=raw_node_data['timestamp'], y=raw_node_data['temperature'], name="Raw Telemetry", line=dict(color='lightgrey', width=1)))
+                
+                # Overlay current registry assignments as shaded boxes
+                node_assignments = full_reg_df[full_reg_df['NodeNum'] == search_id]
+                for _, assign in node_assignments.iterrows():
+                    start = assign['Start_Date']
+                    end = assign['End_Date'] if pd.notnull(assign['End_Date']) else pd.Timestamp.now(tz='UTC')
+                    
+                    fig_comm.add_vrect(
+                        x0=start, x1=end, 
+                        fillcolor="rgba(0, 255, 0, 0.1)", opacity=0.3, line_width=2, line_color="green",
+                        annotation_text=f"Assigned: {assign['Project']}", annotation_position="top left"
+                    )
+                
+                fig_comm.update_layout(title="Registry Assignment vs. Raw Data", height=400, plot_bgcolor='white')
+                st.plotly_chart(fig_comm, use_container_width=True)
+            else:
+                st.warning("No raw telemetry found for this hardware ID in the master view.")
 
+            # 3. SURGICAL EDIT FORM (Copied from existing logic)
+            matches = node_assignments.sort_values('Start_Date', ascending=False)
             if not matches.empty:
                 options = matches.apply(lambda r: f"{r['Project']} | {r['Location']} (Start: {r['Start_Date']})", axis=1).tolist()
                 selection = st.selectbox("Select specific assignment to manage:", options)
                 row = matches.iloc[options.index(selection)]
                 
-                with st.form("surgical_node_edit_form_v3"):
-                    st.subheader("📝 Edit Assignment")
+                with st.form("surgical_node_edit_form_v4"):
+                    st.subheader("📝 Edit Selected Assignment")
                     c1, c2 = st.columns(2)
                     u_proj = c1.text_input("Project", value=str(row['Project']))
                     u_loc = c2.text_input("Location", value=str(row['Location']))
@@ -206,61 +224,21 @@ elif admin_page == "📋 Node Logistics":
                     u_depth = c2.number_input("Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
                     
                     d1, d2 = st.columns(2)
-                    # FIX: Handle NaT dates
                     raw_start = pd.to_datetime(row['Start_Date'])
                     u_start = d1.date_input("Start Date", value=raw_start.date() if pd.notnull(raw_start) else datetime.now().date())
                     
                     raw_end = pd.to_datetime(row['End_Date'])
                     u_end = d2.date_input("End Date", value=raw_end.date() if pd.notnull(raw_end) else datetime.now().date())
-                    apply_end = d2.checkbox("Apply/Active End Date", value=pd.notnull(raw_end))
+                    apply_end = d2.checkbox("Apply End Date", value=pd.notnull(raw_end))
 
                     status_list = ["Active", "Diagnostic", "Available", "Need Repair", "Dead"]
-                    current_stat = str(row['SensorStatus']).strip()
-                    default_idx = status_list.index(current_stat) if current_stat in status_list else 0
-                    u_stat = st.selectbox("Status", status_list, index=default_idx)
+                    u_stat = st.selectbox("Status", status_list, index=status_list.index(row['SensorStatus']) if row['SensorStatus'] in status_list else 0)
                     
-                    op_type = st.radio("Update Strategy", 
-                        ["Correction (Overwrite this record)", "Re-assignment (Retire this, start new)"])
-
-                    if st.form_submit_button("💾 Save Registry Update", use_container_width=True):
-                        today = datetime.now().strftime('%Y-%m-%d')
-                        end_val = f"'{u_end}'" if apply_end else "NULL"
-                        
-                        if "Correction" in op_type:
-                            sql = f"""
-                                UPDATE `{TARGET_REGISTRY}` 
-                                SET Project='{u_proj}', Location='{u_loc}', Bank='{u_bank}', 
-                                    Depth={u_depth}, SensorStatus='{u_stat}', 
-                                    Start_Date='{u_start}', End_Date={end_val}
-                                WHERE NodeNum='{row['NodeNum']}' AND Start_Date='{row['Start_Date']}'
-                            """
-                        else:
-                            sql = f"""
-                                BEGIN TRANSACTION;
-                                UPDATE `{TARGET_REGISTRY}` SET End_Date='{today}' 
-                                WHERE NodeNum='{row['NodeNum']}' AND End_Date IS NULL;
-                                INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
-                                VALUES ('{row['NodeNum']}', {row['PhysicalID']}, '{u_proj}', '{u_loc}', '{u_bank}', {u_depth}, '{today}', '{u_stat}');
-                                COMMIT;
-                            """
+                    if st.form_submit_button("💾 Commit Registry Change"):
+                        sql = f"UPDATE `{TARGET_REGISTRY}` SET Project='{u_proj}', Location='{u_loc}', Bank='{u_bank}', Depth={u_depth}, SensorStatus='{u_stat}', Start_Date='{u_start}', End_Date={'NULL' if not apply_end else f"'{u_end}'"} WHERE NodeNum='{row['NodeNum']}' AND Start_Date='{row['Start_Date']}'"
                         client.query(sql).result()
-                        st.success("Registry updated.")
+                        st.success("Record updated successfully.")
                         st.rerun()
-
-    elif reg_mode == "Bulk CSV Upload":
-        st.info("Ensure CSV has: NodeNum, PhysicalID, Project, Location, Bank, Depth")
-        u_csv = st.file_uploader("Upload Node CSV", type="csv")
-        if u_csv:
-            up_df = pd.read_csv(u_csv)
-            st.dataframe(up_df.head(), hide_index=True)
-            if st.button("🚀 Commit Bulk Changes"):
-                job = client.load_table_from_dataframe(up_df, TARGET_REGISTRY)
-                job.result()
-                st.success(f"Bulk data pushed to {TARGET_REGISTRY}")
-
-    elif reg_mode == "Global Status Audit":
-        st.subheader("📊 Registry Inventory")
-        st.dataframe(full_reg_df.sort_values(['Project', 'Location']), use_container_width=True, hide_index=True)
 
 # ===============================================================
 # TOOL 3: PROJECT MASTER (Updated Fix)
