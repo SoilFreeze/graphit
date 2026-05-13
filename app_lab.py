@@ -226,8 +226,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     """
     Final Master Function: 
     - Restores Smooth Dark Gray Curves (60% Opacity)
-    - Precision Match: Only shows the goal for the specific TP/Location.
-    - Full Black Engineering Box Borders (LineWidth 2)
+    - Fuzzy Match: Allows for different naming formats in the library.
+    - Full Black Engineering Box Borders.
     """
     import plotly.graph_objects as go
     
@@ -284,24 +284,29 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
             ))
 
-    # 3. THEORETICAL REFERENCE CURVES (Restored Dark Gray & Smooth)
+    # 3. THEORETICAL REFERENCE CURVES (Restored Fuzzy Logic)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # Using the full CurveID (e.g., 2527-TP1) to pull all days for that curve
+            # We use LIKE with wildcards to catch '2538-TP1', '2538 TP1', etc.
+            # We also ensure it matches the PROJECT and the LOCATION precisely.
+            parts = str(curve_id).split('-')
+            proj_num = parts[0].strip()
+            loc_num = parts[1].strip() if len(parts) > 1 else ""
+
             ref_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) = UPPER('{curve_id}')
+                WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%')
+                AND UPPER(CurveID) LIKE UPPER('%{loc_num}%')
                 ORDER BY Day
             """
             ref_df = client.query(ref_q).to_dataframe()
             
             if not ref_df.empty:
-                # Align 'Day' with the project's 'Date_Freezedown'
+                # Map 'Day' to calendar dates
                 ref_df['timestamp'] = ref_df['Day'].apply(
                     lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d)
                 )
-                # Localize to current display TZ
                 ref_df['timestamp'] = ref_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                 
                 ref_y = ref_df['Temp']
@@ -310,13 +315,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
                 fig.add_trace(go.Scatter(
                     x=ref_df['timestamp'], y=ref_y,
-                    name=f"<b>GOAL: {curve_id.split('-')[-1]}</b>",
+                    name=f"<b>GOAL: {loc_num}</b>",
                     mode='lines',
                     line=dict(
-                        color='rgba(40, 40, 40, 0.6)', # Dark Gray, 60% Opacity
+                        color='rgba(40, 40, 40, 0.6)', # Dark Gray
                         width=4,
                         dash='dashdot',
-                        shape='spline', # Smooths the curve
+                        shape='spline',
                         smoothing=1.3
                     ),
                     legendrank=1 
