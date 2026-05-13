@@ -332,6 +332,35 @@ if search_node:
             st.warning(f"⚠️ Found {len(maint_results)} records with missing or illogical dates:")
             st.dataframe(maint_results, use_container_width=True)
 
+# --- 1. GLOBAL DATA LOADING ---
+# We load the registry once at the start so all tools (Investigator, Edit, etc.) can see it.
+try:
+    # Use the TARGET_REGISTRY variable we configured globally
+    reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
+except Exception as e:
+    st.error(f"Error loading registry data: {e}")
+    reg_df = pd.DataFrame() # Create an empty dataframe as a fallback
+
+# --- 2. HARDWARE INVESTIGATOR ---
+if admin_page == "🔦 Hardware Investigator":
+    st.subheader("🔦 Hardware Investigator")
+    search_node = st.text_input("Enter Node ID (e.g., TP-0009)", placeholder="Search...").strip()
+
+    if search_node:
+        if not reg_df.empty:
+            # We standardize to uppercase for a robust match
+            # This is line 224 where your error occurred
+            match = reg_df[reg_df['NodeNum'].astype(str).str.upper() == search_node.upper()]
+            
+            if match.empty:
+                st.error(f"Node '{search_node}' not found in the registry.")
+            else:
+                # Proceed with showing history and thermal profiles
+                st.success(f"Found {len(match)} records for {search_node}")
+                # (Remaining logic for SQL history and thermal graph goes here)
+        else:
+            st.warning("The registry is currently empty. Please check your data source.")
+
 # ===============================================================
 # TOOL: Sensor Replace
 # ===============================================================
