@@ -47,6 +47,7 @@ def get_bq_client():
 st.sidebar.title("🛠️ Project & Node Admin")
 admin_page = st.sidebar.radio("Management Tool", [
     "📡 Setup Audit", 
+    "📋 Hardware Assignment & Deployment",
     "📋 Node Logistics", 
     "📦 Bulk Registry Manager",  # New Tool
     "⚙️ Project Master", 
@@ -159,6 +160,109 @@ if "Audit" in admin_page:
         c1, c2 = st.columns(2)
         c1.caption(f"**Audit Timestamp:** {now_utc.strftime('%Y-%m-%d %H:%M UTC')}")
         c2.caption(f"**Max Site Gap:** {df['max_gap_mins'].max() or 0} minutes")
+
+# ===============================================================
+# TOOL: SENSOR STATUS AUDIT (Lifecycle Tracker)
+# ===============================================================
+elif "Sensor status Audit" in admin_page:
+    st.header("🔍 Sensor Status Audit")
+    
+    # 1. TOP LEVEL FLEET METRICS
+    # Fetch registry to calculate fleet-wide stats
+    registry_df = client.query(f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").to_dataframe()
+    
+    m1, m2, m3, m4 = st.columns(4)
+    total_sensors = registry_df['PhysicalID'].nunique()
+    active_assignments = registry_df[registry_df['End_Date'].isna()]
+    
+    m1.metric("Total Unique Sensors", total_sensors)
+    m2.metric("Currently Assigned", len(active_assignments))
+    m3.metric("Available / In Stock", len(registry_df[registry_df['SensorStatus'] == 'Available']))
+    m4.metric("Flagged / Dead", len(registry_df[registry_df['SensorStatus'].isin(['Dead', 'Need Repair'])]))
+
+    st.divider()
+
+    # 2. LOOKUP ENGINE
+    st.subheader("🔦 Sensor Lifecycle Lookup")
+    lookup_tab1, lookup_tab2 = st.tabs(["Search by Node Number", "Search by Project Location"])
+    
+    selected_sn = None
+
+    with lookup_tab1:
+        search_node = st.text_input("Enter Node ID (e.g. TP-0001)", key="audit_node_search")
+        if search_node:
+            match = registry_df[registry_df['NodeNum'].astype(str).str.contains(search_node.upper())]
+            if not match.empty:
+                selected_sn = match.iloc[0]['PhysicalID']
+            else:
+                st.error("No sensor found with that Node Number.")
+
+    with lookup_tab2:
+        proj_list = sorted(registry_df['Project'].dropna().unique().tolist())
+        sel_p = st.selectbox("Select Project", ["Select..."] + proj_list, key="audit_proj")
+        if sel_p != "Select...":
+            loc_list = sorted(registry_df[registry_df['Project'] == sel_p]['Location'].unique().tolist())
+            sel_l = st.selectbox("Select Location", loc_list, key="audit_loc")
+            
+            # Find the hardware currently at this spot
+            current_hardware = active_assignments[(active_assignments['Project'] == sel_p) & (active_assignments['Location'] == sel_l)]
+            if not current_hardware.empty:
+                selected_sn = current_hardware.iloc[0]['PhysicalID']
+                st.info(f"Current sensor at this location is S/N: **{selected_sn}** ({current_hardware.iloc[0]['NodeNum']})")
+            else:
+                st.warning("No active sensor currently assigned to this location.")
+
+    # 3. HISTORIC DATA & TRENDS
+    if selected_sn:
+        st.divider()
+        st.subheader(f"📜 History for Sensor S/N: {selected_sn}")
+        
+        # A. TABLE: Historical Locations
+        history_df = registry_df[registry_df['PhysicalID'] == selected_sn].sort_values('Start_Date', ascending=False)
+        st.markdown("### Deployment History")
+        st.dataframe(
+            history_df[['Project', 'Location', 'Depth', 'Start_Date', 'End_Date', 'SensorStatus']].rename(columns={
+                'SensorStatus': 'Status at Time'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # B. GRAPH: Long-term Thermal Trend
+        st.markdown("### Long-term Temperature Data")
+        # Query ALL raw data for this specific hardware serial across all time
+        raw_history_q = f"""
+            SELECT timestamp, temperature 
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
+            WHERE PhysicalID = {selected_sn} 
+            ORDER BY timestamp DESC
+        """
+        raw_history_df = client.query(raw_history_q).to_dataframe()
+        
+        if not raw_history_df.empty:
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Scatter(
+                x=raw_history_df['timestamp'], 
+                y=raw_history_df['temperature'],
+                mode='lines',
+                name='Temp History',
+                line=dict(color='#1f77b4', width=1)
+            ))
+            
+            # Add horizontal freezing line
+            fig_hist.add_hline(y=32, line_dash="dash", line_color="red", annotation_text="32°F")
+            
+            fig_hist.update_layout(
+                title=f"All-Time Thermal Profile for S/N {selected_sn}",
+                xaxis_title="Time",
+                yaxis_title="Temperature (°F)",
+                height=400,
+                hovermode="x unified",
+                plot_bgcolor='white'
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+        else:
+            st.info("No thermal telemetry found in the master database for this serial number.")
 
 
 # ===============================================================
