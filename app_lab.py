@@ -227,10 +227,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Final Engineering-Grade Plotting Engine:
-    - RESTORED: Theoretical Curves (Smooth Dark Gray).
-    - RESTORED: Global X-Axis shift (Project Day 0 to End of Goal).
-    - TITLE: Project - Thermal Trend - Location.
-    - LEGEND: Position (NodeNum) only, right-aligned.
+    - FIXED: Robust fuzzy matching for CurveIDs (ProjectID + Location).
+    - RESTORED: Smooth Dark Gray Theoretical Curves.
+    - SYNC: Global X-Axis shift (Project Day 0 to End of Goal).
     - STYLE: Med Blue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
     """
     import plotly.graph_objects as go
@@ -249,50 +248,63 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. GLOBAL TIMELINE SYNC (Improved Project ID extraction)
+    # 2. GLOBAL TIMELINE SYNC & CURVE DATA
     final_end_view, final_start_view = end_view, start_view
     
+    # Extract Project Number (e.g., '2527')
+    proj_str = str(st.session_state.get('selected_project', ''))
+    proj_match = re.findall(r'\d+', proj_str)
+    proj_num = proj_match[0] if proj_match else ""
+    
+    # Extract Location Part (e.g., 'TP1')
+    loc_part = str(curve_id).split('-')[-1] if curve_id else ""
+
     if f_start_date:
         try:
-            # Extract Project Number (e.g., '2527') even if project name is '2527-Elizabeth'
-            proj_str = str(st.session_state.get('selected_project', ''))
-            proj_match = re.findall(r'\d+', proj_str)
-            proj_num = proj_match[0] if proj_match else ""
+            # Shift Logic: Find longest curve for the project to set page-wide X-axis
+            ref_q = f"""
+                SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
+                ORDER BY Day DESC LIMIT 1
+            """
+            ref_meta = client.query(ref_q).to_dataframe()
             
-            if proj_num:
-                # Find the longest curve in the library to set the global project window
-                ref_q = f"""
-                    SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
-                    ORDER BY Day DESC LIMIT 1
-                """
-                ref_meta = client.query(ref_q).to_dataframe()
-                
-                if not ref_meta.empty:
-                    max_days = int(ref_meta['Day'].max())
-                    # Window: Day 0 - 1 day through Final Goal Day + 1 day
-                    final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
-                    final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
+            if not ref_meta.empty:
+                max_days = int(ref_meta['Day'].max())
+                final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
+                final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
-    # 3. THEORETICAL CURVE (Smooth Dark Gray)
+    # 3. PLOT THEORETICAL CURVES
+    # DEBUG: st.write(f"Searching for: {proj_num} AND {loc_part}") 
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            target_q = f"SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) = UPPER('{curve_id}') ORDER BY Day"
+            # Fuzzy match: ID must contain project number AND the location label
+            target_q = f"""
+                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%') 
+                AND UPPER(CurveID) LIKE UPPER('%{loc_part}%')
+                ORDER BY Day
+            """
             target_df = client.query(target_q).to_dataframe()
+            
             if not target_df.empty:
-                target_df['timestamp'] = target_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-                target_df['timestamp'] = target_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
-                ref_y = target_df['Temp'] if unit_mode == "Fahrenheit" else (target_df['Temp'] - 32) * 5/9
-                
-                fig.add_trace(go.Scatter(
-                    x=target_df['timestamp'], y=ref_y, name=f"GOAL: {curve_id}", mode='lines',
-                    line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
-                    legendrank=1 
-                ))
+                # Group by CurveID in case there are multiple matches
+                for cid, c_df in target_df.groupby('CurveID'):
+                    c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                    c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
+                    ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                    
+                    fig.add_trace(go.Scatter(
+                        x=c_df['timestamp'], y=ref_y, 
+                        name=f"<b>GOAL: {cid}</b>", 
+                        mode='lines',
+                        line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
+                        legendrank=1 
+                    ))
         except: pass
 
-    # 4. SENSOR DATA (15-Color Palette & Clean Legend)
+    # 4. SENSOR DATA (15-Color Palette)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     unique_nodes = sorted(plot_df['NodeNum'].unique())
     
@@ -302,13 +314,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         bank_val = s_df['Bank'].iloc[0]
         loc_val = s_df['Location'].iloc[0]
         
-        # Legend: Position (NodeNum) only
-        if pd.notnull(depth_val):
-            display_name = f"{depth_val}ft ({sn})"
-        elif pd.notnull(bank_val) and str(bank_val).strip() != "":
-            display_name = f"{bank_val} {loc_val} ({sn})"
-        else:
-            display_name = f"{loc_val} ({sn})"
+        # Legend: Position (NodeNum)
+        if pd.notnull(depth_val): display_name = f"{depth_val}ft ({sn})"
+        elif pd.notnull(bank_val): display_name = f"{bank_val} {loc_val} ({sn})"
+        else: display_name = f"{loc_val} ({sn})"
         
         fig.add_trace(go.Scatter(
             x=s_df['timestamp'], y=s_df['temperature'],
@@ -318,34 +327,29 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         ))
 
     # 5. REFERENCE LINES
-    # Med Blue Dashed Freeze Line (RoyalBlue)
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     
-    # Red "NOW" Line
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
 
-    # Bold Monday Lines
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
     # 6. BOX BORDER & TITLING
     p_name = st.session_state.get('selected_project')
-    full_title = f"<b>{p_name} - Thermal Trend - {title}</b>"
-
     fig.update_layout(
-        title=dict(text=full_title, x=0.02, y=0.98, font=dict(size=18)),
+        title=dict(text=f"<b>{p_name} - Thermal Trend - {title}</b>", x=0.02, y=0.98, font=dict(size=18)),
         plot_bgcolor='white', hovermode="x unified", height=650,
         xaxis=dict(
             range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'), # 1 Day Minor
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'),
             tickformat='%b %d'
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})", range=y_range, dtick=10,
-            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'), # 2 Degree Minor
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
             showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
         ),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
