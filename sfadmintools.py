@@ -161,34 +161,38 @@ if "Audit" in admin_page:
 
 
 # ===============================================================
-# TOOL 2: NODE LOGISTICS (Auto-Mapping Search)
+# TOOL 2: NODE LOGISTICS (Visual Verification & Atomic Switch)
 # ===============================================================
 elif "Logistics" in admin_page:
     st.header("📋 Hardware Assignment & Deployment")
     
-    # 1. DATABASE SETUP
+    # 1. DATABASE & PLAYGROUND SETUP
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
     TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
+    
+    if is_dev:
+        with st.expander("🛠️ Playground Setup & Reset"):
+            if st.button("♻️ Sync Dummy with Live Registry"):
+                client.query(f"CREATE OR REPLACE TABLE `{TARGET_REGISTRY}` AS SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`").result()
+                st.success("Playground initialized.")
+                st.rerun()
+
+    # Load fresh registry data
     full_reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
     full_reg_df['Project'] = full_reg_df['Project'].fillna("UNASSIGNED")
     active_reg = full_reg_df[full_reg_df['End_Date'].isna()].copy()
 
-    # 2. SEARCH & Look-up Engine
+    # 2. SEARCH & AUTO-SELECTION LOGIC
     st.subheader("🔍 Find & Verify Hardware")
     
-    # Initialize session state for cross-selection if not exists
-    if 'search_node_id' not in st.session_state: st.session_state.search_node_id = ""
-    if 'auto_sel_p' not in st.session_state: st.session_state.auto_sel_p = "Select..."
-    if 'auto_sel_l' not in st.session_state: st.session_state.auto_sel_l = None
+    if 'auto_p' not in st.session_state: st.session_state.auto_p = "Select..."
+    if 'auto_l' not in st.session_state: st.session_state.auto_l = None
 
     lookup_col1, lookup_col2 = st.columns(2)
     found_row = None
 
-    # --- METHOD A: HARDWARE SEARCH (The "Master" Search) ---
     with lookup_col1:
-        st.caption("Search by Node ID or S/N")
-        search_input = st.text_input("Enter Hardware ID", placeholder="TP-0001...", value=st.session_state.search_node_id)
-        
+        search_input = st.text_input("Search by Node ID or S/N", placeholder="TP-0001...")
         if search_input:
             search_clean = str(search_input).strip().upper()
             match = active_reg[
@@ -197,43 +201,81 @@ elif "Logistics" in admin_page:
             ]
             if not match.empty:
                 found_row = match.iloc[0]
-                # AUTO-UPDATE dropdown variables in session state
-                st.session_state.auto_sel_p = found_row['Project']
-                st.session_state.auto_sel_l = found_row['Location']
-                st.success(f"📍 **Mapped to:** {found_row['Project']} | {found_row['Location']}")
-            else:
-                st.error("No active project found for this node.")
+                st.session_state.auto_p = found_row['Project']
+                st.session_state.auto_l = found_row['Location']
+                st.success(f"📍 Node found at: {found_row['Project']} | {found_row['Location']}")
 
-    # --- METHOD B: SITE BROWSE (Follows Method A) ---
     with lookup_col2:
-        st.caption("Browse by Project")
         p_list = sorted([p for p in active_reg['Project'].unique().tolist() if p])
-        
-        # Selectbox for Project - tied to session state
-        sel_p = st.selectbox(
-            "1. Select Project", 
-            ["Select..."] + p_list, 
-            index=(["Select..."] + p_list).index(st.session_state.auto_sel_p) if st.session_state.auto_sel_p in (["Select..."] + p_list) else 0
-        )
+        sel_p = st.selectbox("Site Project", ["Select..."] + p_list, 
+                             index=(["Select..."] + p_list).index(st.session_state.auto_p) if st.session_state.auto_p in (["Select..."] + p_list) else 0)
         
         if sel_p != "Select...":
             loc_list = sorted(active_reg[active_reg['Project'] == sel_p]['Location'].unique().tolist())
+            sel_l = st.selectbox("Site Location", loc_list,
+                                 index=loc_list.index(st.session_state.auto_l) if st.session_state.auto_l in loc_list else 0)
             
-            # Selectbox for Location - tied to session state
-            sel_l = st.selectbox(
-                "2. Select Location", 
-                loc_list,
-                index=loc_list.index(st.session_state.auto_sel_l) if st.session_state.auto_sel_l in loc_list else 0
-            )
-            
-            # Identify the final specific node currently assigned
             slot_match = active_reg[(active_reg['Project'] == sel_p) & (active_reg['Location'] == sel_l)]
             if not slot_match.empty:
-                options = slot_match.apply(lambda r: f"{r['NodeNum']} (S/N: {r['PhysicalID']})", axis=1).tolist()
-                sel_n = st.selectbox("3. Current Hardware in Slot", options)
-                # Ensure the found_row is prioritized by dropdown if user manually changes it
+                options = slot_match.apply(lambda r: f"{r['NodeNum']} (S/N: {r['PhysicalID']} | {r['Depth']}ft)", axis=1).tolist()
+                sel_n = st.selectbox("Currently Assigned Hardware", options)
                 found_row = slot_match.iloc[options.index(sel_n)]
 
+    # 3. DUAL-GRAPH VERIFICATION & SWITCH ENGINE
+    if found_row is not None:
+        st.divider()
+        st.subheader(f"⚡ Hardware Switch: {found_row['NodeNum']}")
+        
+        # --- GRAPH 1: THE OLD NODE ---
+        st.markdown(f"**1. Current Assigned Hardware Telemetry** (S/N: {found_row['PhysicalID']})")
+        old_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{found_row['NodeNum']}' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
+        if not old_data.empty:
+            fig_old = go.Figure(go.Scatter(x=old_data['timestamp'], y=old_data['temperature'], name="Old Node"))
+            fig_old.update_layout(height=250, margin=dict(t=0,b=0), hovermode="x unified")
+            fig_old.update_traces(hovertemplate="%{x|%Y-%m-%d %H:%M}<br>Temp: %{y:.2f}°F")
+            st.plotly_chart(fig_old, use_container_width=True)
+        else: st.info("No recent data for old node.")
+
+        # --- INPUT FOR NEW NODE ---
+        new_sn = st.text_input("Enter NEW Hardware Serial Number (Physical ID)")
+
+        # --- GRAPH 2: THE NEW NODE ---
+        if new_sn:
+            st.markdown(f"**2. Incoming Hardware Telemetry** (S/N: {new_sn})")
+            new_data = client.query(f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE CAST(PhysicalID AS STRING) LIKE '%{new_sn}%' AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY ORDER BY timestamp").to_dataframe()
+            if not new_data.empty:
+                fig_new = go.Figure(go.Scatter(x=new_data['timestamp'], y=new_data['temperature'], name="New Node", line=dict(color='orange')))
+                fig_new.update_layout(height=250, margin=dict(t=0,b=0), hovermode="x unified")
+                fig_new.update_traces(hovertemplate="%{x|%Y-%m-%d %H:%M}<br>Temp: %{y:.2f}°F")
+                st.plotly_chart(fig_new, use_container_width=True)
+            else: st.warning("No signal found for this new Serial Number yet.")
+
+        # --- FINAL EXECUTION ---
+        st.divider()
+        with st.form("final_switch_form"):
+            st.write("### 3. Decide Switch Parameters")
+            switch_ts = st.datetime_input("Exact Date & Time to Switch Nodes", value=datetime.now())
+            confirm_check = st.checkbox("I have verified the timestamps on both graphs and want to switch nodes.")
+            
+            if st.form_submit_button("🚀 SWITCH NODES"):
+                if not new_sn or not confirm_check:
+                    st.error("Please provide a new serial number and check the confirmation box.")
+                else:
+                    ts_str = switch_ts.strftime('%Y-%m-%d %H:%M:%S')
+                    sql = f"""
+                    BEGIN TRANSACTION;
+                    -- End the old node assignment
+                    UPDATE `{TARGET_REGISTRY}` SET End_Date='{ts_str}', SensorStatus='Dead' 
+                    WHERE NodeNum='{found_row['NodeNum']}' AND Start_Date='{found_row['Start_Date']}';
+                    
+                    -- Start the new node assignment at same location/depth
+                    INSERT INTO `{TARGET_REGISTRY}` (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+                    VALUES ('{found_row['NodeNum']}', {new_sn}, '{found_row['Project']}', '{found_row['Location']}', '{found_row['Bank']}', {found_row['Depth']}, '{ts_str}', 'Active');
+                    COMMIT;
+                    """
+                    client.query(sql).result()
+                    st.success(f"Successfully switched {found_row['NodeNum']} to New S/N {new_sn} at {ts_str}")
+                    st.balloons()
     # --- 3. SURGICAL ACTIONS ---
     if found_row is not None:
         st.divider()
