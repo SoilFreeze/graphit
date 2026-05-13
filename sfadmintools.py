@@ -28,14 +28,27 @@ def get_bq_client():
 
 client = get_bq_client()
 
+# --- NEW GLOBAL REGISTRY CONFIGURATION ---
+# This block must exist BEFORE the admin_page logic
+st.sidebar.markdown("---")
+is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
+
+# Construct the table paths
+BASE_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+TARGET_REGISTRY = BASE_REGISTRY + ("_dummy" if is_dev else "")
+
+st.sidebar.info(f"Connected to: **{TARGET_REGISTRY.split('.')[-1]}**")
+st.sidebar.markdown("---")
+# ------------------------------------------
+
 # 2. SIDEBAR NAVIGATION
 st.sidebar.title("🛠️ Admin Command Center")
 admin_page = st.sidebar.radio("Management Tool", [
     "📡 Setup Audit", 
     "🔍 Sensor Status",
-    "🔄 Sensor Replace",      # Renamed from Node Logistics
-    "🩹 Sensor Switch",       # New: For ID corrections
-    "📝 Sensor Edit",         # New: For manual row editing/deletion
+    "🔄 Sensor Replace",      
+    "🩹 Sensor Switch",       
+    "📝 Sensor Edit",         
     "📦 Bulk Registry Manager",
     "⚙️ Project Master", 
     "📈 Ref Curve Library", 
@@ -43,6 +56,7 @@ admin_page = st.sidebar.radio("Management Tool", [
 ])
 
 # Global Project Selection for context
+# (This still works perfectly here as it uses the client and constants)
 proj_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
 proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].tolist())
 selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list)
@@ -395,61 +409,67 @@ elif admin_page == "🔄 Sensor Replace":
 
 
 # ===============================================================
-# TOOL: SENSOR SWITCH (ID Correction)
+# TOOL: SENSOR SWITCH (Correction for typos)
 # ===============================================================
-elif admin_page == "🩹 Sensor Switch":
+if admin_page == "🩹 Sensor Switch":
     st.header("🩹 Sensor ID Correction")
-    st.info("Fix a typo in the Serial Number without ending the current deployment.")
-
-    search_node = st.text_input("Enter Node ID to correct (e.g., TP-0001)")
+    node_id = st.text_input("Enter Node ID to fix (e.g., TP-0001)")
     
-    if search_node:
-        # Use the global TARGET_REGISTRY variable
-        reg_q = f"SELECT * FROM `{TARGET_REGISTRY}` WHERE NodeNum = '{search_node}' AND End_Date IS NULL"
-        reg_df = client.query(reg_q).to_dataframe()
+    if node_id:
+        # TARGET_REGISTRY is now accessible here
+        query = f"SELECT * FROM `{TARGET_REGISTRY}` WHERE NodeNum = '{node_id}' AND End_Date IS NULL"
+        df = client.query(query).to_dataframe()
         
-        if not reg_df.empty:
-            row = reg_df.iloc[0]
-            st.write(f"Currently assigned ID: `{row['PhysicalID']}`")
-            
+        if not df.empty:
+            st.write(f"Current PhysicalID: `{df.iloc[0]['PhysicalID']}`")
             new_id = st.text_input("Enter Correct Physical ID")
-            if st.button("Apply Correction"):
-                sql = f"UPDATE `{TARGET_REGISTRY}` SET PhysicalID = SAFE_CAST('{new_id}' AS FLOAT64) WHERE NodeNum = '{row['NodeNum']}' AND End_Date IS NULL"
-                client.query(sql).result()
-                st.success("ID Updated.")
+            
+            if st.button("Update ID"):
+                update_sql = f"""
+                    UPDATE `{TARGET_REGISTRY}`
+                    SET PhysicalID = SAFE_CAST('{new_id}' AS FLOAT64)
+                    WHERE NodeNum = '{node_id}' AND End_Date IS NULL
+                """
+                client.query(update_sql).result()
+                st.success("Correction applied!")
                 st.rerun()
-
+                
 # ===============================================================
-# TOOL: SENSOR EDIT (Manual Row Management)
+# TOOL: SENSOR EDIT (CRUD Operations)
 # ===============================================================
 elif admin_page == "📝 Sensor Edit":
     st.header("📝 Registry Editor")
     
-    # Now TARGET_REGISTRY is defined globally, so this won't crash
+    # This query previously failed because of the NameError
     edit_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}` ORDER BY Start_Date DESC").to_dataframe()
     
-    search = st.text_input("Search Node/Project/Status")
-    if search:
-        edit_df = edit_df[edit_df.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)]
+    # Filter for easier management
+    search_term = st.text_input("Search Registry")
+    if search_term:
+        edit_df = edit_df[edit_df.astype(str).apply(lambda x: x.str.contains(search_term, case=False)).any(axis=1)]
 
-    st.write("Select a row to edit or delete:")
-    # Using streamlit's selection feature
-    selected = st.dataframe(edit_df, on_select="rerun", selection_mode="single_row", hide_index=True)
+    # Use Streamlit's new selection capability
+    event = st.dataframe(edit_df, on_select="rerun", selection_mode="single_row", hide_index=True)
 
-    if selected and len(selected['selection']['rows']) > 0:
-        data = edit_df.iloc[selected['selection']['rows'][0]]
+    if event and len(event['selection']['rows']) > 0:
+        row_idx = event['selection']['rows'][0]
+        data = edit_df.iloc[row_idx]
         
-        with st.form("manual_edit_form"):
-            st.subheader(f"Editing {data['NodeNum']}")
-            u_loc = st.text_input("Location", value=data['Location'])
-            u_stat = st.selectbox("Status", ["Active", "Available", "Dead", "Archived", "Diagnostic"], index=0)
+        with st.form("edit_form"):
+            st.subheader(f"Edit {data['NodeNum']}")
+            new_loc = st.text_input("Location", value=data['Location'])
+            new_stat = st.selectbox("Status", ["Active", "Available", "Archived", "Dead"], index=0)
             
             c1, c2 = st.columns(2)
             if c1.form_submit_button("💾 Save"):
-                client.query(f"UPDATE `{TARGET_REGISTRY}` SET Location='{u_loc}', SensorStatus='{u_stat}' WHERE NodeNum='{data['NodeNum']}' AND Start_Date=DATE('{data['Start_Date']}')").result()
+                # Use NodeNum and Start_Date as a unique composite key for the update
+                client.query(f"UPDATE `{TARGET_REGISTRY}` SET Location='{new_loc}', SensorStatus='{new_stat}' WHERE NodeNum='{data['NodeNum']}' AND Start_Date=DATE('{data['Start_Date']}')").result()
+                st.success("Updated.")
                 st.rerun()
+            
             if c2.form_submit_button("🗑️ DELETE", type="primary"):
                 client.query(f"DELETE FROM `{TARGET_REGISTRY}` WHERE NodeNum='{data['NodeNum']}' AND Start_Date=DATE('{data['Start_Date']}')").result()
+                st.warning("Deleted.")
                 st.rerun()
 
 # ===============================================================
