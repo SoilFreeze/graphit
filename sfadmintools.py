@@ -61,11 +61,12 @@ proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].tolist())
 selected_project = st.sidebar.selectbox("🎯 Target Project", proj_list)
 
 # ===============================================================
-# TOOL 1: SETUP AUDIT
+# TOOL 1: SETUP AUDIT (Emoji-Safe Version)
 # ===============================================================
-if admin_page == "📡 Setup Audit":
+# Use 'in' logic so it works whether you include the emoji or not
+if "Setup Audit" in admin_page:
     st.header(f"🏗️ Setup Audit: {selected_project}")
-    st.write("Comprehensive hardware health check for project initialization.")
+    st.write("Comprehensive hardware health check. Scale: 1hr (Green) | 24hr (Orange) | 48hr+ (Red)")
 
     # Optimized SQL for Latency, 24h Range, and Max Gap analysis
     audit_q = f"""
@@ -108,74 +109,70 @@ if admin_page == "📡 Setup Audit":
         WHERE n.Project = @proj_id
     """
     
-    df = client.query(audit_q, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-    )).to_dataframe()
+    # Run Query
+    with st.spinner("Auditing site hardware..."):
+        df = client.query(audit_q, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        )).to_dataframe()
 
     if df.empty:
-        st.warning("⚠️ No hardware records or data found for this project in the registry.")
+        st.warning(f"⚠️ No nodes found for {selected_project} in the registry.")
     else:
         now_utc = pd.Timestamp.now(tz='UTC')
 
         def evaluate_health(row):
-            # 1. Latency Logic & Scale
+            # 1. LATENCY SCALE LOGIC
             ping = row['last_ping']
             if pd.isnull(ping):
-                return "⚪ Not Seen", "Not Seen", "N/A", "grey"
+                return "⚪ Not Seen", "Not Seen", "N/A", "#808080" # Grey
             
             ping_utc = ping if ping.tzinfo else ping.tz_localize('UTC')
             diff_min = (now_utc - ping_utc).total_seconds() / 60
             
-            # Scaled Categories
             if diff_min <= 60:
-                color, label = "green", f"{int(diff_min)}m ago"
-            elif diff_min <= 1440: # 1hr to 24hr
-                color, label = "orange", f"{round(diff_min/60, 1)}h ago"
-            else: # 24hr+
-                color, label = "red", f"{round(diff_min/1440, 1)}d ago"
+                color, label = "#228B22", f"{int(diff_min)}m ago" # Forest Green
+            elif diff_min <= 1440:
+                color, label = "#FF8C00", f"{round(diff_min/60, 1)}h ago" # Dark Orange
+            else:
+                color, label = "#B22222", f"{round(diff_min/1440, 1)}d ago" # Firebrick Red
 
-            # 2. Temp Range Logic
+            # 2. TEMP RANGE LOGIC (N/A if no data in 24h)
             if pd.isnull(row['min_24h']):
                 t_range = "N/A"
             else:
                 t_range = f"{row['min_24h']:.1f}° to {row['max_24h']:.1f}°"
 
-            # 3. Gap Logic
-            gap = f"{row['max_gap_mins']}m" if pd.notnull(row['max_gap_mins']) else "None"
+            # 3. MAX GAP LOGIC
+            gap = f"{row['max_gap_mins']}m" if pd.notnull(row['max_gap_mins']) else "---"
             
             return label, t_range, gap, color
 
-        # Apply logic
+        # Process status
         df[['Last Seen', '24h Range', 'Max Gap', 'StatusColor']] = df.apply(
             lambda x: pd.Series(evaluate_health(x)), axis=1
         )
 
-        # Build combined Location/Pos column for clarity
+        # Handle Position/Depth Column
         df['Pos'] = df.apply(lambda r: f"{r['Depth']}ft" if pd.notnull(r['Depth']) and str(r['Depth']) != '' else f"Bank {r['Bank']}", axis=1)
         
-        # Display Final Audit Table
-        st.subheader("📋 Hardware Status & Packet Integrity")
-        
-        # Stylized table with your specific scale
-        def style_audit(row):
-            # Map colors for the background of the 'Last Seen' column
-            return ['' for _ in row] # Default
+        # UI: Top Level Metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Site Nodes", len(df))
+        m2.metric("Online (Active)", len(df[df['last_temp'].notnull()]))
+        m3.metric("Max Data Gap", f"{df['max_gap_mins'].max() or 0} mins")
 
+        # UI: Main Audit Table
+        st.subheader("📋 Hardware Audit Table")
+        
+        # Color coding for the dataframe (optional formatting)
         st.dataframe(
             df[['NodeNum', 'Location', 'Pos', 'last_temp', '24h Range', 'Last Seen', 'Max Gap']].rename(columns={
-                'last_temp': 'Last Temp',
-                'Pos': 'Position/Depth'
+                'last_temp': 'Current Temp',
+                'Pos': 'Placement'
             }),
             use_container_width=True,
             hide_index=True
         )
-
-        # Audit Summary Metrics
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Nodes", len(df))
-        c2.metric("Offline (>24h)", len(df[df['StatusColor'] == "red"]))
-        c3.metric("Largest Site Gap", f"{df['max_gap_mins'].max()} mins")
-
 # ===============================================================
 # TOOL 2: NODE LOGISTICS
 # ===============================================================
@@ -238,29 +235,55 @@ elif admin_page == "⚙️ Project Master":
             st.rerun()
 
 # ===============================================================
-# TOOL 4: REF CURVE LIBRARY (2026 Admin Spec)
+# TOOL 4: REF CURVE LIBRARY (Inventory + Management)
 # ===============================================================
 elif admin_page == "📈 Ref Curve Library":
     st.header("📈 Theoretical Curve Management")
-    st.write("Manage soil freeze goals. CSV Format: Col 1=Day, Col 2=Temp. Data starts on Row 3.")
+    
+    # 1. CURRENT INVENTORY (New Section)
+    st.subheader("📚 Current Library Inventory")
+    try:
+        # Query to show summary of each curve in the system
+        inv_q = f"""
+            SELECT 
+                CurveID, 
+                MAX(Day) as Max_Day, 
+                COUNT(*) as Total_Points 
+            FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`
+            GROUP BY CurveID
+            ORDER BY CurveID
+        """
+        inventory_df = client.query(inv_q).to_dataframe()
+        
+        if not inventory_df.empty:
+            st.dataframe(
+                inventory_df.rename(columns={
+                    "CurveID": "Curve Identifier (Filename)",
+                    "Max_Day": "Duration (Days)",
+                    "Total_Points": "Data Density"
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("The library is currently empty. Upload CSVs below to begin.")
+    except Exception as e:
+        st.error(f"Error loading inventory: {e}")
 
-    # 1. MANAGEMENT & PURGE TOOLS
+    st.divider()
+
+    # 2. MANAGEMENT & PURGE TOOLS
     c1, c2 = st.columns(2)
     
     with c1.expander("🗑️ Surgical Delete (Single Curve)"):
-        try:
-            # Fetch unique curves currently in the library
-            lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
-            if not lib_df.empty:
-                to_delete = st.selectbox("Select Curve to Remove", sorted(lib_df['CurveID'].tolist()))
-                if st.button(f"Delete {to_delete}", type="primary"):
-                    client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID = '{to_delete}'").result()
-                    st.success(f"Successfully removed {to_delete}")
-                    st.rerun()
-            else:
-                st.info("Library is currently empty.")
-        except Exception as e:
-            st.error(f"Error fetching library: {e}")
+        if not inventory_df.empty:
+            to_delete = st.selectbox("Select Curve to Remove", sorted(inventory_df['CurveID'].tolist()))
+            if st.button(f"Delete {to_delete}", type="primary"):
+                client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID = '{to_delete}'").result()
+                st.success(f"Successfully removed {to_delete}")
+                st.rerun()
+        else:
+            st.caption("No curves available to delete.")
 
     with c2.expander("🧨 Nuclear Purge (Wipe All)"):
         st.warning("This will permanently delete EVERY theoretical curve in the database.")
@@ -271,7 +294,7 @@ elif admin_page == "📈 Ref Curve Library":
 
     st.divider()
 
-    # 2. BULK UPLOAD ENGINE
+    # 3. BULK UPLOAD ENGINE (Row 3 Start)
     st.subheader("📤 Upload New Curves")
     u_files = st.file_uploader(
         "Upload Curve CSVs", 
@@ -287,34 +310,27 @@ elif admin_page == "📈 Ref Curve Library":
             
             for idx, f in enumerate(u_files):
                 try:
-                    # Logic: Skip first 2 rows, take first 2 columns
-                    # This satisfies 'Row 3 Start, Col 1: Day, Col 2: Temp'
+                    # Skip first 2 rows, take first 2 columns
                     df = pd.read_csv(f, skiprows=2, usecols=[0, 1], names=['Day', 'Temp'])
-                    
-                    # Use Filename as the CurveID (stripping .csv)
                     df['CurveID'] = f.name.rsplit('.', 1)[0]
                     
-                    # Data Cleaning: Remove empty rows or non-numeric values
+                    # Numeric enforcement
                     df['Day'] = pd.to_numeric(df['Day'], errors='coerce')
                     df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
                     df = df.dropna(subset=['Day', 'Temp'])
 
                     if not df.empty:
-                        # Upload to BigQuery
-                        job = client.load_table_from_dataframe(
-                            df, 
-                            f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
-                        )
-                        job.result() # Wait for completion
+                        client.load_table_from_dataframe(
+                            df, f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+                        ).result()
                         total_rows += len(df)
                     
                     progress_bar.progress((idx + 1) / len(u_files))
                 except Exception as e:
                     st.error(f"Error processing {f.name}: {e}")
 
-            st.success(f"✅ Success! Imported {len(u_files)} files ({total_rows} data points).")
-            st.cache_data.clear() # Clear dashboard cache to show new curves immediately
-
+            st.success(f"✅ Success! Imported {len(u_files)} files ({total_rows} points).")
+            st.rerun()
 # ===============================================================
 # TOOL 5: SURGICAL DATA MANAGEMENT
 # ===============================================================
