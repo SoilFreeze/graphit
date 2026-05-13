@@ -817,7 +817,8 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = p_df[p_df['Location'] == loc].copy()
                 
-                # Smart Match for Client: e.g., 2527-TP8
+                # --- FIX: Align CID with the library format (e.g., 2527-TP1) ---
+                # We use the raw selected_project which usually contains the ID
                 cid = f"{selected_project}-{loc}" if show_ref else None
 
                 fig = build_high_speed_graph(
@@ -829,11 +830,11 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
                     unit_mode=unit_mode, 
                     unit_label=unit_label, 
                     display_tz=display_tz,
-                    f_start_date=f_start_date,
+                    f_start_date=f_start_date, # Required for the goal to know where 'Day 0' is
                     curve_id=cid
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
-
+                
     # --- TAB 2: DEPTH PROFILE ---
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
