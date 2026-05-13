@@ -212,136 +212,108 @@ elif "Sensor Status" in admin_page:
         st.divider()
         
 # ===============================================================
-# 2. HARDWARE INVESTIGATOR (REWRITTEN)
+# 2. HARDWARE INVESTIGATOR (NodeNum Centric)
 # ===============================================================
 st.subheader("🔦 Hardware Investigator")
-search_id = st.text_input("Enter Physical ID or Node ID (e.g., TP-0009)", placeholder="Search...")
+# Search input now explicitly asks for the Node Number
+search_node = st.text_input("Enter Node ID (e.g., TP-0009)", placeholder="Search by NodeNum...").strip()
 
-if search_id:
-    # 1. NORMALIZE AND MATCH
-    # We search both NodeNum and PhysicalID to find any mention of this hardware
-    search_id_clean = str(search_id).strip().upper()
-    
-    match = reg_df[
-        (reg_df['NodeNum'].astype(str).str.upper() == search_id_clean) | 
-        (reg_df['PhysicalID'].astype(str).str.replace('.0', '', regex=False) == search_id_clean.replace('.0', ''))
-    ]
+if search_node:
+    # 1. FILTER REGISTRY BY NODENUM
+    # Standardize to uppercase to ensure matches work regardless of user input
+    match = reg_df[reg_df['NodeNum'].astype(str).str.upper() == search_node.upper()]
     
     if match.empty:
-        st.error("No record found for that ID. Please check the registry.")
+        st.error(f"No records found for Node '{search_node}'. Please check the registry.")
     else:
-        # 2. COLLECT ALL RELEVANT IDs
-        # A node might have records with NULL IDs and records with Numeric IDs. 
-        # We need the numeric ones to pull telemetry.
-        target_node = match.iloc[0]['NodeNum']
-        all_phys_ids = match['PhysicalID'].dropna().unique().tolist()
-        
-        # 3. CURRENT STATUS HEADER
+        # 2. SHOW CURRENT STATUS
         current_assignment = match[match['End_Date'].isna()]
         if not current_assignment.empty:
             row = current_assignment.iloc[0]
             st.info(f"📍 **Current Location:** {row['Project']} | {row['Location']} (Status: {row['SensorStatus']})")
         else:
-            st.warning("📍 **Current Status:** Archived or Available (Not currently at a project site).")
+            st.warning("📍 **Current Status:** Not currently assigned (Archived/Available).")
 
-        # 4. DEPLOYMENT & PERFORMANCE HISTORY
+        # 3. DEPLOYMENT & PERFORMANCE HISTORY
         st.markdown("### 📜 Deployment & Performance History")
         
-        if not all_phys_ids:
-            st.warning("This node is in the registry but has no Physical IDs assigned to pull telemetry from.")
-        else:
-            # Updated SQL: Links telemetry to NodeNum history even if the current row ID is missing
-            history_q = f"""
-                -- 1. Find all hardware IDs ever linked to this specific Node Name
-                WITH HardwareIDs AS (
-                    SELECT DISTINCT NodeNum
-                    FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                    WHERE NodeNum = '{target_node}' 
-                      AND PhysicalID IS NOT NULL
-                )
-                SELECT 
-                    r.Project, 
-                    r.Location, 
-                    r.Start_Date, 
-                    r.End_Date,
-                    r.SensorStatus,
-                    DATE_DIFF(IFNULL(r.End_Date, CURRENT_DATE()), r.Start_Date, DAY) as Days_On_Site,
-                    
-                    -- 2. Subquery to count pings using the HardwareIDs found above
-                    (
-                        SELECT COUNT(*) 
-                        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                        WHERE m.PhysicalID IN (SELECT PhysicalID FROM HardwareIDs)
-                          AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
-                          AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
-                    ) as Total_Pings,
-                    
-                    -- 3. Subquery to get average temperature for this specific window
-                    (
-                        SELECT ROUND(AVG(m.temperature), 2)
-                        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                        WHERE m.PhysicalID IN (SELECT PhysicalID FROM HardwareIDs)
-                          AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
-                          AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
-                    ) as Avg_Temp_At_Loc
-                    
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
-                WHERE r.NodeNum = '{target_node}'
-                ORDER BY r.Start_Date DESC
-            """
+        # This SQL joins telemetry based on NodeNum within specific time windows
+        history_q = f"""
+            SELECT 
+                r.Project, 
+                r.Location, 
+                r.Start_Date, 
+                r.End_Date,
+                r.SensorStatus,
+                DATE_DIFF(IFNULL(r.End_Date, CURRENT_DATE()), r.Start_Date, DAY) as Days_On_Site,
+                -- We count pings where the NodeNum matches during this specific project window
+                (
+                    SELECT COUNT(*) 
+                    FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                    WHERE m.NodeNum = r.NodeNum
+                      AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
+                      AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
+                ) as Total_Pings,
+                (
+                    SELECT ROUND(AVG(m.temperature), 2)
+                    FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                    WHERE m.NodeNum = r.NodeNum
+                      AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
+                      AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
+                ) as Avg_Temp
+            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
+            WHERE r.NodeNum = '{search_node.upper()}'
+            ORDER BY r.Start_Date DESC
+        """
+        
+        try:
+            hist_df = client.query(history_q).to_dataframe()
             
-            try:
-                hist_df = client.query(history_q).to_dataframe()
+            if not hist_df.empty:
+                # Calculate Pings per Hour for a reliability metric
+                def calc_pings_hr(row):
+                    total_hours = max(row['Days_On_Site'] * 24, 1)
+                    return round(row['Total_Pings'] / total_hours, 2)
                 
-                if not hist_df.empty:
-                    # Logic: Calculate Pings per Hour to check health
-                    def get_health(row):
-                        hours = max(row['Days_On_Site'] * 24, 1)
-                        return round(row['Total_Pings'] / hours, 2)
-                    
-                    hist_df['Pings/Hr'] = hist_df.apply(get_health, axis=1)
-                    
-                    st.dataframe(
-                        hist_df[['Project', 'Location', 'Start_Date', 'End_Date', 'Pings/Hr', 'Avg_Temp', 'SensorStatus']],
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                else:
-                    st.warning("No historical telemetry windows found.")
-            except Exception as e:
-                st.error(f"History Query Error: {e}")
+                hist_df['Pings/Hr'] = hist_df.apply(calc_pings_hr, axis=1)
+                
+                st.dataframe(
+                    hist_df[['Project', 'Location', 'Start_Date', 'End_Date', 'Pings/Hr', 'Avg_Temp', 'SensorStatus']],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.warning("No historical telemetry windows found in the registry.")
+        except Exception as e:
+            st.error(f"Error fetching Node history: {e}")
 
-        # 5. LIFETIME THERMAL PROFILE
+        # 4. LIFETIME THERMAL PROFILE
         st.markdown("### 📈 Lifetime Thermal Profile")
-        if all_phys_ids:
-            # Note: We query all IDs associated with this NodeNum to get the full story
-            telemetry_q = f"""
-                SELECT timestamp, temperature 
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
-                WHERE SAFE_CAST(PhysicalID AS STRING) IN UNNEST({[str(int(i)) if isinstance(i, float) else str(i) for i in all_phys_ids]})
-                ORDER BY timestamp ASC
-            """
-            try:
-                tel_df = client.query(telemetry_q).to_dataframe()
-                if not tel_df.empty:
-                    fig = go.Figure(go.Scatter(
-                        x=tel_df['timestamp'], 
-                        y=tel_df['temperature'], 
-                        mode='lines', 
-                        line=dict(color='#00d4ff', width=1.5)
-                    ))
-                    fig.update_layout(
-                        height=350, 
-                        template="plotly_dark",
-                        xaxis_title="Time", 
-                        yaxis_title="Temp (°C)",
-                        margin=dict(l=20, r=20, t=20, b=20)
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("No temperature data found in the master view for these IDs.")
-            except Exception as e:
-                st.error(f"Telemetry Graph Error: {e}")
+        telemetry_q = f"""
+            SELECT timestamp, temperature 
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
+            WHERE NodeNum = '{search_node.upper()}'
+            ORDER BY timestamp ASC
+        """
+        tel_df = client.query(telemetry_q).to_dataframe()
+        
+        if not tel_df.empty:
+            fig = go.Figure(go.Scatter(
+                x=tel_df['timestamp'], 
+                y=tel_df['temperature'], 
+                mode='lines', 
+                line=dict(color='#00d4ff', width=1.5)
+            ))
+            fig.update_layout(
+                height=350, 
+                template="plotly_dark",
+                xaxis_title="Time", 
+                yaxis_title="Temp (°C)",
+                margin=dict(l=20, r=20, t=20, b=20)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info(f"No telemetry pings found for Node '{search_node.upper()}' in the master_data_view.")
 
     # 3. REGISTRY MAINTENANCE UTILITY
     st.divider()
