@@ -250,13 +250,14 @@ if search_id:
         if not all_phys_ids:
             st.warning("This node is in the registry but has no Physical IDs assigned to pull telemetry from.")
         else:
-            # Updated SQL: Correlate telemetry by NodeNum and its associated PhysicalID history
+            # Updated SQL: Links telemetry to NodeNum history even if the current row ID is missing
             history_q = f"""
-                WITH NodeHardware AS (
-                    -- Step 1: Find all PhysicalIDs associated with this NodeNum
+                -- 1. Find all hardware IDs ever linked to this specific Node Name
+                WITH HardwareIDs AS (
                     SELECT DISTINCT PhysicalID 
                     FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                    WHERE NodeNum = '{target_node}' AND PhysicalID IS NOT NULL
+                    WHERE NodeNum = '{target_node}' 
+                      AND PhysicalID IS NOT NULL
                 )
                 SELECT 
                     r.Project, 
@@ -265,21 +266,25 @@ if search_id:
                     r.End_Date,
                     r.SensorStatus,
                     DATE_DIFF(IFNULL(r.End_Date, CURRENT_DATE()), r.Start_Date, DAY) as Days_On_Site,
-                    -- Step 2: Count pings by joining on the Hardware IDs found in Step 1
+                    
+                    -- 2. Subquery to count pings using the HardwareIDs found above
                     (
-                        SELECT COUNT(m.temperature) 
+                        SELECT COUNT(*) 
                         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                        WHERE m.PhysicalID IN (SELECT PhysicalID FROM NodeHardware)
+                        WHERE m.PhysicalID IN (SELECT PhysicalID FROM HardwareIDs)
                           AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
                           AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
                     ) as Total_Pings,
+                    
+                    -- 3. Subquery to get average temperature for this specific window
                     (
                         SELECT ROUND(AVG(m.temperature), 2)
                         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                        WHERE m.PhysicalID IN (SELECT PhysicalID FROM NodeHardware)
+                        WHERE m.PhysicalID IN (SELECT PhysicalID FROM HardwareIDs)
                           AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
                           AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
-                    ) as Avg_Temp
+                    ) as Avg_Temp_At_Loc
+                    
                 FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
                 WHERE r.NodeNum = '{target_node}'
                 ORDER BY r.Start_Date DESC
