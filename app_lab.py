@@ -226,11 +226,11 @@ st.session_state["active_refs"] = tuple(active_refs)
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
-    Final Engineering-Grade Plotting Engine:
-    - Fix: Decoupled 'NOW' annotation to prevent TypeError.
-    - Logic: Forces X-Axis Sync for ALL graphs (Brine included) based on Project Day 0.
-    - Style: 15-Color Palette, Right-Hand Legend, Major(10)/Minor(2) Grid.
-    - Monday Bold Lines: Vertical black dividers at midnight.
+    Engineering-grade Trend Graph.
+    - Simplified: Removed 'NOW' label to prevent crashes.
+    - Restored: Theoretical curves with robust project-prefix matching.
+    - Synchronized: All graphs shift to project window (Day 0 to End of Goal).
+    - Styling: 15-color palette, Right-hand legend, Major 10 / Minor 2 grid.
     """
     import plotly.graph_objects as go
     if df.empty: return go.Figure().update_layout(title="No data available")
@@ -247,18 +247,18 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. GLOBAL TIMELINE SYNC (Forcing Brine/Ambient to match the Project Window)
+    # 2. GLOBAL TIMELINE SYNC
     final_end_view, final_start_view = end_view, start_view
     
     if f_start_date:
         try:
-            # Extract Project Number (e.g., 2527) from curve_id or title
-            proj_id_raw = str(curve_id).split('-')[0] if curve_id and '-' in str(curve_id) else str(title)
-            proj_match = re.findall(r'\d+', proj_id_raw)
+            # Robust Project Extraction: Looks for the numeric ID (e.g., 2527)
+            proj_str = str(curve_id) if curve_id else str(title)
+            proj_match = re.findall(r'\d+', proj_str)
             proj_num = proj_match[0] if proj_match else ""
             
             if proj_num:
-                # Find the longest curve in the library for this project to set the window
+                # Find the longest curve in the library to define the shared X-axis
                 ref_q = f"""
                     SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                     WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') 
@@ -272,7 +272,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
-    # 3. THEORETICAL CURVE (Smooth Dark Gray)
+    # 3. THEORETICAL CURVE (Plotting the whole smooth curve)
     if curve_id and curve_id != "None" and f_start_date:
         try:
             target_q = f"SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) = UPPER('{curve_id}') ORDER BY Day"
@@ -310,10 +310,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # Cyan Freeze Line
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="solid", line_color="cyan", annotation_text="32°F FREEZE", layer="above")
     
-    # Red "NOW" Line (DECOUPLED text to prevent crash)
+    # Red "NOW" Line (Line only, no text)
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
-    fig.add_annotation(x=now_ts.to_pydatetime(), y=1, yref="paper", text="NOW", showarrow=False, font=dict(color="red"), xanchor="left", yanchor="bottom")
 
     # Bold Monday Lines
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
@@ -326,12 +325,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         xaxis=dict(
             range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'), # 1 Day Minor Grid
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'),
             tickformat='%b %d'
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})", range=y_range, dtick=10,
-            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'), # 2 degree Minor Grid
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
             showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
         ),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
