@@ -170,7 +170,7 @@ if admin_page == "📡 Setup Node Tool":
 
         # Context Metrics
         m1, m2, m3 = st.columns(3)
-        m1.metric("Site Max Gap", f"{int(df['max_gap_mins'].max() or 0)} mins")
+        m1.metric("Site Max Gap", f"{int(df['max_gap_mins'].fillna(0).max())} mins")
         m2.metric("Site Avg Temp", f"{df['last_temp'].mean():.2f}°F")
         m3.caption(f"Last Updated: {now_utc.strftime('%H:%M:%S UTC')}")
         
