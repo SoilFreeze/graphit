@@ -81,6 +81,22 @@ def render_sidebar():
     return admin_page, target_registry, selected_project, proj_list
 
 # ===============================================================
+# 3. DATA LOADING
+# ===============================================================
+@st.cache_data(ttl=600)  # Caches the registry for 10 minutes to save BQ costs
+def load_registry_data(target_table):
+    """
+    Queries the BigQuery registry table and returns a dataframe.
+    """
+    try:
+        # Uses the global 'client' variable initialized at the top of the script
+        return client.query(f"SELECT * FROM `{target_table}`").to_dataframe()
+    except Exception as e:
+        # If the table doesn't exist or query fails, return an empty DF to prevent crashes
+        st.error(f"Error loading registry: {e}")
+        return pd.DataFrame()
+
+# ===============================================================
 # 4. GLOBAL HELPERS
 # ===============================================================
 def get_trend_arrow(current, previous):
