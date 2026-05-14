@@ -1898,16 +1898,15 @@ def update_records(pts, df, val, display_tz):
 #####################
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
-    The main Dashboard. Shows active project health, 
-    temperature trends, ranges, and staleness alerts.
+    The main Global Project Summary.
+    Features: 24h & Current Ranges, Freezedown Day Tracker, and KPI Goal Metrics.
     """
     st.header("🌐 Global Project Summary")
     
     client = get_bq_client()
     if client is None: return
 
-    # --- SQL MODIFICATION ---
-    # Added min_now and max_now to capture the spread of current readings
+    # 1. ENHANCED SQL QUERY
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -1919,21 +1918,31 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
-            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
         )
         SELECT 
             p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown,
             ld.Bank, ld.Location, ld.Depth,
-            AVG(ld.temperature) as avg_now,
+            -- Averages
+            AVG(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_now,
+            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN avg_1h,
+            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN avg_6h,
+            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN avg_24h,
             
-            -- GOAL STATISTICS
-            -- Supply Goal: <= -10F
-            (COUNTIF(ld.Bank LIKE 'S%' AND ld.temperature <= -10) / NULLIF(COUNTIF(ld.Bank LIKE 'S%'), 0)) * 100 as supply_goal_pct,
-            -- Return Goal: <= 0F
-            (COUNTIF(ld.Bank LIKE 'R%' AND ld.temperature <= 0) / NULLIF(COUNTIF(ld.Bank LIKE 'R%'), 0)) * 100 as return_goal_pct,
-            -- TempPipe Goal: <= 32F
-            (COUNTIF(ld.Depth IS NOT NULL AND ld.temperature <= 32) / NULLIF(COUNTIF(ld.Depth IS NOT NULL), 0)) * 100 as freeze_goal_pct,
+            -- Current Range (Last 1h)
+            MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as min_now,
+            MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as max_now,
+            
+            -- 24h Range
+            MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as min_24h,
+            MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as max_24h,
+            
+            -- KPI Calculation (Aggregated at the Project-Level)
+            (COUNTIF(ld.Bank LIKE 'S%' AND ld.temperature <= -10 AND ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) / NULLIF(COUNTIF(ld.Bank LIKE 'S%' AND ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)), 0)) * 100 as supply_kpi,
+            (COUNTIF(ld.Bank LIKE 'R%' AND ld.temperature <= 0 AND ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) / NULLIF(COUNTIF(ld.Bank LIKE 'R%' AND ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)), 0)) * 100 as return_kpi,
+            (COUNTIF(ld.Depth IS NOT NULL AND ld.temperature <= 32 AND ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) / NULLIF(COUNTIF(ld.Depth IS NOT NULL AND ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)), 0)) * 100 as freeze_kpi,
 
+            -- Staleness Fallback
             ARRAY_AGG(ld.temperature ORDER BY ld.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
             MAX(ld.timestamp) as latest_ts
         FROM active_projects p
@@ -1948,119 +1957,104 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         st.error(f"Dashboard Query Failed: {e}")
         return
 
-    if df.empty:
-        st.warning("No active projects found with data in the last 48 hours.")
-        return
-
     now_utc = pd.Timestamp.now(tz='UTC')
 
+    # 2. PROJECT LOOP
     for project in sorted(df['Project'].unique()):
         p_df = df[df['Project'] == project]
         p_name = p_df['ProjectName'].iloc[0] or project
         
-        # --- FREEZEDOWN DATE LOGIC ---
+        # Freezedown Metadata
         f_date = p_df['Date_Freezedown'].iloc[0]
-        day_text = ""
-        f_date_display = "Not Set"
-        
+        day_text, f_date_display = "", "Not Set"
         if pd.notnull(f_date):
-            # Format the start date for display
-            f_date_display = pd.to_datetime(f_date).strftime('%B %d, %Y')
-            # Calculate days elapsed
-            days = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
-            day_text = f"🗓️ **Day {max(0, days)}**"
+            f_date_display = pd.to_datetime(f_date).strftime('%b %d, %Y')
+            days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
+            day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
         
         with st.container(border=True):
-            # Layout the Header with Project Name and Start Date
-            head_col1, head_col2 = st.columns([2, 1])
-            with head_col1:
-                st.subheader(f"🏗️ {p_name}")
-                st.caption(f"Status: {p_df['ProjectStatus'].iloc[0]}")
-            with head_col2:
-                st.markdown(f"<div style='text-align: right;'>{day_text}<br>Start: <b>{f_date_display}</b></div>", unsafe_allow_html=True)
+            # Header Row
+            h1, h2 = st.columns([2, 1])
+            h1.subheader(f"🏗️ {p_name}")
+            h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
+            st.caption(f"Status: {p_df['ProjectStatus'].iloc[0]}")
             
-            st.divider()
+            st.divider() # Main Spacer
+
+            # 3. SENSOR GROUP COLUMNS
+            # We add a spacer column between each metric group for visual clarity
+            cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
             
-            cols = st.columns(4)
-            
+            # Classification Logic
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
             is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
 
-            groups = [(cols[0], "📥 Supply", p_df[is_s]), (cols[1], "📤 Return", p_df[is_r]), 
-                      (cols[2], "📏 TempPipes", p_df[is_tp]), (cols[3], "☁️ Ambient", p_df[is_amb])]
-            
-            for col, title, g_df in groups:
+            # Map categories to columns
+            groups = [
+                (cols[0], "📥 Supply", p_df[is_s], "supply_kpi", -10), 
+                (cols[2], "📤 Return", p_df[is_r], "return_kpi", 0), 
+                (cols[4], "📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
+                (cols[6], "☁️ Ambient", p_df[is_amb], None, None)
+            ]
+
+            # Render Spacer Vertical Bars
+            for spacer_idx in [1, 3, 5]:
+                cols[spacer_idx].markdown("<div style='border-left: 1px solid #ddd; height: 250px; margin: auto;'></div>", unsafe_allow_html=True)
+
+            for col, title, g_df, kpi_col, kpi_val in groups:
                 with col:
-                    st.markdown(f"#### {title}")
+                    st.markdown(f"**{title}**")
                     if g_df.empty:
                         st.caption("No recent data")
                         continue
                     
-                    # Values for calculation
+                    # Logic for staleness
                     avg_now = g_df['avg_now'].mean()
                     latest_val = g_df['latest_temp'].mean()
                     latest_time = g_df['latest_ts'].max()
                     
-                    # Current spread
-                    cur_min = g_df['min_now'].min()
-                    cur_max = g_df['max_now'].max()
-                    
-                    # 24h spread
-                    mn_24 = g_df['min_24h'].min()
-                    mx_24 = g_df['max_24h'].max()
-
-                    # Lag logic
                     ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
                     lag_hrs = (now_utc - ts_check).total_seconds() / 3600
-                    is_stale = pd.isnull(avg_now)
-                    main_val = latest_val if is_stale else avg_now
+                    val = latest_val if pd.isnull(avg_now) else avg_now
                     
-                    # Conversion function for display
+                    # Ranges
+                    c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
+                    m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
+
+                    # Convert Units
                     def convert(v):
                         if pd.isnull(v): return None
                         return (v - 32) * 5/9 if unit_mode == "Celsius" else v
 
-                    # Convert values
-                    main_val, cur_min, cur_max, mn_24, mx_24 = map(convert, [main_val, cur_min, cur_max, mn_24, mx_24])
-                    # 1. Main Average Metric
-                    st.metric("Avg", f"{main_val:.1f}{unit_label}")
-        
-                    # 2. RENDER GOAL PERCENTAGES
-                    if "Supply" in title:
-                        pct = g_df['supply_goal_pct'].mean()
-                        label = "Nodes ≤ -10°F"
-                    elif "Return" in title:
-                        pct = g_df['return_goal_pct'].mean()
-                        label = "Nodes ≤ 0°F"
-                    elif "TempPipes" in title:
-                        pct = g_df['freeze_goal_pct'].mean()
-                        label = "Nodes ≤ 32°F"
-                    else:
-                        pct = None
-        
-                    if pct is not None:
-                        # Color code the percentage (Green for 100%, Orange for progress)
-                        color = "green" if pct == 100 else "orange" if pct > 0 else "gray"
-                        st.markdown(f"<span style='color:{color}; font-weight:bold;'>{pct:.0f}%</span> <span style='font-size:0.8em;'>{label}</span>", unsafe_allow_html=True)
-                    # --- UI RENDERING ---
-                    st.metric("Avg", f"{main_val:.1f}{unit_label}")
+                    val, c_min, c_max, m24, x24 = map(convert, [val, c_min, c_max, m24, x24])
+
+                    # Main Metric
+                    st.metric("Avg", f"{val:.1f}{unit_label}")
                     
-                    if is_stale and pd.notnull(lag_hrs):
+                    # KPI Badge
+                    if kpi_col:
+                        pct = g_df[kpi_col].mean()
+                        color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
+                        st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
+
+                    # Ranges
+                    st.markdown(f"""
+                        <div style='font-size: 0.8rem; line-height: 1.2;'>
+                        Current: {c_min:.1f} to {c_max:.1f}{unit_label}<br>
+                        24h Range: {m24:.1f} to {x24:.1f}{unit_label}
+                        </div>
+                    """, unsafe_allow_html=True)
+
+                    if pd.isnull(avg_now) and pd.notnull(lag_hrs):
                         st.warning(f"🕒 {int(lag_hrs)}h ago")
 
-                    # Display the two requested ranges
-                    if pd.notnull(cur_min) and pd.notnull(cur_max):
-                        st.caption(f"**Current Range:** {cur_min:.1f} to {cur_max:.1f}{unit_label}")
-                    
-                    if pd.notnull(mn_24) and pd.notnull(mx_24):
-                        st.caption(f"**24h Range:** {mn_24:.1f} to {mx_24:.1f}{unit_label}")
-                    
+                    # Small Trend Indicators
                     t_row = st.columns(3)
-                    t_row[0].caption(f"1h\n{get_trend_arrow(main_val, convert(g_df['avg_1h'].mean()))}")
-                    t_row[1].caption(f"6h\n{get_trend_arrow(main_val, convert(g_df['avg_6h'].mean()))}")
-                    t_row[2].caption(f"24h\n{get_trend_arrow(main_val, convert(g_df['avg_24h'].mean()))}")
+                    t_row[0].caption(f"1h\n{get_trend_arrow(val, convert(g_df['avg_1h'].mean()))}")
+                    t_row[1].caption(f"6h\n{get_trend_arrow(val, convert(g_df['avg_6h'].mean()))}")
+                    t_row[2].caption(f"24h\n{get_trend_arrow(val, convert(g_df['avg_24h'].mean()))}")
 
 
 
