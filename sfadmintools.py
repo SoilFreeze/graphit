@@ -65,36 +65,45 @@ except:
 if admin_page == "📡 Setup Node Tool":
     st.header(f"🏗️ Setup Node Tool: {selected_project}")
 
-    # 1. PROJECT HEADER METRICS (Based on Image)
-    # We fetch project-wide stats for the header
-    header_q = f"""
+    # 1. PROJECT STATUS SUMMARY (Top Dashboard View)
+    # This fetches aggregated data for the site-wide status tiles
+    summary_q = f"""
         SELECT 
-            COUNT(DISTINCT NodeNum) as total_nodes,
-            COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as seen_6h,
-            COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as seen_24h,
-            AVG(temperature) as avg_site_temp
+            Location,
+            ROUND(AVG(temperature), 1) as avg_temp,
+            MIN(temperature) as min_24h,
+            MAX(temperature) as max_24h,
+            COUNT(DISTINCT NodeNum) as total_nodes
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
         WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+        GROUP BY Location
     """
-    h_df = client.query(header_q, job_config=bigquery.QueryJobConfig(
+    summary_df = client.query(summary_q, job_config=bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
     )).to_dataframe()
 
-    if not h_df.empty:
-        total = h_df.iloc[0]['total_nodes'] or 1
-        # Calculate coverage percentages
-        cov_6h = (h_df.iloc[0]['seen_6h'] / total) * 100 if total > 0 else 0
-        cov_24h = (h_df.iloc[0]['seen_24h'] / total) * 100 if total > 0 else 0
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("6 Hour Coverage", f"{cov_6h:.1f}%")
-        c2.metric("24 Hour Coverage", f"{cov_24h:.1f}%")
-        c3.metric("Avg Site Temp", f"{h_df.iloc[0]['avg_site_temp']:.1f}°F" if pd.notnull(h_df.iloc[0]['avg_site_temp']) else "N/A")
-        c4.metric("Active Nodes", int(h_df.iloc[0]['total_nodes'] or 0))
+    # Render Tiles for key locations (Supply, Return, TempPipes, Ambient)
+    # We filter the summary_df for these specific tags
+    st.subheader("📊 Project Status Summary")
+    t_cols = st.columns(4)
+    target_locs = ["Supply", "Return", "TempPipes", "Ambient"]
+    
+    for i, loc in enumerate(target_locs):
+        loc_data = summary_df[summary_df['Location'].str.contains(loc, case=False, na=False)]
+        with t_cols[i]:
+            st.markdown(f"#### 🌡️ {loc}")
+            if not loc_data.empty:
+                avg = loc_data['avg_temp'].iloc[0]
+                st.title(f"{avg}°F")
+                st.caption(f"24h Range: {loc_data['min_24h'].iloc[0]}° to {loc_data['max_24h'].iloc[0]}°")
+            else:
+                st.write("No recent data")
     
     st.divider()
 
-    # 2. DATA FETCH & NULL HANDLING (Fixed pd.NA Error)
+    # 2. HARDWARE INTEGRITY TABLE (With Coverage Columns)
+    st.subheader("📋 Hardware Integrity & Connectivity")
+    
     audit_q = f"""
         WITH RawData AS (
             SELECT NodeNum, timestamp, temperature,
@@ -102,11 +111,13 @@ if admin_page == "📡 Setup Node Tool":
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
         ),
-        Gaps AS (
-            SELECT NodeNum, 
-            -- Using COALESCE here prevents pd.NA errors later in Python
-            COALESCE(MAX(TIMESTAMP_DIFF(timestamp, prev_ts, MINUTE)), 0) as max_gap_mins,
-            MIN(temperature) as min_24h, MAX(temperature) as max_24h
+        Stats AS (
+            SELECT 
+                NodeNum, 
+                COALESCE(MAX(TIMESTAMP_DIFF(timestamp, prev_ts, MINUTE)), 0) as max_gap_mins,
+                -- Calculating individual node coverage counts
+                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as pings_6h,
+                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h
             FROM RawData GROUP BY NodeNum
         ),
         Latest AS (
@@ -115,11 +126,13 @@ if admin_page == "📡 Setup Node Tool":
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             WHERE Project = @proj_id GROUP BY NodeNum
         )
-        SELECT n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus, l.last_ping, l.last_temp,
-        g.min_24h, g.max_24h, g.max_gap_mins
+        SELECT 
+            n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus, 
+            l.last_ping, l.last_temp,
+            s.pings_6h, s.pings_24h, s.max_gap_mins
         FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
         LEFT JOIN Latest l ON n.NodeNum = l.NodeNum
-        LEFT JOIN Gaps g ON n.NodeNum = g.NodeNum
+        LEFT JOIN Stats s ON n.NodeNum = s.NodeNum
         WHERE n.Project = @proj_id
     """
     
@@ -127,53 +140,45 @@ if admin_page == "📡 Setup Node Tool":
         query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
     )).to_dataframe()
 
-    if df.empty:
-        st.warning("⚠️ No records found.")
-    else:
+    if not df.empty:
         now_utc = pd.Timestamp.now(tz='UTC')
 
         def apply_audit_logic(row):
-            # 1. DIAGNOSTIC STYLE LOGIC (Red Node ID if status is Diagnostic)
+            # Red Node ID if Diagnostic
             node_style = 'background-color: #ff4b4b; color: white' if row['SensorStatus'] == 'Diagnostic' else ''
             
-            # 2. CONNECTIVITY STYLE
+            # Last Seen formatting
             ping = row['last_ping']
             if pd.isnull(ping):
                 seen_txt, seen_color = "Not Seen", "background-color: #d3d3d3"
             else:
                 diff = (now_utc - (ping if ping.tzinfo else ping.tz_localize('UTC'))).total_seconds() / 60
                 if diff <= 65: seen_txt, seen_color = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
-                elif diff <= 1440: seen_txt, seen_color = f"{round(diff/60, 1)}h ago", "background-color: #ffe4b5; color: black"
-                else: seen_txt, seen_color = f"{round(diff/1440, 1)}d ago", "background-color: #ffcccb; color: black"
+                else: seen_txt, seen_color = f"{round(diff/60, 1)}h ago", "background-color: #ffcccb; color: black"
 
-            # 3. POSITION & TEMP
             pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
-            last_t = f"{row['last_temp']:.1f}°F" if pd.notnull(row['last_temp']) else "---"
             
-            return pd.Series([pos_txt, last_t, seen_txt, node_style, seen_color])
+            return pd.Series([pos_txt, seen_txt, node_style, seen_color])
 
-        # Apply logic
-        df[['Position', 'Last Temp', 'Last Seen', 'NodeStyle', 'SeenStyle']] = df.apply(apply_audit_logic, axis=1)
+        df[['Position', 'Last Seen', 'NodeStyle', 'SeenStyle']] = df.apply(apply_audit_logic, axis=1)
 
-        # RENDER WITH STYLING
-        st.subheader("📋 Hardware Integrity Table")
-        
-        display_df = df[['NodeNum', 'Location', 'Position', 'Last Seen', 'Last Temp', 'max_gap_mins']].rename(columns={'NodeNum': 'Node ID', 'max_gap_mins': 'Max Gap'})
-        
-        # Applying the styles
+        # Build Display DataFrame
+        display_df = df[[
+            'NodeNum', 'Location', 'Position', 'Last Seen', 
+            'pings_6h', 'pings_24h', 'max_gap_mins'
+        ]].rename(columns={
+            'NodeNum': 'Node ID',
+            'pings_6h': '6h Coverage',
+            'pings_24h': '24h Coverage',
+            'max_gap_mins': 'Max Gap'
+        })
+
+        # Apply Table Styling
         styled_df = display_df.style.apply(lambda x: df['NodeStyle'], subset=['Node ID'])\
                                    .apply(lambda x: df['SeenStyle'], subset=['Last Seen'])\
                                    .set_properties(**{'text-align': 'left'})
 
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-        # Footer Metrics with Safe Formatting
-        c1, c2 = st.columns(2)
-        # Using fillna(0) ensures the int() call never sees a pd.NA
-        max_site_gap = int(df['max_gap_mins'].fillna(0).max())
-        c1.caption(f"**Audit Timestamp:** {now_utc.strftime('%Y-%m-%d %H:%M UTC')}")
-        c2.caption(f"**Max Site Gap:** {max_site_gap} minutes")
-        
 # ===============================================================
 # PAGE: SENSOR STATUS (With Location Drill-Down)
 # ===============================================================
