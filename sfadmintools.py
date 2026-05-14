@@ -64,11 +64,37 @@ except:
 # ===============================================================
 if admin_page == "📡 Setup Node Tool":
     st.header(f"🏗️ Setup Node Tool: {selected_project}")
-    
-    # We now point directly to the production registry
-    TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
 
-    # SQL: Enhanced to capture 1h and 6h pings for connectivity health
+    # 1. PROJECT HEADER METRICS (Based on Image)
+    # We fetch project-wide stats for the header
+    header_q = f"""
+        SELECT 
+            COUNT(DISTINCT NodeNum) as total_nodes,
+            COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as seen_6h,
+            COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as seen_24h,
+            AVG(temperature) as avg_site_temp
+        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+        WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+    """
+    h_df = client.query(header_q, job_config=bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+    )).to_dataframe()
+
+    if not h_df.empty:
+        total = h_df.iloc[0]['total_nodes'] or 1
+        # Calculate coverage percentages
+        cov_6h = (h_df.iloc[0]['seen_6h'] / total) * 100 if total > 0 else 0
+        cov_24h = (h_df.iloc[0]['seen_24h'] / total) * 100 if total > 0 else 0
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("6 Hour Coverage", f"{cov_6h:.1f}%")
+        c2.metric("24 Hour Coverage", f"{cov_24h:.1f}%")
+        c3.metric("Avg Site Temp", f"{h_df.iloc[0]['avg_site_temp']:.1f}°F" if pd.notnull(h_df.iloc[0]['avg_site_temp']) else "N/A")
+        c4.metric("Active Nodes", int(h_df.iloc[0]['total_nodes'] or 0))
+    
+    st.divider()
+
+    # 2. DATA FETCH & NULL HANDLING (Fixed pd.NA Error)
     audit_q = f"""
         WITH RawData AS (
             SELECT NodeNum, timestamp, temperature,
@@ -76,14 +102,11 @@ if admin_page == "📡 Setup Node Tool":
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
         ),
-        Pings AS (
-            SELECT 
-                NodeNum,
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) as pings_1h,
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as pings_6h,
-                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, MINUTE)) as max_gap_mins,
-                MIN(temperature) as min_24h, 
-                MAX(temperature) as max_24h
+        Gaps AS (
+            SELECT NodeNum, 
+            -- Using COALESCE here prevents pd.NA errors later in Python
+            COALESCE(MAX(TIMESTAMP_DIFF(timestamp, prev_ts, MINUTE)), 0) as max_gap_mins,
+            MIN(temperature) as min_24h, MAX(temperature) as max_24h
             FROM RawData GROUP BY NodeNum
         ),
         Latest AS (
@@ -92,13 +115,11 @@ if admin_page == "📡 Setup Node Tool":
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             WHERE Project = @proj_id GROUP BY NodeNum
         )
-        SELECT 
-            n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus,
-            l.last_ping, l.last_temp,
-            p.min_24h, p.max_24h, p.max_gap_mins, p.pings_1h, p.pings_6h
-        FROM `{TARGET_REGISTRY}` n
+        SELECT n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus, l.last_ping, l.last_temp,
+        g.min_24h, g.max_24h, g.max_gap_mins
+        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
         LEFT JOIN Latest l ON n.NodeNum = l.NodeNum
-        LEFT JOIN Pings p ON n.NodeNum = p.NodeNum
+        LEFT JOIN Gaps g ON n.NodeNum = g.NodeNum
         WHERE n.Project = @proj_id
     """
     
@@ -107,75 +128,54 @@ if admin_page == "📡 Setup Node Tool":
     )).to_dataframe()
 
     if df.empty:
-        st.warning("⚠️ No active records found for this project.")
+        st.warning("⚠️ No records found.")
     else:
         now_utc = pd.Timestamp.now(tz='UTC')
 
         def apply_audit_logic(row):
-            # 1. TEMPERATURE & STATUS
-            last_t = f"{row['last_temp']:.1f}°F" if pd.notnull(row['last_temp']) else "---"
-            status = row['SensorStatus'] or "Unknown"
+            # 1. DIAGNOSTIC STYLE LOGIC (Red Node ID if status is Diagnostic)
+            node_style = 'background-color: #ff4b4b; color: white' if row['SensorStatus'] == 'Diagnostic' else ''
             
-            # 2. 24H RANGE & COLOR
-            if pd.isnull(row['min_24h']):
-                range_txt, range_color = "N/A", "" 
-            else:
-                range_txt = f"{row['min_24h']:.1f}°F to {row['max_24h']:.1f}°F"
-                avg_t = (row['min_24h'] + row['max_24h']) / 2
-                if avg_t > 32: range_color = 'background-color: #ffcccb' # Red
-                elif avg_t > 28: range_color = 'background-color: #ffe4b5' # Orange
-                else: range_color = 'background-color: #ccffcc' # Green
-
-            # 3. CONNECTIVITY (Last Seen)
+            # 2. CONNECTIVITY STYLE
             ping = row['last_ping']
             if pd.isnull(ping):
-                seen_txt, seen_color = "Never", "background-color: #d3d3d3"
+                seen_txt, seen_color = "Not Seen", "background-color: #d3d3d3"
             else:
                 diff = (now_utc - (ping if ping.tzinfo else ping.tz_localize('UTC'))).total_seconds() / 60
-                if diff <= 65:
-                    seen_txt, seen_color = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
-                elif diff <= 1440:
-                    seen_txt, seen_color = f"{round(diff/60, 1)}h ago", "background-color: #ffe4b5; color: black"
-                else:
-                    seen_txt, seen_color = f"{round(diff/1440, 1)}d ago", "background-color: #ffcccb; color: black"
+                if diff <= 65: seen_txt, seen_color = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
+                elif diff <= 1440: seen_txt, seen_color = f"{round(diff/60, 1)}h ago", "background-color: #ffe4b5; color: black"
+                else: seen_txt, seen_color = f"{round(diff/1440, 1)}d ago", "background-color: #ffcccb; color: black"
 
-            # 4. POSITION & PINGS
-            pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"B:{row['Bank']}"
-            p1h = int(row['pings_1h']) if pd.notnull(row['pings_1h']) else 0
-            p6h = int(row['pings_6h']) if pd.notnull(row['pings_6h']) else 0
+            # 3. POSITION & TEMP
+            pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
+            last_t = f"{row['last_temp']:.1f}°F" if pd.notnull(row['last_temp']) else "---"
             
-            return pd.Series([
-                status, pos_txt, seen_txt, last_t, range_txt, 
-                p1h, p6h, seen_color, range_color
-            ])
+            return pd.Series([pos_txt, last_t, seen_txt, node_style, seen_color])
 
-        # Apply transformations
-        df[['Status', 'Position', 'Last Seen', 'Last Temp', '24h Range', 'Pings (1h)', 'Pings (6h)', 'SeenStyle', 'RangeStyle']] = df.apply(apply_audit_logic, axis=1)
+        # Apply logic
+        df[['Position', 'Last Temp', 'Last Seen', 'NodeStyle', 'SeenStyle']] = df.apply(apply_audit_logic, axis=1)
 
-        # RENDER TABLE
-        st.subheader("📋 Node Integrity & Performance")
+        # RENDER WITH STYLING
+        st.subheader("📋 Hardware Integrity Table")
         
-        # Display selection matching your reference image
-        display_df = df[[
-            'Location', 'NodeNum', 'Status', 'Position', 
-            'Last Seen', 'Last Temp', '24h Range', 'Pings (1h)', 'Pings (6h)'
-        ]].rename(columns={'NodeNum': 'Node ID'})
+        display_df = df[['NodeNum', 'Location', 'Position', 'Last Seen', 'Last Temp', 'max_gap_mins']].rename(columns={'NodeNum': 'Node ID', 'max_gap_mins': 'Max Gap'})
         
-        styled_df = display_df.style.apply(lambda x: df['SeenStyle'], subset=['Last Seen'])\
-                                   .apply(lambda x: df['RangeStyle'], subset=['24h Range'])\
-                                   .set_properties(**{'text-align': 'left'})\
-                                   .set_table_styles([dict(selector='th', props=[('text-align', 'left')])])
+        # Applying the styles
+        styled_df = display_df.style.apply(lambda x: df['NodeStyle'], subset=['Node ID'])\
+                                   .apply(lambda x: df['SeenStyle'], subset=['Last Seen'])\
+                                   .set_properties(**{'text-align': 'left'})
 
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-        # Context Metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Site Max Gap", f"{int(df['max_gap_mins'].fillna(0).max())} mins")
-        m2.metric("Site Avg Temp", f"{df['last_temp'].mean():.2f}°F")
-        m3.caption(f"Last Updated: {now_utc.strftime('%H:%M:%S UTC')}")
+        # Footer Metrics with Safe Formatting
+        c1, c2 = st.columns(2)
+        # Using fillna(0) ensures the int() call never sees a pd.NA
+        max_site_gap = int(df['max_gap_mins'].fillna(0).max())
+        c1.caption(f"**Audit Timestamp:** {now_utc.strftime('%Y-%m-%d %H:%M UTC')}")
+        c2.caption(f"**Max Site Gap:** {max_site_gap} minutes")
         
 # ===============================================================
-# PAGE: SENSOR STATUS & HARDWARE INVESTIGATOR
+# PAGE: SENSOR STATUS (With Location Drill-Down)
 # ===============================================================
 elif admin_page == "🔍 Sensor Status":
     st.header("🔍 Sensor Status & Performance Overview")
@@ -196,55 +196,62 @@ elif admin_page == "🔍 Sensor Status":
     
     st.divider()
 
-    # --- 2. PROJECT PERFORMANCE SUMMARY (From Reference Image) ---
-    st.subheader(f"📊 Project Health: {selected_project}")
+    # --- 2. LOCATION DRILL-DOWN MENU ---
+    st.subheader(f"📍 Location Drill-Down: {selected_project}")
     
-    summary_q = f"""
-        WITH Stats AS (
-            SELECT 
-                Location,
-                COUNT(DISTINCT NodeNum) as total_nodes,
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) as seen_1h,
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as seen_6h,
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as seen_24h,
-                ROUND(AVG(temperature), 2) as avg_temp,
-                MIN(temperature) as low_24h,
-                MAX(temperature) as high_24h
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-            GROUP BY Location
-        )
-        SELECT * FROM Stats ORDER BY Location
+    # Fetch all active nodes for the project grouped by location
+    loc_q = f"""
+        SELECT 
+            n.Location, 
+            COUNT(n.NodeNum) as pipe_count,
+            AVG(m.temperature) as avg_temp,
+            COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as seen_6h
+        FROM `{TARGET_REGISTRY}` n
+        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
+        WHERE n.Project = @proj_id AND n.End_Date IS NULL
+        GROUP BY n.Location
     """
     
-    summary_df = client.query(summary_q, job_config=bigquery.QueryJobConfig(
+    loc_df = client.query(loc_q, job_config=bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
     )).to_dataframe()
 
-    if not summary_df.empty:
-        # Renaming to match your requested engineering terms
-        st.dataframe(
-            summary_df.rename(columns={
-                "total_nodes": "Total Nodes",
-                "seen_1h": "Seen 1h",
-                "seen_6h": "Seen 6h",
-                "seen_24h": "Seen 24h",
-                "avg_temp": "Avg Temp",
-                "low_24h": "Low 24h",
-                "high_24h": "High 24h"
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
+    if loc_df.empty:
+        st.info("No active locations found for this project.")
     else:
-        st.info("No telemetry data found for this project in the last 7 days.")
+        # Create an expander for each location (The Drill-Down)
+        for _, row in loc_df.iterrows():
+            loc_name = row['Location']
+            avg_t = f"{row['avg_temp']:.1f}°F" if pd.notnull(row['avg_temp']) else "N/A"
+            
+            with st.expander(f"📁 {loc_name} | {row['pipe_count']} Pipes | Avg: {avg_t}"):
+                # Inside the expander, show individual pipes (nodes)
+                pipe_df = reg_df[(reg_df['Project'] == selected_project) & 
+                                 (reg_df['Location'] == loc_name) & 
+                                 (reg_df['End_Date'].isna())]
+                
+                # Clean up display for individual pipe details
+                display_pipes = pipe_df[['NodeNum', 'Bank', 'Depth', 'SensorStatus']].rename(
+                    columns={'NodeNum': 'Pipe ID', 'SensorStatus': 'Status'}
+                )
+                
+                # Apply styling for diagnostic nodes directly in the drill-down
+                def highlight_diagnostic(val):
+                    color = 'red' if val == 'Diagnostic' else 'black'
+                    return f'color: {color}'
+
+                st.dataframe(
+                    display_pipes.style.map(highlight_diagnostic, subset=['Status']),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
     st.divider()
 
-    # --- 3. HARDWARE INVESTIGATOR (Drill-down) ---
-    st.subheader("🔦 Hardware Investigator")
-    search_node = st.text_input("Search Node ID (e.g., TP-0009)", placeholder="Search for history and thermal charts...").strip().upper()
-
+    # --- 3. HARDWARE INVESTIGATOR (Global Search) ---
+    st.subheader("🔦 Global Hardware Investigator")
+    search_node = st.text_input("Quick Search Node ID (e.g., TP-0009)").strip().upper()
+    
     if search_node:
         match = reg_df[reg_df['NodeNum'].astype(str).str.upper() == search_node]
         
@@ -273,7 +280,8 @@ elif admin_page == "🔍 Sensor Status":
                 fig = go.Figure(go.Scatter(x=tel_df['timestamp'], y=tel_df['temperature'], mode='lines', line=dict(color='#00d4ff')))
                 fig.update_layout(height=300, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
                 st.plotly_chart(fig, use_container_width=True)
-
+        pass
+        
     # --- 4. REGISTRY HEALTH ---
     with st.expander("🛠️ Registry Integrity Check"):
         health_df = client.query(f"SELECT NodeNum, PhysicalID, Project, Start_Date FROM `{TARGET_REGISTRY}` WHERE Start_Date IS NULL").to_dataframe()
@@ -282,6 +290,8 @@ elif admin_page == "🔍 Sensor Status":
         else:
             st.warning("⚠️ Found orphaned records (Missing Start Dates):")
             st.dataframe(health_df, use_container_width=True)
+  
+
 # ===============================================================
 # PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
