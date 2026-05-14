@@ -977,6 +977,98 @@ def render_update_project_form(client, selected_project, table_projects):
             time.sleep(1)
             st.rerun()
 # ===============================================================
+# PAGE: BULK REGISTRY MANAGER
+# ===============================================================
+
+def render_bulk_registry_page(client, proj_list, PROJECT_ID, DATASET_ID):
+    """Main entry point for Bulk Registry Operations."""
+    st.header("📦 Bulk Registry Operations")
+    
+    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    bt1, bt2 = st.tabs(["📥 Site Deployment (CSV)", "🔚 Site Decommission"])
+
+    with bt1:
+        render_bulk_deployment_tab(client, target_registry)
+
+    with bt2:
+        render_bulk_decommission_tab(client, proj_list, target_registry)
+
+
+def render_bulk_deployment_tab(client, target_registry):
+    """Handles the UI and logic for uploading new site configurations via CSV."""
+    st.subheader("Initialize New Site Registry")
+    st.info("Upload a CSV to register all sensors for a new project at once.")
+    
+    with st.expander("📊 View Required CSV Format"):
+        st.code("NodeNum,PhysicalID,Project,Location,Bank,Depth,Start_Date,SensorStatus")
+    
+    u_csv = st.file_uploader("Upload Deployment CSV", type="csv")
+    
+    if u_csv:
+        df_upload = pd.read_csv(u_csv)
+        st.write("### Preview Data")
+        st.dataframe(df_upload.head(), use_container_width=True)
+        
+        if st.button("🚀 Commit New Project Hardware"):
+            process_bulk_upload(client, df_upload, target_registry)
+
+
+def process_bulk_upload(client, df, target_registry):
+    """Validates and uploads the dataframe to BigQuery."""
+    try:
+        required = {'NodeNum', 'PhysicalID', 'Project', 'Location'}
+        if not required.issubset(df.columns):
+            st.error(f"Missing required columns: {required - set(df.columns)}")
+            return
+
+        with st.spinner("Uploading to BigQuery..."):
+            if 'Start_Date' in df.columns:
+                df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.date
+            
+            job_config = bigquery.LoadTableConfig(write_disposition="WRITE_APPEND")
+            client.load_table_from_dataframe(df, target_registry, job_config=job_config).result()
+            
+        st.success(f"Successfully registered {len(df)} nodes to project {df['Project'].iloc[0]}.")
+        st.balloons()
+    except Exception as e:
+        st.error(f"Upload Failed: {e}")
+
+
+def render_bulk_decommission_tab(client, proj_list, target_registry):
+    """Handles the UI for retiring an entire project's worth of sensors."""
+    st.subheader("Project-Wide Decommission")
+    st.warning("This action will set an End Date for ALL active sensors on the specified project.")
+    
+    ret_p = st.selectbox("Select Project to Retire", ["-- Select --"] + proj_list)
+    ret_date = st.date_input("Decommission Date", value=datetime.now().date())
+    
+    if st.button("🔚 Retire All Nodes on Site", type="primary"):
+        if ret_p == "-- Select --":
+            st.error("Please select a valid Project ID.")
+        else:
+            execute_bulk_decommission(client, ret_p, ret_date, target_registry)
+
+
+def execute_bulk_decommission(client, project_id, decommission_date, target_registry):
+    """Executes the SQL update to set End_Dates for all active sensors in a project."""
+    try:
+        decom_sql = f"""
+            UPDATE `{target_registry}` 
+            SET End_Date = DATE('{decommission_date.isoformat()}'), 
+                SensorStatus = 'Available' 
+            WHERE Project = '{project_id}' 
+              AND End_Date IS NULL
+        """
+        
+        with st.spinner(f"Retiring Project {project_id}..."):
+            query_job = client.query(decom_sql)
+            query_job.result()
+            
+        st.success(f"Project {project_id} retired. {query_job.num_dml_affected_rows} sensors moved to 'Available'.")
+    except Exception as e:
+        st.error(f"Decommission Failed: {e}")
+
+# ===============================================================
 # PAGE: PROJECT MASTER
 # ===============================================================
 
