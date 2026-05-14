@@ -80,36 +80,59 @@ if admin_page == "📡 Setup Node Tool":
     st.header(f"🏗️ Setup Node Tool: {selected_project}")
 
     # --- 1. ENHANCED DASHBOARD SUMMARY ---
-    # Pulls 48h data to classify types and calculate specific ranges/counts
+    # We pull the registry first to get "Assigned" counts, then join with 48h telemetry
     dashboard_q = f"""
-        WITH raw_data AS (
+        WITH registry_counts AS (
+            -- Get total assigned nodes from registry per type
             SELECT 
-                n.NodeNum, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
-            WHERE n.Project = @proj_id 
-              AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+                Project,
+                NodeNum, Bank, Location, Depth,
+                CASE 
+                    WHEN (Bank LIKE 'S%' OR Location LIKE 'S%') AND (Bank NOT LIKE '%Amb%' AND Location NOT LIKE '%Amb%') THEN 'Supply'
+                    WHEN (Bank LIKE 'R%' OR Location LIKE 'R%') AND (Bank NOT LIKE '%Amb%' AND Location NOT LIKE '%Amb%') THEN 'Return'
+                    WHEN (Bank LIKE '%Amb%' OR Location LIKE '%Amb%') THEN 'Ambient'
+                    WHEN Depth IS NOT NULL THEN 'TempPipes'
+                    ELSE 'Other'
+                END as hardware_type
+            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
+            WHERE Project = @proj_id AND End_Date IS NULL
+        ),
+        telemetry_stats AS (
+            -- Get 48h stats from telemetry
+            SELECT 
+                NodeNum,
+                AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as min_now,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as max_now,
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as min_24h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as max_24h,
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h_prev,
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h_prev,
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h_prev,
+                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+                MAX(timestamp) as latest_ts
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+            GROUP BY NodeNum
         )
         SELECT 
-            Bank, Location, Depth,
-            -- Statistics for the last 1 hour (Current)
-            AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
-            MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as min_now,
-            MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as max_now,
-            COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN NodeNum END) as active_nodes_1h,
-            
-            -- Statistics for the last 24 hours
-            MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as min_24h,
-            MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as max_24h,
-            
-            -- Trend and Stale Fallback
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h_prev,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h_prev,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h_prev,
-            ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-            MAX(timestamp) as latest_ts
-        FROM raw_data
-        GROUP BY 1, 2, 3
+            r.hardware_type,
+            COUNT(r.NodeNum) as assigned_nodes,
+            COUNT(t.NodeNum) as active_nodes_48h,
+            COUNT(CASE WHEN t.avg_now IS NOT NULL THEN r.NodeNum END) as active_nodes_1h,
+            AVG(t.avg_now) as avg_now,
+            MIN(t.min_now) as min_now,
+            MAX(t.max_now) as max_now,
+            MIN(t.min_24h) as min_24h,
+            MAX(t.max_24h) as max_24h,
+            AVG(t.avg_1h_prev) as avg_1h_prev,
+            AVG(t.avg_6h_prev) as avg_6h_prev,
+            AVG(t.avg_24h_prev) as avg_24h_prev,
+            AVG(t.latest_temp) as latest_val,
+            MAX(t.latest_ts) as latest_ts
+        FROM registry_counts r
+        LEFT JOIN telemetry_stats t ON r.NodeNum = t.NodeNum
+        GROUP BY hardware_type
     """
     
     dash_df = client.query(dashboard_q, job_config=bigquery.QueryJobConfig(
@@ -117,70 +140,59 @@ if admin_page == "📡 Setup Node Tool":
     )).to_dataframe()
 
     if not dash_df.empty:
-        dash_df[['Bank', 'Location']] = dash_df[['Bank', 'Location']].fillna('')
-        now_utc = pd.Timestamp.now(tz='UTC')
-
-        # Classification Logic
-        is_amb = dash_df['Bank'].str.contains('Amb', case=False) | dash_df['Location'].str.contains('Amb', case=False)
-        is_s = (dash_df['Bank'].str.startswith('S') | dash_df['Location'].str.startswith('S')) & ~is_amb
-        is_r = (dash_df['Bank'].str.startswith('R') | dash_df['Location'].str.startswith('R')) & ~is_amb
-        is_tp = dash_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
-
         st.subheader("📊 Project Status Summary")
         cols = st.columns(4)
-        groups = [
-            (cols[0], "📥 Supply", dash_df[is_s]), 
-            (cols[1], "📤 Return", dash_df[is_r]), 
-            (cols[2], "📏 TempPipes", dash_df[is_tp]), 
-            (cols[3], "☁️ Ambient", dash_df[is_amb])
-        ]
+        now_utc = pd.Timestamp.now(tz='UTC')
 
-        for col, title, g_df in groups:
+        # Map types to the specific column indices
+        type_map = {"Supply": cols[0], "Return": cols[1], "TempPipes": cols[2], "Ambient": cols[3]}
+        icons = {"Supply": "📥", "Return": "📤", "TempPipes": "📏", "Ambient": "☁️"}
+
+        for h_type, col in type_map.items():
+            g_df = dash_df[dash_df['hardware_type'] == h_type]
             with col:
-                st.markdown(f"#### {title}")
+                st.markdown(f"#### {icons[h_type]} {h_type}")
                 if g_df.empty:
-                    st.error("No recent data (24h+)")
+                    st.error("No nodes assigned")
                     continue
                 
-                # Calculations
-                avg_now = g_df['avg_now'].mean()
-                latest_val = g_df['latest_temp'].mean()
-                latest_time = g_df['latest_ts'].max()
-                active_count = int(g_df['active_nodes_1h'].sum())
+                row = g_df.iloc[0]
                 
-                # Connectivity Check
-                ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
-                lag_hrs = (now_utc - ts_check).total_seconds() / 3600
-                is_stale = pd.isnull(avg_now)
-                val = latest_val if is_stale else avg_now
+                # Connectivity & Staleness Logic
+                latest_time = row['latest_ts']
+                is_stale = pd.isnull(row['avg_now'])
+                val = row['latest_val'] if is_stale else row['avg_now']
                 
-                # 1. Primary Metric & Staleness
-                if is_stale and pd.notnull(lag_hrs):
+                if is_stale and pd.notnull(latest_time):
+                    ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
+                    lag_hrs = (now_utc - ts_check).total_seconds() / 3600
                     st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
+                elif pd.isnull(val):
+                    st.subheader("No Data")
                 else:
                     st.title(f"{val:.1f}°F")
                 
-                # 2. Sensor Density (Last 1 Hour)
-                st.write(f"**{active_count}** Nodes active in last 1h")
+                # DENSITY METRICS (Current/Assigned)
+                active_1h = int(row['active_nodes_1h'])
+                assigned = int(row['assigned_nodes'])
+                st.write(f"**{active_1h} / {assigned}** Nodes active in 1h")
                 
-                # 3. Dual Range Display
-                cur_min, cur_max = g_df['min_now'].min(), g_df['max_now'].max()
-                mn_24, mx_24 = g_df['min_24h'].min(), g_df['max_24h'].max()
-                
-                if pd.notnull(cur_min):
-                    st.caption(f"Current: {cur_min:.1f} to {cur_max:.1f}°F")
+                # DUAL RANGES
+                if pd.notnull(row['min_now']):
+                    st.caption(f"Current: {row['min_now']:.1f} to {row['max_now']:.1f}°F")
                 else:
                     st.caption("Current: No Data")
                 
-                st.caption(f"24h Range: {mn_24:.1f} to {mx_24:.1f}°F")
+                st.caption(f"24h Range: {row['min_24h']:.1f} to {row['max_24h']:.1f}°F")
                 
-                # 4. Trends
+                # TRENDS
                 t_row = st.columns(3)
-                t_row[0].caption(f"1h\n{get_trend_arrow(val, g_df['avg_1h_prev'].mean())}")
-                t_row[1].caption(f"6h\n{get_trend_arrow(val, g_df['avg_6h_prev'].mean())}")
-                t_row[2].caption(f"24h\n{get_trend_arrow(val, g_df['avg_24h_prev'].mean())}")
+                t_row[0].caption(f"1h\n{get_trend_arrow(val, row['avg_1h_prev'])}")
+                t_row[1].caption(f"6h\n{get_trend_arrow(val, row['avg_6h_prev'])}")
+                t_row[2].caption(f"24h\n{get_trend_arrow(val, row['avg_24h_prev'])}")
 
     st.divider()
+    # --- HARDWARE INTEGRITY TABLE FOLLOWS ---
  
 
     # --- 2. HARDWARE INTEGRITY TABLE ---
