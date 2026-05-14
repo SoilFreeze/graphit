@@ -50,12 +50,13 @@ def load_registry_data(target_table):
         return pd.DataFrame()
 
 def render_sidebar():
-    """Renders the sidebar navigation and project selection."""
     st.sidebar.title("🛠️ Admin Command Center")
     
-    admin_page = st.sidebar.radio("Management Tool", [
-        "📡 Setup Node Tool", 
-        "🔍 Sensor Status",
+    admin_page = st.sidebar.radio(
+        "Management Tool", 
+        [
+            "📡 Setup Node Tool", 
+            "🔍 Sensor Status",
         "🔄 Sensor Replace",      
         "🩹 Sensor Switch",       
         "📝 Sensor Edit",         
@@ -64,8 +65,9 @@ def render_sidebar():
         "⚙️ Project Master", 
         "📈 Ref Curve Library", 
         "🧨 Data Management"
-    ])
-
+        ],
+        key="main_admin_nav"  # <--- ADD THIS KEY
+    )
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground", value=True)
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
 
