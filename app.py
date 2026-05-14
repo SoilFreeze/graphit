@@ -227,10 +227,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
-    - Legend (Goals): Soil Type only.
-    - Legend (Sensors): Prioritizes specific Bank IDs (S1, R3) over Bank letters.
-    - Title: Project - Thermal Trend - Location.
-    - Style: RoyalBlue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
+    - Legend: Cleaned priority logic.
+    - Hover: Date at top, Time only on entries.
+    - Gaps: Lines break if data is missing for > 6 hours.
+    - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
     """
     import plotly.graph_objects as go
     import re
@@ -238,7 +238,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     client = get_bq_client()
     plot_df = df.copy() 
-    fig = go.Figure()
 
     # 1. TIMEZONE & UNITS
     if plot_df['timestamp'].dt.tz is None:
@@ -248,6 +247,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
+    fig = go.Figure()
+
     # 2. GLOBAL TIMELINE SYNC
     final_end_view, final_start_view = end_view, start_view
     proj_str = str(st.session_state.get('selected_project', ''))
@@ -255,17 +256,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     proj_num = proj_match[0] if proj_match else ""
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    if f_start_date:
-        try:
-            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') ORDER BY Day DESC LIMIT 1"
-            ref_meta = client.query(ref_q).to_dataframe()
-            if not ref_meta.empty:
-                max_days = int(ref_meta['Day'].max())
-                final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
-                final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
-        except: pass
-
-    # 3. THEORETICAL REFERENCE CURVES (Legend: Soil Type only)
+    # 3. THEORETICAL REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
             target_q = f"""
@@ -282,62 +273,80 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     soil_label = str(cid).split('-')[-1].strip()
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>{soil_label}</b>", mode='lines',
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
                         line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
         except: pass
 
-    # 4. SENSOR DATA (Cleaned Legend Logic)
+    # 4. SENSOR DATA (Cleaned Legend & Gap Logic)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     unique_nodes = sorted(plot_df['NodeNum'].unique())
+    
     for i, sn in enumerate(unique_nodes):
+        # Filter and sort
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
+        
+        # Gap Breaking: Resample to 1h. If gap > 6h, NaNs will persist and break the line.
+        # We use 'first' to keep original readings and 'asfreq' to insert NaNs in gaps.
+        s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
+        
         depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
         
-        # Priority Legend Logic:
-        # 1. If it's a Brine pipe and has a specific ID (S1, R3), use that.
-        # 2. If it has a depth, use depth.
-        # 3. Fallback to location name.
+        # Legend Logic
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
             display_name = f"{bank_val} ({sn})"
-        elif pd.notnull(depth_val): 
+        elif pd.notnull(depth_val) and not pd.isna(depth_val): 
             display_name = f"{depth_val}ft ({sn})"
-        elif pd.notnull(bank_val): 
-            display_name = f"{bank_val} {loc_val} ({sn})"
         else: 
             display_name = f"{loc_val} ({sn})"
         
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'],
-            name=display_name, mode='lines',
+            x=s_df['timestamp'], 
+            y=s_df['temperature'],
+            name=display_name, 
+            mode='lines',
+            connectgaps=False, # Breaks line on NaNs
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+            # Hover Template: Time only per entry
+            hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
     # 5. REFERENCE LINES
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
+    
+    # Current Time vertical line
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
+    
+    # Bold Monday Gridlines
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
     # 6. LAYOUT & TITLING
-    p_name = st.session_state.get('selected_project')
+    p_name = st.session_state.get('selected_project', 'Project')
     fig.update_layout(
         title=dict(text=f"<b>{p_name} - Thermal Trend - {title}</b>", x=0.02, y=0.98, font=dict(size=18)),
-        plot_bgcolor='white', hovermode="x unified", height=650,
+        plot_bgcolor='white', 
+        hovermode="x unified", 
+        height=650,
         xaxis=dict(
-            range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
+            range=[final_start_view, final_end_view], 
+            showgrid=True, gridcolor='Gainsboro',
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'),
-            tickformat='%b %d'
+            # Unified Hover Formatting: Date at the top
+            hoverformat='%A, %b %d, %Y', 
+            tickformat='%b %d',
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')
         ),
         yaxis=dict(
-            title=f"Temperature ({unit_label})", range=y_range, dtick=10,
-            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-            showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
+            title=f"Temperature ({unit_label})", 
+            range=y_range, 
+            dtick=10,
+            showgrid=True, gridcolor='Gainsboro', 
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')
         ),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
@@ -1853,14 +1862,15 @@ def update_records(pts, df, val, display_tz):
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     The main Dashboard. Shows active project health, 
-    temperature trends, 24h extremes, and staleness alerts.
+    temperature trends, ranges, and staleness alerts.
     """
     st.header("🌐 Global Project Summary")
     
     client = get_bq_client()
     if client is None: return
 
-    # Optimized Query: Pulls 48h of data for all non-archived projects
+    # --- SQL MODIFICATION ---
+    # Added min_now and max_now to capture the spread of current readings
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -1877,16 +1887,21 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         SELECT 
             p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown,
             ld.Bank, ld.Location, ld.Depth,
+            -- CURRENT AVERAGES & RANGES (Last 1 Hour)
             AVG(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_now,
+            MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as min_now,
+            MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as max_now,
+            
+            -- HISTORICAL AVERAGES
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_1h,
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN ld.temperature END) as avg_6h,
             AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as avg_24h,
             
-            -- EXTREMES (Restored)
+            -- 24 HOUR EXTREMES
             MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as min_24h,
             MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as max_24h,
             
-            -- STALE FALLBACK
+            -- FALLBACK FOR STALE DATA
             ARRAY_AGG(ld.temperature ORDER BY ld.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
             MAX(ld.timestamp) as latest_ts
         FROM active_projects p
@@ -1925,7 +1940,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             st.divider()
             cols = st.columns(4)
             
-            # Classification Logic
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
@@ -1941,42 +1955,50 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                         st.caption("No recent data")
                         continue
                     
-                    # 1. Logic for Current vs. Stale Fallback
+                    # Values for calculation
                     avg_now = g_df['avg_now'].mean()
                     latest_val = g_df['latest_temp'].mean()
                     latest_time = g_df['latest_ts'].max()
                     
-                    # Calculate Lag
-                    ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
-                    lag_hrs = (now_utc - ts_check).total_seconds() / 3600
-
-                    is_stale = pd.isnull(avg_now)
-                    val = latest_val if is_stale else avg_now
+                    # Current spread
+                    cur_min = g_df['min_now'].min()
+                    cur_max = g_df['max_now'].max()
                     
-                    # 24h Extremes
+                    # 24h spread
                     mn_24 = g_df['min_24h'].min()
                     mx_24 = g_df['max_24h'].max()
+
+                    # Lag logic
+                    ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
+                    lag_hrs = (now_utc - ts_check).total_seconds() / 3600
+                    is_stale = pd.isnull(avg_now)
+                    main_val = latest_val if is_stale else avg_now
                     
-                    # Unit Conversion
-                    if unit_mode == "Celsius":
-                        val = (val - 32) * 5/9 if pd.notnull(val) else None
-                        mn_24 = (mn_24 - 32) * 5/9 if pd.notnull(mn_24) else None
-                        mx_24 = (mx_24 - 32) * 5/9 if pd.notnull(mx_24) else None
+                    # Conversion function for display
+                    def convert(v):
+                        if pd.isnull(v): return None
+                        return (v - 32) * 5/9 if unit_mode == "Celsius" else v
+
+                    # Convert values
+                    main_val, cur_min, cur_max, mn_24, mx_24 = map(convert, [main_val, cur_min, cur_max, mn_24, mx_24])
                     
-                    # 2. Rendering Metric
-                    st.metric("Avg", f"{val:.1f}{unit_label}")
+                    # --- UI RENDERING ---
+                    st.metric("Avg", f"{main_val:.1f}{unit_label}")
                     
                     if is_stale and pd.notnull(lag_hrs):
                         st.warning(f"🕒 {int(lag_hrs)}h ago")
 
-                    if pd.notnull(mn_24) and pd.notnull(mx_24):
-                        st.caption(f"Range: {mn_24:.1f} to {mx_24:.1f}{unit_label}")
+                    # Display the two requested ranges
+                    if pd.notnull(cur_min) and pd.notnull(cur_max):
+                        st.caption(f"**Current Range:** {cur_min:.1f} to {cur_max:.1f}{unit_label}")
                     
-                    # 3. Trends
+                    if pd.notnull(mn_24) and pd.notnull(mx_24):
+                        st.caption(f"**24h Range:** {mn_24:.1f} to {mx_24:.1f}{unit_label}")
+                    
                     t_row = st.columns(3)
-                    t_row[0].caption(f"1h\n{get_trend_arrow(val, g_df['avg_1h'].mean())}")
-                    t_row[1].caption(f"6h\n{get_trend_arrow(val, g_df['avg_6h'].mean())}")
-                    t_row[2].caption(f"24h\n{get_trend_arrow(val, g_df['avg_24h'].mean())}")
+                    t_row[0].caption(f"1h\n{get_trend_arrow(main_val, convert(g_df['avg_1h'].mean()))}")
+                    t_row[1].caption(f"6h\n{get_trend_arrow(main_val, convert(g_df['avg_6h'].mean()))}")
+                    t_row[2].caption(f"24h\n{get_trend_arrow(main_val, convert(g_df['avg_24h'].mean()))}")
 
 def get_trend_arrow(current, previous):
     """Helper to generate trend icons with updated blue downward arrow."""
