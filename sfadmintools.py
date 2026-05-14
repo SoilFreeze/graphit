@@ -65,39 +65,67 @@ except:
 if admin_page == "📡 Setup Node Tool":
     st.header(f"🏗️ Setup Node Tool: {selected_project}")
 
-    # 1. PROJECT STATUS SUMMARY (Top Dashboard View)
-    # This fetches aggregated data for the site-wide status tiles
+    # 1. PROJECT STATUS SUMMARY (Advanced Offline Logic)
+    # This query finds the latest ping AND the 24h stats per location
     summary_q = f"""
+        WITH LocData AS (
+            SELECT 
+                Location,
+                temperature,
+                timestamp,
+                MAX(timestamp) OVER(PARTITION BY Location) as last_ping_time,
+                AVG(temperature) OVER(PARTITION BY Location) as avg_24h,
+                MIN(temperature) OVER(PARTITION BY Location) as min_24h,
+                MAX(temperature) OVER(PARTITION BY Location) as max_24h
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            WHERE Project = @proj_id 
+              AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+        )
         SELECT 
             Location,
-            ROUND(AVG(temperature), 1) as avg_temp,
-            MIN(temperature) as min_24h,
-            MAX(temperature) as max_24h,
-            COUNT(DISTINCT NodeNum) as total_nodes
-        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-        WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as current_temp,
+            MAX(last_ping_time) as last_ping,
+            MAX(min_24h) as min_24h,
+            MAX(max_24h) as max_24h
+        FROM LocData
         GROUP BY Location
     """
     summary_df = client.query(summary_q, job_config=bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
     )).to_dataframe()
 
-    # Render Tiles for key locations (Supply, Return, TempPipes, Ambient)
-    # We filter the summary_df for these specific tags
     st.subheader("📊 Project Status Summary")
     t_cols = st.columns(4)
     target_locs = ["Supply", "Return", "TempPipes", "Ambient"]
-    
+    now_utc = pd.Timestamp.now(tz='UTC')
+
     for i, loc in enumerate(target_locs):
+        # Case-insensitive search for the location category
         loc_data = summary_df[summary_df['Location'].str.contains(loc, case=False, na=False)]
+        
         with t_cols[i]:
             st.markdown(f"#### 🌡️ {loc}")
-            if not loc_data.empty:
-                avg = loc_data['avg_temp'].iloc[0]
-                st.title(f"{avg}°F")
-                st.caption(f"24h Range: {loc_data['min_24h'].iloc[0]}° to {loc_data['max_24h'].iloc[0]}°")
+            
+            if loc_data.empty:
+                st.error("No recent data (24h+)")
             else:
-                st.write("No recent data")
+                row = loc_data.iloc[0]
+                last_ping = row['last_ping']
+                
+                # Check if current (last 65 mins)
+                if last_ping.tzinfo is None:
+                    last_ping = last_ping.tz_localize('UTC')
+                
+                diff_hours = (now_utc - last_ping).total_seconds() / 3600
+
+                # PRIMARY TEMP DISPLAY
+                if diff_hours > 1.1: # More than 65 minutes since last ping
+                    st.subheader(f"⚠️ Offline {int(diff_hours)}h")
+                else:
+                    st.title(f"{row['current_temp']:.1f}°F")
+
+                # 24H RANGE DISPLAY (Always show if data exists)
+                st.caption(f"24h Range: {row['min_24h']:.1f}° to {row['max_24h']:.1f}°")
     
     st.divider()
 
