@@ -60,6 +60,20 @@ except:
     reg_df = pd.DataFrame()
 
 # ===============================================================
+# GLOBAL HELPERS
+# ===============================================================
+def get_trend_arrow(current, previous):
+    """Helper to generate trend icons with updated blue downward arrow."""
+    if pd.isnull(current) or pd.isnull(previous): 
+        return "N/A"
+    delta = current - previous
+    if delta > 0.1: 
+        return f"🔺 +{delta:.1f}"
+    if delta < -0.1: 
+        return f"🔹 {delta:.1f}" 
+    return "➡️ 0.0"
+
+# ===============================================================
 # PAGE: SETUP NODE TOOL
 # ===============================================================
 if admin_page == "📡 Setup Node Tool":
@@ -147,100 +161,100 @@ if admin_page == "📡 Setup Node Tool":
     st.divider()
 
     # --- 2. HARDWARE INTEGRITY TABLE ---
-st.subheader("📋 Hardware Integrity & Connectivity")
-
-# Fetch data with COALESCE to prevent pd.NA errors
-audit_q = f"""
-    WITH RawData AS (
-        SELECT NodeNum, timestamp, temperature,
-        LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_ts
-        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-        WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-    ),
-    Stats AS (
+    st.subheader("📋 Hardware Integrity & Connectivity")
+    
+    # Fetch data with COALESCE to prevent pd.NA errors
+    audit_q = f"""
+        WITH RawData AS (
+            SELECT NodeNum, timestamp, temperature,
+            LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_ts
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+        ),
+        Stats AS (
+            SELECT 
+                NodeNum, 
+                COALESCE(MAX(TIMESTAMP_DIFF(timestamp, prev_ts, MINUTE)), 0) as max_gap_mins,
+                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as pings_6h,
+                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h
+            FROM RawData GROUP BY NodeNum
+        ),
+        Latest AS (
+            SELECT NodeNum, MAX(timestamp) as last_ping,
+            ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            WHERE Project = @proj_id GROUP BY NodeNum
+        )
         SELECT 
-            NodeNum, 
-            COALESCE(MAX(TIMESTAMP_DIFF(timestamp, prev_ts, MINUTE)), 0) as max_gap_mins,
-            COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as pings_6h,
-            COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h
-        FROM RawData GROUP BY NodeNum
-    ),
-    Latest AS (
-        SELECT NodeNum, MAX(timestamp) as last_ping,
-        ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp
-        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-        WHERE Project = @proj_id GROUP BY NodeNum
-    )
-    SELECT 
-        n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus, 
-        l.last_ping, l.last_temp,
-        s.pings_6h, s.pings_24h, s.max_gap_mins
-    FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
-    LEFT JOIN Latest l ON n.NodeNum = l.NodeNum
-    LEFT JOIN Stats s ON n.NodeNum = s.NodeNum
-    WHERE n.Project = @proj_id
-"""
-
-df = client.query(audit_q, job_config=bigquery.QueryJobConfig(
-    query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-)).to_dataframe()
-
-if not df.empty:
-    now_utc = pd.Timestamp.now(tz='UTC')
-
-    # Data Transformation Logic
-    def apply_row_logic(row):
-        # 1. Connectivity Status (Last Seen)
-        ping = row['last_ping']
-        if pd.isnull(ping):
-            seen_txt, seen_color = "Not Seen", "background-color: #d3d3d3"
-        else:
-            diff = (now_utc - (ping if ping.tzinfo else ping.tz_localize('UTC'))).total_seconds() / 60
-            if diff <= 65: 
-                seen_txt, seen_color = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
-            else: 
-                seen_txt, seen_color = f"{round(diff/60, 1)}h ago", "background-color: #ffe4b5; color: black"
-        
-        # 2. Position Labeling
-        pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
-        
-        return pd.Series([pos_txt, seen_txt, seen_color])
-
-    df[['Position', 'Last Seen', 'SeenStyle']] = df.apply(apply_row_logic, axis=1)
-
-    # Prepare Display DataFrame
-    display_df = df[[
-        'NodeNum', 'Location', 'Position', 'Last Seen', 
-        'pings_6h', 'pings_24h', 'max_gap_mins'
-    ]].rename(columns={
-        'NodeNum': 'Node ID',
-        'pings_6h': '6h Coverage',
-        'pings_24h': '24h Coverage',
-        'max_gap_mins': 'Max Gap'
-    })
-
-    # --- THE STYLING ENGINE ---
-    # This function handles the red cell for 'Diagnostic'
-    def diagnostic_styler(data):
-        # Create a blank dataframe of styles
-        style_df = pd.DataFrame('', index=data.index, columns=data.columns)
-        
-        # Apply red background to 'Node ID' column where SensorStatus is Diagnostic
-        # We use the original 'df' to check the status
-        diagnostic_mask = df['SensorStatus'] == 'Diagnostic'
-        style_df.loc[diagnostic_mask, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
-        
-        # Apply the pre-calculated 'SeenStyle' to the 'Last Seen' column
-        style_df['Last Seen'] = df['SeenStyle']
-        
-        return style_df
-
-    # Final Render
-    st.dataframe(
-        display_df.style.apply(diagnostic_styler, axis=None), 
-        use_container_width=True, 
-        hide_index=True
-    )
+            n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus, 
+            l.last_ping, l.last_temp,
+            s.pings_6h, s.pings_24h, s.max_gap_mins
+        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+        LEFT JOIN Latest l ON n.NodeNum = l.NodeNum
+        LEFT JOIN Stats s ON n.NodeNum = s.NodeNum
+        WHERE n.Project = @proj_id
+    """
+    
+    df = client.query(audit_q, job_config=bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+    )).to_dataframe()
+    
+    if not df.empty:
+        now_utc = pd.Timestamp.now(tz='UTC')
+    
+        # Data Transformation Logic
+        def apply_row_logic(row):
+            # 1. Connectivity Status (Last Seen)
+            ping = row['last_ping']
+            if pd.isnull(ping):
+                seen_txt, seen_color = "Not Seen", "background-color: #d3d3d3"
+            else:
+                diff = (now_utc - (ping if ping.tzinfo else ping.tz_localize('UTC'))).total_seconds() / 60
+                if diff <= 65: 
+                    seen_txt, seen_color = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
+                else: 
+                    seen_txt, seen_color = f"{round(diff/60, 1)}h ago", "background-color: #ffe4b5; color: black"
+            
+            # 2. Position Labeling
+            pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
+            
+            return pd.Series([pos_txt, seen_txt, seen_color])
+    
+        df[['Position', 'Last Seen', 'SeenStyle']] = df.apply(apply_row_logic, axis=1)
+    
+        # Prepare Display DataFrame
+        display_df = df[[
+            'NodeNum', 'Location', 'Position', 'Last Seen', 
+            'pings_6h', 'pings_24h', 'max_gap_mins'
+        ]].rename(columns={
+            'NodeNum': 'Node ID',
+            'pings_6h': '6h Coverage',
+            'pings_24h': '24h Coverage',
+            'max_gap_mins': 'Max Gap'
+        })
+    
+        # --- THE STYLING ENGINE ---
+        # This function handles the red cell for 'Diagnostic'
+        def diagnostic_styler(data):
+            # Create a blank dataframe of styles
+            style_df = pd.DataFrame('', index=data.index, columns=data.columns)
+            
+            # Apply red background to 'Node ID' column where SensorStatus is Diagnostic
+            # We use the original 'df' to check the status
+            diagnostic_mask = df['SensorStatus'] == 'Diagnostic'
+            style_df.loc[diagnostic_mask, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
+            
+            # Apply the pre-calculated 'SeenStyle' to the 'Last Seen' column
+            style_df['Last Seen'] = df['SeenStyle']
+            
+            return style_df
+    
+        # Final Render
+        st.dataframe(
+            display_df.style.apply(diagnostic_styler, axis=None), 
+            use_container_width=True, 
+            hide_index=True
+        )
 # ===============================================================
 # PAGE: SENSOR STATUS (With Location Drill-Down)
 # ===============================================================
