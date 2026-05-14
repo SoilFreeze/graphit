@@ -101,17 +101,6 @@ def get_unit_labels():
     unit_label = "°C" if unit_mode == "Celsius" else "°F"
     return unit_mode, unit_label
     
-# ===============================================================
-# PAGE: SETUP NODE TOOL (Unified Audit & Diagnostics)
-# ===============================================================
-if admin_page == "📡 Setup Node Tool":
-    # Component 1: Tiles
-    render_project_status_dashboard(client, selected_project, unit_label)
-    
-    st.divider()
-    
-    # Component 2: Table
-    render_hardware_integrity_table(client, selected_project, unit_mode, unit_label)
 
 # ===============================================================
 # Function: Status Dashboard
@@ -1375,22 +1364,25 @@ def render_execution_step(client, where_str, mode, PROJECT_ID, DATASET_ID):
                 st.error(f"Execution Failed: {e}")
 
 # ===============================================================
-# MAIN ROUTING ENGINE
+# FINAL EXECUTION BLOCK
 # ===============================================================
 
 def main():
     """
-    Orchestrates the application flow by handling data loading,
-    sidebar navigation, and page routing.
+    This replaces the loose 'if admin_page' logic.
+    It calls the sidebar, gets the variables, and routes to functions.
     """
-    # 1. Sidebar & Context Loading
+    # 1. Initialize Sidebar and get context
+    # This defines the variables that were causing the NameError
     admin_page, target_registry, selected_project, proj_list = render_sidebar()
+    
+    # 2. Get Unit Preferences
     unit_mode, unit_label = get_unit_labels()
     
-    # 2. Global Data Refresh (Load registry for pages that need it)
+    # 3. Load Registry Data for the pages that need it
     reg_df = load_registry_data(target_registry)
 
-    # 3. Page Routing Logic
+    # 4. Route to the appropriate function
     if admin_page == "📡 Setup Node Tool":
         render_project_status_dashboard(client, selected_project, unit_label)
         st.divider()
@@ -1423,6 +1415,13 @@ def main():
     elif admin_page == "🧨 Data Management":
         render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID)
 
+# Start the app
+if __name__ == "__main__":
+    if client:
+        main()
+    else:
+        st.error("Critical Error: BigQuery Client failed to initialize.")
+        
 # ===============================================================
 # EXECUTION ENTRY POINT
 # ===============================================================
