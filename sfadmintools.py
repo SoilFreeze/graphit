@@ -7,13 +7,13 @@ from datetime import datetime, timedelta
 import time
 import re
 
-# 1. CONFIGURATION & SECURITY
+# 1. CONFIGURATION
 st.set_page_config(page_title="SF Engineering Admin", page_icon="🛠️", layout="wide")
 
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
 
-# 2. DATABASE CLIENT FUNCTION
+# 2. DATABASE CLIENT
 @st.cache_resource
 def get_bq_client():
     try:
@@ -26,33 +26,14 @@ def get_bq_client():
         st.error(f"❌ Database Link Offline: {e}")
         return None
 
-# 3. INITIALIZE CLIENT & TARGETS
 client = get_bq_client()
 
-# We define the toggle and registry target BEFORE loading data
-st.sidebar.markdown("---")
-is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True, key="global_dev_toggle")
-
-BASE_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-TARGET_REGISTRY = BASE_REGISTRY + ("_dummy" if is_dev else "")
-
-# 4. GLOBAL DATA LOADING
-# Now this works because 'client' and 'TARGET_REGISTRY' are defined above
-if client:
-    try:
-        reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
-    except Exception as e:
-        st.error(f"❌ Failed to load registry: {e}")
-        reg_df = pd.DataFrame(columns=['NodeNum', 'PhysicalID', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'])
-else:
-    # If client failed to initialize, provide empty DF
-    reg_df = pd.DataFrame(columns=['NodeNum', 'PhysicalID', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'])
-
-# ---------------------------------------------------------
-# 5. SIDEBAR NAVIGATION 
+# 3. SIDEBAR NAVIGATION
 st.sidebar.title("🛠️ Admin Command Center")
+
+# Renamed labels for practical engineering use
 admin_page = st.sidebar.radio("Management Tool", [
-    "📡 Setup Audit", 
+    "📡 Setup Node Tool", 
     "🔍 Sensor Status",
     "🔄 Sensor Replace",      
     "🩹 Sensor Switch",       
@@ -61,25 +42,29 @@ admin_page = st.sidebar.radio("Management Tool", [
     "📡 Data Recovery",
     "⚙️ Project Master", 
     "📈 Ref Curve Library", 
-    "🧨 Surgical Data Management"
+    "🧨 Data Management"
 ])
 
+is_dev = st.sidebar.toggle("🧪 Use Registry Playground", value=True)
+TARGET_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
 
-
-# Global Project Selection for context
-# (This still works perfectly here as it uses the client and constants)
+# Global Project Selection
 proj_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
 proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].tolist())
 selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list)
 
-BASE_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-TARGET_REGISTRY = BASE_REGISTRY + ("_dummy" if is_dev else "")
-st.sidebar.markdown("---")
+# 4. GLOBAL DATA LOAD (Registry)
+try:
+    reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
+except:
+    reg_df = pd.DataFrame()
 
-st.sidebar.info(f"Connected to: **{TARGET_REGISTRY.split('.')[-1]}**")
-st.sidebar.markdown("---")
-# ------------------------------------------
-
+# ===============================================================
+# PAGE: SETUP NODE TOOL
+# ===============================================================
+if admin_page == "📡 Setup Node Tool":
+    st.header(f"🏗️ Setup Node Tool: {selected_project}")
+    
 # ===============================================================
 # TOOL 1: SETUP AUDIT (Hardened Formatting & Color Scales)
 # ===============================================================
@@ -180,205 +165,128 @@ if "Setup Audit" in admin_page:
         c2.caption(f"**Max Site Gap:** {df['max_gap_mins'].max() or 0} minutes")
 
 # ===============================================================
-# TOOL: SENSOR STATUS 
+# PAGE: SENSOR STATUS (Includes Investigator)
 # ===============================================================
-elif "Sensor Status" in admin_page:
-    st.header("🔍 Sensor Status & Reliability Audit")
+elif admin_page == "🔍 Sensor Status":
+    st.header("🔍 Sensor Status & Hardware Investigator")
     
-    # 1. FLEET SUMMARY METRICS
-    # Fetch registry to see the current state of all hardware
-    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
-    reg_df = client.query(query).to_dataframe()
-    
+    # --- Part A: Fleet Metrics ---
     if not reg_df.empty:
-        # Ensure date columns are actual datetime objects for accurate filtering
         reg_df['End_Date'] = pd.to_datetime(reg_df['End_Date'], errors='coerce')
-    
-        # --- CALCULATIONS ---
-        
-        # 1. Total Unique Sensors: Count every unique NodeNum ever entered in the system
         total_unique = reg_df['NodeNum'].nunique()
-        
-        # Define a helper for "Active" records (those without an End_Date)
         active_mask = reg_df['End_Date'].isna()
         
-        # 2. Currently Assigned: Active sensors NOT in the Office
-        currently_assigned = len(reg_df[active_mask & (reg_df['Project'] != 'Office')])
-        
-        # 3. Available In Stock: Active sensors IN the Office with 'Available' status
-        available_stock = len(reg_df[active_mask & (reg_df['Project'] == 'Office') & (reg_df['SensorStatus'] == 'Available')])
-        
-        # 4. Flagged / Dead / Diagnostic: Active sensors with specific warning statuses
-        # We use .isin() to group these three categories together
-        warning_statuses = ['Dead', 'Flagged', 'Diagnostic']
-        flagged_dead_diag = len(reg_df[active_mask & reg_df['SensorStatus'].isin(warning_statuses)])
-        
-        # --- DISPLAYING THE METRICS ---
-        st.subheader("📊 Fleet Inventory Overview")
         col1, col2, col3, col4 = st.columns(4)
-        
         col1.metric("Total Unique Sensors", total_unique)
-        col2.metric("Currently Assigned", currently_assigned)
-        col3.metric("Available In Stock", available_stock)
-        col4.metric("Flagged/Dead/Diagnostic", flagged_dead_diag)
-        
-        st.divider()
-        
-# ===============================================================
-# 2. HARDWARE INVESTIGATOR (NodeNum Centric)
-# ===============================================================
-st.subheader("🔦 Hardware Investigator")
-# Search input now explicitly asks for the Node Number
-search_node = st.text_input("Enter Node ID (e.g., TP-0009)", placeholder="Search by NodeNum...").strip()
-
-if search_node:
-    # 1. FILTER REGISTRY BY NODENUM
-    # Standardize to uppercase to ensure matches work regardless of user input
-    match = reg_df[reg_df['NodeNum'].astype(str).str.upper() == search_node.upper()]
+        col2.metric("Currently Assigned", len(reg_df[active_mask & (reg_df['Project'] != 'Office')]))
+        col3.metric("Available In Stock", len(reg_df[active_mask & (reg_df['Project'] == 'Office')]))
+        col4.metric("Warning Statuses", len(reg_df[active_mask & reg_df['SensorStatus'].isin(['Dead', 'Flagged'])]))
     
-    if match.empty:
-        st.error(f"No records found for Node '{search_node}'. Please check the registry.")
-    else:
-        # 2. SHOW CURRENT STATUS
-        current_assignment = match[match['End_Date'].isna()]
-        if not current_assignment.empty:
-            row = current_assignment.iloc[0]
-            st.info(f"📍 **Current Location:** {row['Project']} | {row['Location']} (Status: {row['SensorStatus']})")
-        else:
-            st.warning("📍 **Current Status:** Not currently assigned (Archived/Available).")
+    st.divider()
+    
+# ===============================================================
+# PAGE: SENSOR STATUS & HARDWARE INVESTIGATOR
+# ===============================================================
+elif admin_page == "🔍 Sensor Status":
+    st.header("🔍 Sensor Status & Hardware Investigator")
+    
+    # --- 1. FLEET INVENTORY METRICS ---
+    if not reg_df.empty:
+        reg_df['End_Date'] = pd.to_datetime(reg_df['End_Date'], errors='coerce')
+        
+        col1, col2, col3, col4 = st.columns(4)
+        active_mask = reg_df['End_Date'].isna()
+        
+        col1.metric("Total Unique Sensors", reg_df['NodeNum'].nunique())
+        col2.metric("Currently Assigned", len(reg_df[active_mask & (reg_df['Project'] != 'Office')]))
+        col3.metric("Available In Stock", len(reg_df[active_mask & (reg_df['Project'] == 'Office')]))
+        col4.metric("Diagnostic/Dead", len(reg_df[active_mask & reg_df['SensorStatus'].isin(['Dead', 'Flagged', 'Diagnostic'])]))
+    
+    st.divider()
 
-        # 3. DEPLOYMENT & PERFORMANCE HISTORY
-        st.markdown("### 📜 Deployment & Performance History")
+    # --- 2. HARDWARE INVESTIGATOR (Search Logic) ---
+    st.subheader("🔦 Hardware Investigator")
+    search_node = st.text_input("Search Node ID (e.g., TP-0009)", placeholder="Type ID and press Enter...").strip().upper()
+
+    if search_node:
+        # Standardize for robust matching
+        match = reg_df[reg_df['NodeNum'].astype(str).str.upper() == search_node]
         
-        # This SQL joins telemetry based on NodeNum within specific time windows
-        history_q = f"""
-            SELECT 
-                r.Project, 
-                r.Location, 
-                r.Start_Date, 
-                r.End_Date,
-                r.SensorStatus,
-                DATE_DIFF(IFNULL(r.End_Date, CURRENT_DATE()), r.Start_Date, DAY) as Days_On_Site,
-                -- We count pings where the NodeNum matches during this specific project window
-                (
-                    SELECT COUNT(*) 
-                    FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                    WHERE m.NodeNum = r.NodeNum
-                      AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
-                      AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
-                ) as Total_Pings,
-                (
-                    SELECT ROUND(AVG(m.temperature), 2)
-                    FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                    WHERE m.NodeNum = r.NodeNum
-                      AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
-                      AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
-                ) as Avg_Temp
-            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
-            WHERE r.NodeNum = '{search_node.upper()}'
-            ORDER BY r.Start_Date DESC
-        """
-        
-        try:
-            hist_df = client.query(history_q).to_dataframe()
-            
-            if not hist_df.empty:
-                # Calculate Pings per Hour for a reliability metric
-                def calc_pings_hr(row):
-                    total_hours = max(row['Days_On_Site'] * 24, 1)
-                    return round(row['Total_Pings'] / total_hours, 2)
-                
-                hist_df['Pings/Hr'] = hist_df.apply(calc_pings_hr, axis=1)
-                
-                st.dataframe(
-                    hist_df[['Project', 'Location', 'Start_Date', 'End_Date', 'Pings/Hr', 'Avg_Temp', 'SensorStatus']],
-                    use_container_width=True,
-                    hide_index=True
-                )
+        if match.empty:
+            st.error(f"No records found for Node '{search_node}'.")
+        else:
+            # A. Current Status Banner
+            current_assignment = match[match['End_Date'].isna()]
+            if not current_assignment.empty:
+                row = current_assignment.iloc[0]
+                st.info(f"📍 **Current Location:** {row['Project']} | {row['Location']} (Status: {row['SensorStatus']})")
             else:
-                st.warning("No historical telemetry windows found in the registry.")
-        except Exception as e:
-            st.error(f"Error fetching Node history: {e}")
+                st.warning("📍 **Current Status:** Not currently assigned (Archived/Available).")
 
-        # 4. LIFETIME THERMAL PROFILE
-        st.markdown("### 📈 Lifetime Thermal Profile")
-        telemetry_q = f"""
-            SELECT timestamp, temperature 
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
-            WHERE NodeNum = '{search_node.upper()}'
-            ORDER BY timestamp ASC
-        """
-        tel_df = client.query(telemetry_q).to_dataframe()
-        
-        if not tel_df.empty:
-            fig = go.Figure(go.Scatter(
-                x=tel_df['timestamp'], 
-                y=tel_df['temperature'], 
-                mode='lines', 
-                line=dict(color='#00d4ff', width=1.5)
-            ))
-            fig.update_layout(
-                height=350, 
-                template="plotly_dark",
-                xaxis_title="Time", 
-                yaxis_title="Temp (°C)",
-                margin=dict(l=20, r=20, t=20, b=20)
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info(f"No telemetry pings found for Node '{search_node.upper()}' in the master_data_view.")
+            # B. Deployment & Performance History
+            st.markdown("### 📜 Deployment & Performance History")
+            history_q = f"""
+                SELECT 
+                    Project, Location, Start_Date, End_Date, SensorStatus,
+                    DATE_DIFF(IFNULL(End_Date, CURRENT_DATE()), Start_Date, DAY) as Days_On_Site,
+                    (
+                        SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                        WHERE m.NodeNum = r.NodeNum 
+                        AND m.timestamp >= CAST(r.Start_Date AS TIMESTAMP)
+                        AND m.timestamp <= IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())
+                    ) as Total_Pings
+                FROM `{TARGET_REGISTRY}` r
+                WHERE NodeNum = '{search_node}'
+                ORDER BY Start_Date DESC
+            """
+            
+            try:
+                hist_df = client.query(history_q).to_dataframe()
+                if not hist_df.empty:
+                    # Calculate Reliability Metric
+                    hist_df['Pings/Hr'] = hist_df.apply(lambda r: round(r['Total_Pings'] / max(r['Days_On_Site'] * 24, 1), 2), axis=1)
+                    st.dataframe(hist_df[['Project', 'Location', 'Start_Date', 'End_Date', 'Pings/Hr', 'SensorStatus']], 
+                                 use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"History Query Failed: {e}")
 
-    # 3. REGISTRY MAINTENANCE UTILITY
+            # C. Lifetime Thermal Profile
+            st.markdown("### 📈 Lifetime Thermal Profile")
+            telemetry_q = f"""
+                SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
+                WHERE NodeNum = '{search_node}' ORDER BY timestamp ASC
+            """
+            tel_df = client.query(telemetry_q).to_dataframe()
+            
+            if not tel_df.empty:
+                fig = go.Figure(go.Scatter(x=tel_df['timestamp'], y=tel_df['temperature'], 
+                                         mode='lines', line=dict(color='#00d4ff', width=1.5)))
+                fig.update_layout(height=350, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No telemetry data found for this Node.")
+
+    # --- 3. REGISTRY HEALTH CHECK ---
     st.divider()
     with st.expander("🛠️ Registry Health Check"):
-        st.write("Detecting orphaned records or missing dates...")
-        maint_q = f"""
+        maint_results = client.query(f"""
             SELECT NodeNum, PhysicalID, Project, Start_Date, End_Date 
-            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
-            WHERE Start_Date IS NULL 
-               OR (End_Date IS NOT NULL AND End_Date < Start_Date)
-        """
-        maint_results = client.query(maint_q).to_dataframe()
+            FROM `{TARGET_REGISTRY}`
+            WHERE Start_Date IS NULL OR (End_Date IS NOT NULL AND End_Date < Start_Date)
+        """).to_dataframe()
+        
         if maint_results.empty:
             st.success("✅ Registry Integrity looks good!")
         else:
-            st.warning(f"⚠️ Found {len(maint_results)} records with missing or illogical dates:")
+            st.warning(f"⚠️ Found {len(maint_results)} records with date errors:")
             st.dataframe(maint_results, use_container_width=True)
 
-# --- 1. GLOBAL DATA LOADING ---
-# We load the registry once at the start so all tools (Investigator, Edit, etc.) can see it.
-try:
-    # Use the TARGET_REGISTRY variable we configured globally
-    reg_df = client.query(f"SELECT * FROM `{TARGET_REGISTRY}`").to_dataframe()
-except Exception as e:
-    st.error(f"Error loading registry data: {e}")
-    reg_df = pd.DataFrame() # Create an empty dataframe as a fallback
-
-# --- 2. HARDWARE INVESTIGATOR ---
-if admin_page == "🔦 Hardware Investigator":
-    st.subheader("🔦 Hardware Investigator")
-    search_node = st.text_input("Enter Node ID (e.g., TP-0009)", placeholder="Search...").strip()
-
-    if search_node:
-        if not reg_df.empty:
-            # We standardize to uppercase for a robust match
-            # This is line 224 where your error occurred
-            match = reg_df[reg_df['NodeNum'].astype(str).str.upper() == search_node.upper()]
-            
-            if match.empty:
-                st.error(f"Node '{search_node}' not found in the registry.")
-            else:
-                # Proceed with showing history and thermal profiles
-                st.success(f"Found {len(match)} records for {search_node}")
-                # (Remaining logic for SQL history and thermal graph goes here)
-        else:
-            st.warning("The registry is currently empty. Please check your data source.")
-
 # ===============================================================
-# TOOL: Sensor Replace
+# PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
 elif admin_page == "🔄 Sensor Replace":
-    st.header("📋 Hardware Surgical Switch")
+    st.header("🔄 Hardware Replacement")
+    st.info("Use this to swap old hardware for new hardware while maintaining the same Node Number.")
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground (Dummy)", value=True)
     BASE_REGISTRY = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
     TARGET_REGISTRY = BASE_REGISTRY + ("_dummy" if is_dev else "")
@@ -499,10 +407,11 @@ elif admin_page == "🔄 Sensor Replace":
 
 
 # ===============================================================
-# TOOL: SENSOR SWITCH (Correction for typos)
+# PAGE: SENSOR SWITCH (Correction Logic)
 # ===============================================================
-if admin_page == "🩹 Sensor Switch":
-    st.header("🩹 Sensor ID Correction")
+elif admin_page == "🩹 Sensor Switch":
+    st.header("🩹 Sensor Designation Switch")
+    st.info("Use this for corrections where a sensor was assigned the wrong Physical ID.")
     node_id = st.text_input("Enter Node ID to fix (e.g., TP-0001)")
     
     if node_id:
@@ -859,10 +768,10 @@ elif admin_page == "📈 Ref Curve Library":
             st.rerun()
 
 # ===============================================================
-# TOOL 5: SURGICAL DATA MANAGEMENT
+# PAGE: DATA MANAGEMENT
 # ===============================================================
-elif admin_page == "🧨 Surgical Data Management":
-    st.header("🧨 Precision Data Mask & Purge")
+elif admin_page == "🧨 Data Management":
+    st.header("🧨 Data Management")
     
     col1, col2 = st.columns(2)
     scope = col1.radio("Target Scope", ["Project Wide", "Specific Node"], horizontal=True)
