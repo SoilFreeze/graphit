@@ -1416,13 +1416,6 @@ def main():
 
     elif admin_page == "🧨 Data Management":
         render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID)
-
-# Start the app
-if __name__ == "__main__":
-    if client:
-        main()
-    else:
-        st.error("Critical Error: BigQuery Client failed to initialize.")
         
 # ===============================================================
 # EXECUTION ENTRY POINT
