@@ -1899,15 +1899,15 @@ def update_records(pts, df, val, display_tz):
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     The main Global Project Summary.
-    Updated: KPI percentages use the 'latest_temp'.
-    Updated: Trends displayed in a labeled vertical list.
+    Updated: "No Data" labels for missing ranges.
+    Updated: Vertical trend rows with explicit xhr labels.
     """
     st.header("🌐 Global Project Summary")
     
     client = get_bq_client()
     if client is None: return
 
-    # 1. SQL QUERY (No changes to logic, just ensuring latest_temp is present)
+    # 1. SQL QUERY
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -1990,7 +1990,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             ]
 
             for s_idx in [1, 3, 5]:
-                cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 280px; margin: auto;'></div>", unsafe_allow_html=True)
+                cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 300px; margin: auto;'></div>", unsafe_allow_html=True)
 
             for col, title, g_df, kpi_col, kpi_val in groups:
                 with col:
@@ -2004,7 +2004,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                     m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
 
                     def convert(v):
-                        if pd.isnull(v): return None
+                        if pd.isnull(v) or pd.isna(v): return None
                         return (v - 32) * 5/9 if unit_mode == "Celsius" else v
 
                     l_conv, c_min, c_max, m24, x24 = map(convert, [latest_val, c_min, c_max, m24, x24])
@@ -2016,17 +2016,21 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                         color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
                         st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
 
-                    # Ranges Display
+                    # --- RANGES WITH "NO DATA" FALLBACK ---
                     range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'>"
                     if c_min is not None and c_max is not None:
                         range_html += f"Current: {c_min:.1f} to {c_max:.1f}{unit_label}<br>"
+                    else:
+                        range_html += "Current: No Data<br>"
+                    
                     if m24 is not None and x24 is not None:
                         range_html += f"24h Range: {m24:.1f} to {x24:.1f}{unit_label}"
+                    else:
+                        range_html += "24h Range: No Data"
                     range_html += "</div>"
                     st.markdown(range_html, unsafe_allow_html=True)
 
                     # --- VERTICAL TREND LIST ---
-                    # Shows a row for each trend as requested
                     st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
                     st.caption(f"Trend for 1hr: {get_trend_arrow(l_conv, convert(g_df['avg_1h'].mean()))}")
                     st.caption(f"Trend for 6hr: {get_trend_arrow(l_conv, convert(g_df['avg_6h'].mean()))}")
