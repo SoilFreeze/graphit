@@ -369,6 +369,43 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
     y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
     
     return x_times, y_temps
+
+##################
+# High temp mask #
+##################
+def apply_sanity_filter(df):
+    """
+    Automated filter for rogue data points.
+    Rule: Mask anything > 100°F unless the sensor starts with 'SP'.
+    """
+    if df.empty:
+        return df
+
+    client = get_bq_client()
+    
+    # 1. Identify "Bad" records
+    # Logic: Temp > 100 AND NodeNum does NOT start with 'SP'
+    mask_condition = (df['temperature'] > 100) & (~df['NodeNum'].str.startswith('SP', na=False))
+    bad_data = df[mask_condition].copy()
+
+    if not bad_data.empty:
+        # Prepare records for the manual_rejections table
+        rejections = pd.DataFrame({
+            'NodeNum': bad_data['NodeNum'],
+            'timestamp': bad_data['timestamp'].dt.floor('h'), # Match DB precision
+            'approve': 'MASKED'
+        }).drop_duplicates()
+
+        try:
+            # 2. Commit to BigQuery override table
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+            client.load_table_from_dataframe(rejections, OVERRIDE_TABLE, job_config=job_config).result()
+            st.warning(f"⚠️ Sanity Filter: Automatically masked {len(rejections)} points > 100°F (Non-SP sensors).")
+        except Exception as e:
+            st.error(f"Failed to apply auto-mask: {e}")
+
+    return df
+
 ##################
 # Page Functions #
 ##################
@@ -1882,26 +1919,21 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
-            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
         )
         SELECT 
             p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown,
             ld.Bank, ld.Location, ld.Depth,
-            -- CURRENT AVERAGES & RANGES (Last 1 Hour)
-            AVG(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_now,
-            MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as min_now,
-            MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as max_now,
+            AVG(ld.temperature) as avg_now,
             
-            -- HISTORICAL AVERAGES
-            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_1h,
-            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN ld.temperature END) as avg_6h,
-            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as avg_24h,
-            
-            -- 24 HOUR EXTREMES
-            MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as min_24h,
-            MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as max_24h,
-            
-            -- FALLBACK FOR STALE DATA
+            -- GOAL STATISTICS
+            -- Supply Goal: <= -10F
+            (COUNTIF(ld.Bank LIKE 'S%' AND ld.temperature <= -10) / NULLIF(COUNTIF(ld.Bank LIKE 'S%'), 0)) * 100 as supply_goal_pct,
+            -- Return Goal: <= 0F
+            (COUNTIF(ld.Bank LIKE 'R%' AND ld.temperature <= 0) / NULLIF(COUNTIF(ld.Bank LIKE 'R%'), 0)) * 100 as return_goal_pct,
+            -- TempPipe Goal: <= 32F
+            (COUNTIF(ld.Depth IS NOT NULL AND ld.temperature <= 32) / NULLIF(COUNTIF(ld.Depth IS NOT NULL), 0)) * 100 as freeze_goal_pct,
+
             ARRAY_AGG(ld.temperature ORDER BY ld.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
             MAX(ld.timestamp) as latest_ts
         FROM active_projects p
@@ -1926,18 +1958,29 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         p_df = df[df['Project'] == project]
         p_name = p_df['ProjectName'].iloc[0] or project
         
+        # --- FREEZEDOWN DATE LOGIC ---
         f_date = p_df['Date_Freezedown'].iloc[0]
         day_text = ""
+        f_date_display = "Not Set"
+        
         if pd.notnull(f_date):
+            # Format the start date for display
+            f_date_display = pd.to_datetime(f_date).strftime('%B %d, %Y')
+            # Calculate days elapsed
             days = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
-            day_text = f"🗓️ **Day {max(0, days)} of Freezedown**"
+            day_text = f"🗓️ **Day {max(0, days)}**"
         
         with st.container(border=True):
-            st.subheader(f"🏗️ {p_name}")
-            if day_text: st.markdown(day_text)
-            st.caption(f"Status: {p_df['ProjectStatus'].iloc[0]}")
+            # Layout the Header with Project Name and Start Date
+            head_col1, head_col2 = st.columns([2, 1])
+            with head_col1:
+                st.subheader(f"🏗️ {p_name}")
+                st.caption(f"Status: {p_df['ProjectStatus'].iloc[0]}")
+            with head_col2:
+                st.markdown(f"<div style='text-align: right;'>{day_text}<br>Start: <b>{f_date_display}</b></div>", unsafe_allow_html=True)
             
             st.divider()
+            
             cols = st.columns(4)
             
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
@@ -1981,7 +2024,26 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
                     # Convert values
                     main_val, cur_min, cur_max, mn_24, mx_24 = map(convert, [main_val, cur_min, cur_max, mn_24, mx_24])
-                    
+                    # 1. Main Average Metric
+                    st.metric("Avg", f"{main_val:.1f}{unit_label}")
+        
+                    # 2. RENDER GOAL PERCENTAGES
+                    if "Supply" in title:
+                        pct = g_df['supply_goal_pct'].mean()
+                        label = "Nodes ≤ -10°F"
+                    elif "Return" in title:
+                        pct = g_df['return_goal_pct'].mean()
+                        label = "Nodes ≤ 0°F"
+                    elif "TempPipes" in title:
+                        pct = g_df['freeze_goal_pct'].mean()
+                        label = "Nodes ≤ 32°F"
+                    else:
+                        pct = None
+        
+                    if pct is not None:
+                        # Color code the percentage (Green for 100%, Orange for progress)
+                        color = "green" if pct == 100 else "orange" if pct > 0 else "gray"
+                        st.markdown(f"<span style='color:{color}; font-weight:bold;'>{pct:.0f}%</span> <span style='font-size:0.8em;'>{label}</span>", unsafe_allow_html=True)
                     # --- UI RENDERING ---
                     st.metric("Avg", f"{main_val:.1f}{unit_label}")
                     
@@ -1999,6 +2061,8 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                     t_row[0].caption(f"1h\n{get_trend_arrow(main_val, convert(g_df['avg_1h'].mean()))}")
                     t_row[1].caption(f"6h\n{get_trend_arrow(main_val, convert(g_df['avg_6h'].mean()))}")
                     t_row[2].caption(f"24h\n{get_trend_arrow(main_val, convert(g_df['avg_24h'].mean()))}")
+
+
 
 def get_trend_arrow(current, previous):
     """Helper to generate trend icons with updated blue downward arrow."""
