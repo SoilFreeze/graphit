@@ -213,7 +213,11 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
             COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) as pings_1h,
             COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as pings_6h,
             COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
-            (COUNT(DISTINCT TIMESTAMP_TRUNC(m.timestamp, HOUR)) / 24.0) * 100 as coverage_24h,
+            -- FIXED COVERAGE LOGIC BELOW
+            (COUNT(DISTINCT CASE 
+                WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                THEN TIMESTAMP_TRUNC(m.timestamp, HOUR) 
+             END) / 24.0) * 100 as coverage_24h,
             AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
             AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev
         FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
