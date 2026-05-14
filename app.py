@@ -369,6 +369,43 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
     y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
     
     return x_times, y_temps
+
+##################
+# High temp mask #
+##################
+def apply_sanity_filter(df):
+    """
+    Automated filter for rogue data points.
+    Rule: Mask anything > 100°F unless the sensor starts with 'SP'.
+    """
+    if df.empty:
+        return df
+
+    client = get_bq_client()
+    
+    # 1. Identify "Bad" records
+    # Logic: Temp > 100 AND NodeNum does NOT start with 'SP'
+    mask_condition = (df['temperature'] > 100) & (~df['NodeNum'].str.startswith('SP', na=False))
+    bad_data = df[mask_condition].copy()
+
+    if not bad_data.empty:
+        # Prepare records for the manual_rejections table
+        rejections = pd.DataFrame({
+            'NodeNum': bad_data['NodeNum'],
+            'timestamp': bad_data['timestamp'].dt.floor('h'), # Match DB precision
+            'approve': 'MASKED'
+        }).drop_duplicates()
+
+        try:
+            # 2. Commit to BigQuery override table
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+            client.load_table_from_dataframe(rejections, OVERRIDE_TABLE, job_config=job_config).result()
+            st.warning(f"⚠️ Sanity Filter: Automatically masked {len(rejections)} points > 100°F (Non-SP sensors).")
+        except Exception as e:
+            st.error(f"Failed to apply auto-mask: {e}")
+
+    return df
+
 ##################
 # Page Functions #
 ##################
@@ -1861,16 +1898,16 @@ def update_records(pts, df, val, display_tz):
 #####################
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
-    The main Dashboard. Shows active project health, 
-    temperature trends, ranges, and staleness alerts.
+    The main Global Project Summary.
+    Updated: "No Data" labels for missing ranges.
+    Updated: Vertical trend rows with explicit xhr labels.
     """
     st.header("🌐 Global Project Summary")
     
     client = get_bq_client()
     if client is None: return
 
-    # --- SQL MODIFICATION ---
-    # Added min_now and max_now to capture the spread of current readings
+    # 1. SQL QUERY
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -1879,34 +1916,35 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         ),
         raw_data AS (
             SELECT 
-                n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp
+                n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+            AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
+        ),
+        LatestStats AS (
+            SELECT 
+                Project, Bank, Location, Depth,
+                AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
+                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as min_now,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as max_now,
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as min_24h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as max_24h,
+                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+                MAX(timestamp) as latest_ts
+            FROM raw_data
+            GROUP BY 1, 2, 3, 4
         )
         SELECT 
-            p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown,
-            ld.Bank, ld.Location, ld.Depth,
-            -- CURRENT AVERAGES & RANGES (Last 1 Hour)
-            AVG(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_now,
-            MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as min_now,
-            MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as max_now,
-            
-            -- HISTORICAL AVERAGES
-            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN ld.temperature END) as avg_1h,
-            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN ld.temperature END) as avg_6h,
-            AVG(CASE WHEN ld.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as avg_24h,
-            
-            -- 24 HOUR EXTREMES
-            MIN(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as min_24h,
-            MAX(CASE WHEN ld.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ld.temperature END) as max_24h,
-            
-            -- FALLBACK FOR STALE DATA
-            ARRAY_AGG(ld.temperature ORDER BY ld.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-            MAX(ld.timestamp) as latest_ts
+            p.*, ls.*,
+            (COUNTIF(ls.Bank LIKE 'S%' AND ls.latest_temp <= -10) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'S%') OVER(PARTITION BY p.Project), 0)) * 100 as supply_kpi,
+            (COUNTIF(ls.Bank LIKE 'R%' AND ls.latest_temp <= 0) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'R%') OVER(PARTITION BY p.Project), 0)) * 100 as return_kpi,
+            (COUNTIF(ls.Depth IS NOT NULL AND ls.latest_temp <= 32) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Depth IS NOT NULL) OVER(PARTITION BY p.Project), 0)) * 100 as freeze_kpi
         FROM active_projects p
-        LEFT JOIN raw_data ld ON p.Project = ld.Project
-        GROUP BY 1, 2, 3, 4, 5, 6, 7
+        LEFT JOIN LatestStats ls ON p.Project = ls.Project
     """
     
     try:
@@ -1916,89 +1954,90 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         st.error(f"Dashboard Query Failed: {e}")
         return
 
-    if df.empty:
-        st.warning("No active projects found with data in the last 48 hours.")
-        return
-
     now_utc = pd.Timestamp.now(tz='UTC')
 
     for project in sorted(df['Project'].unique()):
         p_df = df[df['Project'] == project]
         p_name = p_df['ProjectName'].iloc[0] or project
-        
         f_date = p_df['Date_Freezedown'].iloc[0]
-        day_text = ""
+        
+        day_text, f_date_display = "", "Not Set"
         if pd.notnull(f_date):
-            days = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
-            day_text = f"🗓️ **Day {max(0, days)} of Freezedown**"
+            f_date_display = pd.to_datetime(f_date).strftime('%b %d, %Y')
+            days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
+            day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
         
         with st.container(border=True):
-            st.subheader(f"🏗️ {p_name}")
-            if day_text: st.markdown(day_text)
-            st.caption(f"Status: {p_df['ProjectStatus'].iloc[0]}")
+            h1, h2 = st.columns([2, 1])
+            h1.subheader(f"🏗️ {p_name}")
+            h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
             
-            st.divider()
-            cols = st.columns(4)
+            st.divider() 
+
+            cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
             
+            # Classification
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
             is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
 
-            groups = [(cols[0], "📥 Supply", p_df[is_s]), (cols[1], "📤 Return", p_df[is_r]), 
-                      (cols[2], "📏 TempPipes", p_df[is_tp]), (cols[3], "☁️ Ambient", p_df[is_amb])]
-            
-            for col, title, g_df in groups:
+            groups = [
+                (cols[0], "📥 Supply", p_df[is_s], "supply_kpi", -10), 
+                (cols[2], "📤 Return", p_df[is_r], "return_kpi", 0), 
+                (cols[4], "📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
+                (cols[6], "☁️ Ambient", p_df[is_amb], None, None)
+            ]
+
+            for s_idx in [1, 3, 5]:
+                cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 300px; margin: auto;'></div>", unsafe_allow_html=True)
+
+            for col, title, g_df, kpi_col, kpi_val in groups:
                 with col:
-                    st.markdown(f"#### {title}")
-                    if g_df.empty:
+                    st.markdown(f"**{title}**")
+                    if g_df.empty or g_df['latest_temp'].isnull().all():
                         st.caption("No recent data")
                         continue
                     
-                    # Values for calculation
-                    avg_now = g_df['avg_now'].mean()
                     latest_val = g_df['latest_temp'].mean()
-                    latest_time = g_df['latest_ts'].max()
-                    
-                    # Current spread
-                    cur_min = g_df['min_now'].min()
-                    cur_max = g_df['max_now'].max()
-                    
-                    # 24h spread
-                    mn_24 = g_df['min_24h'].min()
-                    mx_24 = g_df['max_24h'].max()
+                    c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
+                    m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
 
-                    # Lag logic
-                    ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
-                    lag_hrs = (now_utc - ts_check).total_seconds() / 3600
-                    is_stale = pd.isnull(avg_now)
-                    main_val = latest_val if is_stale else avg_now
-                    
-                    # Conversion function for display
                     def convert(v):
-                        if pd.isnull(v): return None
+                        if pd.isnull(v) or pd.isna(v): return None
                         return (v - 32) * 5/9 if unit_mode == "Celsius" else v
 
-                    # Convert values
-                    main_val, cur_min, cur_max, mn_24, mx_24 = map(convert, [main_val, cur_min, cur_max, mn_24, mx_24])
-                    
-                    # --- UI RENDERING ---
-                    st.metric("Avg", f"{main_val:.1f}{unit_label}")
-                    
-                    if is_stale and pd.notnull(lag_hrs):
-                        st.warning(f"🕒 {int(lag_hrs)}h ago")
+                    l_conv, c_min, c_max, m24, x24 = map(convert, [latest_val, c_min, c_max, m24, x24])
 
-                    # Display the two requested ranges
-                    if pd.notnull(cur_min) and pd.notnull(cur_max):
-                        st.caption(f"**Current Range:** {cur_min:.1f} to {cur_max:.1f}{unit_label}")
+                    st.metric("Avg (Latest)", f"{l_conv:.1f}{unit_label}")
                     
-                    if pd.notnull(mn_24) and pd.notnull(mx_24):
-                        st.caption(f"**24h Range:** {mn_24:.1f} to {mx_24:.1f}{unit_label}")
+                    if kpi_col:
+                        pct = g_df[kpi_col].iloc[0]
+                        color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
+                        st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
+
+                    # --- RANGES WITH "NO DATA" FALLBACK ---
+                    range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'>"
+                    if c_min is not None and c_max is not None:
+                        range_html += f"Current: {c_min:.1f} to {c_max:.1f}{unit_label}<br>"
+                    else:
+                        range_html += "Current: No Data<br>"
                     
-                    t_row = st.columns(3)
-                    t_row[0].caption(f"1h\n{get_trend_arrow(main_val, convert(g_df['avg_1h'].mean()))}")
-                    t_row[1].caption(f"6h\n{get_trend_arrow(main_val, convert(g_df['avg_6h'].mean()))}")
-                    t_row[2].caption(f"24h\n{get_trend_arrow(main_val, convert(g_df['avg_24h'].mean()))}")
+                    if m24 is not None and x24 is not None:
+                        range_html += f"24h Range: {m24:.1f} to {x24:.1f}{unit_label}"
+                    else:
+                        range_html += "24h Range: No Data"
+                    range_html += "</div>"
+                    st.markdown(range_html, unsafe_allow_html=True)
+
+                    # --- VERTICAL TREND LIST ---
+                    st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
+                    st.caption(f"Trend for 1hr: {get_trend_arrow(l_conv, convert(g_df['avg_1h'].mean()))}")
+                    st.caption(f"Trend for 6hr: {get_trend_arrow(l_conv, convert(g_df['avg_6h'].mean()))}")
+                    st.caption(f"Trend for 24hr: {get_trend_arrow(l_conv, convert(g_df['avg_24h'].mean()))}")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+
 
 def get_trend_arrow(current, previous):
     """Helper to generate trend icons with updated blue downward arrow."""
