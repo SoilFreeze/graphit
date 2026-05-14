@@ -1560,6 +1560,7 @@ def main():
     
     # 2. Get Unit Preferences
     unit_mode, unit_label = get_unit_labels()
+    display_tz = "America/Los_Angeles"
     
     # 3. Load Registry Data for the pages that need it
     reg_df = load_registry_data(target_registry)
