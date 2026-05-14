@@ -173,10 +173,12 @@ if admin_page == "📡 Setup Node Tool":
 
         st.divider()
 
-        # --- HARDWARE INTEGRITY & CONNECTIVITY TABLE ---
+        # ===============================================================
+        # SECTION: HARDWARE INTEGRITY & CONNECTIVITY (Final Order)
+        # ===============================================================
         st.subheader("📋 Hardware Integrity & Connectivity")
         
-        # Fetching expanded metrics including 1h and 6h pings and 24h coverage
+        # Fetching expanded metrics including 1h/6h trends and coverage
         audit_q = f"""
             WITH RawData AS (
                 SELECT NodeNum, timestamp, temperature,
@@ -187,7 +189,7 @@ if admin_page == "📡 Setup Node Tool":
             Stats AS (
                 SELECT 
                     NodeNum, 
-                    -- Hourly Coverage Calculation
+                    -- Hourly Coverage Calculation (Hours with at least 1 ping / Total hours)
                     (COUNT(DISTINCT TIMESTAMP_TRUNC(timestamp, HOUR)) / 24.0) * 100 as coverage_24h,
                     (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 6.0) * 100 as coverage_6h,
                     -- Trend Calculation
@@ -219,7 +221,7 @@ if admin_page == "📡 Setup Node Tool":
             now_utc = pd.Timestamp.now(tz='UTC')
         
             def apply_row_logic(row):
-                # 1. Connectivity (Last Seen)
+                # 1. Connectivity (Last Seen Text & Style)
                 ping = row['last_ping']
                 if pd.isnull(ping):
                     seen_txt, seen_style = "❌ Never", "background-color: #d3d3d3"
@@ -229,17 +231,17 @@ if admin_page == "📡 Setup Node Tool":
                     elif diff <= 60: seen_txt, seen_style = f"{int(diff)}m ago", "background-color: #ffe4b5; color: black"
                     else: seen_txt, seen_style = f"{round(diff/60, 1)}h ago", "background-color: #ffcccb; color: black"
                 
-                # 2. 1h Change (Trend)
+                # 2. 1h Change (Using Global Trend Arrow Helper)
                 change_1h = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
                 
-                # 3. Position Label
+                # 3. Position String
                 pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
                 
                 return pd.Series([seen_txt, change_1h, pos_txt, seen_style])
         
             df[['Last Seen', '1h Change', 'Position', 'SeenStyle']] = df.apply(apply_row_logic, axis=1)
         
-            # Building Display Dataframe
+            # Building Display Dataframe with NODE ID FIRST
             display_df = pd.DataFrame({
                 "Node ID": df['NodeNum'],
                 "Location": df['Location'],
@@ -251,17 +253,24 @@ if admin_page == "📡 Setup Node Tool":
                 "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label))
             })
         
-            # Diagnostic & Connectivity Styler
+            # Sorting Logic: Show problematic/offline nodes at the top
+            order = ["❌ Never", "🔴 > 1h", "🟡 15-60m", "🟢 0-15m"]
+            # Map raw categories for sorting if necessary, otherwise defaults to alphabetical
+            
+            # --- STYLING ENGINE ---
             def diagnostic_styler(data):
                 style_df = pd.DataFrame('', index=data.index, columns=data.columns)
-                idx_map = df.set_index('NodeNum')
+                # Map original data back to the displayed rows using Node ID as index
+                ref_df = df.set_index('NodeNum')
+                
                 for i, row in data.iterrows():
                     node_id = row['Node ID']
-                    # Red Highlight for Diagnostic
-                    if idx_map.loc[node_id, 'SensorStatus'] == 'Diagnostic':
+                    # Highlight Node ID red if Diagnostic
+                    if ref_df.loc[node_id, 'SensorStatus'] == 'Diagnostic':
                         style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
-                    # Green/Yellow/Red for Connectivity
-                    style_df.loc[i, 'Last Seen'] = idx_map.loc[node_id, 'SeenStyle']
+                    # Apply color scale to Last Seen
+                    style_df.loc[i, 'Last Seen'] = ref_df.loc[node_id, 'SeenStyle']
+                    
                 return style_df
         
             st.dataframe(
