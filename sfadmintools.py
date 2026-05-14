@@ -19,6 +19,9 @@ def initialize_app():
     
     return "Temperature", "sensorpush-export"
 
+    # In your Configuration section or at the start of main()
+display_tz = "America/Los_Angeles" 
+
 DATASET_ID, PROJECT_ID = initialize_app()
 
 # ===============================================================
@@ -272,8 +275,9 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
-    Enhanced Sensor Status: Includes Peer Trend Analysis and Hardware-Specific Performance Scoring.
+    Enhanced Sensor Status: Peer Trend Analysis and Performance Scoring.
     """
+    # 1. Header and Metadata (Source: project_registry)
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
@@ -288,12 +292,12 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # 1. ENHANCED QUERY: Peer Averaging and Delta Calculation
+    # 2. Advanced Query (Uses window functions for Peer Trends)
     query = f"""
         WITH BaseReporting AS (
             SELECT 
                 m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth,
-                -- Peer Trend: Avg temp of all other sensors in this specific pipe at this time
+                -- Peer Trend: Average of all sensors in the same pipe at the same time
                 AVG(m.temperature) OVER (PARTITION BY m.Location, m.timestamp) as peer_avg
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             WHERE m.Project = @proj_id
@@ -305,7 +309,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
                 ARRAY_AGG(peer_avg ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_peer_avg,
                 
-                -- Performance Windows: Max - Min over periods
+                -- Swing calculations for Performance Scoring
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) - 
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) as swing_2h,
                 
@@ -315,9 +319,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) - 
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as swing_24h,
 
-                -- Hourly Coverage Calculation
-                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
-                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 168 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 168.0) * 100 as coverage_7d
+                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h
             FROM BaseReporting 
             GROUP BY NodeNum, Location, Bank, Depth
         )
@@ -330,69 +332,54 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         )).to_dataframe()
 
         if df.empty:
-            st.warning("No data found.")
+            st.warning("No data found for this project.")
             return
 
-        # 2. LOGIC: Peer Trend & Performance Scoring
-        def calculate_metrics(row):
-            # A. Peer Trend: How far from the pipe average?
+        # 3. Custom Metrics Logic
+        def calculate_custom_metrics(row):
+            # Peer Trend Logic
             peer_diff = abs(row['current_temp'] - row['current_peer_avg'])
             if peer_diff < 2.0: trend = "🎯 In-Line"
             elif peer_diff < 5.0: trend = "⚠️ Drifting"
             else: trend = "🚨 Outlier"
 
-            # B. Performance: Thresholds based on S/R vs T
-            loc = str(row['Location']).upper()
-            is_sr = any(x in loc for x in ['S', 'R']) and 'AMB' not in loc
+            # Performance Logic (S/R vs T Pipe)
+            loc_upper = str(row['Location']).upper()
+            is_sr = any(x in loc_upper for x in ['S', 'R']) and 'AMB' not in loc_upper
             
             s2, s6, s24 = row['swing_2h'], row['swing_6h'], row['swing_24h']
             
             if is_sr:
-                # S/R Thresholds: 5, 10, 20
+                # S/R Thresholds: 2h=5, 6h=10, 24h=20
                 if s2 > 5 or s6 > 10 or s24 > 20: perf = "❌ Volatile"
                 else: perf = "✅ Stable"
             else:
-                # Temp Pipe (T) Thresholds: 1, 1, 2
+                # T Pipe Thresholds: 2h=1, 6h=1, 24h=2
                 if s2 > 1 or s6 > 1 or s24 > 2: perf = "❌ Unsteady"
                 else: perf = "✅ Solid"
 
             return pd.Series([trend, perf])
 
-        df[['Peer Trend', 'Performance']] = df.apply(calculate_metrics, axis=1)
+        df[['Peer Trend', 'Performance']] = df.apply(calculate_custom_metrics, axis=1)
 
-        # 3. FORMATTING HELPERS
-        unit_mode, unit_label = get_unit_labels()
-        now_local = pd.Timestamp.now(tz=display_tz)
-
-        def get_status_icon(hrs):
-            if hrs <= 1.1: return f"🟢 {hrs:.1f}h"
-            return f"🔴 {hrs:.1f}h"
-
-        # 4. RENDER AUDIT TABLE
+        # 4. Display Result
         st.subheader("🔍 Detailed Sensor Audit")
         
-        display_cols = [
-            "Location", "NodeNum", "Peer Trend", "Performance", 
-            "current_temp", "swing_2h", "swing_24h", "last_ping"
-        ]
-        
-        # Clean up for display
-        render_df = df.copy()
-        render_df['last_seen_hrs'] = render_df['last_ping'].apply(
+        # Calculate lag for status icon
+        now_local = pd.Timestamp.now(tz=display_tz)
+        df['hrs_lag'] = df['last_ping'].apply(
             lambda x: (now_local - (x if x.tzinfo else x.tz_localize('UTC')).tz_convert(display_tz)).total_seconds() / 3600
         )
-        render_df['Status'] = render_df['last_seen_hrs'].apply(get_status_icon)
-        
+        df['Status'] = df['hrs_lag'].apply(lambda x: f"🟢 {x:.1f}h" if x <= 1.1 else f"🔴 {x:.1f}h")
+
         st.dataframe(
-            render_df[[
-                "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"
-            ]].sort_values(['Location', 'NodeNum']),
+            df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"]].sort_values(['Location', 'NodeNum']),
             use_container_width=True, 
             hide_index=True
         )
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Sensor Status Error: {e}")
 
 def render_fleet_inventory_metrics(reg_df):
     """Calculates and displays top-level fleet statistics."""
@@ -1584,9 +1571,11 @@ def main():
         render_hardware_integrity_table(client, selected_project, unit_mode, unit_label)
 
     elif admin_page == "🔍 Sensor Status":
-        render_sensor_status_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID)
+        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+        
 
     elif admin_page == "🔄 Sensor Replace":
+        display_tz = "UTC"
         render_sensor_replace_page(client, PROJECT_ID, DATASET_ID)
 
     elif admin_page == "🩹 Sensor Switch":
