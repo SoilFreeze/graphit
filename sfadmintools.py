@@ -270,28 +270,129 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # PAGE: SENSOR STATUS (Modular Functions)
 # ===============================================================
 
-def render_sensor_status_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID):
-    """Main entry point for the Sensor Status page."""
-    st.header("🔍 Sensor Status & Performance Overview")
+def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
+    """
+    Enhanced Sensor Status: Includes Peer Trend Analysis and Hardware-Specific Performance Scoring.
+    """
+    p_meta = st.session_state.get('project_metadata')
+    if not p_meta or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar to view sensor health.")
+        return
+
+    p_name = p_meta.get('ProjectName', selected_project)
+    f_date = p_meta.get('Date_Freezedown')
+    st.title(f"❄️ {p_name}")
     
-    # Direct production target
-    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-
-    # 1. Fleet Inventory Metrics
-    render_fleet_inventory_metrics(reg_df)
+    if pd.notnull(f_date):
+        days = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
+        st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # 2. Location Drill-Down
-    render_location_drilldown(client, reg_df, selected_project, target_registry, PROJECT_ID, DATASET_ID)
-    st.divider()
+    # 1. ENHANCED QUERY: Peer Averaging and Delta Calculation
+    query = f"""
+        WITH BaseReporting AS (
+            SELECT 
+                m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth,
+                -- Peer Trend: Avg temp of all other sensors in this specific pipe at this time
+                AVG(m.temperature) OVER (PARTITION BY m.Location, m.timestamp) as peer_avg
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            WHERE m.Project = @proj_id
+        ),
+        HistoricalStats AS (
+            SELECT 
+                NodeNum, Location, Bank, Depth,
+                MAX(timestamp) AS last_ping,
+                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
+                ARRAY_AGG(peer_avg ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_peer_avg,
+                
+                -- Performance Windows: Max - Min over periods
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) - 
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) as swing_2h,
+                
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) - 
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as swing_6h,
+                
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) - 
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as swing_24h,
 
-    # 3. Hardware Investigator
-    render_hardware_investigator(client, reg_df, target_registry, PROJECT_ID, DATASET_ID)
-    st.divider()
+                -- Hourly Coverage Calculation
+                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
+                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 168 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 168.0) * 100 as coverage_7d
+            FROM BaseReporting 
+            GROUP BY NodeNum, Location, Bank, Depth
+        )
+        SELECT * FROM HistoricalStats
+    """
 
-    # 4. Registry Health
-    render_registry_health_check(client, target_registry)
+    try:
+        df = client.query(query, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        )).to_dataframe()
 
+        if df.empty:
+            st.warning("No data found.")
+            return
+
+        # 2. LOGIC: Peer Trend & Performance Scoring
+        def calculate_metrics(row):
+            # A. Peer Trend: How far from the pipe average?
+            peer_diff = abs(row['current_temp'] - row['current_peer_avg'])
+            if peer_diff < 2.0: trend = "🎯 In-Line"
+            elif peer_diff < 5.0: trend = "⚠️ Drifting"
+            else: trend = "🚨 Outlier"
+
+            # B. Performance: Thresholds based on S/R vs T
+            loc = str(row['Location']).upper()
+            is_sr = any(x in loc for x in ['S', 'R']) and 'AMB' not in loc
+            
+            s2, s6, s24 = row['swing_2h'], row['swing_6h'], row['swing_24h']
+            
+            if is_sr:
+                # S/R Thresholds: 5, 10, 20
+                if s2 > 5 or s6 > 10 or s24 > 20: perf = "❌ Volatile"
+                else: perf = "✅ Stable"
+            else:
+                # Temp Pipe (T) Thresholds: 1, 1, 2
+                if s2 > 1 or s6 > 1 or s24 > 2: perf = "❌ Unsteady"
+                else: perf = "✅ Solid"
+
+            return pd.Series([trend, perf])
+
+        df[['Peer Trend', 'Performance']] = df.apply(calculate_metrics, axis=1)
+
+        # 3. FORMATTING HELPERS
+        unit_mode, unit_label = get_unit_labels()
+        now_local = pd.Timestamp.now(tz=display_tz)
+
+        def get_status_icon(hrs):
+            if hrs <= 1.1: return f"🟢 {hrs:.1f}h"
+            return f"🔴 {hrs:.1f}h"
+
+        # 4. RENDER AUDIT TABLE
+        st.subheader("🔍 Detailed Sensor Audit")
+        
+        display_cols = [
+            "Location", "NodeNum", "Peer Trend", "Performance", 
+            "current_temp", "swing_2h", "swing_24h", "last_ping"
+        ]
+        
+        # Clean up for display
+        render_df = df.copy()
+        render_df['last_seen_hrs'] = render_df['last_ping'].apply(
+            lambda x: (now_local - (x if x.tzinfo else x.tz_localize('UTC')).tz_convert(display_tz)).total_seconds() / 3600
+        )
+        render_df['Status'] = render_df['last_seen_hrs'].apply(get_status_icon)
+        
+        st.dataframe(
+            render_df[[
+                "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"
+            ]].sort_values(['Location', 'NodeNum']),
+            use_container_width=True, 
+            hide_index=True
+        )
+
+    except Exception as e:
+        st.error(f"Error: {e}")
 
 def render_fleet_inventory_metrics(reg_df):
     """Calculates and displays top-level fleet statistics."""
