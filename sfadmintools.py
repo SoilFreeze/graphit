@@ -63,29 +63,30 @@ except:
 # GLOBAL HELPERS
 # ===============================================================
 def get_trend_arrow(current, previous):
-    """Helper to generate trend icons with updated blue downward arrow."""
-    if pd.isnull(current) or pd.isnull(previous): 
-        return "N/A"
+    """Helper to generate trend icons."""
+    if pd.isnull(current) or pd.isnull(previous): return "N/A"
     delta = current - previous
-    if delta > 0.1: 
-        return f"🔺 +{delta:.1f}"
-    if delta < -0.1: 
-        return f"🔹 {delta:.1f}" 
+    if delta > 0.1: return f"🔺 +{delta:.1f}"
+    if delta < -0.1: return f"🔹 {delta:.1f}"
     return "➡️ 0.0"
 
+def fmt_temp(val, unit_mode, unit_label):
+    """Standardized temperature formatter with unit labels."""
+    if pd.isnull(val): return "N/A"
+    v = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+    return f"{v:.1f}{unit_label}"
+    
 # ===============================================================
-# PAGE: SETUP NODE TOOL
+# PAGE: SETUP NODE TOOL (Unified Audit & Diagnostics)
 # ===============================================================
 if admin_page == "📡 Setup Node Tool":
     st.header(f"🏗️ Setup Node Tool: {selected_project}")
-
-    # --- 1. ENHANCED DASHBOARD SUMMARY ---
-    # We pull the registry first to get "Assigned" counts, then join with 48h telemetry
+    
+    # 1. ENHANCED DASHBOARD QUERY
+    # Combines 48h trends with Registry counts for density verification
     dashboard_q = f"""
         WITH registry_counts AS (
-            -- Get total assigned nodes from registry per type
             SELECT 
-                Project,
                 NodeNum, Bank, Location, Depth,
                 CASE 
                     WHEN (Bank LIKE 'S%' OR Location LIKE 'S%') AND (Bank NOT LIKE '%Amb%' AND Location NOT LIKE '%Amb%') THEN 'Supply'
@@ -98,7 +99,6 @@ if admin_page == "📡 Setup Node Tool":
             WHERE Project = @proj_id AND End_Date IS NULL
         ),
         telemetry_stats AS (
-            -- Get 48h stats from telemetry
             SELECT 
                 NodeNum,
                 AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
@@ -108,90 +108,106 @@ if admin_page == "📡 Setup Node Tool":
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as max_24h,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h_prev,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h_prev,
-                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h_prev,
+                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) as count_1h,
+                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as count_6h,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
                 MAX(timestamp) as latest_ts
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
             GROUP BY NodeNum
         )
-        SELECT 
-            r.hardware_type,
-            COUNT(r.NodeNum) as assigned_nodes,
-            COUNT(t.NodeNum) as active_nodes_48h,
-            COUNT(CASE WHEN t.avg_now IS NOT NULL THEN r.NodeNum END) as active_nodes_1h,
-            AVG(t.avg_now) as avg_now,
-            MIN(t.min_now) as min_now,
-            MAX(t.max_now) as max_now,
-            MIN(t.min_24h) as min_24h,
-            MAX(t.max_24h) as max_24h,
-            AVG(t.avg_1h_prev) as avg_1h_prev,
-            AVG(t.avg_6h_prev) as avg_6h_prev,
-            AVG(t.avg_24h_prev) as avg_24h_prev,
-            AVG(t.latest_temp) as latest_val,
-            MAX(t.latest_ts) as latest_ts
-        FROM registry_counts r
-        LEFT JOIN telemetry_stats t ON r.NodeNum = t.NodeNum
-        GROUP BY hardware_type
+        SELECT r.*, t.* EXCEPT(NodeNum) FROM registry_counts r LEFT JOIN telemetry_stats t ON r.NodeNum = t.NodeNum
     """
     
-    dash_df = client.query(dashboard_q, job_config=bigquery.QueryJobConfig(
+    df = client.query(dashboard_q, job_config=bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
     )).to_dataframe()
 
-    if not dash_df.empty:
+    if not df.empty:
+        # --- PART A: PROJECT STATUS SUMMARY (TILES) ---
         st.subheader("📊 Project Status Summary")
         cols = st.columns(4)
         now_utc = pd.Timestamp.now(tz='UTC')
+        type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient": (cols[3], "☁️")}
 
-        # Map types to the specific column indices
-        type_map = {"Supply": cols[0], "Return": cols[1], "TempPipes": cols[2], "Ambient": cols[3]}
-        icons = {"Supply": "📥", "Return": "📤", "TempPipes": "📏", "Ambient": "☁️"}
-
-        for h_type, col in type_map.items():
-            g_df = dash_df[dash_df['hardware_type'] == h_type]
+        for h_type, (col, icon) in type_map.items():
+            g_df = df[df['hardware_type'] == h_type]
             with col:
-                st.markdown(f"#### {icons[h_type]} {h_type}")
+                st.markdown(f"#### {icon} {h_type}")
                 if g_df.empty:
-                    st.error("No nodes assigned")
+                    st.caption("No nodes assigned")
                     continue
                 
-                row = g_df.iloc[0]
+                # Logic for Current vs. Stale Fallback
+                avg_now = g_df['avg_now'].mean()
+                latest_val = g_df['latest_temp'].mean()
+                latest_time = g_df['latest_ts'].max()
                 
-                # Connectivity & Staleness Logic
-                latest_time = row['latest_ts']
-                is_stale = pd.isnull(row['avg_now'])
-                val = row['latest_val'] if is_stale else row['avg_now']
+                # Lag check
+                ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
+                lag_hrs = (now_utc - ts_check).total_seconds() / 3600
+                val = latest_val if pd.isnull(avg_now) else avg_now
                 
-                if is_stale and pd.notnull(latest_time):
-                    ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
-                    lag_hrs = (now_utc - ts_check).total_seconds() / 3600
-                    st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
-                elif pd.isnull(val):
-                    st.subheader("No Data")
-                else:
-                    st.title(f"{val:.1f}°F")
-                
-                # DENSITY METRICS (Current/Assigned)
-                active_1h = int(row['active_nodes_1h'])
-                assigned = int(row['assigned_nodes'])
-                st.write(f"**{active_1h} / {assigned}** Nodes active in 1h")
-                
-                # DUAL RANGES
-                if pd.notnull(row['min_now']):
-                    st.caption(f"Current: {row['min_now']:.1f} to {row['max_now']:.1f}°F")
-                else:
-                    st.caption("Current: No Data")
-                
-                st.caption(f"24h Range: {row['min_24h']:.1f} to {row['max_24h']:.1f}°F")
-                
-                # TRENDS
-                t_row = st.columns(3)
-                t_row[0].caption(f"1h\n{get_trend_arrow(val, row['avg_1h_prev'])}")
-                t_row[1].caption(f"6h\n{get_trend_arrow(val, row['avg_6h_prev'])}")
-                t_row[2].caption(f"24h\n{get_trend_arrow(val, row['avg_24h_prev'])}")
+                if pd.isnull(val): st.title("No Data")
+                elif lag_hrs > 1.1: st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
+                else: st.title(f"{val:.1f}{unit_label}")
 
-    st.divider()
+                st.write(f"**{int(g_df['avg_now'].notnull().sum())} / {len(g_df)}** Nodes active in 1h")
+                st.caption(f"Cur: {g_df['min_now'].min():.1f} to {g_df['max_now'].max():.1f}{unit_label}")
+                st.caption(f"24h: {g_df['min_24h'].min():.1f} to {g_df['max_24h'].max():.1f}{unit_label}")
+                
+                # Trends (1h and 6h)
+                t_row = st.columns(2)
+                t_row[0].caption(f"1h\n{get_trend_arrow(val, g_df['avg_1h_prev'].mean())}")
+                t_row[1].caption(f"6h\n{get_trend_arrow(val, g_df['avg_6h_prev'].mean())}")
+
+        st.divider()
+
+        # --- PART B: HARDWARE INTEGRITY & CONNECTIVITY (TABLE) ---
+        st.subheader("📋 Hardware Integrity & Connectivity")
+        
+        # Latency Logic
+        def get_latency(ts):
+            if pd.isnull(ts): return "❌ Never", "background-color: #d3d3d3"
+            ts_aware = ts if ts.tzinfo else ts.tz_localize('UTC')
+            diff_mins = (now_utc - ts_aware).total_seconds() / 60
+            if diff_mins <= 15: return "🟢 0-15m", "background-color: #ccffcc; color: black"
+            if diff_mins <= 60: return "🟡 15-60m", "background-color: #ffe4b5; color: black"
+            return "🔴 > 1h", "background-color: #ffcccb; color: black"
+
+        df[['Latency_Cat', 'SeenStyle']] = df['latest_ts'].apply(lambda x: pd.Series(get_latency(x)))
+        
+        # Table DataFrame
+        display_df = pd.DataFrame({
+            "Node ID": df['NodeNum'],
+            "Location": df['Location'],
+            "Position": df.apply(lambda r: f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"Bank {r['Bank']}", axis=1),
+            "Connectivity": df['Latency_Cat'],
+            "Last Temp": df['latest_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label)),
+            "Pings (1h)": df['count_1h'].fillna(0).astype(int),
+            "Pings (6h)": df['count_6h'].fillna(0).astype(int)
+        })
+
+        # Sorting: Stale hardware first
+        order = ["❌ Never", "🔴 > 1h", "🟡 15-60m", "🟢 0-15m"]
+        display_df['Connectivity'] = pd.Categorical(display_df['Connectivity'], categories=order, ordered=True)
+        display_df = display_df.sort_values('Connectivity')
+
+        # Diagnostic Styler
+        def diagnostic_styler(data):
+            style_df = pd.DataFrame('', index=data.index, columns=data.columns)
+            diagnostic_mask = reg_df[reg_df['NodeNum'].isin(df['NodeNum'])]['SensorStatus'] == 'Diagnostic'
+            style_df.loc[diagnostic_mask, 'Node ID'] = 'background-color: #ff4b4b; color: white;'
+            style_df['Connectivity'] = df['SeenStyle'].values
+            return style_df
+
+        st.dataframe(display_df.style.apply(diagnostic_styler, axis=None), use_container_width=True, hide_index=True)
+
+    # 2. COMMISSIONING AUDIT TABLE
+    st.subheader("📋 Hardware Integrity & Connectivity")
+    # ... (Insert the diagnostic_styler and dataframe render logic from previous turn here) ...
+    # Ensure Last Temp column uses: 
+    # display_df["Last Temp"] = df["last_temp"].apply(lambda x: fmt_temp_with_unit(x, unit_mode, unit_label))
     # --- HARDWARE INTEGRITY TABLE FOLLOWS ---
  
 
