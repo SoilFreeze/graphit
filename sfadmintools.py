@@ -58,6 +58,7 @@ admin_page = st.sidebar.radio("Management Tool", [
     "🩹 Sensor Switch",       
     "📝 Sensor Edit",         
     "📦 Bulk Registry Manager",
+    "📡 Data Recovery",
     "⚙️ Project Master", 
     "📈 Ref Curve Library", 
     "🧨 Surgical Data Management"
@@ -624,7 +625,64 @@ elif admin_page == "📝 Sensor Edit":
                     st.rerun()
     else:
         st.warning("No records match your filters.")
+        
+# ===============================================================
+# TOOL: 📡 DATA RECOVERY (Cloud Run Bridge)
+# ===============================================================
+elif admin_page == "📡 Data Recovery":
+    st.header("📡 SensorPush Data Recovery")
+    st.info("Triggers the Cloud Run function to backfill missing data from the SensorPush API.")
 
+    # 1. SETUP PARAMETERS
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=3))
+    with col2:
+        end_date = st.date_input("End Date", value=datetime.now())
+
+    # 2. TARGET SELECTION
+    # We pull unique NodeNums from your pre-loaded reg_df
+    all_nodes = sorted(reg_df['NodeNum'].unique().tolist())
+    selected_nodes = st.multiselect("Select Sensors to Update", all_nodes, help="Only these sensors will be processed by the cloud function.")
+
+    st.warning("⚠️ Note: Large date ranges may take a few minutes to process.")
+
+    # 3. TRIGGER FUNCTION
+    if st.button("🚀 Run Recovery Service"):
+        if not selected_nodes:
+            st.error("Please select at least one sensor.")
+        else:
+            # Prepare the API URL with query parameters
+            # Note: Since your function currently looks at a hardcoded list, 
+            # you will eventually want to update the function to accept 'nodes' in the request.
+            cloud_run_url = "https://sensorpushtobigquery-1013288934882.us-west1.run.app/recover_data"
+            
+            params = {
+                "start": start_date.strftime("%Y-%m-%d"),
+                "end": end_date.strftime("%Y-%m-%d"),
+                "nodes": ",".join(selected_nodes) # Passing nodes as a comma-separated string
+            }
+
+            with st.spinner("Cloud Run is fetching data..."):
+                try:
+                    # We use a long timeout because SensorPush API calls can be slow
+                    response = requests.get(cloud_run_url, params=params, timeout=300)
+                    
+                    if response.status_code == 200:
+                        st.success(f"Response from Cloud: {response.text}")
+                    else:
+                        st.error(f"Cloud Run Error ({response.status_code}): {response.text}")
+                except Exception as e:
+                    st.error(f"Failed to connect to Cloud Run: {e}")
+
+    st.divider()
+    st.markdown("""
+    **How it works:**
+    1. The app sends the `start`, `end`, and `nodes` list to GCP.
+    2. Cloud Run authenticates with the SensorPush API.
+    3. Missing pings are inserted directly into BigQuery `raw_sensorpush`.
+    """)
+    
 # ===============================================================
 # TOOL: BULK REGISTRY MANAGER
 # ===============================================================
