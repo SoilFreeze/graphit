@@ -42,16 +42,6 @@ def get_bq_client():
 
 client = get_bq_client()
 
-# ===============================================================
-# 3. DATA LOADING & SIDEBAR
-# ===============================================================
-def load_registry_data(target_table):
-    """Loads the node registry into a dataframe."""
-    try:
-        return client.query(f"SELECT * FROM `{target_table}`").to_dataframe()
-    except:
-        return pd.DataFrame()
-
 def render_sidebar():
     st.sidebar.title("🛠️ Admin Command Center")
     
@@ -60,24 +50,33 @@ def render_sidebar():
         [
             "📡 Setup Node Tool", 
             "🔍 Sensor Status",
-        "🔄 Sensor Replace",      
-        "🩹 Sensor Switch",       
-        "📝 Sensor Edit",         
-        "📦 Bulk Registry Manager",
-        "📡 Data Recovery",
-        "⚙️ Project Master", 
-        "📈 Ref Curve Library", 
-        "🧨 Data Management"
+            "🔄 Sensor Replace",      
+            "🩹 Sensor Switch",       
+            "📝 Sensor Edit",         
+            "📦 Bulk Registry Manager",
+            "📡 Data Recovery",
+            "⚙️ Project Master", 
+            "📈 Ref Curve Library", 
+            "🧨 Data Management"
         ],
-        key="main_admin_nav"  # <--- ADD THIS KEY
+        key="main_admin_nav"
     )
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground", value=True)
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
 
-    # Global Project Selection
-    proj_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
-    proj_list = sorted(client.query(proj_q).to_dataframe()['Project'].tolist())
+    # 1. Fetch Project List and Metadata
+    proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
+    proj_df = client.query(proj_q).to_dataframe()
+    proj_list = sorted(proj_df['Project'].tolist())
+    
+    # 2. Project Selection Sidebar
     selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list)
+    
+    # 3. CRITICAL FIX: Store metadata in session state
+    if not proj_df.empty:
+        # Find the row for the selected project
+        metadata = proj_df[proj_df['Project'] == selected_project].iloc[0].to_dict()
+        st.session_state['project_metadata'] = metadata
     
     return admin_page, target_registry, selected_project, proj_list
 
@@ -1565,16 +1564,14 @@ def main():
     # 3. Load Registry Data for the pages that need it
     reg_df = load_registry_data(target_registry)
 
-    # 4. Route to the appropriate function
     if admin_page == "📡 Setup Node Tool":
         render_project_status_dashboard(client, selected_project, unit_label)
         st.divider()
         render_hardware_integrity_table(client, selected_project, unit_mode, unit_label)
-
+        
     elif admin_page == "🔍 Sensor Status":
         render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
         
-
     elif admin_page == "🔄 Sensor Replace":
         display_tz = "UTC"
         render_sensor_replace_page(client, PROJECT_ID, DATASET_ID)
