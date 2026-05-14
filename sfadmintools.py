@@ -174,101 +174,101 @@ if admin_page == "📡 Setup Node Tool":
         st.divider()
 
         # --- HARDWARE INTEGRITY & CONNECTIVITY TABLE ---
-st.subheader("📋 Hardware Integrity & Connectivity")
-
-# Fetching expanded metrics including 1h and 6h pings and 24h coverage
-audit_q = f"""
-    WITH RawData AS (
-        SELECT NodeNum, timestamp, temperature,
-        LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_ts
-        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-        WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-    ),
-    Stats AS (
-        SELECT 
-            NodeNum, 
-            -- Hourly Coverage Calculation
-            (COUNT(DISTINCT TIMESTAMP_TRUNC(timestamp, HOUR)) / 24.0) * 100 as coverage_24h,
-            (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 6.0) * 100 as coverage_6h,
-            -- Trend Calculation
-            AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
-            AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h_prev
-        FROM RawData GROUP BY NodeNum
-    ),
-    Latest AS (
-        SELECT NodeNum, MAX(timestamp) as last_ping,
-        ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp
-        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-        WHERE Project = @proj_id GROUP BY NodeNum
-    )
-    SELECT 
-        n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus, 
-        l.last_ping, l.last_temp,
-        s.coverage_6h, s.coverage_24h, s.avg_now, s.avg_1h_prev
-    FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
-    LEFT JOIN Latest l ON n.NodeNum = l.NodeNum
-    LEFT JOIN Stats s ON n.NodeNum = s.NodeNum
-    WHERE n.Project = @proj_id
-"""
-
-df = client.query(audit_q, job_config=bigquery.QueryJobConfig(
-    query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-)).to_dataframe()
-
-if not df.empty:
-    now_utc = pd.Timestamp.now(tz='UTC')
-
-    def apply_row_logic(row):
-        # 1. Connectivity (Last Seen)
-        ping = row['last_ping']
-        if pd.isnull(ping):
-            seen_txt, seen_style = "❌ Never", "background-color: #d3d3d3"
-        else:
-            diff = (now_utc - (ping if ping.tzinfo else ping.tz_localize('UTC'))).total_seconds() / 60
-            if diff <= 15: seen_txt, seen_style = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
-            elif diff <= 60: seen_txt, seen_style = f"{int(diff)}m ago", "background-color: #ffe4b5; color: black"
-            else: seen_txt, seen_style = f"{round(diff/60, 1)}h ago", "background-color: #ffcccb; color: black"
+        st.subheader("📋 Hardware Integrity & Connectivity")
         
-        # 2. 1h Change (Trend)
-        change_1h = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
+        # Fetching expanded metrics including 1h and 6h pings and 24h coverage
+        audit_q = f"""
+            WITH RawData AS (
+                SELECT NodeNum, timestamp, temperature,
+                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_ts
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                WHERE Project = @proj_id AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            ),
+            Stats AS (
+                SELECT 
+                    NodeNum, 
+                    -- Hourly Coverage Calculation
+                    (COUNT(DISTINCT TIMESTAMP_TRUNC(timestamp, HOUR)) / 24.0) * 100 as coverage_24h,
+                    (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 6.0) * 100 as coverage_6h,
+                    -- Trend Calculation
+                    AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
+                    AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h_prev
+                FROM RawData GROUP BY NodeNum
+            ),
+            Latest AS (
+                SELECT NodeNum, MAX(timestamp) as last_ping,
+                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                WHERE Project = @proj_id GROUP BY NodeNum
+            )
+            SELECT 
+                n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus, 
+                l.last_ping, l.last_temp,
+                s.coverage_6h, s.coverage_24h, s.avg_now, s.avg_1h_prev
+            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+            LEFT JOIN Latest l ON n.NodeNum = l.NodeNum
+            LEFT JOIN Stats s ON n.NodeNum = s.NodeNum
+            WHERE n.Project = @proj_id
+        """
         
-        # 3. Position Label
-        pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
+        df = client.query(audit_q, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        )).to_dataframe()
         
-        return pd.Series([seen_txt, change_1h, pos_txt, seen_style])
-
-    df[['Last Seen', '1h Change', 'Position', 'SeenStyle']] = df.apply(apply_row_logic, axis=1)
-
-    # Building Display Dataframe
-    display_df = pd.DataFrame({
-        "Node ID": df['NodeNum'],
-        "Location": df['Location'],
-        "Position": df['Position'],
-        "Last Seen": df['Last Seen'],
-        "24h Coverage": df['coverage_24h'].apply(lambda x: f"{x:.1f}%"),
-        "6h Coverage": df['coverage_6h'].apply(lambda x: f"{x:.1f}%"),
-        "1h Change": df['1h Change'],
-        "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label))
-    })
-
-    # Diagnostic & Connectivity Styler
-    def diagnostic_styler(data):
-        style_df = pd.DataFrame('', index=data.index, columns=data.columns)
-        idx_map = df.set_index('NodeNum')
-        for i, row in data.iterrows():
-            node_id = row['Node ID']
-            # Red Highlight for Diagnostic
-            if idx_map.loc[node_id, 'SensorStatus'] == 'Diagnostic':
-                style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
-            # Green/Yellow/Red for Connectivity
-            style_df.loc[i, 'Last Seen'] = idx_map.loc[node_id, 'SeenStyle']
-        return style_df
-
-    st.dataframe(
-        display_df.style.apply(diagnostic_styler, axis=None), 
-        use_container_width=True, 
-        hide_index=True
-    )
+        if not df.empty:
+            now_utc = pd.Timestamp.now(tz='UTC')
+        
+            def apply_row_logic(row):
+                # 1. Connectivity (Last Seen)
+                ping = row['last_ping']
+                if pd.isnull(ping):
+                    seen_txt, seen_style = "❌ Never", "background-color: #d3d3d3"
+                else:
+                    diff = (now_utc - (ping if ping.tzinfo else ping.tz_localize('UTC'))).total_seconds() / 60
+                    if diff <= 15: seen_txt, seen_style = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
+                    elif diff <= 60: seen_txt, seen_style = f"{int(diff)}m ago", "background-color: #ffe4b5; color: black"
+                    else: seen_txt, seen_style = f"{round(diff/60, 1)}h ago", "background-color: #ffcccb; color: black"
+                
+                # 2. 1h Change (Trend)
+                change_1h = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
+                
+                # 3. Position Label
+                pos_txt = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
+                
+                return pd.Series([seen_txt, change_1h, pos_txt, seen_style])
+        
+            df[['Last Seen', '1h Change', 'Position', 'SeenStyle']] = df.apply(apply_row_logic, axis=1)
+        
+            # Building Display Dataframe
+            display_df = pd.DataFrame({
+                "Node ID": df['NodeNum'],
+                "Location": df['Location'],
+                "Position": df['Position'],
+                "Last Seen": df['Last Seen'],
+                "24h Coverage": df['coverage_24h'].apply(lambda x: f"{x:.1f}%"),
+                "6h Coverage": df['coverage_6h'].apply(lambda x: f"{x:.1f}%"),
+                "1h Change": df['1h Change'],
+                "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label))
+            })
+        
+            # Diagnostic & Connectivity Styler
+            def diagnostic_styler(data):
+                style_df = pd.DataFrame('', index=data.index, columns=data.columns)
+                idx_map = df.set_index('NodeNum')
+                for i, row in data.iterrows():
+                    node_id = row['Node ID']
+                    # Red Highlight for Diagnostic
+                    if idx_map.loc[node_id, 'SensorStatus'] == 'Diagnostic':
+                        style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
+                    # Green/Yellow/Red for Connectivity
+                    style_df.loc[i, 'Last Seen'] = idx_map.loc[node_id, 'SeenStyle']
+                return style_df
+        
+            st.dataframe(
+                display_df.style.apply(diagnostic_styler, axis=None), 
+                use_container_width=True, 
+                hide_index=True
+            )
     
 # ===============================================================
 # PAGE: SENSOR STATUS (With Location Drill-Down)
