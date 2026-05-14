@@ -227,16 +227,17 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
-    - Updated: Shows Time in hover labels.
-    - Updated: Breaks lines if gaps exceed 6 hours.
+    - Legend: Cleaned priority logic.
+    - Hover: Date at top, Time only on entries.
+    - Gaps: Lines break if data is missing for > 6 hours.
+    - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
     """
     import plotly.graph_objects as go
     import re
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
-    plot_df = df.copy()
-    fig = go.Figure()
+    plot_df = df.copy() 
 
     # 1. TIMEZONE & UNITS
     if plot_df['timestamp'].dt.tz is None:
@@ -246,27 +247,16 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # Initialize Figure
     fig = go.Figure()
 
-    # 2. GLOBAL TIMELINE SYNC (Logic remains same)
+    # 2. GLOBAL TIMELINE SYNC
     final_end_view, final_start_view = end_view, start_view
     proj_str = str(st.session_state.get('selected_project', ''))
     proj_match = re.findall(r'\d+', proj_str)
     proj_num = proj_match[0] if proj_match else ""
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    if f_start_date:
-        try:
-            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') ORDER BY Day DESC LIMIT 1"
-            ref_meta = client.query(ref_q).to_dataframe()
-            if not ref_meta.empty:
-                max_days = int(ref_meta['Day'].max())
-                final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
-                final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
-        except: pass
-
-    # 3. THEORETICAL REFERENCE CURVES (Legend: Soil Type only)
+    # 3. THEORETICAL REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
             target_q = f"""
@@ -283,30 +273,30 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     soil_label = str(cid).split('-')[-1].strip()
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>{soil_label}</b>", mode='lines',
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
                         line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
         except: pass
 
-    # 3. SENSOR DATA (With Gap Breaking Logic)
+    # 4. SENSOR DATA (Cleaned Legend & Gap Logic)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     unique_nodes = sorted(plot_df['NodeNum'].unique())
     
     for i, sn in enumerate(unique_nodes):
+        # Filter and sort
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         
-        # --- GAP BREAKING LOGIC ---
-        # To break the line at 6h, we reindex to a 1-hour frequency. 
-        # Any gap > 6h will remain as NaN, causing Plotly to break the line.
+        # Gap Breaking: Resample to 1h. If gap > 6h, NaNs will persist and break the line.
+        # We use 'first' to keep original readings and 'asfreq' to insert NaNs in gaps.
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
         
         depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
         
-        # Legend Label Logic
+        # Legend Logic
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
             display_name = f"{bank_val} ({sn})"
-        elif pd.notnull(depth_val): 
+        elif pd.notnull(depth_val) and not pd.isna(depth_val): 
             display_name = f"{depth_val}ft ({sn})"
         else: 
             display_name = f"{loc_val} ({sn})"
@@ -316,16 +306,26 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             y=s_df['temperature'],
             name=display_name, 
             mode='lines',
-            # connectgaps=False ensures that NaNs created by resample break the line
-            connectgaps=False, 
+            connectgaps=False, # Breaks line on NaNs
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            # --- HOVER TIME RESTORATION ---
-            # %{x|%b %d %H:%M} forces Month Day Hour:Minute in the hover box
-            hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%b %d %H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+            # Hover Template: Time only per entry
+            hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
-    # 4. LAYOUT & TITLING
-    p_name = st.session_state.get('selected_project')
+    # 5. REFERENCE LINES
+    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
+    
+    # Current Time vertical line
+    now_ts = pd.Timestamp.now(tz=display_tz)
+    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
+    
+    # Bold Monday Gridlines
+    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+    for m_dt in m_range:
+        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+
+    # 6. LAYOUT & TITLING
+    p_name = st.session_state.get('selected_project', 'Project')
     fig.update_layout(
         title=dict(text=f"<b>{p_name} - Thermal Trend - {title}</b>", x=0.02, y=0.98, font=dict(size=18)),
         plot_bgcolor='white', 
@@ -333,38 +333,23 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         height=650,
         xaxis=dict(
             range=[final_start_view, final_end_view], 
-            showgrid=True, 
-            gridcolor='Gainsboro',
-            showline=True, 
-            mirror=True, 
-            linecolor='black', 
-            linewidth=2,
-            tickformat='%b %d\n%H:%M', # Shows time on the axis labels as well
-            hoverformat='%b %d %H:%M' # Ensures the "Unified" header shows time
+            showgrid=True, gridcolor='Gainsboro',
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            # Unified Hover Formatting: Date at the top
+            hoverformat='%A, %b %d, %Y', 
+            tickformat='%b %d',
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')
         ),
         yaxis=dict(
             title=f"Temperature ({unit_label})", 
             range=y_range, 
             dtick=10,
-            showgrid=True, 
-            gridcolor='Gainsboro', 
-            showline=True, 
-            mirror=True, 
-            linecolor='black', 
-            linewidth=2
+            showgrid=True, gridcolor='Gainsboro', 
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')
         ),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
-    return fig
-
-    # 5. REFERENCE LINES
-    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
-    now_ts = pd.Timestamp.now(tz=display_tz)
-    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
-    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
-    for m_dt in m_range:
-        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
-
     return fig
                                
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
