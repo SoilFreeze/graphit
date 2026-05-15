@@ -58,32 +58,25 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
 
-    # 1. Determine if this is the "Office" project
-    # Using 'in' ensures we catch IDs like '9999-Office'
-    is_office_context = "OFFICE" in str(project_id).upper()
+    is_office = "OFFICE" in str(project_id).upper()
 
     if view_mode == "client":
         filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
-        visibility_sql = "AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)"
     else:
-        # 2. Apply Visibility Logic for Engineering/Office
-        if is_office_context:
-            # Office view: See everything (NULL, PENDING, OFFICE, MASKED) except BADDATA
+        # If Office, show everything except BadData. If regular project, hide False/0.
+        if is_office:
             filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
         else:
-            # Standard View: Hide BadData and explicitly rejected data
             filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
-        
-        visibility_sql = ""
 
     query = f"""
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
         WHERE m.Project = @project_id
-        {visibility_sql}
         {filter_sql}
-        ORDER BY m.Location ASC, m.timestamp ASC
+        ORDER BY m.timestamp ASC
     """
+    # ... rest of function
     
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -131,15 +124,16 @@ sidebar_client = get_bq_client()
 # --- PROJECT SELECTION ---
 if sidebar_client is not None:
     try:
-        # UPDATED: Explicitly include 'Office' regardless of status
         proj_q = f"""
             SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-            WHERE ProjectStatus != 'Archived' 
-            OR UPPER(Project) LIKE '%OFFICE%'
+            WHERE Project IS NOT NULL 
+              AND Project != ''
+              AND (ProjectStatus != 'Archived' OR UPPER(Project) LIKE '%OFFICE%')
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
-        proj_list = sorted(proj_df['Project'].dropna().unique().tolist())
+        # Filter out any lingering 'None' or empty strings in Python too
+        proj_list = sorted([p for p in proj_df['Project'].unique() if p and str(p).strip()])
         
         selected_project = st.sidebar.selectbox(
             "🎯 Active Project", 
