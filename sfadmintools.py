@@ -1017,33 +1017,34 @@ def render_edit_record_form(client, data, reg_df, proj_list, target_registry):
 
 def execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
     """
-    Final fix for 'nan' errors in both SET and WHERE clauses.
+    Sanitizes inputs and explicitly handles NULL for Depth 
+    to prevent bank-position overrides.
     """
-    # 1. Sanitizers for the 'SET' section
+    # 1. Sanitize Strings
     def to_sql_str(val):
-        if pd.isna(val) or str(val).lower() == 'nan': return ""
-        return str(val).replace("'", "\\'") # Escape single quotes
+        if pd.isna(val) or str(val).lower() == 'nan' or not str(val).strip():
+            return ""
+        return str(val).replace("'", "\\'")
 
-    def to_sql_num(val):
-        if pd.isna(val) or str(val).lower() == 'nan': return "NULL"
-        return float(val)
-
-    # 2. Sanitizer for the 'WHERE' section (PhysicalID)
-    # If PhysicalID is NaN, we must use 'IS NULL' in SQL or 0 if that's your default
-    raw_phys_id = data.get('PhysicalID')
-    if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
-        phys_id_where = "PhysicalID IS NULL"
+    # 2. Sanitize Depth (The Critical Fix)
+    # If depth is 0.0, we treat it as NULL so the Bank column handles the position
+    if pd.isna(new_depth) or new_depth == 0.0:
+        sql_depth = "NULL"
     else:
-        phys_id_where = f"PhysicalID = {raw_phys_id}"
+        sql_depth = f"{float(new_depth)}"
 
-    # 3. Construct the clean SQL
+    # 3. Handle PhysicalID WHERE clause for 'nan' safety
+    raw_phys_id = data.get('PhysicalID')
+    phys_id_where = "PhysicalID IS NULL" if pd.isna(raw_phys_id) else f"PhysicalID = {raw_phys_id}"
+
+    # 4. Final SQL Construction
     update_sql = f"""
         UPDATE `{target_registry}`
         SET 
             Project = '{to_sql_str(new_proj)}',
             Location = '{to_sql_str(new_loc)}', 
             Bank = '{to_sql_str(new_bank)}',
-            Depth = {to_sql_num(new_depth)},
+            Depth = {sql_depth},
             SensorStatus = '{to_sql_str(new_status)}'
         WHERE 
             NodeNum = '{data['NodeNum']}' 
@@ -1053,13 +1054,13 @@ def execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, 
     
     try:
         client.query(update_sql).result()
-        st.success(f"✅ Successfully updated {data['NodeNum']}")
+        st.success(f"✅ Updated {data['NodeNum']}. Depth set to {sql_depth}.")
         time.sleep(1)
         st.rerun()
     except Exception as e:
-        st.error("Failed to execute SQL update.")
-        st.code(update_sql, language="sql") # Shows the bad SQL for debugging
-        st.error(f"Error: {e}")
+        st.error("SQL Execution Error")
+        st.code(update_sql, language="sql")
+        st.error(str(e))
 
 
 def execute_record_delete(client, data, target_registry):
