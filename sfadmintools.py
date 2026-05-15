@@ -1618,7 +1618,7 @@ def build_management_where_clause(reg_df, selected_project, target_scope, f):
 def render_verification_step(client, where_str, telemetry_table, rejections_table):
     """Queries BigQuery to show count and current status of data points."""
     if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
-        # This query joins the data to see what the status is RIGHT NOW
+        # We add 't.' before NodeNum to resolve the ambiguity
         status_q = f"""
             SELECT 
                 t.NodeNum,
@@ -1634,20 +1634,18 @@ def render_verification_step(client, where_str, telemetry_table, rejections_tabl
             res = client.query(status_q).to_dataframe()
             
             if not res.empty:
-                st.subheader("Current Data Profile")
-                # Show a summary table of what is currently in that query range
+                st.subheader("📊 Current Data Profile")
                 st.dataframe(res, use_container_width=True, hide_index=True)
                 
                 total_points = res['Point_Count'].sum()
                 st.metric("Total Points in Selection", f"{total_points:,}")
-                st.session_state['points_to_process'] = total_points
             else:
                 st.warning("No data points found for this selection.")
-                st.session_state['points_to_process'] = 0
                 
         except Exception as e:
             st.error(f"Verification Failed: {e}")
-
+            # Optional: print the query to the console for debugging
+            # print(status_q)
 
 def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
     """Executes a MERGE to ensure existing flags are overwritten correctly."""
