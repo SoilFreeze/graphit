@@ -527,16 +527,9 @@ def render_registry_health_check(client, target_registry):
 
 def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
     """
-    Combined Correction: Updates Metadata and Status.
-    Enforces 'On Project' instead of 'Active' or 'Online'.
+    Updates metadata based ONLY on NodeNum. PhysicalID is left untouched in BQ.
     """
-    # 1. Final check on status before SQL
-    clean_status = "On Project" if new_status in ["Active", "Online"] else new_status
-    
-    if pd.isna(new_depth) or new_depth == 0.0:
-        sql_depth = "NULL"
-    else:
-        sql_depth = f"{float(new_depth)}"
+    sql_depth = "NULL" if (pd.isna(new_depth) or new_depth == 0.0) else f"{float(new_depth)}"
 
     update_sql = f"""
         UPDATE `{target_registry}`
@@ -545,11 +538,12 @@ def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_d
             Location = '{new_loc}', 
             Bank = '{new_bank}',
             Depth = {sql_depth},
-            SensorStatus = '{clean_status}'
+            SensorStatus = '{new_status}'
         WHERE 
             NodeNum = '{data['NodeNum']}' 
             AND End_Date IS NULL
     """
+    # ... rest of try/except block ...
     
     try:
         client.query(update_sql).result()
@@ -623,11 +617,19 @@ def render_node_selector(reg_df, proj_list):
     if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
     if search_node: df_working = df_working[df_working['NodeNum'].str.contains(search_node)]
 
-    # Table Display & Selection
+    # Inside render_node_selector, right before st.dataframe:
     if not df_working.empty:
+        # Standardize sorting as before
         df_working['Depth'] = pd.to_numeric(df_working['Depth'], errors='coerce').fillna(0.0)
         df_working['bank_sort'] = df_working['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
-        df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth']).drop(columns=['bank_sort'])
+        df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth'])
+        
+        # --- STRIP PHYSICAL ID FROM VIEW ---
+        cols_to_drop = ['bank_sort']
+        if 'PhysicalID' in df_working.columns:
+            cols_to_drop.append('PhysicalID')
+        
+        df_working = df_working.drop(columns=cols_to_drop)
 
     selected_rows = st.dataframe(
         df_working, 
@@ -687,10 +689,13 @@ def render_node_action_manager(client, data, reg_df, proj_list, target_registry)
         except ValueError: s_idx = 0
         new_status = c3.selectbox("Update Status", final_status_options, index=s_idx)
 
-    with st.form(key=f"form_{node_id}"):
-        fcol1, fcol2 = st.columns(2)
-        new_bank = fcol1.text_input("Bank Identifier", value=data.get('Bank', ''))
-        new_depth = fcol2.number_input("Depth (ft)", value=float(data.get('Depth', 0.0)), format="%.1f")
+    # Inside the with st.form(key=f"form_{node_id}"):
+        with st.form(key=f"form_{node_id}"):
+            fcol1, fcol2 = st.columns(2)
+            new_bank = fcol1.text_input("Bank Identifier", value=data.get('Bank', ''))
+            new_depth = fcol2.number_input("Depth (ft)", value=float(data.get('Depth', 0.0)), format="%.1f")
+            
+            # PHYSICAL ID INPUT REMOVED FROM HERE
 
         if mgmt_action == "📝 Correct Record":
             if st.form_submit_button("💾 Save Changes"):
