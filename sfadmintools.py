@@ -52,7 +52,7 @@ def render_sidebar():
             "🔍 Sensor Status",
             "🔄 Sensor Replace",      
             "🩹 Sensor Switch",       
-            "📝 Sensor Manager",         
+            "📝 Node Manager",         
             "📦 Bulk Registry Manager",
             "📡 Data Recovery",
             "⚙️ Project Master", 
