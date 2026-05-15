@@ -1474,39 +1474,37 @@ def process_curve_uploads(client, u_files, table_curves):
         time.sleep(1.5)
         st.rerun()
 
-# ===============================================================
-# PAGE: DATA MANAGEMENT (Flagging & Maintenance)
-# ===============================================================
-
 def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID):
+    """
+    Main entry point for Data Management using the manual_rejections side-table.
+    """
     st.header("🧨 Data Management (Manual Rejections)")
-    
-    # Target the physical side-table
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
+    st.info("""
+        **Status Definitions:**
+        - **TRUE**: Removes flags. Data is visible to client.
+        - **BadData**: Hardware issues. Keep for engineering analysis.
+        - **Masked**: Invalid placement (e.g., Ambient temp in a Pipe).
+        - **Office**: Data recorded while hardware was unassigned.
+    """)
 
+    # 1. Define Table Paths
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+
+    # 2. Get User Inputs
     target_scope, new_status = render_management_controls()
     st.divider()
 
+    # 3. Apply Filters and Build SQL Logic
     filters = render_management_filters(reg_df, selected_project, target_scope)
-    
-    # Build the WHERE clause (which targets NodeNum, timestamp, etc.)
     where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
     
-    # For rejections, we show how many points currently exist in the main data
-    # that match this filter to be moved into the rejection table.
-    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+    # 4. Step 1: Verify (Check Telemetry table to see what will be moved)
+    # We add a unique key to prevent the Duplicate ID error
     render_verification_step(client, where_str, telemetry_table)
 
+    # 5. Step 2: Execute (Insert into or Delete from Rejections table)
     render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table)
-    
-    # 3. SQL CONSTRUCTION
-    # Note: We target the base table, not the view, for DML updates
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-    where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
-    
-    # 5. EXECUTION STEP
-    render_execution_step(client, where_str, new_status, target_table)
-
 
 def render_management_controls():
     """Renders radio buttons for scope and the new specific status types."""
