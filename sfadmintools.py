@@ -1474,7 +1474,9 @@ def process_curve_uploads(client, u_files, table_curves):
         time.sleep(1.5)
         st.rerun()
 
-
+# ===============================================================
+# PAGE: Data Management
+# ===============================================================
 def render_verification_step(client, where_str, telemetry_table, rejections_table):
     """Queries BigQuery to show count and current status of data points."""
     
@@ -1519,35 +1521,6 @@ def render_verification_step(client, where_str, telemetry_table, rejections_tabl
             # status_q is now guaranteed to exist for this block:
             st.code(status_q, language="sql")
 
-def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
-    """Executes a MERGE to ensure existing flags are overwritten correctly."""
-    st.warning(f"Targeting status: **{new_status}**")
-    
-    if st.checkbox("I confirm these changes to the rejection library.", key="confirm_mgmt"):
-        if st.button(f"🚀 Set All to {new_status}", key="exec_mgmt_btn"):
-            aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
-            
-            if new_status == "TRUE":
-                # For DELETE, we target the rejections table specifically
-                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
-            else:
-                # MERGE handles both Updating and Inserting
-                sql = f"""
-                    MERGE `{target_table}` T
-                    USING (SELECT NodeNum, timestamp FROM `{telemetry_table}` t WHERE {aliased_where}) S
-                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
-                    WHEN MATCHED THEN
-                        UPDATE SET approve = '{new_status}'
-                    WHEN NOT MATCHED THEN
-                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
-                """
-            try:
-                job = client.query(sql)
-                job.result()
-                st.success(f"Successfully processed {job.num_dml_affected_rows:,} records.")
-                st.balloons()
-            except Exception as e:
-                st.error(f"Execution Error: {e}")
 
 def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID):
     st.header("🧨 Data Management (Manual Rejections)")
