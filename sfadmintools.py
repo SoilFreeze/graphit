@@ -747,10 +747,10 @@ def execute_switch_update(client, node_id, project, new_id, target_registry):
 # PAGE: SENSOR EDIT (Interactive Registry Editor)
 # ===============================================================
 
-def render_sensor_edit_page(client, reg_df, PROJECT_ID, DATASET_ID):
+def render_sensor_edit_page(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
     """Main entry point for the interactive registry editor."""
     st.header("📝 Sensor Edit")
-    st.info("Use this tool to modify location metadata or remove incorrect registry entries.")
+    st.info("Modify metadata, assign unassigned sensors, or decommission points.")
     
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
 
@@ -772,9 +772,11 @@ def render_sensor_edit_page(client, reg_df, PROJECT_ID, DATASET_ID):
     if len(selected_rows.selection.rows) > 0:
         row_index = selected_rows.selection.rows[0]
         selected_data = filtered_df.iloc[row_index]
-        render_edit_record_form(client, selected_data, target_registry)
+        
+        # FIXED: Added reg_df and proj_list to this call
+        render_edit_record_form(client, selected_data, reg_df, proj_list, target_registry)
     else:
-        st.info("💡 Select a row in the table above to edit its details.")
+        st.info("💡 Select a row in the table above to edit details or decommission the sensor.")
 
 
 def render_sensor_edit_filters(reg_df):
@@ -1649,8 +1651,9 @@ def main():
     elif admin_page == "🩹 Sensor Switch":
         render_sensor_switch_page(client, PROJECT_ID, DATASET_ID)
 
-    elif admin_page == "📝 Sensor Edit":
-        render_sensor_edit_page(client, reg_df, PROJECT_ID, DATASET_ID)
+elif admin_page == "📝 Sensor Edit":
+        # FIXED: Added proj_list to the arguments
+        render_sensor_edit_page(client, reg_df, proj_list, PROJECT_ID, DATASET_ID)
 
     elif admin_page == "📡 Data Recovery":
         render_data_recovery_page(reg_df)
