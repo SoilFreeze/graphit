@@ -1615,40 +1615,70 @@ def build_management_where_clause(reg_df, selected_project, target_scope, f):
     return " AND ".join(where_clauses)
 
 
-def render_verification_step(client, where_str, target_table):
-    """Shows the user how many rows will be affected before they commit."""
-    if st.button("🔍 Step 1: Verify Match Count"):
-        count_q = f"SELECT COUNT(*) as total FROM `{target_table}` WHERE {where_str}"
+def render_verification_step(client, where_str, telemetry_table, rejections_table):
+    """Queries BigQuery to show count and current status of data points."""
+    if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
+        # This query joins the data to see what the status is RIGHT NOW
+        status_q = f"""
+            SELECT 
+                t.NodeNum,
+                COUNT(*) as Point_Count,
+                COALESCE(r.approve, 'TRUE') as current_status
+            FROM `{telemetry_table}` t
+            LEFT JOIN `{rejections_table}` r 
+                ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+            WHERE {where_str}
+            GROUP BY t.NodeNum, current_status
+        """
         try:
-            res = client.query(count_q).to_dataframe()
-            count = res.iloc[0]['total']
-            st.metric("Points Found", f"{count:,}")
-            if count == 0:
-                st.warning("No data points found with these filters.")
+            res = client.query(status_q).to_dataframe()
+            
+            if not res.empty:
+                st.subheader("Current Data Profile")
+                # Show a summary table of what is currently in that query range
+                st.dataframe(res, use_container_width=True, hide_index=True)
+                
+                total_points = res['Point_Count'].sum()
+                st.metric("Total Points in Selection", f"{total_points:,}")
+                st.session_state['points_to_process'] = total_points
+            else:
+                st.warning("No data points found for this selection.")
+                st.session_state['points_to_process'] = 0
+                
         except Exception as e:
-            st.error(f"Verification Query Failed: {e}")
+            st.error(f"Verification Failed: {e}")
 
 
 def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
-    st.warning(f"Setting status to: **{new_status}**")
+    """Executes a MERGE to ensure existing flags are overwritten correctly."""
     
-    if st.checkbox("Confirm change to manual rejections?", key="rejection_final_check"):
-        if st.button("🚀 Execute", key="rejection_final_btn"):
+    if st.checkbox("I confirm these changes to the rejection library.", key="confirm_mgmt"):
+        if st.button(f"🚀 Set All to {new_status}", key="exec_mgmt_btn"):
+            
             if new_status == "TRUE":
-                # Removes existing rejections
+                # If setting to TRUE, we just wipe the rejections out
                 sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
             else:
-                # Inserts the node/time into the 'approve' lookup table
+                # MERGE handles both Updating 'TRUE' to 'Masked' and Inserting new rows
                 sql = f"""
-                    INSERT INTO `{target_table}` (NodeNum, timestamp, approve)
-                    SELECT NodeNum, timestamp, '{new_status}'
-                    FROM `{telemetry_table}`
-                    WHERE {where_str}
+                    MERGE `{target_table}` T
+                    USING (SELECT NodeNum, timestamp FROM `{telemetry_table}` WHERE {where_str}) S
+                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                    WHEN MATCHED THEN
+                        UPDATE SET approve = '{new_status}'
+                    WHEN NOT MATCHED THEN
+                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
                 """
+            
             try:
-                job = client.query(sql)
-                job.result()
-                st.success(f"Processed {job.num_dml_affected_rows} points.")
+                with st.spinner(f"Processing updates to {new_status}..."):
+                    job = client.query(sql)
+                    job.result()
+                
+                # Report accurate counts of what happened
+                rows = job.num_dml_affected_rows if job.num_dml_affected_rows else 0
+                st.success(f"Successfully processed {rows:,} records.")
+                st.balloons()
             except Exception as e:
                 st.error(f"Execution Error: {e}")
 # ===============================================================
