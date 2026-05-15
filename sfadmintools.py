@@ -1651,7 +1651,7 @@ def main():
     elif admin_page == "🩹 Sensor Switch":
         render_sensor_switch_page(client, PROJECT_ID, DATASET_ID)
 
-elif admin_page == "📝 Sensor Edit":
+    elif admin_page == "📝 Sensor Edit":
         # FIXED: Added proj_list to the arguments
         render_sensor_edit_page(client, reg_df, proj_list, PROJECT_ID, DATASET_ID)
 
