@@ -338,7 +338,7 @@ def render_node_selector(reg_df, proj_list):
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode="single_row"
+        selection_mode="single"  # If this fails, try ["single_row"] or "single"
     )
 
     # 4. Return the selected row data
