@@ -702,7 +702,25 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         mgmt_action = st.radio("Management Intent", 
                                ["📝 Correct Record", "🔄 Hardware Swap (Replace)"], 
                                horizontal=True)
-
+        
+        # --- NEW LOCATION LOGIC: Dropdown for Projects, Text for Office ---
+        if new_proj == 'Office':
+            # Allow custom typing for Office sensors (Desk, Spare, etc.)
+            new_loc = c_m2.text_input(
+                "Office Sub-Location", 
+                value=data['Location'] if data['Project'] == 'Office' else "Desk",
+                help="Specify where this is (e.g., Desk, Lab, Blackjack Spares)"
+            )
+        else:
+            # Standard dropdown for field projects
+            existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), 
+                                   key=lambda x: tuple(natural_sort_key(x)))
+            if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
+            
+            try: l_idx = existing_locs.index("Ambient" if is_sp else data['Location'])
+            except ValueError: l_idx = 0
+            new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
+            
         # Reactive Selectors (outside form for instant location refreshes)
         c_m1, c_m2, c_m3 = st.columns(3)
         
@@ -755,7 +773,26 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
                         st.error("New Node ID Required")
                     else: 
                         execute_replacement_transaction(client, data, new_hw_node, swap_date, target_registry)
-
+                        
+            # --- DECOMMISSION (Only for SensorPush/TP) ---
+            if not is_lord:
+                st.divider()
+                st.subheader("🏁 Site Decommission")
+                st.caption("Closes the project entry as 'Archived' and creates a new entry in 'Office'.")
+                
+                cd1, cd2, cd3 = st.columns(3)
+                d_date = cd1.date_input("Removal Date", value=datetime.now().date())
+                d_time = cd2.time_input("Removal Time", value=datetime.now().time())
+                d_stat = cd3.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
+                
+                # NEW: Input for where exactly it's going in the office
+                d_office_loc = st.text_input("Return to Office Location", value="Desk")
+                
+                if st.form_submit_button("🔚 Execute Decommission"):
+                    final_dt = datetime.combine(d_date, d_time)
+                    # IMPORTANT: Pass d_office_loc to your function
+                    execute_decommission_node(client, data, target_registry, final_dt, d_stat, d_office_loc)
+                    
             # --- DECOMMISSION (Only for SensorPush/TP) ---
             if not is_lord:
                 st.divider()
