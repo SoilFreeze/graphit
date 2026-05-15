@@ -58,19 +58,20 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
 
-    # 1. Determine if this is an "Office" context
+    # 1. Determine if this is the "Office" project
+    # Using 'in' ensures we catch IDs like '9999-Office'
     is_office_context = "OFFICE" in str(project_id).upper()
 
     if view_mode == "client":
         filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
         visibility_sql = "AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)"
     else:
-        # 2. Apply Visibility Logic
+        # 2. Apply Visibility Logic for Engineering/Office
         if is_office_context:
-            # Office sees everything except BadData
+            # Office view: See everything (NULL, PENDING, OFFICE, MASKED) except BADDATA
             filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
         else:
-            # Standard Engineering View logic
+            # Standard View: Hide BadData and explicitly rejected data
             filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
         
         visibility_sql = ""
@@ -127,12 +128,15 @@ project_metadata = None
 
 sidebar_client = get_bq_client()
 
+# --- PROJECT SELECTION ---
 if sidebar_client is not None:
     try:
+        # UPDATED: Explicitly include 'Office' regardless of status
         proj_q = f"""
             SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-            WHERE ProjectStatus != 'Archived'
+            WHERE ProjectStatus != 'Archived' 
+            OR UPPER(Project) LIKE '%OFFICE%'
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         proj_list = sorted(proj_df['Project'].dropna().unique().tolist())
@@ -2021,19 +2025,22 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
             cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
             
-            # Classification
+            # Classification Logic
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
             is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
-
+            
+            # NEW: Catch-all for Office/Lab nodes that don't fit the above
+            is_office_node = (p_df['Project'].str.contains('OFFICE', case=False)) & ~is_s & ~is_r & ~is_tp & ~is_amb
+            
+            # Update your groups list to include the new column
             groups = [
                 (cols[0], "📥 Supply", p_df[is_s], "supply_kpi", -10), 
                 (cols[2], "📤 Return", p_df[is_r], "return_kpi", 0), 
                 (cols[4], "📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
-                (cols[6], "☁️ Ambient", p_df[is_amb], None, None)
+                (cols[6], "🖥️ Office/Lab", p_df[is_office_node], None, None) # Swapped Ambient for Office or add a 5th col
             ]
-
             for s_idx in [1, 3, 5]:
                 cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 300px; margin: auto;'></div>", unsafe_allow_html=True)
 
