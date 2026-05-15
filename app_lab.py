@@ -55,22 +55,20 @@ def get_bq_client():
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    """
-    Core data fetcher with built-in visibility logic for Client vs Engineering.
-    """
     client = get_bq_client()
-    if client is None:
-        return pd.DataFrame()
+    if client is None: return pd.DataFrame()
 
-    # 1. Classification & Visibility Logic
     if view_mode == "client":
-        # Clients only see data marked as approved
+        # Clients only see data marked as approved (True/1)
         filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
-        # Client ONLY sees data from the official Freezedown date onwards
         visibility_sql = "AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)"
     else:
-        # Engineering sees everything except what was explicitly MASKED
-        filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('FALSE', '0', 'MASKED')"
+        # Engineering/Office View logic:
+        # 1. Strictly exclude 'BadData'
+        # 2. Keep NULL, 'TRUE', and 'MASKED'
+        filter_sql = """
+            AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
+        """
         visibility_sql = ""
 
     query = f"""
@@ -92,8 +90,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         query_job = client.query(query, job_config=job_config)
         return query_job.to_dataframe()
     except Exception as e:
-        st.error(f"⚠️ Data Sync Error for '{project_id}': {e}")
-        print(traceback.format_exc())
+        st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
 
 ###########################
@@ -440,68 +437,63 @@ def apply_sanity_filter(df):
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Includes the Master Switch for Reference Curves and logic for chart borders.
+    Updated: Strict status filtering (TRUE, NULL, MASKED only).
     """
-    # 1. INITIALIZE UI STATE VARIABLES
-    mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
-    active_refs = st.session_state.get("active_refs", [])
+    # 1. INITIALIZE UI STATE VARIABLES FROM SIDEBAR KEYS
+    # Ensure these keys match the ones defined in your sidebar exactly
+    show_ref = st.session_state.get("global_show_ref", True)
+    show_masked = st.session_state.get("global_show_masked", False)
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
     unit_label = st.session_state.get("unit_label", "°F")
+    active_refs = st.session_state.get("active_refs", [])
 
     # 2. EXTRACT PROJECT METADATA
     p_name = selected_project
     status = "Active"
     f_start_date = None
-    assigned_curve = "None"
 
     if project_metadata:
         p_name = project_metadata.get('ProjectName', selected_project)
         status = project_metadata.get('ProjectStatus', 'Active')
-        assigned_curve = project_metadata.get('SoilType', 'None')
-        
         raw_f_date = project_metadata.get('Date_Freezedown')
         if pd.notnull(raw_f_date):
             f_start_date = pd.to_datetime(raw_f_date).date()
 
-    # 3. HEADER & FREEZEDOWN TRACKER
+    # 3. HEADER
     st.header(f"📈 Time vs Temp: {p_name} [{status}]")
     
     if f_start_date:
         today = pd.Timestamp.now(tz=display_tz).date()
         days_since = (today - f_start_date).days
         st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
-    else:
-        st.caption("ℹ️ Freeze start date not yet initialized in Project Master.")
 
-    # 4. SIDEBAR TOGGLES (The Master Switch)
-    st.sidebar.subheader("👁️ Visibility Settings")
-    
-    # The Switch to turn curves ON/OFF
-    show_ref = st.sidebar.toggle("Show Theoretical Curves", value=True, help="Toggle background reference curves for TP locations.")
-    show_masked = st.sidebar.toggle("Show Masked Points", value=False)
-
-    # 5. DATA PRE-FLIGHT
+    # 4. DATA PRE-FLIGHT
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Select a project in the sidebar to view engineering trends.")
         return
 
     with st.spinner(f"Syncing {p_name} telemetry..."):
+        # The data engine now handles the strict 'BadData' exclusion
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if p_df.empty:
         st.warning(f"No engineering data found for '{p_name}'.")
         return
 
-    # 6. MASKING FILTER
-    if not show_masked and 'approve' in p_df.columns:
-        p_df = p_df[p_df['approve'] != 'MASKED'].copy()
+    # 5. DYNAMIC UI FILTERING
+    # This logic ensures MASKED data only shows if the toggle is ON.
+    # BadData and False are already removed by the SQL engine.
+    mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
+    
+    if not show_masked and mask_col in p_df.columns:
+        # Filter out MASKED points if the toggle is OFF
+        p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
 
-    # 7. TIMELINE CONFIG (With 1-Day Cushion)
+    # 6. TIMELINE CONFIG
     st.sidebar.subheader("📅 Timeline Controls")
     lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
     
     now_local = pd.Timestamp.now(tz=display_tz)
-    # Set end_view to tomorrow at midnight for a visual cushion
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     
     if lookback == 0:
@@ -509,21 +501,16 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     else:
         start_view = end_view - pd.Timedelta(weeks=lookback)
 
-    # 8. DEFINE LOCATIONS
+    # 7. LOCATION-BASED PLOTTING LOOP
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
 
-    # 9. LOCATION-BASED PLOTTING LOOP
     for loc in locations:
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
-            # --- THE FIX ---
-            # We only want the ID (2527), not the full name (2527-Elizabeth)
-            # This extracts '2527' from '2527-Elizabeth'
-            clean_proj_id = str(selected_project).split('-')[0] 
-            
-            # This creates "2527-TP4" (matching your library files)
-            search_id = f"{clean_proj_id}-{loc}" 
+            # Extract ID and Location for Curve Matching
+            clean_proj_id = str(selected_project).split('-')[0]
+            search_id = f"{clean_proj_id}-{loc}"
             
             is_temp_pipe = any(x in loc.upper() for x in ["TP", "T", "PIPE", "TEMP"])
             
@@ -537,6 +524,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_label=unit_label, 
                 display_tz=display_tz,
                 f_start_date=f_start_date,
+                # Toggle theoretical curves based on sidebar state
                 curve_id=search_id if (show_ref and is_temp_pipe) else None
             )
             
