@@ -528,29 +528,30 @@ def render_registry_health_check(client, target_registry):
 
 def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
     """
-    All-in-one tool for Registry Management.
-    1. Filter & Select (Hierarchical)
-    2. Action Manager (Edit, Switch, Replace)
-    3. Decommission & Delete
+    Unified Node Manager: A multi-modal interface to manage sensor lifecycles.
+    - Hierarchical Filtering: Project -> Location context.
+    - Multi-Action Logic: Edit (Metadata), Switch (Typos), Replace (Hardware Swaps).
+    - Lifecycle Events: Decommission (Return to Office) and Permanent Deletion.
     """
     st.header("🛠️ Unified Node Manager")
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
 
     # ===============================================================
-    # 1. FIND & SELECT RECORD (Hierarchical Search)
+    # SECTION 1: SEARCH & FILTERING (Hierarchical)
     # ===============================================================
     st.subheader("🔍 Find & Select Record")
     
-    # Checkbox for archived data (Defaulted to OFF)
+    # Defaults to showing only current field deployments
     show_archived = st.checkbox("Show Archived/Historical Data", value=False)
     
-    # Initial Filter based on Archival Toggle
+    # Slicing the dataframe based on archival toggle
     if not show_archived:
-        # Filter for active sensors (End_Date is null)
+        # Active sensors have no End_Date
         df_working = reg_df[reg_df['End_Date'].isna()].copy()
     else:
         df_working = reg_df.copy()
 
+    # Layout for 4-column filter bar
     f_col1, f_col2, f_col3, f_col4 = st.columns(4)
 
     with f_col1:
@@ -558,7 +559,7 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         sel_proj = st.selectbox("Search by Project", ["All"] + u_projects)
 
     with f_col2:
-        # Hierarchical: Locations update based on selected Project
+        # Hierarchical Dependency: Location list updates based on sel_proj
         if sel_proj != "All":
             u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist())
         else:
@@ -572,13 +573,13 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     with f_col4:
         search_node = st.text_input("Search Node ID (e.g. TP-0001)").strip().upper()
 
-    # Apply Final Filters
+    # Apply all chosen filters to the working dataframe
     if sel_proj != "All": df_working = df_working[df_working['Project'] == sel_proj]
     if sel_loc != "All": df_working = df_working[df_working['Location'] == sel_loc]
     if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
     if search_node: df_working = df_working[df_working['NodeNum'].str.upper().str.contains(search_node)]
 
-    # Display Results Table
+    # Render interactive table
     st.write(f"Showing **{len(df_working)}** matching records.")
     selected_rows = st.dataframe(
         df_working,
@@ -589,7 +590,7 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     )
 
     # ===============================================================
-    # 2. ACTION MANAGER (Appears only on selection)
+    # SECTION 2: ACTION MANAGER (Selection Dependent)
     # ===============================================================
     if len(selected_rows.selection.rows) > 0:
         row_index = selected_rows.selection.rows[0]
@@ -598,27 +599,28 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         st.divider()
         st.subheader(f"⚡ Action Manager: {data['NodeNum']}")
         
-        # Determine current state for prepopulation
+        # --- Pre-processing Data for Widgets ---
+        # Checks for 'nan' strings or Nulls to ensure clean form population
         curr_phys_id = str(data['PhysicalID']) if pd.notnull(data['PhysicalID']) else ""
         curr_bank = str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) and str(data.get('Bank')).lower() != 'nan' else ""
         curr_depth = float(data['Depth']) if pd.notnull(data['Depth']) and str(data['Depth']).lower() != 'nan' else 0.0
 
-        # ACTION SELECTOR
+        # High-level intent selector
         mgmt_action = st.radio(
             "Management Intent", 
             ["📝 Edit Metadata", "🩹 Serial Correction (Switch)", "🔄 Hardware Swap (Replace)"],
             horizontal=True
         )
 
-        # Reactive Selectors (Outside form so Location updates immediately if Project changes)
+        # Reactive Inputs (Outside form to allow dropdowns to refresh instantly)
         c_m1, c_m2, c_m3 = st.columns(3)
         
-        # Project Selector
+        # 1. Project Assignment
         try: p_idx = proj_list.index(data['Project'])
         except ValueError: p_idx = 0
         new_proj = c_m1.selectbox("Assign to Project", proj_list, index=p_idx, key="m_proj")
 
-        # Location Selector (Hierarchical based on new_proj)
+        # 2. Location Assignment (Filtered by the selection in new_proj)
         existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
         if "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
         if "Stock" not in existing_locs: existing_locs.append("Stock")
@@ -627,12 +629,13 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         except ValueError: l_idx = 0
         new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
 
+        # 3. Status Override
         status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
         try: s_idx = status_list.index(data['SensorStatus'])
         except ValueError: s_idx = 0
         new_status = c_m3.selectbox("Update Status", status_list, index=s_idx, key="m_stat")
 
-        # --- SUBMISSION FORM ---
+        # --- SUBMISSION FORM: Metadata & Action Execution ---
         with st.form(key=f"mgmt_form_{data['NodeNum']}"):
             c_f1, c_f2 = st.columns(2)
             new_bank = c_f1.text_input("Bank Identifier", value=curr_bank)
@@ -643,35 +646,55 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
                 format="%.1f"
             )
 
-            # Execution logic based on Action
+            # 📝 ACTION: Metadata Update
             if mgmt_action == "📝 Edit Metadata":
+                st.caption("Standard Metadata update. Corrects Bank, Depth, or Location without ending the record.")
                 if st.form_submit_button("💾 Save Metadata Updates"):
                     execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
 
+            # 🩹 ACTION: Serial Correction
             elif mgmt_action == "🩹 Serial Correction (Switch)":
-                st.warning("Correction Mode: Overwrites current record Serial Number.")
+                st.warning("TYPO CORRECTION: Overwrites the Physical ID of the current record.")
                 new_sn = st.text_input("Corrected Physical ID (Serial #)", value=curr_phys_id)
                 if st.form_submit_button("🚀 Apply Serial Correction"):
                     execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry)
 
+            # 🔄 ACTION: Hardware Replacement
             elif mgmt_action == "🔄 Hardware Swap (Replace)":
-                st.error("Replace Mode: Ends current record and starts NEW record for new serial.")
+                st.error("HARDWARE SWAP: Closes current record and starts NEW record for the new serial.")
                 new_sn = st.text_input("NEW Hardware Physical ID (Serial #)")
                 swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
                 if st.form_submit_button("🔄 Execute Hardware Replacement"):
                     if not new_sn: st.error("New Serial Required")
                     else: execute_replacement_transaction(client, data, new_sn, swap_date, target_registry)
 
-            # Footer Actions
+            # ===============================================================
+            # SECTION 3: DECOMMISSION & DELETE (Footer)
+            # ===============================================================
             st.divider()
-            f_col_a, f_col_b = st.columns(2)
-            if f_col_a.form_submit_button("🔚 Decommission Node (Return to Stock)"):
-                execute_decommission_node(client, data, target_registry)
-            if f_col_b.form_submit_button("🗑️ Permanent Delete Record", type="primary"):
+            st.subheader("🏁 Lifecycle Management")
+            
+            c_d1, c_d2, c_d3 = st.columns(3)
+            with c_d1:
+                decom_date = st.date_input("Removal Date", value=datetime.now().date())
+            with c_d2:
+                decom_time = st.time_input("Removal Time", value=datetime.now().time())
+            with c_d3:
+                new_stock_status = st.selectbox("Stock Status", ["Available", "Diagnostic", "Dead"], index=0)
+            
+            # Combine Date and Time for the Audit Log
+            final_decom_dt = datetime.combine(decom_date, decom_time)
+
+            btn_a, btn_b = st.columns(2)
+            if btn_a.form_submit_button("🔚 Decommission (Close & Move to Office)"):
+                # Logic: Closes current Project entry, creates NEW Office entry
+                execute_decommission_node(client, data, target_registry, final_decom_dt, new_stock_status)
+                
+            if btn_b.form_submit_button("🗑️ Permanent Delete Record", type="primary"):
+                # Logic: Hard delete from BigQuery (Use with caution)
                 execute_record_delete(client, data, target_registry)
     else:
         st.info("💡 Select a row in the table above to reveal the Action Manager.")
-
 
 def identify_active_node(active_reg, search_term):
     """Filters the active registry to find a specific node by ID or Physical Serial."""
@@ -1079,14 +1102,14 @@ def execute_record_delete(client, data, target_registry):
     except Exception as e:
         st.error(f"Deletion failed: {e}")
 
-def execute_decommission_node(client, data, target_registry, decom_date):
+def execute_decommission_node(client, data, target_registry, decom_dt, stock_status):
     """
-    Ensures the current deployment is ARCHIVED under its site 
-    and a NEW record is created for Office.
+    Closes the old record with a timestamp and creates a new one in Office.
     """
-    decom_date_str = decom_date.isoformat()
+    # Format for BigQuery: 'YYYY-MM-DD HH:MM:SS'
+    dt_str = decom_dt.strftime('%Y-%m-%d %H:%M:%S')
     
-    # 1. Sanitize PhysicalID
+    # Sanitize PhysicalID
     raw_phys_id = data.get('PhysicalID')
     if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
         phys_id_match = "PhysicalID IS NULL"
@@ -1095,22 +1118,20 @@ def execute_decommission_node(client, data, target_registry, decom_date):
         phys_id_val = f"{int(float(raw_phys_id))}"
         phys_id_match = f"PhysicalID = {phys_id_val}"
 
-    # 2. Transaction: The 'UPDATE' must match the 'Project' it was just in
     sql = f"""
         BEGIN TRANSACTION;
         
-        -- STEP 1: Archive the specific site deployment
+        -- 1. Close and Archive the OLD record
         UPDATE `{target_registry}`
         SET 
-            End_Date = DATE('{decom_date_str}'), 
-            SensorStatus = 'Archived'
+            End_Date = DATETIME('{dt_str}'), 
+            SensorStatus = 'Decommissioned'
         WHERE NodeNum = '{data['NodeNum']}' 
           AND Project = '{data['Project']}'
-          AND Location = '{data['Location']}'
           AND {phys_id_match}
           AND End_Date IS NULL;
 
-        -- STEP 2: Create the clean Stock record
+        -- 2. Create the NEW Office record
         INSERT INTO `{target_registry}` (
             NodeNum, PhysicalID, Project, Location, Bank, Depth, SensorStatus, Start_Date
         )
@@ -1121,8 +1142,8 @@ def execute_decommission_node(client, data, target_registry, decom_date):
             'Office', 
             '{data['NodeNum']}', 
             NULL, 
-            'Available', 
-            DATE('{decom_date_str}')
+            '{stock_status}', 
+            DATETIME('{dt_str}')
         );
         
         COMMIT;
@@ -1130,11 +1151,11 @@ def execute_decommission_node(client, data, target_registry, decom_date):
     
     try:
         client.query(sql).result()
-        st.success(f"✅ History locked for {data['Project']}. Node moved to Office.")
+        st.success(f"✅ Node {data['NodeNum']} moved to Office at {dt_str}")
         time.sleep(1)
         st.rerun()
     except Exception as e:
-        st.error("Audit log failed to close.")
+        st.error("Audit transaction failed.")
         st.code(sql, language="sql")
         st.error(str(e))
 # ===============================================================
