@@ -565,39 +565,24 @@ def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_d
 # ===============================================================
 # PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
-import re
-import pandas as pd
-import streamlit as st
-from datetime import datetime
-import time
+def render_node_selector(reg_df, proj_list):
+    """
+    Handles only the UI for finding and selecting a record.
+    Returns the 'data' (Series) of the selected row, or None.
+    """
+    st.subheader("🔍 Find & Select Record")
+    
+    if st.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
 
-def natural_sort_key(s):
-    """Sorts strings with numbers logically (e.g., Bank 2 before Bank 10)."""
-    return [int(text) if text.isdigit() else text.lower()
-            for text in re.split('([0-9]+)', str(s))]
-
-def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
-    st.header("🛠️ Unified Node Manager")
-    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-
-    # --- 1. DATA PREP & STATUS MAPPING ---
+    # --- Initial Filtering & Status Mapping ---
     status_map = {
         'Online': 'On Project', 'Active': 'On Project', 'In Use': 'On Project',
         'Available': 'Available', 'Diagnostic': 'Diagnostic', 'Dead': 'Dead', 'Archived': 'Archived'
     }
     reg_df['SensorStatus'] = reg_df['SensorStatus'].map(status_map).fillna(reg_df['SensorStatus'])
     final_status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
-
-    # Limit projects to active ones + Office
-    active_projects = reg_df[reg_df['End_Date'].isna()]['Project'].unique().tolist()
-    filtered_proj_list = sorted([p for p in proj_list if p in active_projects or p == 'Office'])
-
-    # --- 2. FIND & SELECT RECORD ---
-    st.subheader("🔍 Find & Select Record")
-    
-    if st.button("🔄 Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
 
     show_archived = st.checkbox("Show Archived/Historical Data", value=False)
     df_working = reg_df[reg_df['End_Date'].isna()].copy() if not show_archived else reg_df.copy()
@@ -614,7 +599,6 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     with f1:
         sel_proj = st.selectbox("Project Filter", ["All"] + sorted(df_working['Project'].unique().tolist()))
     
-    # Filter by Project first to handle the Lord 4-channel rule
     if sel_proj != "All":
         df_working = df_working[df_working['Project'] == sel_proj]
 
@@ -639,77 +623,94 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
     if search_node: df_working = df_working[df_working['NodeNum'].str.contains(search_node)]
 
-    # Table Display
+    # Table Display & Selection
     if not df_working.empty:
         df_working['Depth'] = pd.to_numeric(df_working['Depth'], errors='coerce').fillna(0.0)
         df_working['bank_sort'] = df_working['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
         df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth']).drop(columns=['bank_sort'])
 
-    selected_rows = st.dataframe(df_working, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
+    selected_rows = st.dataframe(
+        df_working, 
+        use_container_width=True, 
+        hide_index=True, 
+        on_select="rerun", 
+        selection_mode="single-row"
+    )
 
-    # --- 3. ACTION MANAGER ---
     if len(selected_rows.selection.rows) > 0:
-        data = df_working.iloc[selected_rows.selection.rows[0]]
-        node_id = str(data['NodeNum']).upper()
-        is_lord = 'CH' in node_id
-        is_sp = 'SP' in node_id
-        
-        st.divider()
-        st.subheader(f"⚡ Action Manager: {node_id}")
+        return df_working.iloc[selected_rows.selection.rows[0]]
+    
+    return None
 
-        mgmt_action = st.radio("Intent", ["📝 Correct Record", "🔄 Hardware Swap"], horizontal=True)
+def render_node_action_manager(client, data, reg_df, proj_list, target_registry):
+    """
+    Handles the logic for correcting, swapping, or decommissioning.
+    Requires 'data' from the selector.
+    """
+    node_id = str(data['NodeNum']).upper()
+    is_lord = 'CH' in node_id
+    is_sp = 'SP' in node_id
+    final_status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
+    
+    # Filter projects to active ones + Office
+    active_projects = reg_df[reg_df['End_Date'].isna()]['Project'].unique().tolist()
+    filtered_proj_list = sorted([p for p in proj_list if p in active_projects or p == 'Office'])
 
-        # START OF RECTIFIED ORDER (Column definitions)
-        c1, c2, c3 = st.columns(3)
-        
-        # A. PROJECT (Defines 'new_proj')
-        try: p_idx = filtered_proj_list.index(data['Project'])
-        except ValueError: p_idx = 0
-        new_proj = c1.selectbox("Move to Project", filtered_proj_list, index=p_idx)
+    st.divider()
+    st.subheader(f"⚡ Action Manager: {node_id}")
 
-        # B. LOCATION (Uses 'new_proj')
-        if new_proj == 'Office':
-            new_loc = c2.text_input("Office Sub-Location", value=data['Location'] if data['Project'] == 'Office' else "Desk")
-        else:
-            existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
-            if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
-            try: l_idx = existing_locs.index("Ambient" if is_sp else data['Location'])
-            except ValueError: l_idx = 0
-            new_loc = c2.selectbox("Assign to Location", existing_locs, index=l_idx)
+    mgmt_action = st.radio("Intent", ["📝 Correct Record", "🔄 Hardware Swap"], horizontal=True)
 
-        # C. STATUS
-        if is_lord:
-            new_status = "On Project"
-            c3.info("Status: **On Project**")
-        else:
-            try: s_idx = final_status_options.index(data['SensorStatus'])
-            except ValueError: s_idx = 0
-            new_status = c3.selectbox("Update Status", final_status_options, index=s_idx)
+    c1, c2, c3 = st.columns(3)
+    
+    # 1. Project
+    try: p_idx = filtered_proj_list.index(data['Project'])
+    except ValueError: p_idx = 0
+    new_proj = c1.selectbox("Move to Project", filtered_proj_list, index=p_idx)
 
-        with st.form(key=f"form_{node_id}"):
-            fcol1, fcol2 = st.columns(2)
-            new_bank = fcol1.text_input("Bank Identifier", value=data.get('Bank', ''))
-            new_depth = fcol2.number_input("Depth (ft)", value=float(data.get('Depth', 0.0)), format="%.1f")
+    # 2. Location (Toggle Text/Dropdown)
+    if new_proj == 'Office':
+        new_loc = c2.text_input("Office Sub-Location", value=data['Location'] if data['Project'] == 'Office' else "Desk")
+    else:
+        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
+        if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
+        try: l_idx = existing_locs.index("Ambient" if is_sp else data['Location'])
+        except ValueError: l_idx = 0
+        new_loc = c2.selectbox("Assign to Location", existing_locs, index=l_idx)
 
-            if mgmt_action == "📝 Correct Record":
-                if st.form_submit_button("💾 Save Changes"):
-                    execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
+    # 3. Status
+    if is_lord:
+        new_status = "On Project"
+        c3.info("Status: **On Project**")
+    else:
+        try: s_idx = final_status_options.index(data['SensorStatus'])
+        except ValueError: s_idx = 0
+        new_status = c3.selectbox("Update Status", final_status_options, index=s_idx)
 
-            elif mgmt_action == "🔄 Hardware Swap":
-                new_hw_node = st.text_input("New Node ID")
-                swap_date = st.date_input("Effective Date", value=datetime.now().date())
-                if st.form_submit_button("🔄 Swap Hardware"):
-                    execute_replacement_transaction(client, data, new_hw_node, swap_date, target_registry)
+    with st.form(key=f"form_{node_id}"):
+        fcol1, fcol2 = st.columns(2)
+        new_bank = fcol1.text_input("Bank Identifier", value=data.get('Bank', ''))
+        new_depth = fcol2.number_input("Depth (ft)", value=float(data.get('Depth', 0.0)), format="%.1f")
 
-            if not is_lord:
-                st.divider()
-                st.subheader("🏁 Decommission")
-                d_c1, d_c2, d_c3 = st.columns(3)
-                d_date = d_c1.date_input("Removal Date")
-                d_stat = d_c2.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
-                d_office_loc = d_c3.text_input("Office Storage Loc", value="Desk")
-                if st.form_submit_button("🔚 Send to Office"):
-                    execute_decommission_node(client, data, target_registry, d_date, d_stat, d_office_loc)
+        if mgmt_action == "📝 Correct Record":
+            if st.form_submit_button("💾 Save Changes"):
+                execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
+
+        elif mgmt_action == "🔄 Hardware Swap":
+            new_hw_node = st.text_input("New Node ID")
+            swap_date = st.date_input("Effective Date", value=datetime.now().date())
+            if st.form_submit_button("🔄 Swap Hardware"):
+                execute_replacement_transaction(client, data, new_hw_node, swap_date, target_registry)
+
+        if not is_lord:
+            st.divider()
+            st.subheader("🏁 Decommission")
+            d_c1, d_c2, d_c3 = st.columns(3)
+            d_date = d_c1.date_input("Removal Date")
+            d_stat = d_c2.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
+            d_office_loc = d_c3.text_input("Office Storage Loc", value="Desk")
+            if st.form_submit_button("🔚 Send to Office"):
+                execute_decommission_node(client, data, target_registry, d_date, d_stat, d_office_loc)
 
 def render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID):
     """Renders charts for old vs new hardware to verify telemetry before committing."""
@@ -1948,8 +1949,17 @@ def main():
 # EXECUTION ENTRY POINT
 # ===============================================================
 
-if __name__ == "__main__":
-    if client:
-        main()
+def main():
+    # ... setup client, reg_df, etc. ...
+    
+    st.header("🛠️ Unified Node Manager")
+    
+    # Run the selector
+    selected_node_data = render_node_selector(reg_df, proj_list)
+    
+    # If a node was clicked, run the action manager
+    if selected_node_data is not None:
+        target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+        render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry)
     else:
-        st.error("Application cannot start: Database connection unavailable.")
+        st.info("💡 Select a record in the table above to manage its lifecycle.")
