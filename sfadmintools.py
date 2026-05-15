@@ -546,7 +546,7 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     else:
         df_working = reg_df.copy()
 
-    # Ambient Filter Logic
+    # Ambient Filter Logic (Rule: SP = Ambient only)
     ambient_view = st.radio(
         "Display Hardware Type",
         ["Show All", "Hide Ambient (SP)", "Ambient Only (SP)"],
@@ -558,7 +558,7 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     elif ambient_view == "Ambient Only (SP)":
         df_working = df_working[df_working['NodeNum'].str.contains('SP', case=False, na=False)]
 
-    # Filters
+    # Filter Columns
     f_col1, f_col2, f_col3, f_col4 = st.columns(4)
 
     with f_col1:
@@ -566,11 +566,13 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         sel_proj = st.selectbox("Search by Project", ["All"] + u_projects)
 
     with f_col2:
+        # Hierarchical Natural Sort for Location Dropdown
         if sel_proj != "All":
-            # Apply natural sort to Location dropdown
-            u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist(), key=natural_sort_key)
+            u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist(), 
+                            key=lambda x: tuple(natural_sort_key(x)))
         else:
-            u_locs = sorted(df_working['Location'].unique().tolist(), key=natural_sort_key)
+            u_locs = sorted(df_working['Location'].unique().tolist(), 
+                            key=lambda x: tuple(natural_sort_key(x)))
         sel_loc = st.selectbox("Search by Location", ["All"] + u_locs)
 
     with f_col3:
@@ -580,7 +582,7 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     with f_col4:
         search_node = st.text_input("Search Node ID").strip().upper()
 
-    # Apply Final Filtering
+    # Apply Filters
     if sel_proj != "All": df_working = df_working[df_working['Project'] == sel_proj]
     if sel_loc != "All": df_working = df_working[df_working['Location'] == sel_loc]
     if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
@@ -588,14 +590,10 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
 
     # --- CRITICAL FIX: NATURAL SORTING FOR THE TABLE ---
     if not df_working.empty:
-        # 1. Clean Depth column (ensure it is numeric for sorting)
         df_working['Depth'] = pd.to_numeric(df_working['Depth'], errors='coerce').fillna(0.0)
-        
-        # 2. Sort by Location, then Bank (Natural Sort), then Depth
-        # We temporarily create a sort key column to handle 'Bank 10' vs 'Bank 2'
-        df_working['bank_sort'] = df_working['Bank'].apply(natural_sort_key)
+        # Using TUPLE to avoid TypeError in Pandas sort_values
+        df_working['bank_sort'] = df_working['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
         df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth'])
-        # Drop the helper column before displaying
         df_working = df_working.drop(columns=['bank_sort'])
 
     st.write(f"Showing **{len(df_working)}** matching records.")
@@ -609,19 +607,21 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     )
 
     # ===============================================================
-    # 2. ACTION MANAGER (Selection Dependent)
+    # 2. ACTION MANAGER
     # ===============================================================
     if len(selected_rows.selection.rows) > 0:
         row_index = selected_rows.selection.rows[0]
         data = df_working.iloc[row_index]
         node_id = str(data['NodeNum']).upper()
+        
         is_lord = 'CH' in node_id
         is_sp = 'SP' in node_id
         
         st.divider()
         st.subheader(f"⚡ Action Manager: {node_id}")
 
-        # Prep Form Values
+        # Pre-populate Logic
+        curr_phys_id = str(data['PhysicalID']) if pd.notnull(data['PhysicalID']) else ""
         curr_bank = str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) and str(data.get('Bank')).lower() != 'nan' else ""
         curr_depth = float(data['Depth']) if pd.notnull(data['Depth']) and str(data['Depth']).lower() != 'nan' else 0.0
 
@@ -629,22 +629,23 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
                                ["📝 Edit Metadata", "🩹 Serial Correction", "🔄 Hardware Swap"], 
                                horizontal=True)
 
+        # Reactive Layout (Outside form for dynamic dropdowns)
         c_m1, c_m2, c_m3 = st.columns(3)
         
-        # Project Selector
         try: p_idx = proj_list.index(data['Project'])
         except ValueError: p_idx = 0
         new_proj = c_m1.selectbox("Assign to Project", proj_list, index=p_idx, key="m_proj")
 
-        # Location Selector (Natural Sorted)
-        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), key=natural_sort_key)
+        # Location Selection (Natural Sorted)
+        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), 
+                               key=lambda x: tuple(natural_sort_key(x)))
         if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
         
         try: l_idx = existing_locs.index("Ambient" if is_sp else data['Location'])
         except ValueError: l_idx = 0
         new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
 
-        # Status Rule: Lords are always 'In Use'
+        # Lord Rule: Always 'In Use'
         if is_lord:
             new_status = "In Use"
             c_m3.info("Status: **In Use** (Fixed Hardware)")
@@ -659,14 +660,28 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
             new_bank = c_f1.text_input("Bank Identifier", value="Ambient" if is_sp else curr_bank)
             new_depth = c_f2.number_input("Depth (ft)", value=0.0 if is_sp else curr_depth, format="%.1f")
 
-            # Execution Logic (Edit/Switch/Replace functions should be defined elsewhere)
+            # 📝 Save Metadata
             if mgmt_action == "📝 Edit Metadata":
                 if st.form_submit_button("💾 Save Metadata Updates"):
                     execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
 
-            # ... [Other Actions: Switch/Replace] ...
+            # 🩹 Serial Correction (Typo Fix)
+            elif mgmt_action == "🩹 Serial Correction":
+                st.warning("Overwrites current serial number record.")
+                new_sn = st.text_input("Corrected Physical ID (Serial #)", value=curr_phys_id)
+                if st.form_submit_button("🚀 Apply Serial Correction"):
+                    execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry)
 
-            # Lifecycle (Decommission)
+            # 🔄 Hardware Swap (New Entry)
+            elif mgmt_action == "🔄 Hardware Swap":
+                st.error("Ends current history and starts NEW entry.")
+                new_sn = st.text_input("NEW Hardware Physical ID (Serial #)")
+                swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
+                if st.form_submit_button("🔄 Execute Hardware Replacement"):
+                    if not new_sn: st.error("New Serial Required")
+                    else: execute_replacement_transaction(client, data, new_sn, swap_date, target_registry)
+
+            # Lifecycle (Decommission) - Only for SensorPush
             if not is_lord:
                 st.divider()
                 c_d1, c_d2, c_d3 = st.columns(3)
