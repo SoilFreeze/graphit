@@ -531,6 +531,11 @@ def render_registry_health_check(client, target_registry):
 # PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
 def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
+    # Place this at the top of your render_unified_node_manager function
+    if st.button("🔄 Refresh Registry Data"):
+        st.cache_data.clear()
+        st.rerun()
+    
     st.header("🛠️ Unified Node Manager")
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
 
