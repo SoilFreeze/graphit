@@ -877,37 +877,38 @@ def render_edit_record_form(client, data, reg_df, proj_list, target_registry):
 
 def execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
     """
-    Sanitizes inputs to prevent 'nan' errors and updates the BigQuery registry.
+    Final fix for 'nan' errors in both SET and WHERE clauses.
     """
-    # 1. Handle NaN or Null for Strings (Location, Project, Bank, Status)
-    def clean_str(val):
-        if pd.isna(val) or str(val).lower() == 'nan':
-            return ""
-        return str(val).strip()
+    # 1. Sanitizers for the 'SET' section
+    def to_sql_str(val):
+        if pd.isna(val) or str(val).lower() == 'nan': return ""
+        return str(val).replace("'", "\\'") # Escape single quotes
 
-    # 2. Handle NaN or Null for Numeric (Depth)
-    def clean_num(val):
-        if pd.isna(val) or str(val).lower() == 'nan':
-            return "NULL"
+    def to_sql_num(val):
+        if pd.isna(val) or str(val).lower() == 'nan': return "NULL"
         return float(val)
 
-    safe_proj = clean_str(new_proj)
-    safe_loc = clean_str(new_loc)
-    safe_bank = clean_str(new_bank)
-    safe_status = clean_str(new_status)
-    safe_depth = clean_num(new_depth)
+    # 2. Sanitizer for the 'WHERE' section (PhysicalID)
+    # If PhysicalID is NaN, we must use 'IS NULL' in SQL or 0 if that's your default
+    raw_phys_id = data.get('PhysicalID')
+    if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
+        phys_id_where = "PhysicalID IS NULL"
+    else:
+        phys_id_where = f"PhysicalID = {raw_phys_id}"
 
-    # 3. Construct Query
+    # 3. Construct the clean SQL
     update_sql = f"""
         UPDATE `{target_registry}`
-        SET Project = '{safe_proj}',
-            Location = '{safe_loc}', 
-            Bank = '{safe_bank}',
-            Depth = {safe_depth},
-            SensorStatus = '{safe_status}'
-        WHERE NodeNum = '{data['NodeNum']}' 
-          AND Start_Date = DATE('{data['Start_Date']}')
-          AND PhysicalID = {data['PhysicalID']}
+        SET 
+            Project = '{to_sql_str(new_proj)}',
+            Location = '{to_sql_str(new_loc)}', 
+            Bank = '{to_sql_str(new_bank)}',
+            Depth = {to_sql_num(new_depth)},
+            SensorStatus = '{to_sql_str(new_status)}'
+        WHERE 
+            NodeNum = '{data['NodeNum']}' 
+            AND Start_Date = DATE('{data['Start_Date']}')
+            AND {phys_id_where}
     """
     
     try:
@@ -916,9 +917,9 @@ def execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, 
         time.sleep(1)
         st.rerun()
     except Exception as e:
-        # Debug the actual SQL if it fails again
-        st.error(f"Update failed. SQL Preview: {update_sql}")
-        st.error(f"Error Details: {e}")
+        st.error("Failed to execute SQL update.")
+        st.code(update_sql, language="sql") # Shows the bad SQL for debugging
+        st.error(f"Error: {e}")
 
 
 def execute_record_delete(client, data, target_registry):
