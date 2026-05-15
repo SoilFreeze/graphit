@@ -565,250 +565,151 @@ def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_d
 # ===============================================================
 # PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
+import re
+import pandas as pd
+import streamlit as st
+from datetime import datetime
+import time
+
+def natural_sort_key(s):
+    """Sorts strings with numbers logically (e.g., Bank 2 before Bank 10)."""
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split('([0-9]+)', str(s))]
+
 def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
-    # 1. Clean up Project List: Only projects currently in the registry + 'Office'
-    # We filter out any projects from the master list that don't have active sensors
-    active_projects = reg_df[reg_df['End_Date'].isna()]['Project'].unique().tolist()
-    filtered_proj_list = [p for p in proj_list if p in active_projects or p == 'Office']
-    
-    # 2. Status Mapping: Consolidate 'Online' and 'Active' into 'On Project'
-    # This ensures your UI and filters stay clean
-    status_map = {
-        'Online': 'On Project',
-        'Active': 'On Project',
-        'Available': 'Available',
-        'Diagnostic': 'Diagnostic',
-        'Dead': 'Dead',
-        'Archived': 'Archived'
-    }
-    
-    # Apply mapping to the working dataframe immediately
-    reg_df['SensorStatus'] = reg_df['SensorStatus'].map(status_map).fillna(reg_df['SensorStatus'])
-    
-    # The official status list for your dropdowns
-    final_status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
-    
     st.header("🛠️ Unified Node Manager")
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-    # ===============================================================
-    # 1. FIND & SELECT RECORD (Hierarchical & Natural Sorted)
-    # ===============================================================
+
+    # --- 1. DATA PREP & STATUS MAPPING ---
+    status_map = {
+        'Online': 'On Project', 'Active': 'On Project', 'In Use': 'On Project',
+        'Available': 'Available', 'Diagnostic': 'Diagnostic', 'Dead': 'Dead', 'Archived': 'Archived'
+    }
+    reg_df['SensorStatus'] = reg_df['SensorStatus'].map(status_map).fillna(reg_df['SensorStatus'])
+    final_status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
+
+    # Limit projects to active ones + Office
+    active_projects = reg_df[reg_df['End_Date'].isna()]['Project'].unique().tolist()
+    filtered_proj_list = sorted([p for p in proj_list if p in active_projects or p == 'Office'])
+
+    # --- 2. FIND & SELECT RECORD ---
     st.subheader("🔍 Find & Select Record")
     
-    # Refresh Logic: Clears the app cache and reruns the script to pull fresh BQ data
-    if st.button("🔄 Refresh Table Data"):
+    if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
 
     show_archived = st.checkbox("Show Archived/Historical Data", value=False)
-    
-    # 1. Initial Slice: Active vs Archived
-    if not show_archived:
-        df_working = reg_df[reg_df['End_Date'].isna()].copy()
-    else:
-        df_working = reg_df.copy()
+    df_working = reg_df[reg_df['End_Date'].isna()].copy() if not show_archived else reg_df.copy()
 
-    # 2. GLOBAL TOGGLE: Ambient View (SensorPush)
-    ambient_view = st.radio(
-        "Display Hardware Type",
-        ["Show All", "Hide Ambient (SP)", "Ambient Only (SP)"],
-        horizontal=True
-    )
-
-    if ambient_view == "Hide Ambient (SP)":
+    # Hardware Toggles
+    ambient_view = st.radio("Hardware View", ["Show All", "Hide Ambient (SP)", "Ambient Only (SP)"], horizontal=True)
+    if "Hide Ambient" in ambient_view:
         df_working = df_working[~df_working['NodeNum'].str.contains('SP', case=False, na=False)]
-    elif ambient_view == "Ambient Only (SP)":
+    elif "Ambient Only" in ambient_view:
         df_working = df_working[df_working['NodeNum'].str.contains('SP', case=False, na=False)]
 
-    # 3. SELECTBOX FILTERS
-    f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+    # Filter Bar
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        sel_proj = st.selectbox("Project Filter", ["All"] + sorted(df_working['Project'].unique().tolist()))
+    
+    # Filter by Project first to handle the Lord 4-channel rule
+    if sel_proj != "All":
+        df_working = df_working[df_working['Project'] == sel_proj]
 
-    with f_col1:
-        u_projects = sorted(df_working['Project'].unique().tolist())
-        sel_proj = st.selectbox("Search by Project", ["All"] + u_projects)
+    # Rule: Office Lords must have all 4 channels to show up
+    if sel_proj == "Office":
+        lord_office = df_working[df_working['NodeNum'].str.contains('CH', case=False, na=False)].copy()
+        if not lord_office.empty:
+            lord_office['LordBase'] = lord_office['NodeNum'].apply(lambda x: x.rsplit('-', 1)[0])
+            l_counts = lord_office.groupby('LordBase')['NodeNum'].transform('count')
+            incomplete = lord_office[l_counts < 4]['NodeNum'].tolist()
+            df_working = df_working[~df_working['NodeNum'].isin(incomplete)]
 
-    with f_col2:
-        # Hierarchical Location list
-        if sel_proj != "All":
-            u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist(), 
-                            key=lambda x: tuple(natural_sort_key(x)))
-        else:
-            u_locs = sorted(df_working['Location'].unique().tolist(), 
-                            key=lambda x: tuple(natural_sort_key(x)))
-        sel_loc = st.selectbox("Search by Location", ["All"] + u_locs)
-
-    with f_col3:
-        u_status = sorted(df_working['SensorStatus'].unique().tolist())
-        sel_stat = st.selectbox("Filter by Status", ["All"] + u_status)
-
-    with f_col4:
+    with f2:
+        u_locs = sorted(df_working['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
+        sel_loc = st.selectbox("Location Filter", ["All"] + u_locs)
+    with f3:
+        sel_stat = st.selectbox("Status Filter", ["All"] + final_status_options)
+    with f4:
         search_node = st.text_input("Search Node ID").strip().upper()
 
-    # 4. APPLY FILTERS
-    if sel_proj != "All": df_working = df_working[df_working['Project'] == sel_proj]
     if sel_loc != "All": df_working = df_working[df_working['Location'] == sel_loc]
     if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
-    if search_node: df_working = df_working[df_working['NodeNum'].str.upper().str.contains(search_node)]
+    if search_node: df_working = df_working[df_working['NodeNum'].str.contains(search_node)]
 
-    # 5. SPECIAL RULE: LORD 4-CHANNEL INVENTORY (Office Only)
-    if sel_proj == "Office":
-        # Identify Lords (contain 'CH')
-        lord_office = df_working[df_working['NodeNum'].str.contains('CH', case=False, na=False)].copy()
-        
-        if not lord_office.empty:
-            # Extract parent ID (Split at the last dash)
-            lord_office['LordBase'] = lord_office['NodeNum'].apply(lambda x: x.rsplit('-', 1)[0])
-            # Count occurrences of parent ID
-            lord_counts = lord_office.groupby('LordBase')['NodeNum'].transform('count')
-            # Identify nodes where the full set (4) isn't present
-            incomplete_nodes = lord_office[lord_counts < 4]['NodeNum'].tolist()
-            # Filter them out
-            df_working = df_working[~df_working['NodeNum'].isin(incomplete_nodes)]
-            
-    # --- APPLY NATURAL SORT TO TABLE ---
+    # Table Display
     if not df_working.empty:
         df_working['Depth'] = pd.to_numeric(df_working['Depth'], errors='coerce').fillna(0.0)
-        # Use TUPLE sort key for Bank (Bank 2, Bank 10)
         df_working['bank_sort'] = df_working['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
-        df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth'])
-        df_working = df_working.drop(columns=['bank_sort'])
+        df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth']).drop(columns=['bank_sort'])
 
-    st.write(f"Showing **{len(df_working)}** matching records.")
-    selected_rows = st.dataframe(
-        df_working, use_container_width=True, hide_index=True,
-        on_select="rerun", selection_mode="single-row"
-    )
+    selected_rows = st.dataframe(df_working, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
 
-    # ===============================================================
-    # 2. ACTION MANAGER (Correction & Lifecycle)
-    # ===============================================================
+    # --- 3. ACTION MANAGER ---
     if len(selected_rows.selection.rows) > 0:
-        row_index = selected_rows.selection.rows[0]
-        data = df_working.iloc[row_index]
+        data = df_working.iloc[selected_rows.selection.rows[0]]
         node_id = str(data['NodeNum']).upper()
-        
-        # Hardware Rules Identification
         is_lord = 'CH' in node_id
         is_sp = 'SP' in node_id
         
         st.divider()
         st.subheader(f"⚡ Action Manager: {node_id}")
 
-        # Current Metadata prep
-        curr_phys_id = str(data['PhysicalID']) if pd.notnull(data['PhysicalID']) else ""
-        curr_bank = str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) and str(data.get('Bank')).lower() != 'nan' else ""
-        curr_depth = float(data['Depth']) if pd.notnull(data['Depth']) and str(data['Depth']).lower() != 'nan' else 0.0
+        mgmt_action = st.radio("Intent", ["📝 Correct Record", "🔄 Hardware Swap"], horizontal=True)
 
-        mgmt_action = st.radio("Management Intent", 
-                               ["📝 Correct Record", "🔄 Hardware Swap (Replace)"], 
-                               horizontal=True)
+        # START OF RECTIFIED ORDER (Column definitions)
+        c1, c2, c3 = st.columns(3)
         
-        # --- NEW LOCATION LOGIC: Dropdown for Projects, Text for Office ---
+        # A. PROJECT (Defines 'new_proj')
+        try: p_idx = filtered_proj_list.index(data['Project'])
+        except ValueError: p_idx = 0
+        new_proj = c1.selectbox("Move to Project", filtered_proj_list, index=p_idx)
+
+        # B. LOCATION (Uses 'new_proj')
         if new_proj == 'Office':
-            # Allow custom typing for Office sensors (Desk, Spare, etc.)
-            new_loc = c_m2.text_input(
-                "Office Sub-Location", 
-                value=data['Location'] if data['Project'] == 'Office' else "Desk",
-                help="Specify where this is (e.g., Desk, Lab, Blackjack Spares)"
-            )
+            new_loc = c2.text_input("Office Sub-Location", value=data['Location'] if data['Project'] == 'Office' else "Desk")
         else:
-            # Standard dropdown for field projects
-            existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), 
-                                   key=lambda x: tuple(natural_sort_key(x)))
+            existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
             if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
-            
             try: l_idx = existing_locs.index("Ambient" if is_sp else data['Location'])
             except ValueError: l_idx = 0
-            new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
-            
-        # Reactive Selectors (outside form for instant location refreshes)
-        c_m1, c_m2, c_m3 = st.columns(3)
-        
-        try: p_idx = proj_list.index(data['Project'])
-        except ValueError: p_idx = 0
-        new_proj = c_m1.selectbox("Assign to Project", proj_list, index=p_idx, key="m_proj")
+            new_loc = c2.selectbox("Assign to Location", existing_locs, index=l_idx)
 
-        # Natural Sorted Locations for the chosen project
-        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), 
-                               key=lambda x: tuple(natural_sort_key(x)))
-        if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
-        
-        try: l_idx = existing_locs.index("Ambient" if is_sp else data['Location'])
-        except ValueError: l_idx = 0
-        new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
-
-        # Rule: Lord (CH) is always 'In Use'. SensorPush is selectable.
-        # Rule: Lord (CH) is always 'On Project'. Others use the new limited list.
+        # C. STATUS
         if is_lord:
             new_status = "On Project"
-            c_m3.info("Status: **On Project** (Fixed Hardware)")
+            c3.info("Status: **On Project**")
         else:
-            # Use the strict 5-status list
             try: s_idx = final_status_options.index(data['SensorStatus'])
             except ValueError: s_idx = 0
-            new_status = c_m3.selectbox("Update Status", final_status_options, index=s_idx, key="m_stat")
+            new_status = c3.selectbox("Update Status", final_status_options, index=s_idx)
 
-        with st.form(key=f"mgmt_form_{node_id}"):
-            c_f1, c_f2 = st.columns(2)
-            new_bank = c_f1.text_input("Bank Identifier", value="Ambient" if is_sp else curr_bank)
-            new_depth = c_f2.number_input("Depth (ft)", value=0.0 if is_sp else curr_depth, format="%.1f")
-            
-            # Optional PhysicalID fix
-            new_sn = st.text_input("Physical ID / Serial # (Correct only if wrong)", value=curr_phys_id)
+        with st.form(key=f"form_{node_id}"):
+            fcol1, fcol2 = st.columns(2)
+            new_bank = fcol1.text_input("Bank Identifier", value=data.get('Bank', ''))
+            new_depth = fcol2.number_input("Depth (ft)", value=float(data.get('Depth', 0.0)), format="%.1f")
 
             if mgmt_action == "📝 Correct Record":
-                st.info("Directly modifies the active record. Fixes typos or changes status (e.g. to Archived).")
-                if st.form_submit_button("💾 Apply Corrections"):
-                    execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry)
+                if st.form_submit_button("💾 Save Changes"):
+                    execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
 
-            elif mgmt_action == "🔄 Hardware Swap (Replace)":
-                st.error("Swap Mode: Ends current record and starts NEW entry for new hardware.")
-                
-                # We only care about the Node ID (e.g., TP-0124)
-                new_hw_node = st.text_input("NEW Hardware Node ID (e.g. TP-XXXX)")
-                swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
-                
-                if st.form_submit_button("🔄 Execute Hardware Replacement"):
-                    if not new_hw_node: 
-                        st.error("New Node ID Required")
-                    else: 
-                        execute_replacement_transaction(client, data, new_hw_node, swap_date, target_registry)
-                        
-            # --- DECOMMISSION (Only for SensorPush/TP) ---
+            elif mgmt_action == "🔄 Hardware Swap":
+                new_hw_node = st.text_input("New Node ID")
+                swap_date = st.date_input("Effective Date", value=datetime.now().date())
+                if st.form_submit_button("🔄 Swap Hardware"):
+                    execute_replacement_transaction(client, data, new_hw_node, swap_date, target_registry)
+
             if not is_lord:
                 st.divider()
-                st.subheader("🏁 Site Decommission")
-                st.caption("Closes the project entry as 'Archived' and creates a new entry in 'Office'.")
-                
-                cd1, cd2, cd3 = st.columns(3)
-                d_date = cd1.date_input("Removal Date", value=datetime.now().date())
-                d_time = cd2.time_input("Removal Time", value=datetime.now().time())
-                d_stat = cd3.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
-                
-                # NEW: Input for where exactly it's going in the office
-                d_office_loc = st.text_input("Return to Office Location", value="Desk")
-                
-                if st.form_submit_button("🔚 Execute Decommission"):
-                    final_dt = datetime.combine(d_date, d_time)
-                    # IMPORTANT: Pass d_office_loc to your function
-                    execute_decommission_node(client, data, target_registry, final_dt, d_stat, d_office_loc)
-                    
-            # --- DECOMMISSION (Only for SensorPush/TP) ---
-            if not is_lord:
-                st.divider()
-                st.subheader("🏁 Site Decommission")
-                st.caption("Closes the project entry as 'Archived' and creates a new entry in 'Office'.")
-                
-                cd1, cd2, cd3 = st.columns(3)
-                d_date = cd1.date_input("Removal Date", value=datetime.now().date())
-                d_time = cd2.time_input("Removal Time", value=datetime.now().time())
-                d_stat = cd3.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
-                
-                if st.form_submit_button("🔚 Execute Decommission"):
-                    final_dt = datetime.combine(d_date, d_time)
-                    execute_decommission_node(client, data, target_registry, final_dt, d_stat)
-    else:
-        st.info("💡 Select a record in the table to manage its lifecycle.")
+                st.subheader("🏁 Decommission")
+                d_c1, d_c2, d_c3 = st.columns(3)
+                d_date = d_c1.date_input("Removal Date")
+                d_stat = d_c2.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
+                d_office_loc = d_c3.text_input("Office Storage Loc", value="Desk")
+                if st.form_submit_button("🔚 Send to Office"):
+                    execute_decommission_node(client, data, target_registry, d_date, d_stat, d_office_loc)
 
 def render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID):
     """Renders charts for old vs new hardware to verify telemetry before committing."""
