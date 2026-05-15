@@ -809,59 +809,68 @@ def render_sensor_edit_filters(reg_df):
 
 def render_edit_record_form(client, data, reg_df, proj_list, target_registry):
     st.divider()
-    with st.form("edit_entry_form"):
-        st.subheader(f"🛠️ Managing {data['NodeNum']}")
-        st.caption(f"S/N: {data['PhysicalID']} | Currently: {data['Project']} - {data['Location']}")
-        
-        # 1. Project Dropdown
-        # Allows moving a sensor from 'Office' to a specific Project ID
-        try:
-            p_idx = proj_list.index(data['Project'])
-        except ValueError:
-            p_idx = 0
-        new_proj = st.selectbox("Assign to Project", proj_list, index=p_idx)
-        
-        # 2. Location Dropdown
-        # Sourced from all known locations in the registry for that project
-        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
-        if "Ambient" not in existing_locs:
-            existing_locs.append("Ambient")
-            
-        try:
-            l_idx = existing_locs.index(data['Location'])
-        except ValueError:
-            l_idx = 0
-        new_loc = st.selectbox("Assign to Location", existing_locs, index=l_idx)
-        
-        # 3. Position Details
+    st.subheader(f"🛠️ Managing {data['NodeNum']}")
+    st.caption(f"Physical ID: {data['PhysicalID']} | Start Date: {data['Start_Date']}")
+
+    # 1. Project Selection (Outside form for instant reactivity)
+    try:
+        p_idx = proj_list.index(data['Project'])
+    except ValueError:
+        p_idx = 0
+    
+    # We use a unique key based on NodeNum to prevent StreamlitDuplicateElementId
+    new_proj = st.selectbox(
+        "Assign to Project", 
+        proj_list, 
+        index=p_idx, 
+        key=f"proj_sel_{data['NodeNum']}"
+    )
+
+    # 2. Dynamic Location Selection (Updates immediately when new_proj changes)
+    existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
+    
+    # Ensure standard options are available
+    if "Ambient" not in existing_locs:
+        existing_locs.insert(0, "Ambient")
+    if "Stock" not in existing_locs:
+        existing_locs.append("Stock")
+
+    try:
+        l_idx = existing_locs.index(data['Location'])
+    except ValueError:
+        l_idx = 0
+
+    new_loc = st.selectbox(
+        "Assign to Location", 
+        existing_locs, 
+        index=l_idx, 
+        key=f"loc_sel_{data['NodeNum']}"
+    )
+
+    # 3. Action Form for final submission
+    with st.form(key=f"edit_form_{data['NodeNum']}"):
         c1, c2 = st.columns(2)
         new_bank = c1.text_input("Bank", value=str(data.get('Bank', '')))
         new_depth = c2.number_input("Depth (ft)", value=float(data['Depth']) if pd.notnull(data['Depth']) else 0.0)
         
-        # 4. Status
         status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
         try:
             s_idx = status_list.index(data['SensorStatus'])
         except ValueError:
             s_idx = 0
         new_status = st.selectbox("Update Status", status_list, index=s_idx)
+
+        # Execution Buttons
+        cols = st.columns([1, 1, 1])
         
-        # Action Buttons
-        btn_cols = st.columns([1, 1, 1])
-        
-        # SAVE CHANGES
-        if btn_cols[0].form_submit_button("💾 Save & Assign"):
-            # Auto-set status to Active if assigned to a real project
+        if cols[0].form_submit_button("💾 Save Assignment"):
             final_status = "Active" if new_proj != "Office" and new_status == "Available" else new_status
             execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, final_status, target_registry)
 
-        # DECOMMISSION (Take off location)
-        if btn_cols[1].form_submit_button("🔚 Decommission Point"):
-            # Logic: Set End_Date to today and return sensor to 'Office' project
+        if cols[1].form_submit_button("🔚 Decommission"):
             execute_decommission_node(client, data, target_registry)
 
-        # DELETE (Remove typo)
-        if btn_cols[2].form_submit_button("🗑️ Delete Record", type="primary"):
+        if cols[2].form_submit_button("🗑️ Delete", type="primary"):
             execute_record_delete(client, data, target_registry)
 
 
