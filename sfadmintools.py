@@ -1479,26 +1479,29 @@ def process_curve_uploads(client, u_files, table_curves):
 # ===============================================================
 
 def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID):
-    """Main entry point for Data Management with refined approval statuses."""
-    st.header("🧨 Data Management (Approval & Flagging)")
-    st.info("""
-        **Status Definitions:**
-        - **TRUE**: Valid data visible to client.
-        - **BadData**: Sensor hardware/comms issues (Retained for engineering analysis).
-        - **Masked**: Valid hardware but invalid placement (e.g., Ambient temp in a Pipe).
-        - **Office**: Data recorded while hardware was unassigned.
-    """)
+    st.header("🧨 Data Management (Manual Rejections)")
+    
+    # Target the physical side-table
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
 
-    # 1. SCOPE & STATUS (Top Row)
     target_scope, new_status = render_management_controls()
     st.divider()
 
-    # 2. FILTERS (Middle Section)
     filters = render_management_filters(reg_df, selected_project, target_scope)
+    
+    # Build the WHERE clause (which targets NodeNum, timestamp, etc.)
+    where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
+    
+    # For rejections, we show how many points currently exist in the main data
+    # that match this filter to be moved into the rejection table.
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+    render_verification_step(client, where_str, telemetry_table)
+
+    render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table)
     
     # 3. SQL CONSTRUCTION
     # Note: We target the base table, not the view, for DML updates
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" 
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
     where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
     
     # 4. VERIFICATION STEP
@@ -1613,25 +1616,32 @@ def render_verification_step(client, where_str, target_table):
             st.error(f"Verification Query Failed: {e}")
 
 
-def render_execution_step(client, where_str, new_status, target_table):
-    """Final confirmation and execution of the specific status update."""
-    st.warning(f"Warning: You are about to set matching data points to status: **{new_status}**")
+def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
+    st.warning(f"Targeting status: **{new_status}**")
     
-    if st.checkbox("I confirm this status update is correct for engineering/client view."):
-        if st.button(f"🚀 Commit Status Change"):
-            update_sql = f"""
-                UPDATE `{target_table}`
-                SET ApprovalStatus = '{new_status}'
-                WHERE {where_str}
-            """
+    if st.checkbox("I confirm this change to the manual rejections table."):
+        if st.button(f"🚀 Execute Status Update"):
+            if new_status == "TRUE":
+                # "TRUE" means it's NOT rejected. Delete from the rejection table.
+                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
+            else:
+                # Flagging: Insert matching records from telemetry into the rejection table
+                sql = f"""
+                    INSERT INTO `{target_table}` (NodeNum, timestamp, temperature, Project, Location, ApprovalStatus)
+                    SELECT NodeNum, timestamp, temperature, Project, Location, '{new_status}'
+                    FROM `{telemetry_table}`
+                    WHERE {where_str}
+                """
+            
             try:
-                with st.spinner(f"Updating flags to {new_status}..."):
-                    job = client.query(update_sql)
+                with st.spinner("Processing rejection records..."):
+                    job = client.query(sql)
                     job.result()
-                st.success(f"Successfully updated {job.num_dml_affected_rows:,} records to '{new_status}'.")
+                st.success(f"Successfully processed {job.num_dml_affected_rows} records.")
                 st.balloons()
             except Exception as e:
-                st.error(f"Execution Failed: {e}")
+                st.error(f"Database Error: {e}")
+                st.code(sql)
 # ===============================================================
 # FINAL INTEGRATED EXECUTION BLOCK
 # ===============================================================
