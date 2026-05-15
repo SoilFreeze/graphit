@@ -1478,14 +1478,14 @@ def process_curve_uploads(client, u_files, table_curves):
 def render_verification_step(client, where_str, telemetry_table, rejections_table):
     """Queries BigQuery to show count and current status of data points."""
     
-    # 1. Initialize the variable so it exists regardless of button clicks
-    status_q = "" 
+    # 1. Initialize at the top so the variable exists in the local scope
+    status_q = "Query not yet generated." 
     
     if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
-        # 2. Apply aliasing to avoid "Ambiguous Column" errors
+        # 2. Hardening: Resolve ambiguity by aliasing columns to 't'
         aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
         
-        # 3. Define the query
+        # 3. Define the query inside the button click
         status_q = f"""
             SELECT 
                 t.NodeNum,
@@ -1499,22 +1499,25 @@ def render_verification_step(client, where_str, telemetry_table, rejections_tabl
         """
         
         try:
-            res = client.query(status_q).to_dataframe()
+            with st.spinner("Analyzing current database flags..."):
+                res = client.query(status_q).to_dataframe()
             
             if not res.empty:
                 st.subheader("📊 Current Data Profile")
+                st.info("The table below shows how many points are currently 'TRUE' vs. already flagged.")
+                
+                # Display the breakdown
                 st.dataframe(res, use_container_width=True, hide_index=True)
                 
                 total_points = res['Point_Count'].sum()
                 st.metric("Total Points in Selection", f"{total_points:,}")
             else:
-                st.warning("No data points found for this selection.")
+                st.warning("No data points found for this selection. Check your date range.")
                 
         except Exception as e:
             st.error(f"Verification Failed: {e}")
-            # Now status_q is guaranteed to be defined here for debugging
-            if status_q:
-                st.code(status_q, language="sql")
+            # status_q is now guaranteed to exist for this block:
+            st.code(status_q, language="sql")
 
 def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
     """Executes a MERGE to ensure existing flags are overwritten correctly."""
