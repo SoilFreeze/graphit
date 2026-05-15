@@ -525,24 +525,19 @@ def render_registry_health_check(client, target_registry):
             st.warning("⚠️ Found orphaned records (Missing Start Dates):")
             st.dataframe(health_df, use_container_width=True)
 
-def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry):
+def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
     """
-    Combined Correction: Updates all metadata, status, and PhysicalID 
-    for the current active deployment of a Node.
+    Combined Correction: Updates Metadata and Status.
+    Enforces 'On Project' instead of 'Active' or 'Online'.
     """
-    # 1. Sanitize Serial Number (PhysicalID)
-    # Strip non-numeric chars. If empty, we keep the current one or set to NULL.
-    clean_sn = re.sub(r'[^0-9]', '', str(new_sn))
-    sql_phys_id = clean_sn if clean_sn else "NULL"
+    # 1. Final check on status before SQL
+    clean_status = "On Project" if new_status in ["Active", "Online"] else new_status
     
-    # 2. Sanitize Depth
     if pd.isna(new_depth) or new_depth == 0.0:
         sql_depth = "NULL"
     else:
         sql_depth = f"{float(new_depth)}"
 
-    # 3. Construct SQL
-    # We identify the row by NodeNum + current active status (End_Date IS NULL)
     update_sql = f"""
         UPDATE `{target_registry}`
         SET 
@@ -550,8 +545,7 @@ def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_d
             Location = '{new_loc}', 
             Bank = '{new_bank}',
             Depth = {sql_depth},
-            SensorStatus = '{new_status}',
-            PhysicalID = {sql_phys_id}
+            SensorStatus = '{clean_status}'
         WHERE 
             NodeNum = '{data['NodeNum']}' 
             AND End_Date IS NULL
@@ -559,25 +553,41 @@ def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_d
     
     try:
         client.query(update_sql).result()
-        st.success(f"✅ Record for {data['NodeNum']} has been corrected.")
-        st.cache_data.clear() # Refresh the 'Find & Select' list
+        st.success(f"✅ Record corrected for {data['NodeNum']} with Status: {clean_status}")
+        st.cache_data.clear()
         time.sleep(1)
         st.rerun()
     except Exception as e:
-        st.error("Correction failed. Check your SQL syntax or connection.")
-        st.code(update_sql, language="sql")
+        st.error("Correction failed.")
+        st.code(update_sql)
         st.error(str(e))
 
 # ===============================================================
 # PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
 def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
-    """
-    All-in-one hardware lifecycle tool.
-    - Filters: Hierarchical Project/Location search with hardware-type toggles.
-    - Correction: Combined Metadata and Serial correction for active records.
-    - Decommission: Close site history as 'Archived' and move hardware to 'Office'.
-    """
+    # 1. Clean up Project List: Only projects currently in the registry + 'Office'
+    # We filter out any projects from the master list that don't have active sensors
+    active_projects = reg_df[reg_df['End_Date'].isna()]['Project'].unique().tolist()
+    filtered_proj_list = [p for p in proj_list if p in active_projects or p == 'Office']
+    
+    # 2. Status Mapping: Consolidate 'Online' and 'Active' into 'On Project'
+    # This ensures your UI and filters stay clean
+    status_map = {
+        'Online': 'On Project',
+        'Active': 'On Project',
+        'Available': 'Available',
+        'Diagnostic': 'Diagnostic',
+        'Dead': 'Dead',
+        'Archived': 'Archived'
+    }
+    
+    # Apply mapping to the working dataframe immediately
+    reg_df['SensorStatus'] = reg_df['SensorStatus'].map(status_map).fillna(reg_df['SensorStatus'])
+    
+    # The official status list for your dropdowns
+    final_status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
+    
     st.header("🛠️ Unified Node Manager")
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
     # ===============================================================
@@ -710,14 +720,15 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
 
         # Rule: Lord (CH) is always 'In Use'. SensorPush is selectable.
+        # Rule: Lord (CH) is always 'On Project'. Others use the new limited list.
         if is_lord:
-            new_status = "In Use"
-            c_m3.info("Status: **In Use** (Fixed Hardware)")
+            new_status = "On Project"
+            c_m3.info("Status: **On Project** (Fixed Hardware)")
         else:
-            status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
-            try: s_idx = status_list.index(data['SensorStatus'])
+            # Use the strict 5-status list
+            try: s_idx = final_status_options.index(data['SensorStatus'])
             except ValueError: s_idx = 0
-            new_status = c_m3.selectbox("Update Status", status_list, index=s_idx, key="m_stat")
+            new_status = c_m3.selectbox("Update Status", final_status_options, index=s_idx, key="m_stat")
 
         with st.form(key=f"mgmt_form_{node_id}"):
             c_f1, c_f2 = st.columns(2)
