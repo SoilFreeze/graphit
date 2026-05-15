@@ -1477,10 +1477,15 @@ def process_curve_uploads(client, u_files, table_curves):
 
 def render_verification_step(client, where_str, telemetry_table, rejections_table):
     """Queries BigQuery to show count and current status of data points."""
+    
+    # 1. Initialize the variable so it exists regardless of button clicks
+    status_q = "" 
+    
     if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
-        # Resolve ambiguity by aliasing columns to 't' (telemetry)
+        # 2. Apply aliasing to avoid "Ambiguous Column" errors
         aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
         
+        # 3. Define the query
         status_q = f"""
             SELECT 
                 t.NodeNum,
@@ -1492,16 +1497,24 @@ def render_verification_step(client, where_str, telemetry_table, rejections_tabl
             WHERE {aliased_where}
             GROUP BY t.NodeNum, current_status
         """
+        
         try:
             res = client.query(status_q).to_dataframe()
+            
             if not res.empty:
                 st.subheader("📊 Current Data Profile")
                 st.dataframe(res, use_container_width=True, hide_index=True)
-                st.metric("Total Points in Selection", f"{res['Point_Count'].sum():,}")
+                
+                total_points = res['Point_Count'].sum()
+                st.metric("Total Points in Selection", f"{total_points:,}")
             else:
                 st.warning("No data points found for this selection.")
+                
         except Exception as e:
             st.error(f"Verification Failed: {e}")
+            # Now status_q is guaranteed to be defined here for debugging
+            if status_q:
+                st.code(status_q, language="sql")
 
 def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
     """Executes a MERGE to ensure existing flags are overwritten correctly."""
