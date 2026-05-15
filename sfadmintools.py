@@ -778,9 +778,14 @@ def render_sensor_edit_page(client, reg_df, PROJECT_ID, DATASET_ID):
 
 
 def render_sensor_edit_filters(reg_df):
-    """Renders the filter sidebar/columns and returns the filtered dataframe."""
+    """
+    Modified filters to allow finding 'Available' (unassigned) sensors 
+    for assignment to a new location.
+    """
     st.subheader("🔍 Find & Select Record")
     
+    # Toggle to include unassigned stock
+    include_stock = st.checkbox("Include Available Stock (Unassigned)", value=True)
     show_archived = st.checkbox("Show Archived/Historical Data", value=False)
     
     col_f1, col_f2, col_f3, col_f4 = st.columns(4)
@@ -797,15 +802,18 @@ def render_sensor_edit_filters(reg_df):
         sel_loc = st.selectbox("Filter by Location", u_locs)
         
     with col_f4:
+        # Status filter defaults to show 'Available' if include_stock is checked
         u_status = ["All"] + sorted(reg_df['SensorStatus'].unique().tolist())
         sel_stat = st.selectbox("Filter by Status", u_status)
 
-    # Apply Logic
     df = reg_df.copy()
     
+    # Filtering Logic
     if not show_archived:
         df = df[df['End_Date'].isna()]
-        df = df[df['SensorStatus'] != "Archived"]
+        
+    if not include_stock and sel_proj != "Office":
+        df = df[df['Project'] != "Office"]
 
     if sel_proj != "All":
         df = df[df['Project'] == sel_proj]
@@ -820,14 +828,23 @@ def render_sensor_edit_filters(reg_df):
 
 
 def render_edit_record_form(client, data, target_registry):
-    """Renders the update/delete form for a specific registry record."""
+    """
+    Updated form to allow assigning a project and location to an unassigned sensor.
+    """
     st.divider()
     with st.form("edit_entry_form"):
         st.subheader(f"🛠️ Modifying {data['NodeNum']}")
-        st.caption(f"Entry ID: {data['PhysicalID']} | Started: {data['Start_Date']}")
+        st.caption(f"Current S/N: {data['PhysicalID']} | Current Project: {data['Project']}")
         
-        # Edit inputs
+        # New: Project Assignment (Source from proj_list or session_state)
+        # Assuming you want to be able to move a sensor to the active context
+        target_proj = st.text_input("Assign to Project", value=str(data['Project']))
         new_loc = st.text_input("Update Location", value=str(data['Location']))
+        
+        # Depth/Bank adjustments (Added for completeness)
+        c_p1, c_p2 = st.columns(2)
+        new_bank = c_p1.text_input("Bank", value=str(data.get('Bank', '')))
+        new_depth = c_p2.number_input("Depth", value=float(data['Depth']) if pd.notnull(data['Depth']) else 0.0)
         
         status_list = ["Active", "Available", "Archived", "Dead", "Diagnostic", "Moved", "Replaced"]
         try:
@@ -838,19 +855,29 @@ def render_edit_record_form(client, data, target_registry):
         new_status = st.selectbox("Update Status", status_list, index=current_stat_idx)
         
         c1, c2 = st.columns(2)
-        
         if c1.form_submit_button("💾 Save Changes"):
-            execute_record_update(client, data, new_loc, new_status, target_registry)
+            # If moving from 'Available' to a project, ensure status is 'Active'
+            if data['SensorStatus'] == 'Available' and target_proj != 'Office':
+                actual_status = 'Active'
+            else:
+                actual_status = new_status
+                
+            execute_record_update(client, data, target_proj, new_loc, new_bank, new_depth, actual_status, target_registry)
 
         if c2.form_submit_button("🗑️ DELETE RECORD", type="primary"):
             execute_record_delete(client, data, target_registry)
 
 
-def execute_record_update(client, data, new_loc, new_status, target_registry):
-    """Executes the BigQuery UPDATE for a specific record."""
+def execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
+    """
+    Performs the UPDATE in BigQuery, now including Project, Bank, and Depth.
+    """
     update_sql = f"""
         UPDATE `{target_registry}`
-        SET Location = '{new_loc}', 
+        SET Project = '{new_proj}',
+            Location = '{new_loc}', 
+            Bank = '{new_bank}',
+            Depth = {new_depth if new_depth != 0.0 else 'NULL'},
             SensorStatus = '{new_status}'
         WHERE NodeNum = '{data['NodeNum']}' 
           AND Start_Date = DATE('{data['Start_Date']}')
@@ -858,7 +885,7 @@ def execute_record_update(client, data, new_loc, new_status, target_registry):
     """
     try:
         client.query(update_sql).result()
-        st.success(f"Successfully updated {data['NodeNum']}")
+        st.success(f"Successfully updated {data['NodeNum']} and assigned to {new_proj}")
         time.sleep(1)
         st.rerun()
     except Exception as e:
