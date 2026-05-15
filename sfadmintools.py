@@ -850,7 +850,8 @@ def render_edit_record_form(client, data, reg_df, proj_list, target_registry):
     # 3. Action Form for final submission
     with st.form(key=f"edit_form_{data['NodeNum']}"):
         c1, c2 = st.columns(2)
-        new_bank = c1.text_input("Bank", value=str(data.get('Bank', '')))
+        # Use get() with an empty string default to avoid pulling other column data
+        new_bank = st.text_input("Bank", value=str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) else "")
         new_depth = c2.number_input("Depth (ft)", value=float(data['Depth']) if pd.notnull(data['Depth']) else 0.0)
         
         status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
@@ -876,26 +877,48 @@ def render_edit_record_form(client, data, reg_df, proj_list, target_registry):
 
 def execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
     """
-    Performs the UPDATE in BigQuery, now including Project, Bank, and Depth.
+    Sanitizes inputs to prevent 'nan' errors and updates the BigQuery registry.
     """
+    # 1. Handle NaN or Null for Strings (Location, Project, Bank, Status)
+    def clean_str(val):
+        if pd.isna(val) or str(val).lower() == 'nan':
+            return ""
+        return str(val).strip()
+
+    # 2. Handle NaN or Null for Numeric (Depth)
+    def clean_num(val):
+        if pd.isna(val) or str(val).lower() == 'nan':
+            return "NULL"
+        return float(val)
+
+    safe_proj = clean_str(new_proj)
+    safe_loc = clean_str(new_loc)
+    safe_bank = clean_str(new_bank)
+    safe_status = clean_str(new_status)
+    safe_depth = clean_num(new_depth)
+
+    # 3. Construct Query
     update_sql = f"""
         UPDATE `{target_registry}`
-        SET Project = '{new_proj}',
-            Location = '{new_loc}', 
-            Bank = '{new_bank}',
-            Depth = {new_depth if new_depth != 0.0 else 'NULL'},
-            SensorStatus = '{new_status}'
+        SET Project = '{safe_proj}',
+            Location = '{safe_loc}', 
+            Bank = '{safe_bank}',
+            Depth = {safe_depth},
+            SensorStatus = '{safe_status}'
         WHERE NodeNum = '{data['NodeNum']}' 
           AND Start_Date = DATE('{data['Start_Date']}')
           AND PhysicalID = {data['PhysicalID']}
     """
+    
     try:
         client.query(update_sql).result()
-        st.success(f"Successfully updated {data['NodeNum']} and assigned to {new_proj}")
+        st.success(f"✅ Successfully updated {data['NodeNum']}")
         time.sleep(1)
         st.rerun()
     except Exception as e:
-        st.error(f"Update failed: {e}")
+        # Debug the actual SQL if it fails again
+        st.error(f"Update failed. SQL Preview: {update_sql}")
+        st.error(f"Error Details: {e}")
 
 
 def execute_record_delete(client, data, target_registry):
