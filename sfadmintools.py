@@ -61,7 +61,7 @@ def render_sidebar():
         ],
         key="main_admin_nav"
     )
-    is_dev = st.sidebar.toggle("🧪 Use Registry Playground", value=True)
+    is_dev = st.sidebar.toggle("🧪 Use Registry Playground", value=False)
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
 
     # 1. Fetch Project List and Metadata
