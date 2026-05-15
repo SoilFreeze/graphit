@@ -851,45 +851,49 @@ def render_replacement_form(client, found_row, new_sn, target_registry):
                 execute_replacement_transaction(client, found_row, clean_sn, replace_date, target_registry)
 
 
-def execute_replacement_transaction(client, found_row, clean_sn, replace_date, target_registry):
-    """Performs the SQL transaction to close the old node record and open the new one."""
-    try:
-        date_str = replace_date.isoformat()
-        sql = f"""
+def execute_replacement_transaction(client, data, new_node_num, swap_date, target_registry):
+    """
+    Hardware Swap: Closes current NodeNum entry and starts a NEW one 
+    for a different NodeNum at the same location.
+    """
+    date_str = swap_date.isoformat()
+
+    sql = f"""
         BEGIN TRANSACTION;
         
-        -- 1. Close old assignment
-        UPDATE `{target_registry}` 
+        -- 1. Close the old hardware record
+        UPDATE `{target_registry}`
         SET End_Date = DATE('{date_str}'), 
-            SensorStatus = 'Replaced' 
-        WHERE NodeNum = '{found_row['NodeNum']}' 
-          AND Project = '{found_row['Project']}'
+            SensorStatus = 'Archived'
+        WHERE NodeNum = '{data['NodeNum']}' 
           AND End_Date IS NULL;
-        
-        -- 2. Open new assignment
-        INSERT INTO `{target_registry}` 
-        (NodeNum, PhysicalID, Project, Location, Bank, Depth, Start_Date, SensorStatus)
+
+        -- 2. Start the new hardware record at the same spot
+        INSERT INTO `{target_registry}` (
+            NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date
+        )
         VALUES (
-            '{found_row['NodeNum']}', 
-            SAFE_CAST('{clean_sn}' AS FLOAT64), 
-            '{found_row['Project']}', 
-            '{found_row['Location']}', 
-            '{found_row.get('Bank', '')}', 
-            {float(found_row['Depth']) if pd.notnull(found_row['Depth']) else 'NULL'}, 
-            DATE('{date_str}'), 
-            'Active'
+            '{new_node_num}', 
+            '{data['Project']}', 
+            '{data['Location']}', 
+            '{data.get('Bank', '')}', 
+            {data.get('Depth', 'NULL')}, 
+            'Active', 
+            DATE('{date_str}')
         );
         
         COMMIT;
-        """
+    """
+    try:
         client.query(sql).result()
-        st.success(f"Successfully replaced {found_row['NodeNum']} with S/N {clean_sn}")
-        st.balloons()
-        time.sleep(1.5)
+        st.success(f"🔄 Swapped {data['NodeNum']} for {new_node_num}")
+        st.cache_data.clear()
+        time.sleep(1)
         st.rerun()
-        
     except Exception as e:
-        st.error(f"Hardware Replacement Failed: {e}")
+        st.error("Swap Transaction Failed")
+        st.code(sql, language="sql")
+        st.error(str(e))
 
 # ===============================================================
 # PAGE: SENSOR SWITCH (Correction Logic)
