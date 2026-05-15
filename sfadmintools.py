@@ -1632,26 +1632,32 @@ def render_verification_step(client, where_str, target_table):
 def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
     st.warning(f"Targeting status: **{new_status}**")
     
-    if st.checkbox("I confirm this change to the manual rejections table."):
-        if st.button(f"🚀 Execute Status Update"):
+    if st.checkbox("I confirm this change to the manual rejections table.", key="confirm_rejection_check"):
+        if st.button(f"🚀 Execute Status Update", key="execute_rejection_btn"):
+            
             if new_status == "TRUE":
-                # "TRUE" means it's NOT rejected. Delete from the rejection table.
+                # To 'Approve' data, we remove it from the rejections table
                 sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
             else:
-                # Flagging: Insert matching records from telemetry into the rejection table
+                # To 'Flag' data, we insert the Node and Timestamp into the rejections table
+                # We map your status choice to the 'approve' column
                 sql = f"""
-                    INSERT INTO `{target_table}` (NodeNum, timestamp, temperature, Project, Location, ApprovalStatus)
-                    SELECT NodeNum, timestamp, temperature, Project, Location, '{new_status}'
+                    INSERT INTO `{target_table}` (NodeNum, timestamp, approve)
+                    SELECT NodeNum, timestamp, '{new_status}'
                     FROM `{telemetry_table}`
                     WHERE {where_str}
                 """
             
             try:
-                with st.spinner("Processing rejection records..."):
+                with st.spinner(f"Updating records to {new_status}..."):
                     job = client.query(sql)
                     job.result()
-                st.success(f"Successfully processed {job.num_dml_affected_rows} records.")
+                
+                # Feedback on how many rows were affected
+                affected = job.num_dml_affected_rows if job.num_dml_affected_rows is not None else 0
+                st.success(f"Successfully processed {affected:,} records.")
                 st.balloons()
+                
             except Exception as e:
                 st.error(f"Database Error: {e}")
                 st.code(sql)
