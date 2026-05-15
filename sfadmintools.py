@@ -1081,47 +1081,59 @@ def execute_record_delete(client, data, target_registry):
 
 def execute_decommission_node(client, data, target_registry):
     """
-    Closes current deployment and returns hardware to 'Office' stock.
-    Handles 'nan' safety for the transaction.
+    Robust Decommission: Closes current record and forces arrival in Office.
     """
     today = datetime.now().date().isoformat()
     
-    # 1. Sanitize PhysicalID for both the WHERE and the INSERT
+    # 1. Sanitize the PhysicalID (The usual suspect for 'nan' errors)
     raw_phys_id = data.get('PhysicalID')
     if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
         phys_id_val = "NULL"
-        phys_id_where = "PhysicalID IS NULL"
+        phys_id_match = "PhysicalID IS NULL"
     else:
-        phys_id_val = f"{raw_phys_id}"
-        phys_id_where = f"PhysicalID = {raw_phys_id}"
+        phys_id_val = f"{int(float(raw_phys_id))}" # Ensure it's an integer string
+        phys_id_match = f"PhysicalID = {phys_id_val}"
 
     # 2. Transaction Logic
-    # Note: We use f-strings carefully to ensure NULL keywords are passed, not 'nan'
+    # We use a more flexible WHERE clause to ensure we catch the record
     sql = f"""
         BEGIN TRANSACTION;
-        -- Step A: Close the current assignment
+        
+        -- A. Close the active record at the site
         UPDATE `{target_registry}`
         SET End_Date = DATE('{today}'), 
-            SensorStatus = 'Removed'
+            SensorStatus = 'Decommissioned'
         WHERE NodeNum = '{data['NodeNum']}' 
-          AND Start_Date = DATE('{data['Start_Date']}')
-          AND {phys_id_where};
+          AND {phys_id_match}
+          AND End_Date IS NULL; -- Ensures we only close the CURRENT record
 
-        -- Step B: Re-insert into Office Stock
-        INSERT INTO `{target_registry}` (NodeNum, PhysicalID, Project, Location, SensorStatus, Start_Date, Depth)
-        VALUES ('{data['NodeNum']}', {phys_id_val}, 'Office', 'Stock', 'Available', DATE('{today}'), NULL);
+        -- B. Create the NEW record in Office Stock
+        INSERT INTO `{target_registry}` (
+            NodeNum, PhysicalID, Project, Location, Bank, Depth, SensorStatus, Start_Date
+        )
+        VALUES (
+            '{data['NodeNum']}', 
+            {phys_id_val}, 
+            'Office', 
+            'Stock', 
+            NULL, 
+            NULL, 
+            'Available', 
+            DATE('{today}')
+        );
+        
         COMMIT;
     """
     
     try:
         client.query(sql).result()
-        st.success(f"✅ Decommissioned {data['NodeNum']}. Hardware is now 'Available' in Office.")
-        time.sleep(1.5)
+        st.success(f"✅ Success! {data['NodeNum']} moved to Office Stock.")
+        time.sleep(1)
         st.rerun()
     except Exception as e:
-        st.error("Decommission Transaction Failed")
+        st.error("Transaction Error")
         st.code(sql, language="sql")
-        st.error(f"Error: {e}")
+        st.error(f"Details: {e}")
 # ===============================================================
 # PAGE: DATA RECOVERY (SensorPush API Bridge)
 # ===============================================================
