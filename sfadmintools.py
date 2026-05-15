@@ -1498,7 +1498,7 @@ def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DA
     
     # 3. SQL CONSTRUCTION
     # Note: We target the base table, not the view, for DML updates
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data" 
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" 
     where_str = build_management_where_clause(selected_project, target_scope, filters)
     
     # 4. VERIFICATION STEP
