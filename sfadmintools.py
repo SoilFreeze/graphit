@@ -307,7 +307,65 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # ===============================================================
 # PAGE: SENSOR STATUS (Modular Functions)
 # ===============================================================
+def render_node_selector(reg_df, proj_list):
+    """
+    Renders a searchable table of nodes. 
+    Returns the data of the selected row for use in other tools.
+    """
+    st.subheader("🎯 Node Selection")
+    
+    # 1. Filters for the table
+    c1, c2 = st.columns(2)
+    with c1:
+        f_proj = st.selectbox("Filter by Project", ["All"] + proj_list)
+    with c2:
+        search_term = st.text_input("Search by Node ID or Location", "")
 
+    # 2. Apply Filtering
+    display_df = reg_df.copy()
+    if f_proj != "All":
+        display_df = display_df[display_df['Project'] == f_proj]
+    if search_term:
+        display_df = display_df[
+            display_df['NodeNum'].str.contains(search_term, case=False, na=False) | 
+            display_df['Location'].str.contains(search_term, case=False, na=False)
+        ]
+
+    # 3. Render Data Editor with selection enabled
+    # We use column_config to make it look clean
+    selected_node = st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single_row"
+    )
+
+    # 4. Return the selected row data
+    if selected_node and len(selected_node.selection.rows) > 0:
+        idx = selected_node.selection.rows[0]
+        return display_df.iloc[idx]
+    
+    return None
+
+
+def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
+    """
+    Handles the Edit/Swap/Decommission actions once a node is selected.
+    """
+    node_id = selected_node_data['NodeNum']
+    curr_proj = selected_node_data['Project']
+    curr_loc = selected_node_data['Location']
+
+    st.success(f"Selected: **{node_id}** at {curr_loc} ({curr_proj})")
+    
+    tabs = st.tabs(["📝 Quick Edit", "🔄 Swap Sensor", "🚫 Decommission"])
+    
+    with tabs[0]:
+        st.write("Update location or basic metadata for this node.")
+        # Add your Edit Form logic here...
+
+    # ... rest of your action logic ...
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Enhanced Sensor Status: Peer Trend Analysis and Performance Scoring.
