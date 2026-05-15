@@ -1889,24 +1889,30 @@ def render_execution_step(client, where_str, mode, PROJECT_ID, DATASET_ID):
                 st.error(f"Execution Failed: {e}")
 
 # ===============================================================
-# FINAL EXECUTION BLOCK
+# FINAL INTEGRATED EXECUTION BLOCK
 # ===============================================================
 
 def main():
     """
-    This replaces the loose 'if admin_page' logic.
-    It calls the sidebar, gets the variables, and routes to functions.
+    Unified entry point. Routes to specific tools based on sidebar selection.
     """
     # 1. Initialize Sidebar and get context
-    # This defines the variables that were causing the NameError
+    # Ensure render_sidebar returns these 4 variables
     admin_page, target_registry, selected_project, proj_list = render_sidebar()
     
-    # 2. Get Unit Preferences
+    # 2. Get Unit Preferences & BigQuery Pathing
     unit_mode, unit_label = get_unit_labels()
     display_tz = "America/Los_Angeles"
     
-    # 3. Load Registry Data for the pages that need it
+    # Constant IDs used across functions
+    # Make sure PROJECT_ID and DATASET_ID are defined globally or here
+    # PROJECT_ID = "sensorpush-export"
+    # DATASET_ID = "Temperature"
+    
+    # 3. Load Registry Data
     reg_df = load_registry_data(target_registry)
+
+    # --- ROUTING LOGIC ---
 
     if admin_page == "📡 Setup Node Tool":
         render_project_status_dashboard(client, selected_project, unit_label)
@@ -1914,8 +1920,18 @@ def main():
         render_hardware_integrity_table(client, selected_project, unit_mode, unit_label)
 
     elif admin_page == "🛠️ Node Manager":
-        render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID)
-    
+        st.header("🛠️ Unified Node Manager")
+        
+        # 1. Run the NEW Selector (Handles the table and grouping rules)
+        selected_node_data = render_node_selector(reg_df, proj_list)
+        
+        # 2. Run the NEW Action Manager (Handles Forms/SQL)
+        if selected_node_data is not None:
+            render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry)
+        else:
+            st.divider()
+            st.info("💡 **Tip:** Select a record in the table above to Edit, Swap, or Decommission that node.")
+
     elif admin_page == "🔍 Sensor Status":
         render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
         
@@ -1927,7 +1943,6 @@ def main():
         render_sensor_switch_page(client, PROJECT_ID, DATASET_ID)
 
     elif admin_page == "📝 Sensor Edit":
-        # FIXED: Added proj_list to the arguments
         render_sensor_edit_page(client, reg_df, proj_list, PROJECT_ID, DATASET_ID)
 
     elif admin_page == "📡 Data Recovery":
@@ -1944,22 +1959,9 @@ def main():
 
     elif admin_page == "🧨 Data Management":
         render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID)
-        
+
 # ===============================================================
 # EXECUTION ENTRY POINT
 # ===============================================================
-
-def main():
-    # ... setup client, reg_df, etc. ...
-    
-    st.header("🛠️ Unified Node Manager")
-    
-    # Run the selector
-    selected_node_data = render_node_selector(reg_df, proj_list)
-    
-    # If a node was clicked, run the action manager
-    if selected_node_data is not None:
-        target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-        render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry)
-    else:
-        st.info("💡 Select a record in the table above to manage its lifecycle.")
+if __name__ == "__main__":
+    main()
