@@ -734,11 +734,16 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
 
             elif mgmt_action == "🔄 Hardware Swap (Replace)":
                 st.error("Swap Mode: Ends current record and starts NEW entry for new hardware.")
-                new_hw_sn = st.text_input("NEW Hardware Physical ID (Serial #)")
+                
+                # We only care about the Node ID (e.g., TP-0124)
+                new_hw_node = st.text_input("NEW Hardware Node ID (e.g. TP-XXXX)")
                 swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
+                
                 if st.form_submit_button("🔄 Execute Hardware Replacement"):
-                    if not new_hw_sn: st.error("New Serial Required")
-                    else: execute_replacement_transaction(client, data, new_hw_sn, swap_date, target_registry)
+                    if not new_hw_node: 
+                        st.error("New Node ID Required")
+                    else: 
+                        execute_replacement_transaction(client, data, new_hw_node, swap_date, target_registry)
 
             # --- DECOMMISSION (Only for SensorPush/TP) ---
             if not is_lord:
