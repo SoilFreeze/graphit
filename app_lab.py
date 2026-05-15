@@ -58,17 +58,21 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
 
+    # 1. Determine if this is an "Office" context
+    is_office_context = "OFFICE" in str(project_id).upper()
+
     if view_mode == "client":
-        # Clients only see data marked as approved (True/1)
         filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
         visibility_sql = "AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)"
     else:
-        # Engineering/Office View logic:
-        # 1. Strictly exclude 'BadData'
-        # 2. Keep NULL, 'TRUE', and 'MASKED'
-        filter_sql = """
-            AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
-        """
+        # 2. Apply Visibility Logic
+        if is_office_context:
+            # Office sees everything except BadData
+            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
+        else:
+            # Standard Engineering View logic
+            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
+        
         visibility_sql = ""
 
     query = f"""
@@ -389,6 +393,36 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
     y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
     
     return x_times, y_temps
+
+def run_office_auto_assignment():
+    """
+    Surgically assigns 'OFFICE' status to all telemetry 
+    where the node is currently assigned to the Office project.
+    """
+    client = get_bq_client()
+    
+    # This SQL finds all raw data for nodes currently assigned to 'Office' 
+    # in the registry and ensures they are marked as 'OFFICE' in the override table.
+    sql = f"""
+        MERGE `{OVERRIDE_TABLE}` T
+        USING (
+            SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
+            FROM (
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                UNION ALL 
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
+            WHERE n.Project LIKE '%OFFICE%' 
+        ) S ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
+        WHEN MATCHED THEN UPDATE SET approve = 'OFFICE'
+        WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'OFFICE')
+    """
+    try:
+        client.query(sql).result()
+        st.success("✅ Successfully assigned 'OFFICE' status to all relevant telemetry.")
+    except Exception as e:
+        st.error(f"Auto-assignment failed: {e}")
 
 ##################
 # High temp mask #
