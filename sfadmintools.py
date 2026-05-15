@@ -527,140 +527,145 @@ def render_registry_health_check(client, target_registry):
 # ===============================================================
 
 def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
+    """
+    All-in-one tool for Registry Management.
+    1. Filter & Select (Hierarchical)
+    2. Action Manager (Edit, Switch, Replace)
+    3. Decommission & Delete
+    """
     st.header("🛠️ Unified Node Manager")
-    st.info("Select a sensor to Edit Metadata, Switch Serial Numbers, or Replace Hardware.")
-
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
 
-    # 1. SHARED SELECTION INTERFACE
-    filtered_df = render_sensor_edit_filters(reg_df) # Uses your existing filter logic
+    # ===============================================================
+    # 1. FIND & SELECT RECORD (Hierarchical Search)
+    # ===============================================================
+    st.subheader("🔍 Find & Select Record")
     
+    # Checkbox for archived data (Defaulted to OFF)
+    show_archived = st.checkbox("Show Archived/Historical Data", value=False)
+    
+    # Initial Filter based on Archival Toggle
+    if not show_archived:
+        # Filter for active sensors (End_Date is null)
+        df_working = reg_df[reg_df['End_Date'].isna()].copy()
+    else:
+        df_working = reg_df.copy()
+
+    f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+
+    with f_col1:
+        u_projects = sorted(df_working['Project'].unique().tolist())
+        sel_proj = st.selectbox("Search by Project", ["All"] + u_projects)
+
+    with f_col2:
+        # Hierarchical: Locations update based on selected Project
+        if sel_proj != "All":
+            u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist())
+        else:
+            u_locs = sorted(df_working['Location'].unique().tolist())
+        sel_loc = st.selectbox("Search by Location", ["All"] + u_locs)
+
+    with f_col3:
+        u_status = sorted(df_working['SensorStatus'].unique().tolist())
+        sel_stat = st.selectbox("Filter by Status", ["All"] + u_status)
+
+    with f_col4:
+        search_node = st.text_input("Search Node ID (e.g. TP-0001)").strip().upper()
+
+    # Apply Final Filters
+    if sel_proj != "All": df_working = df_working[df_working['Project'] == sel_proj]
+    if sel_loc != "All": df_working = df_working[df_working['Location'] == sel_loc]
+    if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
+    if search_node: df_working = df_working[df_working['NodeNum'].str.upper().str.contains(search_node)]
+
+    # Display Results Table
+    st.write(f"Showing **{len(df_working)}** matching records.")
     selected_rows = st.dataframe(
-        filtered_df,
+        df_working,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row"
     )
 
+    # ===============================================================
+    # 2. ACTION MANAGER (Appears only on selection)
+    # ===============================================================
     if len(selected_rows.selection.rows) > 0:
         row_index = selected_rows.selection.rows[0]
-        data = filtered_df.iloc[row_index]
+        data = df_working.iloc[row_index]
         
         st.divider()
-        # 2. ACTION SELECTOR
-        # This determines which logic block is active
+        st.subheader(f"⚡ Action Manager: {data['NodeNum']}")
+        
+        # Determine current state for prepopulation
+        curr_phys_id = str(data['PhysicalID']) if pd.notnull(data['PhysicalID']) else ""
+        curr_bank = str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) and str(data.get('Bank')).lower() != 'nan' else ""
+        curr_depth = float(data['Depth']) if pd.notnull(data['Depth']) and str(data['Depth']).lower() != 'nan' else 0.0
+
+        # ACTION SELECTOR
         mgmt_action = st.radio(
-            "Select Management Action", 
-            ["📝 Edit Metadata", "🩹 Serial Correction (Switch)", "🔄 Physical Hardware Swap (Replace)"],
+            "Management Intent", 
+            ["📝 Edit Metadata", "🩹 Serial Correction (Switch)", "🔄 Hardware Swap (Replace)"],
             horizontal=True
         )
 
-        # Common inputs for all actions
-        with st.container():
-            # Handle NaN values for display
-            curr_bank = str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) else ""
-            curr_depth = float(data['Depth']) if pd.notnull(data['Depth']) else 0.0
-            
-            # --- SHARED INPUTS (Metadata) ---
-            c1, c2, c3 = st.columns(3)
-            new_proj = c1.selectbox("Project", proj_list, index=proj_list.index(data['Project']) if data['Project'] in proj_list else 0)
-            
-            # Dynamic Location Logic
-            existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
-            if "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
-            new_loc = c2.selectbox("Location", existing_locs, index=existing_locs.index(data['Location']) if data['Location'] in existing_locs else 0)
-            
-            status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
-            new_status = c3.selectbox("Status", status_list, index=status_list.index(data['SensorStatus']) if data['SensorStatus'] in status_list else 0)
+        # Reactive Selectors (Outside form so Location updates immediately if Project changes)
+        c_m1, c_m2, c_m3 = st.columns(3)
+        
+        # Project Selector
+        try: p_idx = proj_list.index(data['Project'])
+        except ValueError: p_idx = 0
+        new_proj = c_m1.selectbox("Assign to Project", proj_list, index=p_idx, key="m_proj")
 
-            c4, c5 = st.columns(2)
-            new_bank = c4.text_input("Bank / Identifier", value=curr_bank)
-            new_depth = c5.number_input("Depth (ft)", value=curr_depth)
+        # Location Selector (Hierarchical based on new_proj)
+        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
+        if "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
+        if "Stock" not in existing_locs: existing_locs.append("Stock")
+        
+        try: l_idx = existing_locs.index(data['Location'])
+        except ValueError: l_idx = 0
+        new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
 
-            # --- ACTION SPECIFIC LOGIC ---
+        status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
+        try: s_idx = status_list.index(data['SensorStatus'])
+        except ValueError: s_idx = 0
+        new_status = c_m3.selectbox("Update Status", status_list, index=s_idx, key="m_stat")
+
+        # --- SUBMISSION FORM ---
+        with st.form(key=f"mgmt_form_{data['NodeNum']}"):
+            c_f1, c_f2 = st.columns(2)
+            new_bank = c_f1.text_input("Bank Identifier", value=curr_bank)
+            new_depth = c_f2.number_input("Depth (ft)", value=curr_depth)
+
+            # Execution logic based on Action
             if mgmt_action == "📝 Edit Metadata":
-                st.caption("Standard update: Changes metadata for the existing record.")
-                if st.button("💾 Save Metadata Updates", use_container_width=True):
+                if st.form_submit_button("💾 Save Metadata Updates"):
                     execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
 
             elif mgmt_action == "🩹 Serial Correction (Switch)":
-                st.warning("Correction Mode: Use this to fix a typo in the Physical ID Serial.")
-                new_sn = st.text_input("Corrected Physical ID (Serial #)", value=str(data['PhysicalID']))
-                if st.button("🚀 Apply Serial Correction", use_container_width=True):
-                    # We reuse execute_record_update but pass the new Serial ID
-                    # We modify the update function slightly to accept PhysicalID
+                st.warning("Correction Mode: Overwrites current record Serial Number.")
+                new_sn = st.text_input("Corrected Physical ID (Serial #)", value=curr_phys_id)
+                if st.form_submit_button("🚀 Apply Serial Correction"):
                     execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry)
 
-            elif mgmt_action == "🔄 Physical Hardware Swap (Replace)":
-                st.error("Swap Mode: This ends the current record and starts a new one for the new serial.")
+            elif mgmt_action == "🔄 Hardware Swap (Replace)":
+                st.error("Replace Mode: Ends current record and starts NEW record for new serial.")
                 new_sn = st.text_input("NEW Hardware Physical ID (Serial #)")
                 swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
-                
-                if st.button("🔄 Execute Hardware Replacement", type="primary", use_container_width=True):
-                    if not new_sn:
-                        st.error("Please enter the NEW Serial Number.")
-                    else:
-                        execute_replacement_transaction(client, data, new_sn, swap_date, target_registry)
+                if st.form_submit_button("🔄 Execute Hardware Replacement"):
+                    if not new_sn: st.error("New Serial Required")
+                    else: execute_replacement_transaction(client, data, new_sn, swap_date, target_registry)
 
+            # Footer Actions
+            st.divider()
+            f_col_a, f_col_b = st.columns(2)
+            if f_col_a.form_submit_button("🔚 Decommission Node (Return to Stock)"):
+                execute_decommission_node(client, data, target_registry)
+            if f_col_b.form_submit_button("🗑️ Permanent Delete Record", type="primary"):
+                execute_record_delete(client, data, target_registry)
     else:
-        st.info("💡 Select a sensor in the table above to manage its lifecycle.")
-
-def execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry):
-    """Updates metadata AND changes the PhysicalID (Switch logic)."""
-    clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
-    
-    # Handle the WHERE clause for PhysicalID safely as discussed
-    raw_phys_id = data.get('PhysicalID')
-    phys_id_where = "PhysicalID IS NULL" if (pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan') else f"PhysicalID = {raw_phys_id}"
-
-    sql = f"""
-        UPDATE `{target_registry}`
-        SET 
-            Project = '{new_proj}',
-            Location = '{new_loc}', 
-            Bank = '{new_bank}',
-            Depth = {new_depth},
-            SensorStatus = '{new_status}',
-            PhysicalID = {clean_sn}
-        WHERE NodeNum = '{data['NodeNum']}' 
-          AND Start_Date = DATE('{data['Start_Date']}')
-          AND {phys_id_where}
-    """
-    try:
-        client.query(sql).result()
-        st.success(f"✅ Serial corrected to {clean_sn}")
-        time.sleep(1)
-        st.rerun()
-    except Exception as e:
-        st.error(f"Switch Correction Failed: {e}")
-
-def render_sensor_replace_page(client, PROJECT_ID, DATASET_ID):
-    """Main entry point for the Sensor Replace management tool."""
-    st.header("🔄 Sensor Replace")
-    st.info("Use this tool when physically swapping out hardware on-site while maintaining the same Node ID.")
-    
-    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-    
-    # 1. LOAD ACTIVE INVENTORY
-    active_reg = client.query(f"SELECT * FROM `{target_registry}` WHERE End_Date IS NULL").to_dataframe()
-
-    # 2. SEARCH & IDENTIFY
-    search_node = st.text_input("🔍 Search Node ID or Current Serial", placeholder="e.g., TP-0001 or 12345.67")
-    found_row = None
-    
-    if search_node:
-        found_row = identify_active_node(active_reg, search_node)
-
-    if found_row is not None:
-        st.divider()
-        st.subheader(f"⚡ Verification: {found_row['NodeNum']}")
-        
-        # 3. VISUAL OVERLAP CHECK
-        new_sn = render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID)
-
-        # 4. FINAL TRANSACTION FORM
-        render_replacement_form(client, found_row, new_sn, target_registry)
+        st.info("💡 Select a row in the table above to reveal the Action Manager.")
 
 
 def identify_active_node(active_reg, search_term):
