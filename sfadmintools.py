@@ -778,47 +778,25 @@ def render_sensor_edit_page(client, reg_df, PROJECT_ID, DATASET_ID):
 
 
 def render_sensor_edit_filters(reg_df):
-    """
-    Modified filters to allow finding 'Available' (unassigned) sensors 
-    for assignment to a new location.
-    """
     st.subheader("🔍 Find & Select Record")
     
-    # Toggle to include unassigned stock
-    include_stock = st.checkbox("Include Available Stock (Unassigned)", value=True)
-    show_archived = st.checkbox("Show Archived/Historical Data", value=False)
-    
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    
+    col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
-        u_projects = ["All"] + sorted(reg_df['Project'].unique().tolist())
-        sel_proj = st.selectbox("Filter by Project", u_projects)
+        # Include 'Office' so unassigned sensors can be found
+        u_projects = sorted(reg_df['Project'].unique().tolist())
+        sel_proj = st.selectbox("Filter by Project", ["All"] + u_projects)
         
     with col_f2:
-        search_node = st.text_input("Search Node ID", "").strip().upper()
+        search_node = st.text_input("Search Node ID").strip().upper()
 
     with col_f3:
-        u_locs = ["All"] + sorted(reg_df['Location'].unique().tolist())
-        sel_loc = st.selectbox("Filter by Location", u_locs)
-        
-    with col_f4:
-        # Status filter defaults to show 'Available' if include_stock is checked
-        u_status = ["All"] + sorted(reg_df['SensorStatus'].unique().tolist())
-        sel_stat = st.selectbox("Filter by Status", u_status)
+        u_status = sorted(reg_df['SensorStatus'].unique().tolist())
+        sel_stat = st.selectbox("Filter by Status", ["All"] + u_status)
 
-    df = reg_df.copy()
-    
-    # Filtering Logic
-    if not show_archived:
-        df = df[df['End_Date'].isna()]
-        
-    if not include_stock and sel_proj != "Office":
-        df = df[df['Project'] != "Office"]
+    df = reg_df[reg_df['End_Date'].isna()].copy()
 
     if sel_proj != "All":
         df = df[df['Project'] == sel_proj]
-    if sel_loc != "All":
-        df = df[df['Location'] == sel_loc]
     if sel_stat != "All":
         df = df[df['SensorStatus'] == sel_stat]
     if search_node:
@@ -827,44 +805,61 @@ def render_sensor_edit_filters(reg_df):
     return df
 
 
-def render_edit_record_form(client, data, target_registry):
-    """
-    Updated form to allow assigning a project and location to an unassigned sensor.
-    """
+def render_edit_record_form(client, data, reg_df, proj_list, target_registry):
     st.divider()
     with st.form("edit_entry_form"):
-        st.subheader(f"🛠️ Modifying {data['NodeNum']}")
-        st.caption(f"Current S/N: {data['PhysicalID']} | Current Project: {data['Project']}")
+        st.subheader(f"🛠️ Managing {data['NodeNum']}")
+        st.caption(f"S/N: {data['PhysicalID']} | Currently: {data['Project']} - {data['Location']}")
         
-        # New: Project Assignment (Source from proj_list or session_state)
-        # Assuming you want to be able to move a sensor to the active context
-        target_proj = st.text_input("Assign to Project", value=str(data['Project']))
-        new_loc = st.text_input("Update Location", value=str(data['Location']))
-        
-        # Depth/Bank adjustments (Added for completeness)
-        c_p1, c_p2 = st.columns(2)
-        new_bank = c_p1.text_input("Bank", value=str(data.get('Bank', '')))
-        new_depth = c_p2.number_input("Depth", value=float(data['Depth']) if pd.notnull(data['Depth']) else 0.0)
-        
-        status_list = ["Active", "Available", "Archived", "Dead", "Diagnostic", "Moved", "Replaced"]
+        # 1. Project Dropdown
+        # Allows moving a sensor from 'Office' to a specific Project ID
         try:
-            current_stat_idx = status_list.index(data['SensorStatus'])
+            p_idx = proj_list.index(data['Project'])
         except ValueError:
-            current_stat_idx = 0
-            
-        new_status = st.selectbox("Update Status", status_list, index=current_stat_idx)
+            p_idx = 0
+        new_proj = st.selectbox("Assign to Project", proj_list, index=p_idx)
         
+        # 2. Location Dropdown
+        # Sourced from all known locations in the registry for that project
+        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
+        if "Ambient" not in existing_locs:
+            existing_locs.append("Ambient")
+            
+        try:
+            l_idx = existing_locs.index(data['Location'])
+        except ValueError:
+            l_idx = 0
+        new_loc = st.selectbox("Assign to Location", existing_locs, index=l_idx)
+        
+        # 3. Position Details
         c1, c2 = st.columns(2)
-        if c1.form_submit_button("💾 Save Changes"):
-            # If moving from 'Available' to a project, ensure status is 'Active'
-            if data['SensorStatus'] == 'Available' and target_proj != 'Office':
-                actual_status = 'Active'
-            else:
-                actual_status = new_status
-                
-            execute_record_update(client, data, target_proj, new_loc, new_bank, new_depth, actual_status, target_registry)
+        new_bank = c1.text_input("Bank", value=str(data.get('Bank', '')))
+        new_depth = c2.number_input("Depth (ft)", value=float(data['Depth']) if pd.notnull(data['Depth']) else 0.0)
+        
+        # 4. Status
+        status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
+        try:
+            s_idx = status_list.index(data['SensorStatus'])
+        except ValueError:
+            s_idx = 0
+        new_status = st.selectbox("Update Status", status_list, index=s_idx)
+        
+        # Action Buttons
+        btn_cols = st.columns([1, 1, 1])
+        
+        # SAVE CHANGES
+        if btn_cols[0].form_submit_button("💾 Save & Assign"):
+            # Auto-set status to Active if assigned to a real project
+            final_status = "Active" if new_proj != "Office" and new_status == "Available" else new_status
+            execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, final_status, target_registry)
 
-        if c2.form_submit_button("🗑️ DELETE RECORD", type="primary"):
+        # DECOMMISSION (Take off location)
+        if btn_cols[1].form_submit_button("🔚 Decommission Point"):
+            # Logic: Set End_Date to today and return sensor to 'Office' project
+            execute_decommission_node(client, data, target_registry)
+
+        # DELETE (Remove typo)
+        if btn_cols[2].form_submit_button("🗑️ Delete Record", type="primary"):
             execute_record_delete(client, data, target_registry)
 
 
@@ -907,6 +902,34 @@ def execute_record_delete(client, data, target_registry):
         st.rerun()
     except Exception as e:
         st.error(f"Deletion failed: {e}")
+
+def execute_decommission_node(client, data, target_registry):
+    """
+    Closes the current deployment record and returns the hardware to 'Office' stock.
+    """
+    today = datetime.now().date().isoformat()
+    sql = f"""
+        BEGIN TRANSACTION;
+        -- 1. Close current assignment
+        UPDATE `{target_registry}`
+        SET End_Date = DATE('{today}'), 
+            SensorStatus = 'Removed'
+        WHERE NodeNum = '{data['NodeNum']}' 
+          AND Start_Date = DATE('{data['Start_Date']}')
+          AND PhysicalID = {data['PhysicalID']};
+
+        -- 2. Return hardware to inventory as a new available record
+        INSERT INTO `{target_registry}` (NodeNum, PhysicalID, Project, Location, SensorStatus, Start_Date)
+        VALUES ('{data['NodeNum']}', {data['PhysicalID']}, 'Office', 'Stock', 'Available', DATE('{today}'));
+        COMMIT;
+    """
+    try:
+        client.query(sql).result()
+        st.success(f"Successfully decommissioned {data['NodeNum']}. Hardware returned to Office.")
+        time.sleep(1.5)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Decommission failed: {e}")
 # ===============================================================
 # PAGE: DATA RECOVERY (SensorPush API Bridge)
 # ===============================================================
