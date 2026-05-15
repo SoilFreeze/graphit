@@ -1519,7 +1519,11 @@ def render_management_controls():
 
 
 def render_management_filters(reg_df, selected_project, target_scope):
-    """Renders temporal, value, and scope-specific filters."""
+    """
+    Renders hierarchical filters.
+    If 'Specific Node' is selected, it forces the user to pick a Location first
+    to make finding the Node easier.
+    """
     col_f1, col_f2, col_f3 = st.columns(3)
     
     with col_f1:
@@ -1533,20 +1537,34 @@ def render_management_filters(reg_df, selected_project, target_scope):
 
     with col_f3:
         scope_val = None
-        if target_scope == "Specific Location":
-            u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].unique().tolist())
+        
+        # 1. Logic for "Project Wide"
+        if target_scope == "Project Wide":
+            st.info(f"Targeting all nodes in **{selected_project}**")
+            scope_val = selected_project
+
+        # 2. Logic for "Specific Location"
+        elif target_scope == "Specific Location":
+            u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].unique().tolist(), key=natural_sort_key)
             scope_val = st.selectbox("Select Location", u_locs)
+
+        # 3. Logic for "Specific Node" (Hierarchical: Project -> Location -> Node)
         elif target_scope == "Specific Node":
-            u_nodes = sorted(reg_df[reg_df['Project'] == selected_project]['NodeNum'].unique().tolist())
-            scope_val = st.selectbox("Select Node", u_nodes)
-        else:
-            st.write(f"**Target:** All nodes in {selected_project}")
+            # Step A: Pick Location first to filter nodes
+            u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].unique().tolist(), key=natural_sort_key)
+            selected_loc = st.selectbox("First, Select Location", u_locs)
+            
+            # Step B: Pick Node from that Location
+            u_nodes = sorted(
+                reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == selected_loc)]['NodeNum'].unique().tolist(),
+                key=natural_sort_key
+            )
+            scope_val = st.selectbox("Then, Select Node", u_nodes)
             
     return {
         "temporal_dir": temporal_dir, "s_date": s_date, "e_date": e_date,
         "val_filter": val_filter, "threshold": threshold, "scope_val": scope_val
     }
-
 
 def build_management_where_clause(reg_df, selected_project, target_scope, f):
     """
