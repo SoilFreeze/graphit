@@ -1489,7 +1489,7 @@ def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DA
 
     # 1. Define Table Paths
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
-    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
 
     # 2. Get User Inputs
     target_scope, new_status = render_management_controls()
@@ -1630,37 +1630,27 @@ def render_verification_step(client, where_str, target_table):
 
 
 def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
-    st.warning(f"Targeting status: **{new_status}**")
+    st.warning(f"Setting status to: **{new_status}**")
     
-    if st.checkbox("I confirm this change to the manual rejections table.", key="confirm_rejection_check"):
-        if st.button(f"🚀 Execute Status Update", key="execute_rejection_btn"):
-            
+    if st.checkbox("Confirm change to manual rejections?", key="rejection_final_check"):
+        if st.button("🚀 Execute", key="rejection_final_btn"):
             if new_status == "TRUE":
-                # To 'Approve' data, we remove it from the rejections table
+                # Removes existing rejections
                 sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
             else:
-                # To 'Flag' data, we insert the Node and Timestamp into the rejections table
-                # We map your status choice to the 'approve' column
+                # Inserts the node/time into the 'approve' lookup table
                 sql = f"""
                     INSERT INTO `{target_table}` (NodeNum, timestamp, approve)
                     SELECT NodeNum, timestamp, '{new_status}'
                     FROM `{telemetry_table}`
                     WHERE {where_str}
                 """
-            
             try:
-                with st.spinner(f"Updating records to {new_status}..."):
-                    job = client.query(sql)
-                    job.result()
-                
-                # Feedback on how many rows were affected
-                affected = job.num_dml_affected_rows if job.num_dml_affected_rows is not None else 0
-                st.success(f"Successfully processed {affected:,} records.")
-                st.balloons()
-                
+                job = client.query(sql)
+                job.result()
+                st.success(f"Processed {job.num_dml_affected_rows} points.")
             except Exception as e:
-                st.error(f"Database Error: {e}")
-                st.code(sql)
+                st.error(f"Execution Error: {e}")
 # ===============================================================
 # FINAL INTEGRATED EXECUTION BLOCK
 # ===============================================================
