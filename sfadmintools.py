@@ -1474,38 +1474,79 @@ def process_curve_uploads(client, u_files, table_curves):
         time.sleep(1.5)
         st.rerun()
 
+
+def render_verification_step(client, where_str, telemetry_table, rejections_table):
+    """Queries BigQuery to show count and current status of data points."""
+    if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
+        # Resolve ambiguity by aliasing columns to 't' (telemetry)
+        aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
+        
+        status_q = f"""
+            SELECT 
+                t.NodeNum,
+                COUNT(*) as Point_Count,
+                COALESCE(r.approve, 'TRUE') as current_status
+            FROM `{telemetry_table}` t
+            LEFT JOIN `{rejections_table}` r 
+                ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+            WHERE {aliased_where}
+            GROUP BY t.NodeNum, current_status
+        """
+        try:
+            res = client.query(status_q).to_dataframe()
+            if not res.empty:
+                st.subheader("📊 Current Data Profile")
+                st.dataframe(res, use_container_width=True, hide_index=True)
+                st.metric("Total Points in Selection", f"{res['Point_Count'].sum():,}")
+            else:
+                st.warning("No data points found for this selection.")
+        except Exception as e:
+            st.error(f"Verification Failed: {e}")
+
+def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
+    """Executes a MERGE to ensure existing flags are overwritten correctly."""
+    st.warning(f"Targeting status: **{new_status}**")
+    
+    if st.checkbox("I confirm these changes to the rejection library.", key="confirm_mgmt"):
+        if st.button(f"🚀 Set All to {new_status}", key="exec_mgmt_btn"):
+            aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
+            
+            if new_status == "TRUE":
+                # For DELETE, we target the rejections table specifically
+                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
+            else:
+                # MERGE handles both Updating and Inserting
+                sql = f"""
+                    MERGE `{target_table}` T
+                    USING (SELECT NodeNum, timestamp FROM `{telemetry_table}` t WHERE {aliased_where}) S
+                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                    WHEN MATCHED THEN
+                        UPDATE SET approve = '{new_status}'
+                    WHEN NOT MATCHED THEN
+                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                """
+            try:
+                job = client.query(sql)
+                job.result()
+                st.success(f"Successfully processed {job.num_dml_affected_rows:,} records.")
+                st.balloons()
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
+
 def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID):
-    """
-    Main entry point for Data Management using the manual_rejections side-table.
-    """
     st.header("🧨 Data Management (Manual Rejections)")
-    st.info("""
-        **Status Definitions:**
-        - **TRUE**: Removes flags. Data is visible to client.
-        - **BadData**: Hardware issues. Keep for engineering analysis.
-        - **Masked**: Invalid placement (e.g., Ambient temp in a Pipe).
-        - **Office**: Data recorded while hardware was unassigned.
-    """)
-
-    # 1. Define Table Paths
+    
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
-    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" # Make sure this is your physical table
 
-    # 2. Get User Inputs
     target_scope, new_status = render_management_controls()
     st.divider()
 
-    # 3. Apply Filters and Build SQL Logic
     filters = render_management_filters(reg_df, selected_project, target_scope)
     where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
     
-    # 4. Step 1: Verify (Check Telemetry table to see what will be moved)
-    # We add a unique key to prevent the Duplicate ID error
     render_verification_step(client, where_str, telemetry_table, target_table)
-
-    # 5. Step 2: Execute (Insert into or Delete from Rejections table)
     render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table)
-
 def render_management_controls():
     """Renders radio buttons for scope and the new specific status types."""
     c1, c2 = st.columns(2)
@@ -1652,38 +1693,6 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
             # Optional: print the query to the console for debugging
             # print(status_q)
 
-def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
-    """Executes a MERGE to ensure existing flags are overwritten correctly."""
-    
-    if st.checkbox("I confirm these changes to the rejection library.", key="confirm_mgmt"):
-        if st.button(f"🚀 Set All to {new_status}", key="exec_mgmt_btn"):
-            
-            if new_status == "TRUE":
-                # If setting to TRUE, we just wipe the rejections out
-                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
-            else:
-                # MERGE handles both Updating 'TRUE' to 'Masked' and Inserting new rows
-                sql = f"""
-                    MERGE `{target_table}` T
-                    USING (SELECT NodeNum, timestamp FROM `{telemetry_table}` WHERE {where_str}) S
-                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
-                    WHEN MATCHED THEN
-                        UPDATE SET approve = '{new_status}'
-                    WHEN NOT MATCHED THEN
-                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
-                """
-            
-            try:
-                with st.spinner(f"Processing updates to {new_status}..."):
-                    job = client.query(sql)
-                    job.result()
-                
-                # Report accurate counts of what happened
-                rows = job.num_dml_affected_rows if job.num_dml_affected_rows else 0
-                st.success(f"Successfully processed {rows:,} records.")
-                st.balloons()
-            except Exception as e:
-                st.error(f"Execution Error: {e}")
 # ===============================================================
 # FINAL INTEGRATED EXECUTION BLOCK
 # ===============================================================
