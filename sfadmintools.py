@@ -1079,35 +1079,36 @@ def execute_record_delete(client, data, target_registry):
     except Exception as e:
         st.error(f"Deletion failed: {e}")
 
-def execute_decommission_node(client, data, target_registry):
+def execute_decommission_node(client, data, target_registry, decom_date):
     """
-    Robust Decommission: Closes current record and forces arrival in Office.
+    1. Updates the OLD record: Sets End_Date and status 'Decommissioned'.
+    2. Inserts a NEW record: Project/Location='Office', Bank=NodeNum, Status='Available'.
     """
-    today = datetime.now().date().isoformat()
+    # Format dates for SQL
+    decom_date_str = decom_date.isoformat()
     
-    # 1. Sanitize the PhysicalID (The usual suspect for 'nan' errors)
+    # Sanitize PhysicalID
     raw_phys_id = data.get('PhysicalID')
     if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
         phys_id_val = "NULL"
         phys_id_match = "PhysicalID IS NULL"
     else:
-        phys_id_val = f"{int(float(raw_phys_id))}" # Ensure it's an integer string
+        phys_id_val = f"{int(float(raw_phys_id))}"
         phys_id_match = f"PhysicalID = {phys_id_val}"
 
-    # 2. Transaction Logic
-    # We use a more flexible WHERE clause to ensure we catch the record
     sql = f"""
         BEGIN TRANSACTION;
         
-        -- A. Close the active record at the site
+        -- STEP 1: CLOSE THE OLD RECORD
         UPDATE `{target_registry}`
-        SET End_Date = DATE('{today}'), 
-            SensorStatus = 'Decommissioned'
+        SET 
+            End_Date = DATE('{decom_date_str}'), 
+            SensorStatus = 'Removed from Site'
         WHERE NodeNum = '{data['NodeNum']}' 
           AND {phys_id_match}
-          AND End_Date IS NULL; -- Ensures we only close the CURRENT record
+          AND End_Date IS NULL;
 
-        -- B. Create the NEW record in Office Stock
+        -- STEP 2: INSERT THE NEW OFFICE RECORD
         INSERT INTO `{target_registry}` (
             NodeNum, PhysicalID, Project, Location, Bank, Depth, SensorStatus, Start_Date
         )
@@ -1115,11 +1116,11 @@ def execute_decommission_node(client, data, target_registry):
             '{data['NodeNum']}', 
             {phys_id_val}, 
             'Office', 
-            'Stock', 
-            NULL, 
-            NULL, 
+            'Office', 
+            '{data['NodeNum']}', -- Bank becomes Node Number per request
+            NULL,               -- Depth is cleared
             'Available', 
-            DATE('{today}')
+            DATE('{decom_date_str}')
         );
         
         COMMIT;
@@ -1127,13 +1128,13 @@ def execute_decommission_node(client, data, target_registry):
     
     try:
         client.query(sql).result()
-        st.success(f"✅ Success! {data['NodeNum']} moved to Office Stock.")
+        st.success(f"✅ {data['NodeNum']} History Closed. New record created in Office.")
         time.sleep(1)
         st.rerun()
     except Exception as e:
-        st.error("Transaction Error")
+        st.error("Transaction failed. History was not closed.")
         st.code(sql, language="sql")
-        st.error(f"Details: {e}")
+        st.error(str(e))
 # ===============================================================
 # PAGE: DATA RECOVERY (SensorPush API Bridge)
 # ===============================================================
