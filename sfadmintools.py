@@ -1081,34 +1081,36 @@ def execute_record_delete(client, data, target_registry):
 
 def execute_decommission_node(client, data, target_registry, decom_date):
     """
-    1. Updates the OLD record: Sets End_Date and status 'Decommissioned'.
-    2. Inserts a NEW record: Project/Location='Office', Bank=NodeNum, Status='Available'.
+    Ensures the current deployment is ARCHIVED under its site 
+    and a NEW record is created for Office.
     """
-    # Format dates for SQL
     decom_date_str = decom_date.isoformat()
     
-    # Sanitize PhysicalID
+    # 1. Sanitize PhysicalID
     raw_phys_id = data.get('PhysicalID')
     if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
-        phys_id_val = "NULL"
         phys_id_match = "PhysicalID IS NULL"
+        phys_id_val = "NULL"
     else:
         phys_id_val = f"{int(float(raw_phys_id))}"
         phys_id_match = f"PhysicalID = {phys_id_val}"
 
+    # 2. Transaction: The 'UPDATE' must match the 'Project' it was just in
     sql = f"""
         BEGIN TRANSACTION;
         
-        -- STEP 1: CLOSE THE OLD RECORD
+        -- STEP 1: Archive the specific site deployment
         UPDATE `{target_registry}`
         SET 
             End_Date = DATE('{decom_date_str}'), 
-            SensorStatus = 'Removed from Site'
+            SensorStatus = 'Archived'
         WHERE NodeNum = '{data['NodeNum']}' 
+          AND Project = '{data['Project']}'
+          AND Location = '{data['Location']}'
           AND {phys_id_match}
           AND End_Date IS NULL;
 
-        -- STEP 2: INSERT THE NEW OFFICE RECORD
+        -- STEP 2: Create the clean Stock record
         INSERT INTO `{target_registry}` (
             NodeNum, PhysicalID, Project, Location, Bank, Depth, SensorStatus, Start_Date
         )
@@ -1117,8 +1119,8 @@ def execute_decommission_node(client, data, target_registry, decom_date):
             {phys_id_val}, 
             'Office', 
             'Office', 
-            '{data['NodeNum']}', -- Bank becomes Node Number per request
-            NULL,               -- Depth is cleared
+            '{data['NodeNum']}', 
+            NULL, 
             'Available', 
             DATE('{decom_date_str}')
         );
@@ -1128,11 +1130,11 @@ def execute_decommission_node(client, data, target_registry, decom_date):
     
     try:
         client.query(sql).result()
-        st.success(f"✅ {data['NodeNum']} History Closed. New record created in Office.")
+        st.success(f"✅ History locked for {data['Project']}. Node moved to Office.")
         time.sleep(1)
         st.rerun()
     except Exception as e:
-        st.error("Transaction failed. History was not closed.")
+        st.error("Audit log failed to close.")
         st.code(sql, language="sql")
         st.error(str(e))
 # ===============================================================
