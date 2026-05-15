@@ -1550,29 +1550,44 @@ def render_management_filters(reg_df, selected_project, target_scope):
     }
 
 
-def build_management_where_clause(selected_project, target_scope, f):
-    """Constructs the WHERE string for the BigQuery UPDATE/SELECT queries."""
-    where_clauses = [f"Project = '{selected_project}'"]
+def build_management_where_clause(reg_df, selected_project, target_scope, f):
+    """
+    Constructs a WHERE clause compatible with the raw data table.
+    Filters by NodeNum instead of Project name.
+    """
+    # 1. Identify which nodes belong to this project from the registry
+    proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].unique().tolist()
     
-    # Temporal Logic
+    # 2. Start building the query with the Node list
+    if target_scope == "Specific Node":
+        where_clauses = [f"NodeNum = '{f['scope_val']}'"]
+    else:
+        # Filter by all nodes in the project
+        nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
+        where_clauses = [f"NodeNum IN ({nodes_str})"]
+    
+    # 3. Scope Logic for Specific Location
+    if target_scope == "Specific Location":
+        # Get nodes only at that specific location
+        loc_nodes = reg_df[(reg_df['Project'] == selected_project) & 
+                           (reg_df['Location'] == f['scope_val'])]['NodeNum'].unique().tolist()
+        nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
+        where_clauses = [f"NodeNum IN ({nodes_str})"]
+
+    # 4. Temporal Logic (Handling "Up to a date")
+    # Using 'f['e_date']' as the cutoff for "Up to a date"
     if f["temporal_dir"] == "Between Range":
         where_clauses.append(f"timestamp BETWEEN '{f['s_date']}' AND '{f['e_date']}'")
-    elif f["temporal_dir"] == "Older Than":
-        where_clauses.append(f"timestamp < '{f['s_date']}'")
-    elif f["temporal_dir"] == "Newer Than":
-        where_clauses.append(f"timestamp > '{f['s_date']}'")
+    elif f["temporal_dir"] == "Older Than" or f["temporal_dir"] == "Newer Than":
+        # For "Up to a date", ensure you select "Older Than" in the UI
+        op = "<" if f["temporal_dir"] == "Older Than" else ">"
+        where_clauses.append(f"timestamp {op} '{f['s_date']}'")
     
-    # Threshold Logic
+    # 5. Threshold Logic
     if f["val_filter"] == "Above Threshold":
         where_clauses.append(f"temperature > {f['threshold']}")
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"temperature < {f['threshold']}")
-
-    # Scope Logic
-    if target_scope == "Specific Location":
-        where_clauses.append(f"Location = '{f['scope_val']}'")
-    elif target_scope == "Specific Node":
-        where_clauses.append(f"NodeNum = '{f['scope_val']}'")
 
     return " AND ".join(where_clauses)
 
