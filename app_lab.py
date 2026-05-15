@@ -234,6 +234,15 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False, key="ref_type_a"):
 
 st.session_state["active_refs"] = tuple(active_refs)
 
+# --- SCOPE DEFINITIONS ---
+# This pulls the values from the Sidebar inputs into variables 
+# that the rest of the script can use.
+
+unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+unit_label = st.session_state.get("unit_label", "°F")
+display_tz = st.session_state.get("display_tz", "UTC")
+active_refs = st.session_state.get("active_refs", [])
+
 #############
 # - Graph - #
 #############
@@ -2065,15 +2074,22 @@ def get_trend_arrow(current, previous):
 ###################
 # 12. MAIN ROUTER #
 ###################
-# --- MAIN ROUTING LOGIC ---
-# Initialize the DB Client one time for the main execution
+
+# 1. RETRIEVE GLOBAL STATE
+# This ensures variables like display_tz exist before we pass them to functions
+display_tz = st.session_state.get("display_tz", "UTC")
+unit_label = st.session_state.get("unit_label", "°F")
+unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+active_refs = st.session_state.get("active_refs", [])
+
+# 2. INITIALIZE DB CLIENT
 client = get_bq_client() 
 
+# 3. PAGE ROUTING
 if page == "Summary":
     render_summary_dashboard(unit_label, unit_mode, display_tz)
 
 elif page == "Time vs Temp":
-    # Pass the metadata dictionary from session state
     render_global_overview(
         selected_project, 
         st.session_state.get('project_metadata'), 
@@ -2081,11 +2097,7 @@ elif page == "Time vs Temp":
     ) 
 
 elif page == "Sensor Status":
-    # Ensure this function exists in your script or is defined
-    try:
-        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
-    except NameError:
-        st.warning("Sensor Status module is currently being updated.")
+    render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
 
 elif page == "Depth Charts":
     render_depth_charts(selected_project, unit_label, display_tz)
@@ -2105,7 +2117,6 @@ elif page == "Client Portal":
 
 # --- PASSWORD PROTECTED SECTIONS ---
 elif page in ["Data Intake Lab", "Admin Tools"]:
-    # Check if user is already authenticated
     if st.session_state.get('authenticated', False):
         if page == "Data Intake Lab":
             render_data_intake_page(selected_project)
@@ -2118,7 +2129,6 @@ elif page in ["Data Intake Lab", "Admin Tools"]:
                 active_refs
             )
     else:
-        # Display the login gate
         st.divider()
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
