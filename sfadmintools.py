@@ -730,6 +730,49 @@ def render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID):
     
     return new_sn
 
+def execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry):
+    """
+    Overwrites the metadata and PhysicalID for an existing record.
+    Used for fixing typos in serial numbers without ending the deployment history.
+    """
+    # 1. Sanitize Serial Number (Remove any accidental spaces/chars)
+    clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
+    
+    # 2. Sanitize Depth for SQL NULL handling
+    if pd.isna(new_depth) or new_depth == 0.0:
+        sql_depth = "NULL"
+    else:
+        sql_depth = f"{float(new_depth)}"
+
+    # 3. Handle PhysicalID WHERE clause for 'nan' safety
+    raw_phys_id = data.get('PhysicalID')
+    phys_id_where = "PhysicalID IS NULL" if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan' else f"PhysicalID = {raw_phys_id}"
+
+    # 4. Construct SQL
+    update_sql = f"""
+        UPDATE `{target_registry}`
+        SET 
+            Project = '{new_proj}',
+            Location = '{new_loc}', 
+            Bank = '{new_bank}',
+            Depth = {sql_depth},
+            SensorStatus = '{new_status}',
+            PhysicalID = {clean_sn}
+        WHERE 
+            NodeNum = '{data['NodeNum']}' 
+            AND Start_Date = DATE('{data['Start_Date']}')
+            AND {phys_id_where}
+    """
+    
+    try:
+        client.query(update_sql).result()
+        st.success(f"✅ Serial corrected to {clean_sn} for {data['NodeNum']}")
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error("Correction Failed")
+        st.code(update_sql, language="sql")
+        st.error(str(e))
 
 def render_replacement_form(client, found_row, new_sn, target_registry):
     """Renders the final confirmation form and executes the BQ transaction."""
