@@ -122,18 +122,29 @@ project_metadata = None
 sidebar_client = get_bq_client()
 
 # --- PROJECT SELECTION ---
+# 2. PROJECT SELECTION
+selected_project = "All Projects"
+project_metadata = None  
+
+sidebar_client = get_bq_client()
+
 if sidebar_client is not None:
     try:
+        # SQL fix: Exclude empty strings and force inclusion of 'Office'
         proj_q = f"""
             SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
             WHERE Project IS NOT NULL 
-              AND Project != ''
+              AND TRIM(Project) != ''
               AND (ProjectStatus != 'Archived' OR UPPER(Project) LIKE '%OFFICE%')
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
-        # Filter out any lingering 'None' or empty strings in Python too
-        proj_list = sorted([p for p in proj_df['Project'].unique() if p and str(p).strip()])
+        
+        # Python fix: Strip whitespace and filter out non-values to kill "No Project"
+        proj_list = sorted([
+            str(p).strip() for p in proj_df['Project'].unique() 
+            if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
+        ])
         
         selected_project = st.sidebar.selectbox(
             "🎯 Active Project", 
@@ -153,7 +164,7 @@ if sidebar_client is not None:
             
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
-
+        
 st.sidebar.divider()
 
 # 3. GLOBAL VIEW TOGGLES
