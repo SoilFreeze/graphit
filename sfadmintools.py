@@ -580,13 +580,16 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     """
     st.header("🛠️ Unified Node Manager")
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-
     # ===============================================================
     # 1. FIND & SELECT RECORD (Hierarchical & Natural Sorted)
     # ===============================================================
     st.subheader("🔍 Find & Select Record")
     
-    # Toggle for Archival/Historical Data (Default OFF)
+    # Refresh Logic: Clears the app cache and reruns the script to pull fresh BQ data
+    if st.button("🔄 Refresh Table Data"):
+        st.cache_data.clear()
+        st.rerun()
+
     show_archived = st.checkbox("Show Archived/Historical Data", value=False)
     
     if not show_archived:
