@@ -592,13 +592,33 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
 
     show_archived = st.checkbox("Show Archived/Historical Data", value=False)
     
+    # 1. Initial Slice: Active vs Archived
     if not show_archived:
-        # End_Date is null for active sensors
         df_working = reg_df[reg_df['End_Date'].isna()].copy()
     else:
         df_working = reg_df.copy()
 
-    # Hardware Type Filter (Rule: SP = Ambient Only)
+    # --- NEW: LORD HARDWARE GROUPING RULE ---
+    # Goal: If Project is 'Office', only show Lords if all 4 channels are present.
+    if sel_proj == "Office":
+        # A. Identify all Lord rows in Office
+        lord_office = df_working[df_working['NodeNum'].str.contains('CH', case=False, na=False)].copy()
+        
+        if not lord_office.empty:
+            # B. Extract the base Lord ID (e.g., 'Lord-01' from 'Lord-01-ch1')
+            # Adjust the regex/split based on your exact naming convention
+            lord_office['LordBase'] = lord_office['NodeNum'].apply(lambda x: x.rsplit('-', 1)[0])
+            
+            # C. Count how many channels each LordBase has in the Office
+            lord_counts = lord_office.groupby('LordBase')['NodeNum'].transform('count')
+            
+            # D. Identify incomplete Lords (count < 4)
+            incomplete_lords = lord_office[lord_counts < 4]['NodeNum'].tolist()
+            
+            # E. Filter them out of the working dataframe
+            df_working = df_working[~df_working['NodeNum'].isin(incomplete_lords)]
+
+    # --- Ambient Filter Logic (SP Rule) ---
     ambient_view = st.radio(
         "Display Hardware Type",
         ["Show All", "Hide Ambient (SP)", "Ambient Only (SP)"],
