@@ -1123,34 +1123,36 @@ def execute_record_delete(client, data, target_registry):
 
 def execute_decommission_node(client, data, target_registry, decom_dt, stock_status):
     """
-    Closes the old record with a timestamp and creates a new one in Office.
+    Closes the old record and creates a new one in Office.
+    Uses DATE() casting to prevent 'Type Mismatch' errors in BigQuery.
     """
-    # Format for BigQuery: 'YYYY-MM-DD HH:MM:SS'
+    # Format for SQL: 'YYYY-MM-DD HH:MM:SS'
     dt_str = decom_dt.strftime('%Y-%m-%d %H:%M:%S')
     
-    # Sanitize PhysicalID
+    # 1. PhysicalID Handling (matching your rule to not rely on it)
     raw_phys_id = data.get('PhysicalID')
     if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
         phys_id_match = "PhysicalID IS NULL"
         phys_id_val = "NULL"
     else:
+        # Convert to int to strip any .0 from floats
         phys_id_val = f"{int(float(raw_phys_id))}"
         phys_id_match = f"PhysicalID = {phys_id_val}"
 
     sql = f"""
         BEGIN TRANSACTION;
         
-        -- 1. Close and Archive the OLD record
+        -- 1. Archive the OLD record (Casting DATETIME to DATE)
         UPDATE `{target_registry}`
         SET 
-            End_Date = DATETIME('{dt_str}'), 
+            End_Date = DATE('{dt_str}'), 
             SensorStatus = 'Decommissioned'
         WHERE NodeNum = '{data['NodeNum']}' 
           AND Project = '{data['Project']}'
           AND {phys_id_match}
           AND End_Date IS NULL;
 
-        -- 2. Create the NEW Office record
+        -- 2. Create the NEW Office record (Casting DATETIME to DATE)
         INSERT INTO `{target_registry}` (
             NodeNum, PhysicalID, Project, Location, Bank, Depth, SensorStatus, Start_Date
         )
@@ -1162,7 +1164,7 @@ def execute_decommission_node(client, data, target_registry, decom_dt, stock_sta
             '{data['NodeNum']}', 
             NULL, 
             '{stock_status}', 
-            DATETIME('{dt_str}')
+            DATE('{dt_str}')
         );
         
         COMMIT;
@@ -1170,11 +1172,13 @@ def execute_decommission_node(client, data, target_registry, decom_dt, stock_sta
     
     try:
         client.query(sql).result()
-        st.success(f"✅ Node {data['NodeNum']} moved to Office at {dt_str}")
+        st.success(f"✅ Node {data['NodeNum']} moved to Office (Effective: {decom_dt.date()})")
+        # Clear cache to ensure 'Find & Select' updates immediately
+        st.cache_data.clear()
         time.sleep(1)
         st.rerun()
     except Exception as e:
-        st.error("Audit transaction failed.")
+        st.error("Audit transaction failed due to type mismatch or connection.")
         st.code(sql, language="sql")
         st.error(str(e))
 # ===============================================================
