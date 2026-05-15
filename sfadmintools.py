@@ -665,12 +665,12 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
                 if st.form_submit_button("💾 Save Metadata Updates"):
                     execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
 
-            # 🩹 Serial Correction (Typo Fix)
+            # Inside the mgmt_action == "🩹 Serial Correction" block:
             elif mgmt_action == "🩹 Serial Correction":
-                st.warning("Overwrites current serial number record.")
-                new_sn = st.text_input("Corrected Physical ID (Serial #)", value=curr_phys_id)
-                if st.form_submit_button("🚀 Apply Serial Correction"):
-                    execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry)
+                st.info("Fixing metadata typos for the current active record.")
+                # NO new_sn input here!
+                if st.form_submit_button("🚀 Apply Correction"):
+                    execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
 
             # 🔄 Hardware Swap (New Entry)
             elif mgmt_action == "🔄 Hardware Swap":
@@ -730,25 +730,19 @@ def render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID):
     
     return new_sn
 
-def execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry):
+def execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
     """
-    Overwrites the metadata and PhysicalID for an existing record.
-    Used for fixing typos in serial numbers without ending the deployment history.
+    Metadata Correction: Uses NodeNum to find the record. 
+    Removes PhysicalID as a requirement or identifier.
     """
-    # 1. Sanitize Serial Number (Remove any accidental spaces/chars)
-    clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
-    
-    # 2. Sanitize Depth for SQL NULL handling
+    # 1. Sanitize Depth
     if pd.isna(new_depth) or new_depth == 0.0:
         sql_depth = "NULL"
     else:
         sql_depth = f"{float(new_depth)}"
 
-    # 3. Handle PhysicalID WHERE clause for 'nan' safety
-    raw_phys_id = data.get('PhysicalID')
-    phys_id_where = "PhysicalID IS NULL" if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan' else f"PhysicalID = {raw_phys_id}"
-
-    # 4. Construct SQL
+    # 2. Construct SQL using ONLY NodeNum and active status as the identifier
+    # This prevents 'nan' errors because NodeNum is always a clean string.
     update_sql = f"""
         UPDATE `{target_registry}`
         SET 
@@ -756,24 +750,22 @@ def execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_dep
             Location = '{new_loc}', 
             Bank = '{new_bank}',
             Depth = {sql_depth},
-            SensorStatus = '{new_status}',
-            PhysicalID = {clean_sn}
+            SensorStatus = '{new_status}'
         WHERE 
             NodeNum = '{data['NodeNum']}' 
-            AND Start_Date = DATE('{data['Start_Date']}')
-            AND {phys_id_where}
+            AND End_Date IS NULL  -- Only update the current active deployment
     """
     
     try:
         client.query(update_sql).result()
-        st.success(f"✅ Serial corrected to {clean_sn} for {data['NodeNum']}")
+        st.success(f"✅ Metadata corrected for {data['NodeNum']}")
         time.sleep(1)
         st.rerun()
     except Exception as e:
         st.error("Correction Failed")
         st.code(update_sql, language="sql")
         st.error(str(e))
-
+        
 def render_replacement_form(client, found_row, new_sn, target_registry):
     """Renders the final confirmation form and executes the BQ transaction."""
     st.divider()
