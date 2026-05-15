@@ -11,7 +11,7 @@ import re
 # 1. CONFIGURATION & SESSION STATE
 # ===============================================================
 def initialize_app():
-    """Sets up page config and global session state variables."""F
+    """Sets up page config and global session state variables."""
     st.set_page_config(page_title="SF Engineering Admin", page_icon="🛠️", layout="wide")
     
     if 'unit_mode' not in st.session_state:
