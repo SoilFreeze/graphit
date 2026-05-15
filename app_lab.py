@@ -95,17 +95,14 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         st.error(f"⚠️ Data Sync Error for '{project_id}': {e}")
         print(traceback.format_exc())
         return pd.DataFrame()
-        
-###########################
-# - SIDEBAR NAVIGATION -  #
-###########################
+
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
 
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# --- NAVIGATION ---
+# 1. PAGE NAVIGATION
 page = st.sidebar.selectbox(
     "Navigation", 
     [
@@ -123,7 +120,7 @@ page = st.sidebar.selectbox(
 
 st.sidebar.divider()
 
-# --- PROJECT SELECTION ---
+# 2. PROJECT SELECTION
 selected_project = "All Projects"
 project_metadata = None  
 
@@ -131,7 +128,6 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # UPDATED: Added SoilType to the selection
         proj_q = f"""
             SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
@@ -158,18 +154,38 @@ if sidebar_client is not None:
             
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
-        
+
 st.sidebar.divider()
-show_ref = st.sidebar.toggle("Show Theoretical Curves", value=True)
-mobile_optimized = st.sidebar.toggle(
+
+# 3. GLOBAL VIEW TOGGLES
+st.sidebar.subheader("👁️ Visibility Controls")
+
+st.sidebar.toggle(
+    "Show Theoretical Curves", 
+    value=True, 
+    key="global_show_ref",
+    help="Superimpose goal curves on Time vs Temp charts."
+)
+
+st.sidebar.toggle(
+    "Show Masked Data", 
+    value=False, 
+    key="global_show_masked",
+    help="Display data points manually hidden by admins."
+)
+
+st.sidebar.toggle(
     "Mobile Layout", 
     value=False, 
     key="mobile_optimized_toggle"
 )
+
 st.sidebar.divider()
-# --- UNIT & MEASUREMENT
+
+# 4. MEASUREMENT & UNITS
+st.sidebar.subheader("🌡️ Units")
 unit_mode = st.sidebar.radio(
-    "Temperature Unit", 
+    "Temperature Scale", 
     ["Fahrenheit", "Celsius"], 
     horizontal=True,
     key="unit_toggle"
@@ -180,9 +196,10 @@ st.session_state["unit_label"] = unit_label
 
 st.sidebar.divider()
 
-# --- TIME & DISPLAY ---
+# 5. TIMEZONE & DISPLAY
 st.sidebar.subheader("📱 Display & Time")
 
+# Smart Defaulting based on Project Metadata
 default_tz_index = 2 # Default to Pacific
 if project_metadata and project_metadata.get('Timezone') == "US/Eastern":
     default_tz_index = 1
@@ -200,14 +217,11 @@ tz_mode = st.sidebar.selectbox(
     key="tz_picker"
 )
 
-display_tz = tz_lookup[tz_mode]
-st.session_state["display_tz"] = display_tz
-
-
+st.session_state["display_tz"] = tz_lookup[tz_mode]
 
 st.sidebar.divider()
 
-# --- REFERENCE LINES ---
+# 6. REFERENCE LINES (Static Constants)
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
 
