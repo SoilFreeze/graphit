@@ -351,7 +351,7 @@ def render_node_selector(reg_df, proj_list):
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
-    Handles the Edit/Swap/Decommission actions once a node is selected.
+    Handles the Edit, Swap, and Decommission logic for a selected node.
     """
     node_id = selected_node_data['NodeNum']
     curr_proj = selected_node_data['Project']
@@ -361,11 +361,68 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     
     tabs = st.tabs(["📝 Quick Edit", "🔄 Swap Sensor", "🚫 Decommission"])
     
+    # --- TAB 1: QUICK EDIT ---
     with tabs[0]:
-        st.write("Update location or basic metadata for this node.")
-        # Add your Edit Form logic here...
+        st.markdown(f"### Edit Metadata for {node_id}")
+        with st.form("quick_edit_form"):
+            new_loc = st.text_input("New Location Name", value=curr_loc)
+            new_proj = st.selectbox("Assign to Project", proj_list, index=proj_list.index(curr_proj) if curr_proj in proj_list else 0)
+            
+            if st.form_submit_button("Update Registry"):
+                sql = f"""
+                    UPDATE `{target_registry}`
+                    SET Location = '{new_loc}', Project = '{new_proj}'
+                    WHERE NodeNum = '{node_id}'
+                """
+                try:
+                    client.query(sql).result()
+                    st.success(f"Updated {node_id} successfully! Refreshing...")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Update failed: {e}")
 
-    # ... rest of your action logic ...
+    # --- TAB 2: SWAP SENSOR ---
+    with tabs[1]:
+        st.markdown("### Swap Hardware")
+        st.info("Use this when physical hardware is replaced but the Location/Project remains the same.")
+        with st.form("swap_sensor_form"):
+            new_node_id = st.text_input("New Hardware ID (NodeNum)")
+            
+            if st.form_submit_button("Execute Swap"):
+                if not new_node_id:
+                    st.error("Please enter a new Node ID.")
+                else:
+                    # Update the NodeNum while keeping Project/Location
+                    sql = f"""
+                        UPDATE `{target_registry}`
+                        SET NodeNum = '{new_node_id}'
+                        WHERE NodeNum = '{node_id}'
+                    """
+                    try:
+                        client.query(sql).result()
+                        st.success(f"Swapped {node_id} with {new_node_id}!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Swap failed: {e}")
+
+    # --- TAB 3: DECOMMISSION ---
+    with tabs[2]:
+        st.markdown("### Remove from Registry")
+        st.warning(f"This will delete **{node_id}** from the active registration list.")
+        
+        confirm_code = st.text_input(f"Type '{node_id}' to confirm deletion")
+        
+        if st.button("🚨 Permanently Decommission"):
+            if confirm_code == node_id:
+                sql = f"DELETE FROM `{target_registry}` WHERE NodeNum = '{node_id}'"
+                try:
+                    client.query(sql).result()
+                    st.success(f"{node_id} removed from registry.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Decommission failed: {e}")
+            else:
+                st.error("Confirmation ID does not match.")
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Enhanced Sensor Status: Peer Trend Analysis and Performance Scoring.
