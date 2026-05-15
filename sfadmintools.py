@@ -856,37 +856,58 @@ def execute_switch_update(client, node_id, project, new_id, target_registry):
 # PAGE: SENSOR EDIT (Interactive Registry Editor)
 # ===============================================================
 
-def render_sensor_edit_page(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
-    """Main entry point for the interactive registry editor."""
-    st.header("📝 Sensor Edit")
-    st.info("Modify metadata, assign unassigned sensors, or decommission points.")
+def render_sensor_edit_filters(reg_df):
+    """
+    Advanced filtering for the Unified Node Manager.
+    Allows hierarchical Project -> Location search with status and node ID filters.
+    """
+    st.subheader("🔍 Find & Select Record")
     
-    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-
-    # 1. Advanced Filtering UI
-    filtered_df = render_sensor_edit_filters(reg_df)
-
-    # 2. Interactive Table Selection
-    st.write(f"Showing **{len(filtered_df)}** matching records.")
+    # 1. Archived Toggle (Defaulted to False)
+    show_archived = st.checkbox("Show Archived/Historical Data", value=False)
     
-    selected_rows = st.dataframe(
-        filtered_df,
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row"
-    )
-
-    # 3. Form Logic for Selected Record
-    if len(selected_rows.selection.rows) > 0:
-        row_index = selected_rows.selection.rows[0]
-        selected_data = filtered_df.iloc[row_index]
-        
-        # FIXED: Added reg_df and proj_list to this call
-        render_edit_record_form(client, selected_data, reg_df, proj_list, target_registry)
+    # Clean data based on archival toggle
+    if not show_archived:
+        # Only show nodes that are currently active in the field
+        df = reg_df[reg_df['End_Date'].isna()].copy()
     else:
-        st.info("💡 Select a row in the table above to edit details or decommission the sensor.")
+        df = reg_df.copy()
 
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    
+    with col_f1:
+        # Project Search
+        u_projects = sorted(df['Project'].unique().tolist())
+        sel_proj = st.selectbox("Search by Project", ["All"] + u_projects)
+        
+    with col_f2:
+        # Hierarchical Location Search (Depends on Project Selection)
+        if sel_proj != "All":
+            u_locs = sorted(df[df['Project'] == sel_proj]['Location'].unique().tolist())
+        else:
+            u_locs = sorted(df['Location'].unique().tolist())
+        sel_loc = st.selectbox("Search by Location", ["All"] + u_locs)
+
+    with col_f3:
+        # Status Filter
+        u_status = sorted(df['SensorStatus'].unique().tolist())
+        sel_stat = st.selectbox("Filter by Status", ["All"] + u_status)
+        
+    with col_f4:
+        # Node ID Search
+        search_node = st.text_input("Search Node ID").strip().upper()
+
+    # Apply Final Filter Logic
+    if sel_proj != "All":
+        df = df[df['Project'] == sel_proj]
+    if sel_loc != "All":
+        df = df[df['Location'] == sel_loc]
+    if sel_stat != "All":
+        df = df[df['SensorStatus'] == sel_stat]
+    if search_node:
+        df = df[df['NodeNum'].str.upper().str.contains(search_node)]
+        
+    return df
 
 def render_sensor_edit_filters(reg_df):
     st.subheader("🔍 Find & Select Record")
