@@ -1504,9 +1504,6 @@ def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DA
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
     where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
     
-    # 4. VERIFICATION STEP
-    render_verification_step(client, where_str, target_table)
-
     # 5. EXECUTION STEP
     render_execution_step(client, where_str, new_status, target_table)
 
