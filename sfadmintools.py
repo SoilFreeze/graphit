@@ -636,7 +636,12 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         with st.form(key=f"mgmt_form_{data['NodeNum']}"):
             c_f1, c_f2 = st.columns(2)
             new_bank = c_f1.text_input("Bank Identifier", value=curr_bank)
-            new_depth = c_f2.number_input("Depth (ft)", value=curr_depth)
+            new_depth = c_f2.number_input(
+                "Depth (ft) - Leave 0.0 for Bank-only position", 
+                value=curr_depth, 
+                step=0.5,
+                format="%.1f"
+            )
 
             # Execution logic based on Action
             if mgmt_action == "📝 Edit Metadata":
