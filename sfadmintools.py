@@ -598,47 +598,33 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     else:
         df_working = reg_df.copy()
 
-    # --- NEW: LORD HARDWARE GROUPING RULE ---
-    # Goal: If Project is 'Office', only show Lords if all 4 channels are present.
-    if sel_proj == "Office":
-        # A. Identify all Lord rows in Office
-        lord_office = df_working[df_working['NodeNum'].str.contains('CH', case=False, na=False)].copy()
-        
-        if not lord_office.empty:
-            # B. Extract the base Lord ID (e.g., 'Lord-01' from 'Lord-01-ch1')
-            # Adjust the regex/split based on your exact naming convention
-            lord_office['LordBase'] = lord_office['NodeNum'].apply(lambda x: x.rsplit('-', 1)[0])
-            
-            # C. Count how many channels each LordBase has in the Office
-            lord_counts = lord_office.groupby('LordBase')['NodeNum'].transform('count')
-            
-            # D. Identify incomplete Lords (count < 4)
-            incomplete_lords = lord_office[lord_counts < 4]['NodeNum'].tolist()
-            
-            # E. Filter them out of the working dataframe
-            df_working = df_working[~df_working['NodeNum'].isin(incomplete_lords)]
-
-    # --- Ambient Filter Logic (SP Rule) ---
-    ambient_view = st.radio(
-        "Display Hardware Type",
-        ["Show All", "Hide Ambient (SP)", "Ambient Only (SP)"],
-        horizontal=True
-    )
-
-    if ambient_view == "Hide Ambient (SP)":
-        df_working = df_working[~df_working['NodeNum'].str.contains('SP', case=False, na=False)]
-    elif ambient_view == "Ambient Only (SP)":
-        df_working = df_working[df_working['NodeNum'].str.contains('SP', case=False, na=False)]
-
-    # Multi-Column Filter Bar
+    # 2. Setup Filter Columns (This creates the variables we need)
     f_col1, f_col2, f_col3, f_col4 = st.columns(4)
 
     with f_col1:
         u_projects = sorted(df_working['Project'].unique().tolist())
         sel_proj = st.selectbox("Search by Project", ["All"] + u_projects)
 
+    # --- NEW: LORD HARDWARE GROUPING RULE (Now placed safely after sel_proj) ---
+    if sel_proj == "Office":
+        # A. Identify all Lord rows currently in the working set for Office
+        lord_office = df_working[df_working['NodeNum'].str.contains('CH', case=False, na=False)].copy()
+        
+        if not lord_office.empty:
+            # B. Extract base Lord ID (assuming 'Lord-01-ch1' -> 'Lord-01')
+            lord_office['LordBase'] = lord_office['NodeNum'].apply(lambda x: x.rsplit('-', 1)[0])
+            
+            # C. Count how many channels for each base are in Office
+            lord_counts = lord_office.groupby('LordBase')['NodeNum'].transform('count')
+            
+            # D. Identify channels belonging to incomplete Lords (less than 4)
+            incomplete_nodes = lord_office[lord_counts < 4]['NodeNum'].tolist()
+            
+            # E. Remove those specific nodes from the final table view
+            df_working = df_working[~df_working['NodeNum'].isin(incomplete_nodes)]
+
+    # 3. Continue with the rest of the filters...
     with f_col2:
-        # Hierarchical Location list with Natural Sorting
         if sel_proj != "All":
             u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist(), 
                             key=lambda x: tuple(natural_sort_key(x)))
