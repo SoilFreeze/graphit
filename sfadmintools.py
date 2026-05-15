@@ -1499,7 +1499,7 @@ def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DA
     # 3. SQL CONSTRUCTION
     # Note: We target the base table, not the view, for DML updates
     target_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" 
-    where_str = build_management_where_clause(selected_project, target_scope, filters)
+    where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
     
     # 4. VERIFICATION STEP
     render_verification_step(client, where_str, target_table)
@@ -1552,11 +1552,18 @@ def render_management_filters(reg_df, selected_project, target_scope):
 
 def build_management_where_clause(reg_df, selected_project, target_scope, f):
     """
-    Constructs a WHERE clause compatible with the raw data table.
-    Filters by NodeNum instead of Project name.
+    Constructs a WHERE clause by looking up NodeNums for the project in reg_df.
     """
-    # 1. Identify which nodes belong to this project from the registry
+    # Get the list of nodes assigned to this project
     proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].unique().tolist()
+    
+    if not proj_nodes:
+        # Return a clause that matches nothing if the project is empty to avoid SQL errors
+        return "NodeNum = 'NONE'"
+
+    # Create the IN list for SQL
+    nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
+    where_clauses = [f"NodeNum IN ({nodes_str})"]
     
     # 2. Start building the query with the Node list
     if target_scope == "Specific Node":
