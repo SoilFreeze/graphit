@@ -1477,7 +1477,88 @@ def process_curve_uploads(client, u_files, table_curves):
 # ===============================================================
 # PAGE: Data Management
 # ===============================================================
+def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID):
+    st.header("🧨 Data Management (Manual Rejections)")
+    
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" 
+
+    target_scope, new_status = render_management_controls()
+    st.divider()
+
+    filters = render_management_filters(reg_df, selected_project, target_scope)
+    where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
+    
+    # 1. Step 1: Verification
+    render_verification_step(client, where_str, telemetry_table, target_table)
+
+    # 2. Step 2: Execution
+    render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table)
+
+
 def render_verification_step(client, where_str, telemetry_table, rejections_table):
+    """Queries BigQuery to show count and current status of data points."""
+    if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
+        # Resolve ambiguity by aliasing columns to 't'
+        aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
+        
+        status_q = f"""
+            SELECT 
+                t.NodeNum,
+                COUNT(*) as Point_Count,
+                COALESCE(r.approve, 'TRUE') as current_status
+            FROM `{telemetry_table}` t
+            LEFT JOIN `{rejections_table}` r 
+                ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+            WHERE {aliased_where}
+            GROUP BY t.NodeNum, current_status
+        """
+        try:
+            res = client.query(status_q).to_dataframe()
+            if not res.empty:
+                st.subheader("📊 Current Data Profile")
+                st.dataframe(res, use_container_width=True, hide_index=True)
+                st.metric("Total Points in Selection", f"{res['Point_Count'].sum():,}")
+            else:
+                st.warning("No data points found for this selection.")
+        except Exception as e:
+            st.error(f"Verification Failed: {e}")
+            st.code(status_q, language="sql")
+
+
+def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
+    """Executes the actual database update."""
+    st.info(f"Target Status for these points: **{new_status}**")
+    
+    if st.checkbox("I confirm these changes to the rejection library.", key="confirm_mgmt"):
+        if st.button(f"🚀 Execute Set to {new_status}", key="exec_mgmt_btn"):
+            aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
+            
+            if new_status == "TRUE":
+                # To set to TRUE, we DELETE the rejection record
+                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
+            else:
+                # MERGE handles both Updating and Inserting
+                sql = f"""
+                    MERGE `{target_table}` T
+                    USING (SELECT NodeNum, timestamp FROM `{telemetry_table}` t WHERE {aliased_where}) S
+                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                    WHEN MATCHED THEN
+                        UPDATE SET approve = '{new_status}'
+                    WHEN NOT MATCHED THEN
+                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                """
+            try:
+                with st.spinner("Executing database merge..."):
+                    job = client.query(sql)
+                    job.result()
+                st.success(f"Successfully processed {job.num_dml_affected_rows:,} records.")
+                st.balloons()
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
+                st.code(sql, language="sql")
+
+# --- KEEP YOUR build_management_where_clause AND OTHER HELPERS BELOW ---def render_verification_step(client, where_str, telemetry_table, rejections_table):
     """Queries BigQuery to show count and current status of data points."""
     
     # 1. Initialize at the top so the variable exists in the local scope
@@ -1645,42 +1726,6 @@ def build_management_where_clause(reg_df, selected_project, target_scope, f):
     return " AND ".join(where_clauses)
 
 
-def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
-    if st.checkbox("I confirm these changes.", key="confirm_mgmt"):
-        if st.button(f"🚀 Set All to {new_status}", key="exec_mgmt_btn"):
-            # Ensure the WHERE clause is aliased for the sub-select
-            aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
-            
-            if new_status == "TRUE":
-                # For DELETE, we don't alias because there's only one table involved
-                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
-            else:
-                # For MERGE, we use the aliased version in the Source (S) query
-                sql = f"""
-                    MERGE `{target_table}` T
-                    USING (SELECT NodeNum, timestamp FROM `{telemetry_table}` t WHERE {aliased_where}) S
-                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
-                    WHEN MATCHED THEN
-                        UPDATE SET approve = '{new_status}'
-                    WHEN NOT MATCHED THEN
-                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
-                """
-        try:
-            res = client.query(status_q).to_dataframe()
-            
-            if not res.empty:
-                st.subheader("📊 Current Data Profile")
-                st.dataframe(res, use_container_width=True, hide_index=True)
-                
-                total_points = res['Point_Count'].sum()
-                st.metric("Total Points in Selection", f"{total_points:,}")
-            else:
-                st.warning("No data points found for this selection.")
-                
-        except Exception as e:
-            st.error(f"Verification Failed: {e}")
-            # Optional: print the query to the console for debugging
-            # print(status_q)
 
 # ===============================================================
 # FINAL INTEGRATED EXECUTION BLOCK
