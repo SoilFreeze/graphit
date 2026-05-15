@@ -19,10 +19,8 @@ def initialize_app():
     
     return "Temperature", "sensorpush-export"
 
-    # In your Configuration section or at the start of main()
-display_tz = "America/Los_Angeles" 
-
 DATASET_ID, PROJECT_ID = initialize_app()
+display_tz = "America/Los_Angeles" 
 
 # ===============================================================
 # 2. DATABASE CLIENT
@@ -45,14 +43,13 @@ client = get_bq_client()
 def render_sidebar():
     st.sidebar.title("🛠️ Admin Command Center")
     
+    # Updated Navigation to prioritize the Unified Node Manager
     admin_page = st.sidebar.radio(
         "Management Tool", 
         [
+            "🛠️ Node Manager",      # Primary tool
             "📡 Setup Node Tool", 
             "🔍 Sensor Status",
-            "🔄 Sensor Replace",      
-            "🩹 Sensor Switch",       
-            "🛠️ Node Manager",         
             "📦 Bulk Registry Manager",
             "📡 Data Recovery",
             "⚙️ Project Master", 
@@ -61,38 +58,46 @@ def render_sidebar():
         ],
         key="main_admin_nav"
     )
+    
     is_dev = st.sidebar.toggle("🧪 Use Registry Playground", value=False)
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry" + ("_dummy" if is_dev else "")
 
-    # 1. Fetch Project List and Metadata
+    # 1. Fetch Project List
     proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
-    proj_df = client.query(proj_q).to_dataframe()
-    proj_list = sorted(proj_df['Project'].tolist())
-    
-    # 2. Project Selection Sidebar
-    selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list)
-    
-    # 3. CRITICAL FIX: Store metadata in session state
-    if not proj_df.empty:
-        # Find the row for the selected project
-        metadata = proj_df[proj_df['Project'] == selected_project].iloc[0].to_dict()
-        st.session_state['project_metadata'] = metadata
-    
-    return admin_page, target_registry, selected_project, proj_list
+    try:
+        proj_df = client.query(proj_q).to_dataframe()
+        proj_list = sorted(proj_df['Project'].tolist())
+        
+        # 2. Project Selection
+        selected_project = st.sidebar.selectbox("🎯 Target Project Context", proj_list)
+        
+        # 3. Store metadata
+        if not proj_df.empty:
+            metadata = proj_df[proj_df['Project'] == selected_project].iloc[0].to_dict()
+            st.session_state['project_metadata'] = metadata
+            
+        return admin_page, target_registry, selected_project, proj_list
+    except Exception as e:
+        st.sidebar.error(f"Error loading projects: {e}")
+        return admin_page, target_registry, "None", ["Office"]
 
 # ===============================================================
 # 3. DATA LOADING
 # ===============================================================
-@st.cache_data(ttl=600)  # Caches the registry for 10 minutes to save BQ costs
+@st.cache_data(ttl=600)
 def load_registry_data(target_table):
     """
-    Queries the BigQuery registry table and returns a dataframe.
+    Queries BigQuery and ensures PhysicalID is handled correctly (casted to string or dropped).
     """
     try:
-        # Uses the global 'client' variable initialized at the top of the script
-        return client.query(f"SELECT * FROM `{target_table}`").to_dataframe()
+        df = client.query(f"SELECT * FROM `{target_table}`").to_dataframe()
+        
+        # Ensure PhysicalID doesn't cause float display issues if it exists
+        if 'PhysicalID' in df.columns:
+            df['PhysicalID'] = df['PhysicalID'].astype(str).replace(['nan', 'None', '<NA>'], '')
+            
+        return df
     except Exception as e:
-        # If the table doesn't exist or query fails, return an empty DF to prevent crashes
         st.error(f"Error loading registry: {e}")
         return pd.DataFrame()
 
@@ -128,9 +133,10 @@ def natural_sort_key(s):
 # ===============================================================
 # Function: Status Dashboard
 # ===============================================================
-def render_project_status_dashboard(client, selected_project, unit_label):
+def render_project_status_dashboard(client, selected_project, unit_label, target_registry):
     st.subheader("📊 Project Status Summary")
     
+    # Updated to use dynamic target_registry from sidebar
     query = f"""
         SELECT 
             n.NodeNum, n.Bank, n.Location, n.Depth,
@@ -151,18 +157,22 @@ def render_project_status_dashboard(client, selected_project, unit_label):
             COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
             ARRAY_AGG(m.temperature ORDER BY m.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
             MAX(m.timestamp) as latest_ts
-        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+        FROM `{target_registry}` n
         LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
         WHERE n.Project = @proj_id AND n.End_Date IS NULL
         GROUP BY 1, 2, 3, 4, 5
     """
     
-    df = client.query(query, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-    )).to_dataframe()
+    try:
+        df = client.query(query, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        )).to_dataframe()
+    except Exception as e:
+        st.error(f"Dashboard Query Failed: {e}")
+        return
 
     if df.empty:
-        st.error("No active nodes found for dashboard summary.")
+        st.info("No active nodes found for dashboard summary.")
         return
 
     cols = st.columns(4)
@@ -177,11 +187,12 @@ def render_project_status_dashboard(client, selected_project, unit_label):
                 st.caption("No recent data")
                 continue
             
-            # Tile Logic
+            # Robust Timestamp Comparison
             latest_time = g_df['latest_ts'].max()
-            ts_check = latest_time if latest_time.tzinfo else latest_time.tz_localize('UTC')
-            lag_hrs = (now_utc - ts_check).total_seconds() / 3600
+            if latest_time.tzinfo is None:
+                latest_time = latest_time.tz_localize('UTC')
             
+            lag_hrs = (now_utc - latest_time).total_seconds() / 3600
             val = g_df['avg_now'].mean() if pd.notnull(g_df['avg_now'].mean()) else g_df['latest_temp'].mean()
             
             if lag_hrs > 1.1: 
@@ -189,8 +200,10 @@ def render_project_status_dashboard(client, selected_project, unit_label):
             else: 
                 st.title(f"{val:.1f}{unit_label}")
             
-            st.write(f"**{int(g_df['avg_now'].notnull().sum())} / {len(g_df)}** Active (1h)")
-            st.write(f"**{int((g_df['pings_24h'] > 0).sum())} / {len(g_df)}** Active (24h)")
+            # Simplified Summary Stats
+            active_1h = int(g_df['avg_now'].notnull().sum())
+            active_24h = int((g_df['pings_24h'] > 0).sum())
+            st.write(f"**{active_1h}/{len(g_df)}** (1h) | **{active_24h}/{len(g_df)}** (24h)")
             
             st.caption(f"Cur: {g_df['min_now'].min():.1f} to {g_df['max_now'].max():.1f}{unit_label}")
             st.caption(f"24h: {g_df['min_24h'].min():.1f} to {g_df['max_24h'].max():.1f}{unit_label}")
@@ -198,13 +211,14 @@ def render_project_status_dashboard(client, selected_project, unit_label):
             t_row = st.columns(2)
             t_row[0].caption(f"1h\n{get_trend_arrow(val, g_df['avg_1h_prev'].mean())}")
             t_row[1].caption(f"6h\n{get_trend_arrow(val, g_df['avg_6h_prev'].mean())}")
+            
 # ===============================================================
 # Function: Hardware integrity table
 # ===============================================================
-def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label):
+def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
     """
-    Renders a detailed table showing connectivity, coverage, and recent activity 
-    for all active nodes in the selected project.
+    Renders a detailed table showing connectivity, coverage, and recent activity.
+    Now includes natural sorting for improved readability.
     """
     st.subheader("📋 Hardware Integrity & Connectivity")
     
@@ -216,14 +230,13 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
             COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) as pings_1h,
             COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as pings_6h,
             COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
-            -- FIXED COVERAGE LOGIC BELOW
             (COUNT(DISTINCT CASE 
                 WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                 THEN TIMESTAMP_TRUNC(m.timestamp, HOUR) 
              END) / 24.0) * 100 as coverage_24h,
             AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
             AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev
-        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+        FROM `{target_registry}` n
         LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
         WHERE n.Project = @proj_id AND n.End_Date IS NULL
         GROUP BY 1, 2, 3, 4, 5
@@ -234,17 +247,22 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
     )).to_dataframe()
 
     if df.empty: 
+        st.info("No active nodes found for connectivity table.")
         return
+
+    # Natural Sorting Logic
+    df['bank_sort'] = df['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
+    df = df.sort_values(by=['Location', 'bank_sort', 'Depth']).drop(columns=['bank_sort'])
 
     now_utc = pd.Timestamp.now(tz='UTC')
 
     def row_processor(row):
-        # Last Seen Text/Style
         ping = row['last_ping']
         if pd.isnull(ping):
             txt, style = "❌ Never", "background-color: #d3d3d3"
         else:
-            diff = (now_utc - (ping if ping.tzinfo else ping.tz_localize('UTC'))).total_seconds() / 60
+            ts = ping if ping.tzinfo else ping.tz_localize('UTC')
+            diff = (now_utc - ts).total_seconds() / 60
             if diff <= 15: 
                 txt, style = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
             elif diff <= 60: 
@@ -252,13 +270,12 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
             else: 
                 txt, style = f"{round(diff/60, 1)}h ago", "background-color: #ffcccb; color: black"
         
-        pos = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
+        pos = f"{row['Depth']}ft" if (pd.notnull(row['Depth']) and row['Depth'] != 0) else f"Bank {row['Bank']}"
         trend = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
         return pd.Series([txt, style, pos, trend])
 
     df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend']] = df.apply(row_processor, axis=1)
 
-    # Table Layout
     display_df = pd.DataFrame({
         "Node ID": df['NodeNum'],
         "Location": df['Location'],
@@ -272,17 +289,13 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         "24h Pings": df['pings_24h']
     })
 
-    # Diagnostic Styler
     def diagnostic_styler(data):
         style_df = pd.DataFrame('', index=data.index, columns=data.columns)
-        ref = df.set_index('NodeNum')
+        ref = df.reset_index(drop=True)
         for i, row in data.iterrows():
-            nid = row['Node ID']
-            # Highlight Node ID if in Diagnostic status
-            if ref.loc[nid, 'SensorStatus'] == 'Diagnostic':
+            if ref.loc[i, 'SensorStatus'] == 'Diagnostic':
                 style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
-            # Apply the connectivity color coding to the Last Seen column
-            style_df.loc[i, 'Last Seen'] = ref.loc[nid, 'Seen_Style']
+            style_df.loc[i, 'Last Seen'] = ref.loc[i, 'Seen_Style']
         return style_df
 
     st.dataframe(
@@ -299,7 +312,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     """
     Enhanced Sensor Status: Peer Trend Analysis and Performance Scoring.
     """
-    # 1. Header and Metadata (Source: project_registry)
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
@@ -314,12 +326,11 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # 2. Advanced Query (Uses window functions for Peer Trends)
+    # Optimized Query: Peer Trend partitioning
     query = f"""
         WITH BaseReporting AS (
             SELECT 
                 m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth,
-                -- Peer Trend: Average of all sensors in the same pipe at the same time
                 AVG(m.temperature) OVER (PARTITION BY m.Location, m.timestamp) as peer_avg
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             WHERE m.Project = @proj_id
@@ -331,7 +342,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
                 ARRAY_AGG(peer_avg ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_peer_avg,
                 
-                -- Swing calculations for Performance Scoring
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) - 
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) as swing_2h,
                 
@@ -357,57 +367,40 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             st.warning("No data found for this project.")
             return
 
-        # 3. Custom Metrics Logic
         def calculate_custom_metrics(row):
-            # Peer Trend Logic
             peer_diff = abs(row['current_temp'] - row['current_peer_avg'])
-            if peer_diff < 2.0: trend = "🎯 In-Line"
-            elif peer_diff < 5.0: trend = "⚠️ Drifting"
-            else: trend = "🚨 Outlier"
+            trend = "🎯 In-Line" if peer_diff < 2.0 else "⚠️ Drifting" if peer_diff < 5.0 else "🚨 Outlier"
 
-            # Performance Logic (S/R vs T Pipe)
             loc_upper = str(row['Location']).upper()
             is_sr = any(x in loc_upper for x in ['S', 'R']) and 'AMB' not in loc_upper
-            
             s2, s6, s24 = row['swing_2h'], row['swing_6h'], row['swing_24h']
             
             if is_sr:
-                # S/R Thresholds: 2h=5, 6h=10, 24h=20
-                if s2 > 5 or s6 > 10 or s24 > 20: perf = "❌ Volatile"
-                else: perf = "✅ Stable"
+                perf = "❌ Volatile" if (s2 > 5 or s6 > 10 or s24 > 20) else "✅ Stable"
             else:
-                # T Pipe Thresholds: 2h=1, 6h=1, 24h=2
-                if s2 > 1 or s6 > 1 or s24 > 2: perf = "❌ Unsteady"
-                else: perf = "✅ Solid"
-
+                perf = "❌ Unsteady" if (s2 > 1 or s6 > 1 or s24 > 2) else "✅ Solid"
             return pd.Series([trend, perf])
 
         df[['Peer Trend', 'Performance']] = df.apply(calculate_custom_metrics, axis=1)
 
-        # 4. Display Result
-        st.subheader("🔍 Detailed Sensor Audit")
-        
-        # Calculate lag for status icon
         now_local = pd.Timestamp.now(tz=display_tz)
         df['hrs_lag'] = df['last_ping'].apply(
             lambda x: (now_local - (x if x.tzinfo else x.tz_localize('UTC')).tz_convert(display_tz)).total_seconds() / 3600
         )
         df['Status'] = df['hrs_lag'].apply(lambda x: f"🟢 {x:.1f}h" if x <= 1.1 else f"🔴 {x:.1f}h")
 
+        st.subheader("🔍 Detailed Sensor Audit")
         st.dataframe(
             df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"]].sort_values(['Location', 'NodeNum']),
-            use_container_width=True, 
-            hide_index=True
+            use_container_width=True, hide_index=True
         )
 
     except Exception as e:
         st.error(f"Sensor Status Error: {e}")
 
 def render_fleet_inventory_metrics(reg_df):
-    """Calculates and displays top-level fleet statistics."""
+    """Displays high-level fleet statistics."""
     if not reg_df.empty:
-        # Pre-process dates for filtering
-        reg_df['End_Date'] = pd.to_datetime(reg_df['End_Date'], errors='coerce')
         active_mask = reg_df['End_Date'].isna()
         
         m1, m2, m3, m4 = st.columns(4)
@@ -415,90 +408,32 @@ def render_fleet_inventory_metrics(reg_df):
         m2.metric("Currently Assigned", len(reg_df[active_mask & (reg_df['Project'] != 'Office')]))
         m3.metric("Available In Stock", len(reg_df[active_mask & (reg_df['Project'] == 'Office')]))
         
-        # Count critical statuses
         bad_status_count = len(reg_df[active_mask & reg_df['SensorStatus'].isin(['Dead', 'Flagged', 'Diagnostic'])])
         m4.metric("Diagnostic/Dead", bad_status_count)
 
-
-def render_location_drilldown(client, reg_df, selected_project, target_registry, PROJECT_ID, DATASET_ID):
-    """Displays project locations and allows expanding to see individual nodes."""
-    st.subheader(f"📍 Location Drill-Down: {selected_project}")
-    
-    loc_q = f"""
-        SELECT 
-            n.Location, 
-            COUNT(n.NodeNum) as pipe_count,
-            AVG(m.temperature) as avg_temp,
-            COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as seen_6h
-        FROM `{target_registry}` n
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
-        WHERE n.Project = @proj_id AND n.End_Date IS NULL
-        GROUP BY n.Location
-    """
-    
-    loc_df = client.query(loc_q, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-    )).to_dataframe()
-
-    if loc_df.empty:
-        st.info("No active locations found for this project.")
-        return
-
-    for _, row in loc_df.iterrows():
-        loc_name = row['Location']
-        avg_t = f"{row['avg_temp']:.1f}°F" if pd.notnull(row['avg_temp']) else "N/A"
-        
-        with st.expander(f"📁 {loc_name} | {row['pipe_count']} Pipes | Avg: {avg_t}"):
-            # Filter main registry for specific nodes in this location
-            pipe_df = reg_df[(reg_df['Project'] == selected_project) & 
-                             (reg_df['Location'] == loc_name) & 
-                             (reg_df['End_Date'].isna())].copy()
-            
-            display_pipes = pipe_df[['NodeNum', 'Bank', 'Depth', 'SensorStatus']].rename(
-                columns={'NodeNum': 'Pipe ID', 'SensorStatus': 'Status'}
-            )
-            
-            # Highlight diagnostic nodes in red
-            st.dataframe(
-                display_pipes.style.map(
-                    lambda val: 'color: red' if val == 'Diagnostic' else 'color: black', 
-                    subset=['Status']
-                ),
-                use_container_width=True,
-                hide_index=True
-            )
-
-
 def render_hardware_investigator(client, reg_df, target_registry, PROJECT_ID, DATASET_ID):
-    """Provides a global search tool to investigate a specific Node ID's history and data."""
+    """Global Node ID search tool."""
     st.subheader("🔦 Global Hardware Investigator")
-    search_node = st.text_input("Quick Search Node ID (e.g., TP-0009)").strip().upper()
+    search_node = st.text_input("Quick Search Node ID").strip().upper()
     
-    if not search_node:
-        return
+    if not search_node: return
 
     match = reg_df[reg_df['NodeNum'].astype(str).str.upper() == search_node]
-    
     if match.empty:
-        st.error(f"Node '{search_node}' not found in registry.")
+        st.error(f"Node '{search_node}' not found.")
         return
 
-    # A. Current Assignment info
     curr = match[match['End_Date'].isna()]
     if not curr.empty:
         st.info(f"📍 **Current Assignment:** {curr.iloc[0]['Project']} | {curr.iloc[0]['Location']} ({curr.iloc[0]['SensorStatus']})")
     
-    # B. Historical Deployment Table
     st.markdown("### 📜 Deployment History")
     history_q = f"""
-        SELECT Project, Location, Start_Date, End_Date, SensorStatus,
-        (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m 
-         WHERE m.NodeNum = r.NodeNum AND m.timestamp BETWEEN CAST(r.Start_Date AS TIMESTAMP) AND IFNULL(CAST(r.End_Date AS TIMESTAMP), CURRENT_TIMESTAMP())) as pings
-        FROM `{target_registry}` r WHERE NodeNum = '{search_node}' ORDER BY Start_Date DESC
+        SELECT Project, Location, Start_Date, End_Date, SensorStatus
+        FROM `{target_registry}` WHERE NodeNum = '{search_node}' ORDER BY Start_Date DESC
     """
     st.dataframe(client.query(history_q).to_dataframe(), use_container_width=True, hide_index=True)
 
-    # C. Plotly Lifetime Graph
     st.markdown("### 📈 Lifetime Thermal Profile")
     tel_df = client.query(
         f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{search_node}' ORDER BY timestamp ASC"
@@ -508,26 +443,91 @@ def render_hardware_investigator(client, reg_df, target_registry, PROJECT_ID, DA
         fig = go.Figure(go.Scatter(x=tel_df['timestamp'], y=tel_df['temperature'], mode='lines', line=dict(color='#00d4ff')))
         fig.update_layout(height=300, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.caption("No telemetry data available for this node.")
-
 
 def render_registry_health_check(client, target_registry):
-    """Checks for data integrity issues in the registry table."""
+    """Data integrity check (PhysicalID removed)."""
     with st.expander("🛠️ Registry Integrity Check"):
         health_df = client.query(
-            f"SELECT NodeNum, PhysicalID, Project, Start_Date FROM `{target_registry}` WHERE Start_Date IS NULL"
+            f"SELECT NodeNum, Project, Start_Date FROM `{target_registry}` WHERE Start_Date IS NULL"
         ).to_dataframe()
         
         if health_df.empty:
             st.success("✅ Registry Integrity looks good!")
         else:
-            st.warning("⚠️ Found orphaned records (Missing Start Dates):")
+            st.warning("⚠️ Orphaned records (Missing Start Dates):")
             st.dataframe(health_df, use_container_width=True)
 
 def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
+    """Corrects active record metadata by NodeNum only."""
+    sql_depth = "NULL" if (pd.isna(new_depth) or new_depth == 0.0) else f"{float(new_depth)}"
+
+    update_sql = f"""
+        UPDATE `{target_registry}`
+        SET Project = '{new_proj}', Location = '{new_loc}', Bank = '{new_bank}',
+            Depth = {sql_depth}, SensorStatus = '{new_status}'
+        WHERE NodeNum = '{data['NodeNum']}' AND End_Date IS NULL
     """
-    Updates metadata based ONLY on NodeNum. PhysicalID is left untouched in BQ.
+    
+    try:
+        client.query(update_sql).result()
+        st.success(f"✅ Record updated for {data['NodeNum']}")
+        st.cache_data.clear()
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Correction failed: {e}")
+        st.code(update_sql)
+
+# ===============================================================
+# PAGE: SENSOR REPLACE (Physical Swap Logic)
+# ===============================================================
+
+def render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID):
+    """
+    Renders charts for old vs new hardware to verify telemetry before committing.
+    Now searches by NodeNum (the user-facing ID) instead of Serial Number.
+    """
+    col_g1, col_g2 = st.columns(2)
+    
+    with col_g1:
+        st.markdown(f"**Old Hardware** ({found_row['NodeNum']})")
+        old_q = f"""
+            SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
+            WHERE NodeNum = '{found_row['NodeNum']}' 
+            AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY 
+            ORDER BY timestamp
+        """
+        old_data = client.query(old_q).to_dataframe()
+        if not old_data.empty:
+            fig_old = go.Figure(go.Scatter(x=old_data['timestamp'], y=old_data['temperature'], name="Old Node", line=dict(color='#888888')))
+            fig_old.update_layout(height=200, margin=dict(t=0,b=0), template="plotly_dark")
+            st.plotly_chart(fig_old, use_container_width=True)
+
+    # Search for the NEW hardware being prepared
+    new_hw_node = st.text_input("Enter NEW Hardware Node ID (e.g., TP-XXXX)")
+
+    with col_g2:
+        if new_hw_node:
+            st.markdown(f"**New Hardware** ({new_hw_node})")
+            new_q = f"""
+                SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
+                WHERE NodeNum = '{new_hw_node}' 
+                AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY 
+                ORDER BY timestamp
+            """
+            new_data = client.query(new_q).to_dataframe()
+            if not new_data.empty:
+                fig_new = go.Figure(go.Scatter(x=new_data['timestamp'], y=new_data['temperature'], name="New Node", line=dict(color='orange')))
+                fig_new.update_layout(height=200, margin=dict(t=0,b=0), template="plotly_dark")
+                st.plotly_chart(fig_new, use_container_width=True)
+            else:
+                st.caption(f"No recent telemetry seen for '{new_hw_node}' yet.")
+    
+    return new_hw_node
+
+def execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
+    """
+    Metadata Correction: Strictly uses NodeNum. 
     """
     sql_depth = "NULL" if (pd.isna(new_depth) or new_depth == 0.0) else f"{float(new_depth)}"
 
@@ -543,278 +543,38 @@ def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_d
             NodeNum = '{data['NodeNum']}' 
             AND End_Date IS NULL
     """
-    # ... rest of try/except block ...
-    
-    try:
-        client.query(update_sql).result()
-        st.success(f"✅ Record corrected for {data['NodeNum']} with Status: {clean_status}")
-        st.cache_data.clear()
-        time.sleep(1)
-        st.rerun()
-    except Exception as e:
-        st.error("Correction failed.")
-        st.code(update_sql)
-        st.error(str(e))
-
-# ===============================================================
-# PAGE: SENSOR REPLACE (Physical Swap Logic)
-# ===============================================================
-def render_node_selector(reg_df, proj_list):
-    """
-    Handles only the UI for finding and selecting a record.
-    Returns the 'data' (Series) of the selected row, or None.
-    """
-    st.subheader("🔍 Find & Select Record")
-    
-    if st.button("🔄 Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
-
-    # --- Initial Filtering & Status Mapping ---
-    status_map = {
-        'Online': 'On Project', 'Active': 'On Project', 'In Use': 'On Project',
-        'Available': 'Available', 'Diagnostic': 'Diagnostic', 'Dead': 'Dead', 'Archived': 'Archived'
-    }
-    reg_df['SensorStatus'] = reg_df['SensorStatus'].map(status_map).fillna(reg_df['SensorStatus'])
-    final_status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
-
-    show_archived = st.checkbox("Show Archived/Historical Data", value=False)
-    df_working = reg_df[reg_df['End_Date'].isna()].copy() if not show_archived else reg_df.copy()
-
-    # Hardware Toggles
-    ambient_view = st.radio("Hardware View", ["Show All", "Hide Ambient (SP)", "Ambient Only (SP)"], horizontal=True)
-    if "Hide Ambient" in ambient_view:
-        df_working = df_working[~df_working['NodeNum'].str.contains('SP', case=False, na=False)]
-    elif "Ambient Only" in ambient_view:
-        df_working = df_working[df_working['NodeNum'].str.contains('SP', case=False, na=False)]
-
-    # Filter Bar
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        sel_proj = st.selectbox("Project Filter", ["All"] + sorted(df_working['Project'].unique().tolist()))
-    
-    if sel_proj != "All":
-        df_working = df_working[df_working['Project'] == sel_proj]
-
-    # Rule: Office Lords must have all 4 channels to show up
-    if sel_proj == "Office":
-        lord_office = df_working[df_working['NodeNum'].str.contains('CH', case=False, na=False)].copy()
-        if not lord_office.empty:
-            lord_office['LordBase'] = lord_office['NodeNum'].apply(lambda x: x.rsplit('-', 1)[0])
-            l_counts = lord_office.groupby('LordBase')['NodeNum'].transform('count')
-            incomplete = lord_office[l_counts < 4]['NodeNum'].tolist()
-            df_working = df_working[~df_working['NodeNum'].isin(incomplete)]
-
-    with f2:
-        u_locs = sorted(df_working['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
-        sel_loc = st.selectbox("Location Filter", ["All"] + u_locs)
-    with f3:
-        sel_stat = st.selectbox("Status Filter", ["All"] + final_status_options)
-    with f4:
-        search_node = st.text_input("Search Node ID").strip().upper()
-
-    if sel_loc != "All": df_working = df_working[df_working['Location'] == sel_loc]
-    if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
-    if search_node: df_working = df_working[df_working['NodeNum'].str.contains(search_node)]
-
-    # Inside render_node_selector, right before st.dataframe:
-    if not df_working.empty:
-        # Standardize sorting as before
-        df_working['Depth'] = pd.to_numeric(df_working['Depth'], errors='coerce').fillna(0.0)
-        df_working['bank_sort'] = df_working['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
-        df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth'])
-        
-        # --- STRIP PHYSICAL ID FROM VIEW ---
-        cols_to_drop = ['bank_sort']
-        if 'PhysicalID' in df_working.columns:
-            cols_to_drop.append('PhysicalID')
-        
-        df_working = df_working.drop(columns=cols_to_drop)
-
-    selected_rows = st.dataframe(
-        df_working, 
-        use_container_width=True, 
-        hide_index=True, 
-        on_select="rerun", 
-        selection_mode="single-row"
-    )
-
-    if len(selected_rows.selection.rows) > 0:
-        return df_working.iloc[selected_rows.selection.rows[0]]
-    
-    return None
-
-def render_node_action_manager(client, data, reg_df, proj_list, target_registry):
-    """
-    Handles the logic for correcting, swapping, or decommissioning.
-    Requires 'data' from the selector.
-    """
-    node_id = str(data['NodeNum']).upper()
-    is_lord = 'CH' in node_id
-    is_sp = 'SP' in node_id
-    final_status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
-    
-    # Filter projects to active ones + Office
-    active_projects = reg_df[reg_df['End_Date'].isna()]['Project'].unique().tolist()
-    filtered_proj_list = sorted([p for p in proj_list if p in active_projects or p == 'Office'])
-
-    st.divider()
-    st.subheader(f"⚡ Action Manager: {node_id}")
-
-    mgmt_action = st.radio("Intent", ["📝 Correct Record", "🔄 Hardware Swap"], horizontal=True)
-
-    c1, c2, c3 = st.columns(3)
-    
-    # 1. Project
-    try: p_idx = filtered_proj_list.index(data['Project'])
-    except ValueError: p_idx = 0
-    new_proj = c1.selectbox("Move to Project", filtered_proj_list, index=p_idx)
-
-    # 2. Location (Toggle Text/Dropdown)
-    if new_proj == 'Office':
-        new_loc = c2.text_input("Office Sub-Location", value=data['Location'] if data['Project'] == 'Office' else "Desk")
-    else:
-        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
-        if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
-        try: l_idx = existing_locs.index("Ambient" if is_sp else data['Location'])
-        except ValueError: l_idx = 0
-        new_loc = c2.selectbox("Assign to Location", existing_locs, index=l_idx)
-
-    # 3. Status
-    if is_lord:
-        new_status = "On Project"
-        c3.info("Status: **On Project**")
-    else:
-        try: s_idx = final_status_options.index(data['SensorStatus'])
-        except ValueError: s_idx = 0
-        new_status = c3.selectbox("Update Status", final_status_options, index=s_idx)
-
-    # Inside the with st.form(key=f"form_{node_id}"):
-        with st.form(key=f"form_{node_id}"):
-            fcol1, fcol2 = st.columns(2)
-            new_bank = fcol1.text_input("Bank Identifier", value=data.get('Bank', ''))
-            new_depth = fcol2.number_input("Depth (ft)", value=float(data.get('Depth', 0.0)), format="%.1f")
-            
-            # PHYSICAL ID INPUT REMOVED FROM HERE
-
-        if mgmt_action == "📝 Correct Record":
-            if st.form_submit_button("💾 Save Changes"):
-                execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
-
-        elif mgmt_action == "🔄 Hardware Swap":
-            new_hw_node = st.text_input("New Node ID")
-            swap_date = st.date_input("Effective Date", value=datetime.now().date())
-            if st.form_submit_button("🔄 Swap Hardware"):
-                execute_replacement_transaction(client, data, new_hw_node, swap_date, target_registry)
-
-        if not is_lord:
-            st.divider()
-            st.subheader("🏁 Decommission")
-            d_c1, d_c2, d_c3 = st.columns(3)
-            d_date = d_c1.date_input("Removal Date")
-            d_stat = d_c2.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
-            d_office_loc = d_c3.text_input("Office Storage Loc", value="Desk")
-            if st.form_submit_button("🔚 Send to Office"):
-                execute_decommission_node(client, data, target_registry, d_date, d_stat, d_office_loc)
-
-def render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID):
-    """Renders charts for old vs new hardware to verify telemetry before committing."""
-    col_g1, col_g2 = st.columns(2)
-    
-    with col_g1:
-        st.markdown(f"**Old Hardware** (S/N: {found_row['PhysicalID']})")
-        old_q = f"""
-            SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
-            WHERE NodeNum = '{found_row['NodeNum']}' 
-            AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY 
-            ORDER BY timestamp
-        """
-        old_data = client.query(old_q).to_dataframe()
-        if not old_data.empty:
-            fig_old = go.Figure(go.Scatter(x=old_data['timestamp'], y=old_data['temperature'], name="Old Node", line=dict(color='#888888')))
-            fig_old.update_layout(height=200, margin=dict(t=0,b=0), template="plotly_dark")
-            st.plotly_chart(fig_old, use_container_width=True)
-
-    new_sn = st.text_input("Enter NEW Hardware Serial Number (Physical ID)")
-
-    with col_g2:
-        if new_sn:
-            st.markdown(f"**New Hardware** (S/N: {new_sn})")
-            new_q = f"""
-                SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
-                WHERE SAFE_CAST(PhysicalID AS STRING) LIKE '%{new_sn}%' 
-                AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL 3 DAY 
-                ORDER BY timestamp
-            """
-            new_data = client.query(new_q).to_dataframe()
-            if not new_data.empty:
-                fig_new = go.Figure(go.Scatter(x=new_data['timestamp'], y=new_data['temperature'], name="New Node", line=dict(color='orange')))
-                fig_new.update_layout(height=200, margin=dict(t=0,b=0), template="plotly_dark")
-                st.plotly_chart(fig_new, use_container_width=True)
-            else:
-                st.caption("No recent telemetry seen for this new Serial Number yet.")
-    
-    return new_sn
-
-def execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
-    """
-    Metadata Correction: Uses NodeNum to find the record. 
-    Removes PhysicalID as a requirement or identifier.
-    """
-    # 1. Sanitize Depth
-    if pd.isna(new_depth) or new_depth == 0.0:
-        sql_depth = "NULL"
-    else:
-        sql_depth = f"{float(new_depth)}"
-
-    # 2. Construct SQL using ONLY NodeNum and active status as the identifier
-    # This prevents 'nan' errors because NodeNum is always a clean string.
-    update_sql = f"""
-        UPDATE `{target_registry}`
-        SET 
-            Project = '{new_proj}',
-            Location = '{new_loc}', 
-            Bank = '{new_bank}',
-            Depth = {sql_depth},
-            SensorStatus = '{new_status}'
-        WHERE 
-            NodeNum = '{data['NodeNum']}' 
-            AND End_Date IS NULL  -- Only update the current active deployment
-    """
     
     try:
         client.query(update_sql).result()
         st.success(f"✅ Metadata corrected for {data['NodeNum']}")
+        st.cache_data.clear()
         time.sleep(1)
         st.rerun()
     except Exception as e:
         st.error("Correction Failed")
         st.code(update_sql, language="sql")
         st.error(str(e))
-        
-def render_replacement_form(client, found_row, new_sn, target_registry):
-    """Renders the final confirmation form and executes the BQ transaction."""
+
+def render_replacement_form(client, found_row, new_hw_node, target_registry):
+    """Renders final confirmation form for swapping hardware."""
     st.divider()
     with st.form("replacement_commit_form"):
         st.write("### 🚀 Commit Hardware Swap")
-        st.warning("This will end the current record and create a new assignment for this Node ID.")
+        st.warning(f"This will end the current record for {found_row['NodeNum']} and start a new assignment for {new_hw_node}.")
         
         replace_date = st.date_input("Actual Swap Date", value=datetime.now().date())
         confirm_check = st.checkbox("I verify the new hardware is communicating and the old hardware is removed.")
         
         if st.form_submit_button("EXECUTE REPLACEMENT"):
-            clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
-            
-            if not clean_sn or not confirm_check:
-                st.error("Missing Serial Number or verification checkbox.")
+            if not new_hw_node or not confirm_check:
+                st.error("Missing New Node ID or verification checkbox.")
             else:
-                execute_replacement_transaction(client, found_row, clean_sn, replace_date, target_registry)
-
+                execute_replacement_transaction(client, found_row, new_hw_node, replace_date, target_registry)
 
 def execute_replacement_transaction(client, data, new_node_num, swap_date, target_registry):
     """
-    Hardware Swap: Closes current NodeNum entry and starts a NEW one 
-    for a different NodeNum at the same location.
+    Hardware Swap: Closes current entry and starts a NEW one.
+    PhysicalID is completely removed from this transaction.
     """
     date_str = swap_date.isoformat()
 
@@ -837,8 +597,8 @@ def execute_replacement_transaction(client, data, new_node_num, swap_date, targe
             '{data['Project']}', 
             '{data['Location']}', 
             '{data.get('Bank', '')}', 
-            {data.get('Depth', 'NULL')}, 
-            'Active', 
+            {data.get('Depth', 'NULL') if pd.notnull(data.get('Depth')) else 'NULL'}, 
+            'On Project', 
             DATE('{date_str}')
         );
         
@@ -861,13 +621,13 @@ def execute_replacement_transaction(client, data, new_node_num, swap_date, targe
 
 def render_sensor_switch_page(client, PROJECT_ID, DATASET_ID):
     """
-    Main entry point for the Sensor Switch tool. 
-    Used for metadata corrections (typos) without affecting history.
+    Repurposed for metadata corrections (typos) using only NodeNum.
+    This page is now a 'Quick Fix' tool for active deployments.
     """
-    st.header("🩹 Sensor Designation Switch")
+    st.header("🩹 Metadata Quick-Fix")
     st.info("""
-        **Purpose:** Use this for metadata corrections only (e.g., a typo during setup). 
-        This will update the existing active record without changing start dates or history.
+        **Purpose:** Use this to fix typos (Location, Bank, Depth) on an active node 
+        without changing history or start dates.
     """)
     
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
@@ -875,339 +635,177 @@ def render_sensor_switch_page(client, PROJECT_ID, DATASET_ID):
     node_id = st.text_input("Enter Node ID to correct (e.g., TP-0001)").strip().upper()
     
     if node_id:
-        process_sensor_switch(client, node_id, target_registry)
-
-
-def process_sensor_switch(client, node_id, target_registry):
-    """Handles the lookup and update logic for correcting a sensor's Physical ID."""
-    # We only want to switch IDs for active assignments
-    query = f"SELECT * FROM `{target_registry}` WHERE NodeNum = '{node_id}' AND End_Date IS NULL"
-    df = client.query(query).to_dataframe()
-    
-    if not df.empty:
-        row = df.iloc[0]
+        # Search for the active record
+        query = f"SELECT * FROM `{target_registry}` WHERE NodeNum = '{node_id}' AND End_Date IS NULL"
+        df = client.query(query).to_dataframe()
         
-        # Display current state
-        st.subheader(f"Current Config: {node_id}")
-        c1, c2, c3 = st.columns(3)
-        c1.write(f"**Project:** {row['Project']}")
-        c2.write(f"**Location:** {row['Location']}")
-        c3.write(f"**Physical ID:** `{row['PhysicalID']}`")
-        
-        st.divider()
-        
-        # Input for correction
-        new_id = st.text_input("Enter Corrected Physical ID (Serial Number)")
-        
-        if st.button("🚀 Apply Designation Correction"):
-            if not new_id:
-                st.warning("Please provide a new Physical ID.")
-            else:
-                execute_switch_update(client, node_id, row['Project'], new_id, target_registry)
-    else:
-        st.error(f"No active record found for Node '{node_id}'. Verify the ID or check the Sensor Status page.")
+        if not df.empty:
+            row = df.iloc[0]
+            st.subheader(f"Current Config: {node_id}")
+            
+            with st.form("quick_fix_form"):
+                c1, c2 = st.columns(2)
+                # Allow editing of the core metadata
+                new_loc = c1.text_input("Corrected Location", value=row['Location'])
+                new_bank = c2.text_input("Corrected Bank", value=row['Bank'])
+                
+                c3, c4 = st.columns(2)
+                new_depth = c3.number_input("Corrected Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
+                new_status = c4.selectbox("Corrected Status", ["On Project", "Available", "Diagnostic", "Dead"], index=0)
 
+                if st.form_submit_button("🚀 Apply Corrections"):
+                    execute_combined_correction(
+                        client, row, row['Project'], new_loc, 
+                        new_bank, new_depth, new_status, target_registry
+                    )
+        else:
+            st.error(f"No active record found for Node '{node_id}'.")
 
-def execute_switch_update(client, node_id, project, new_id, target_registry):
-    """Executes the SQL update to correct the PhysicalID in BigQuery."""
-    # Clean the input to ensure it's numeric for FLOAT64 column
-    clean_id = re.sub(r'[^0-9.]', '', str(new_id))
-    
-    update_sql = f"""
-        UPDATE `{target_registry}`
-        SET PhysicalID = SAFE_CAST('{clean_id}' AS FLOAT64)
-        WHERE NodeNum = '{node_id}' 
-          AND Project = '{project}'
-          AND End_Date IS NULL
-    """
-    
-    try:
-        with st.spinner("Correcting designation..."):
-            client.query(update_sql).result()
-        st.success(f"Successfully updated {node_id} to Physical ID: {clean_id}")
-        time.sleep(1.5)
-        st.rerun()
-    except Exception as e:
-        st.error(f"Update failed: {e}")
+# Note: This function now calls 'execute_combined_correction' 
+# which we already updated to ignore PhysicalID.
 # ===============================================================
 # PAGE: SENSOR EDIT (Interactive Registry Editor)
 # ===============================================================
 
 def render_sensor_edit_filters(reg_df):
     """
-    Advanced filtering for the Unified Node Manager.
-    Allows hierarchical Project -> Location search with status and node ID filters.
+    Unified Filtering: Hierarchical Project -> Location search.
+    Strips PhysicalID from view and applies strict status rules.
     """
     st.subheader("🔍 Find & Select Record")
     
-    # 1. Archived Toggle (Defaulted to False)
-    show_archived = st.checkbox("Show Archived/Historical Data", value=False)
+    # Refresh logic
+    if st.button("🔄 Refresh Table Data"):
+        st.cache_data.clear()
+        st.rerun()
     
-    # Clean data based on archival toggle
-    if not show_archived:
-        # Only show nodes that are currently active in the field
-        df = reg_df[reg_df['End_Date'].isna()].copy()
-    else:
-        df = reg_df.copy()
+    show_archived = st.checkbox("Show Archived/Historical Data", value=False)
+    df = reg_df[reg_df['End_Date'].isna()].copy() if not show_archived else reg_df.copy()
 
     col_f1, col_f2, col_f3, col_f4 = st.columns(4)
     
     with col_f1:
-        # Project Search
         u_projects = sorted(df['Project'].unique().tolist())
         sel_proj = st.selectbox("Search by Project", ["All"] + u_projects)
         
     with col_f2:
-        # Hierarchical Location Search (Depends on Project Selection)
         if sel_proj != "All":
-            u_locs = sorted(df[df['Project'] == sel_proj]['Location'].unique().tolist())
+            u_locs = sorted(df[df['Project'] == sel_proj]['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
         else:
-            u_locs = sorted(df['Location'].unique().tolist())
+            u_locs = sorted(df['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
         sel_loc = st.selectbox("Search by Location", ["All"] + u_locs)
 
     with col_f3:
-        # Status Filter
-        u_status = sorted(df['SensorStatus'].unique().tolist())
+        # Use our strict status list for filtering
+        u_status = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
         sel_stat = st.selectbox("Filter by Status", ["All"] + u_status)
         
     with col_f4:
-        # Node ID Search
         search_node = st.text_input("Search Node ID").strip().upper()
 
-    # Apply Final Filter Logic
-    if sel_proj != "All":
-        df = df[df['Project'] == sel_proj]
-    if sel_loc != "All":
-        df = df[df['Location'] == sel_loc]
-    if sel_stat != "All":
-        df = df[df['SensorStatus'] == sel_stat]
-    if search_node:
-        df = df[df['NodeNum'].str.upper().str.contains(search_node)]
+    # Application of filters
+    if sel_proj != "All": df = df[df['Project'] == sel_proj]
+    if sel_loc != "All": df = df[df['Location'] == sel_loc]
+    if sel_stat != "All": df = df[df['SensorStatus'] == sel_stat]
+    if search_node: df = df[df['NodeNum'].str.contains(search_node)]
         
+    # Standardize sort and strip PhysicalID from view
+    if not df.empty:
+        df['bank_sort'] = df['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
+        df = df.sort_values(by=['Location', 'bank_sort']).drop(columns=['bank_sort'])
+        if 'PhysicalID' in df.columns:
+            df = df.drop(columns=['PhysicalID'])
+            
     return df
-
-def render_sensor_edit_filters(reg_df):
-    st.subheader("🔍 Find & Select Record")
-    
-    col_f1, col_f2, col_f3 = st.columns(3)
-    with col_f1:
-        # Include 'Office' so unassigned sensors can be found
-        u_projects = sorted(reg_df['Project'].unique().tolist())
-        sel_proj = st.selectbox("Filter by Project", ["All"] + u_projects)
-        
-    with col_f2:
-        search_node = st.text_input("Search Node ID").strip().upper()
-
-    with col_f3:
-        u_status = sorted(reg_df['SensorStatus'].unique().tolist())
-        sel_stat = st.selectbox("Filter by Status", ["All"] + u_status)
-
-    df = reg_df[reg_df['End_Date'].isna()].copy()
-
-    if sel_proj != "All":
-        df = df[df['Project'] == sel_proj]
-    if sel_stat != "All":
-        df = df[df['SensorStatus'] == sel_stat]
-    if search_node:
-        df = df[df['NodeNum'].str.upper().str.contains(search_node)]
-        
-    return df
-
 
 def render_edit_record_form(client, data, reg_df, proj_list, target_registry):
+    """
+    Form for editing existing records. Physical ID is removed.
+    Implements custom Office locations and strict status dropdowns.
+    """
     st.divider()
     st.subheader(f"🛠️ Managing {data['NodeNum']}")
-    st.caption(f"Physical ID: {data['PhysicalID']} | Start Date: {data['Start_Date']}")
 
-    # 1. Project Selection (Outside form for instant reactivity)
-    try:
-        p_idx = proj_list.index(data['Project'])
-    except ValueError:
-        p_idx = 0
-    
-    # We use a unique key based on NodeNum to prevent StreamlitDuplicateElementId
-    new_proj = st.selectbox(
-        "Assign to Project", 
-        proj_list, 
-        index=p_idx, 
-        key=f"proj_sel_{data['NodeNum']}"
-    )
+    # 1. Project Selection
+    try: p_idx = proj_list.index(data['Project'])
+    except ValueError: p_idx = 0
+    new_proj = st.selectbox("Assign to Project", proj_list, index=p_idx, key=f"edit_proj_{data['NodeNum']}")
 
-    # 2. Dynamic Location Selection (Updates immediately when new_proj changes)
-    existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
-    
-    # Ensure standard options are available
-    if "Ambient" not in existing_locs:
-        existing_locs.insert(0, "Ambient")
-    if "Stock" not in existing_locs:
-        existing_locs.append("Stock")
+    # 2. Dynamic Location (Text input for Office, selectbox for sites)
+    if new_proj == 'Office':
+        new_loc = st.text_input("Office Sub-Location", value=data['Location'] if data['Project'] == 'Office' else "Desk")
+    else:
+        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
+        try: l_idx = existing_locs.index(data['Location'])
+        except ValueError: l_idx = 0
+        new_loc = st.selectbox("Assign to Location", existing_locs, index=l_idx)
 
-    try:
-        l_idx = existing_locs.index(data['Location'])
-    except ValueError:
-        l_idx = 0
-
-    new_loc = st.selectbox(
-        "Assign to Location", 
-        existing_locs, 
-        index=l_idx, 
-        key=f"loc_sel_{data['NodeNum']}"
-    )
-
-    # 3. Action Form for final submission
+    # 3. Form for Bank, Depth, Status
     with st.form(key=f"edit_form_{data['NodeNum']}"):
         c1, c2 = st.columns(2)
-        # Use get() with an empty string default to avoid pulling other column data
-        new_bank = st.text_input("Bank", value=str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) else "")
+        new_bank = c1.text_input("Bank", value=str(data.get('Bank', '')))
         new_depth = c2.number_input("Depth (ft)", value=float(data['Depth']) if pd.notnull(data['Depth']) else 0.0)
         
-        status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
-        try:
-            s_idx = status_list.index(data['SensorStatus'])
-        except ValueError:
-            s_idx = 0
+        status_list = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
+        try: s_idx = status_list.index(data['SensorStatus'])
+        except ValueError: s_idx = 0
         new_status = st.selectbox("Update Status", status_list, index=s_idx)
 
-        # Execution Buttons
+        # Actions
         cols = st.columns([1, 1, 1])
-        
         if cols[0].form_submit_button("💾 Save Assignment"):
-            final_status = "Active" if new_proj != "Office" and new_status == "Available" else new_status
-            execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, final_status, target_registry)
+            execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
 
         if cols[1].form_submit_button("🔚 Decommission"):
-            execute_decommission_node(client, data, target_registry)
+            # This triggers the standard decommission workflow
+            st.info("Please use the Decommission section in Node Manager for full audit trail.")
 
-        if cols[2].form_submit_button("🗑️ Delete", type="primary"):
+        if cols[2].form_submit_button("🗑️ Delete Record", type="primary"):
             execute_record_delete(client, data, target_registry)
 
-
-def execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry):
-    """
-    Sanitizes inputs and explicitly handles NULL for Depth 
-    to prevent bank-position overrides.
-    """
-    # 1. Sanitize Strings
-    def to_sql_str(val):
-        if pd.isna(val) or str(val).lower() == 'nan' or not str(val).strip():
-            return ""
-        return str(val).replace("'", "\\'")
-
-    # 2. Sanitize Depth (The Critical Fix)
-    # If depth is 0.0, we treat it as NULL so the Bank column handles the position
-    if pd.isna(new_depth) or new_depth == 0.0:
-        sql_depth = "NULL"
-    else:
-        sql_depth = f"{float(new_depth)}"
-
-    # 3. Handle PhysicalID WHERE clause for 'nan' safety
-    raw_phys_id = data.get('PhysicalID')
-    phys_id_where = "PhysicalID IS NULL" if pd.isna(raw_phys_id) else f"PhysicalID = {raw_phys_id}"
-
-    # 4. Final SQL Construction
-    update_sql = f"""
-        UPDATE `{target_registry}`
-        SET 
-            Project = '{to_sql_str(new_proj)}',
-            Location = '{to_sql_str(new_loc)}', 
-            Bank = '{to_sql_str(new_bank)}',
-            Depth = {sql_depth},
-            SensorStatus = '{to_sql_str(new_status)}'
-        WHERE 
-            NodeNum = '{data['NodeNum']}' 
-            AND Start_Date = DATE('{data['Start_Date']}')
-            AND {phys_id_where}
-    """
-    
-    try:
-        client.query(update_sql).result()
-        st.success(f"✅ Updated {data['NodeNum']}. Depth set to {sql_depth}.")
-        time.sleep(1)
-        st.rerun()
-    except Exception as e:
-        st.error("SQL Execution Error")
-        st.code(update_sql, language="sql")
-        st.error(str(e))
-
-
 def execute_record_delete(client, data, target_registry):
-    """Executes the BigQuery DELETE for a specific record."""
+    """Deletes record using NodeNum only."""
     delete_sql = f"""
         DELETE FROM `{target_registry}` 
         WHERE NodeNum = '{data['NodeNum']}' 
           AND Start_Date = DATE('{data['Start_Date']}')
-          AND PhysicalID = {data['PhysicalID']}
+          AND End_Date IS NULL
     """
     try:
         client.query(delete_sql).result()
-        st.warning(f"Deleted {data['NodeNum']} record from registry.")
+        st.warning(f"Deleted {data['NodeNum']} from registry.")
+        st.cache_data.clear()
         time.sleep(1)
         st.rerun()
     except Exception as e:
         st.error(f"Deletion failed: {e}")
 
-def execute_decommission_node(client, data, target_registry, decom_dt, stock_status):
+def execute_decommission_node(client, data, target_registry, decom_dt, stock_status, d_office_loc):
     """
-    Closes the old site record as 'Archived' and creates a new 'Office' stock record.
+    Finalized Decommission: No PhysicalID reliance.
     """
-    # Format for SQL: 'YYYY-MM-DD' (Stripping time to match BigQuery DATE type)
     date_str = decom_dt.strftime('%Y-%m-%d')
-    
-    # 1. Clean NodeNum for WHERE clause
     node_num = data['NodeNum']
-    
-    # 2. Sanitize PhysicalID (matching your rule to handle but not rely on it)
-    raw_phys_id = data.get('PhysicalID')
-    if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
-        phys_id_match = "PhysicalID IS NULL"
-        phys_id_val = "NULL"
-    else:
-        phys_id_val = f"{int(float(raw_phys_id))}"
-        phys_id_match = f"PhysicalID = {phys_id_val}"
 
     sql = f"""
         BEGIN TRANSACTION;
-        
-        -- 1. ARCHIVE the OLD site deployment
         UPDATE `{target_registry}`
-        SET 
-            End_Date = DATE('{date_str}'), 
-            SensorStatus = 'Archived'  -- Per your request
-        WHERE NodeNum = '{node_num}' 
-          AND Project = '{data['Project']}'
-          AND {phys_id_match}
-          AND End_Date IS NULL;
+        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+        WHERE NodeNum = '{node_num}' AND End_Date IS NULL;
 
-        -- 2. Create the NEW Office stock record
-        INSERT INTO `{target_registry}` (
-            NodeNum, PhysicalID, Project, Location, Bank, Depth, SensorStatus, Start_Date
-        )
-        VALUES (
-            '{node_num}', 
-            {phys_id_val}, 
-            'Office', 
-            'Office', 
-            '{node_num}', -- Bank set to NodeNum
-            NULL, 
-            '{stock_status}', 
-            DATE('{date_str}')
-        );
-        
+        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+        VALUES ('{node_num}', 'Office', '{d_office_loc}', '{node_num}', NULL, '{stock_status}', DATE('{date_str}'));
         COMMIT;
     """
-    
     try:
         client.query(sql).result()
-        st.success(f"✅ {node_num} deployment Archived. Hardware moved to Office Stock.")
-        # Clear cache so the 'Find & Select' table updates immediately
+        st.success(f"✅ {node_num} moved to {d_office_loc}.")
         st.cache_data.clear()
         time.sleep(1)
         st.rerun()
     except Exception as e:
         st.error("Audit transaction failed.")
         st.code(sql, language="sql")
-        st.error(str(e))
-
 
 # ===============================================================
 # PAGE: DATA RECOVERY (SensorPush API Bridge)
@@ -1218,8 +816,12 @@ def render_data_recovery_page(reg_df):
     st.header("📡 Data Recovery")
     st.info("Triggers the Cloud Run service to backfill missing telemetry from the SensorPush API.")
 
-    # 1. GATEWAY: Filter for SensorPush hardware only (TP-Prefix)
-    sp_reg = reg_df[reg_df['NodeNum'].str.startswith('TP', na=False)].copy()
+    # 1. GATEWAY: Filter for SensorPush hardware only (TP-Prefix) 
+    # Use only active sensors to keep the selection list manageable
+    sp_reg = reg_df[
+        (reg_df['NodeNum'].str.startswith('TP', na=False)) & 
+        (reg_df['End_Date'].isna())
+    ].copy()
 
     # 2. FILTERING UI
     selected_nodes = render_recovery_filters(sp_reg)
@@ -1228,40 +830,45 @@ def render_data_recovery_page(reg_df):
     st.divider()
     c_d1, c_d2 = st.columns(2)
     with c_d1:
+        # Default to last 3 days
         start_date = st.date_input("Recovery Start Date", value=datetime.now() - timedelta(days=3))
     with c_d2:
         end_date = st.date_input("Recovery End Date", value=datetime.now())
 
     if st.button("🚀 Run Recovery Service", type="primary"):
-        handle_recovery_trigger(selected_nodes, start_date, end_date)
+        if not selected_nodes:
+            st.error("Please select at least one node.")
+        else:
+            handle_recovery_trigger(selected_nodes, start_date, end_date)
 
     # 4. SYSTEM LOGIC FOOTER
     render_recovery_logic_footer()
 
 
 def render_recovery_filters(sp_reg):
-    """Renders the hierarchical filters and returns the list of selected Node IDs."""
+    """Renders hierarchical filters and returns selected Node IDs."""
     st.subheader("🔍 Select Target Hardware")
     col_f1, col_f2, col_f3 = st.columns(3)
     
     with col_f1:
         u_projects = ["All"] + sorted(sp_reg['Project'].unique().tolist())
-        rec_proj = st.selectbox("Filter by Project", u_projects)
+        rec_proj = st.selectbox("Filter by Project", u_projects, key="rec_proj_sel")
     
     proj_filtered = sp_reg if rec_proj == "All" else sp_reg[sp_reg['Project'] == rec_proj]
     
     with col_f2:
-        u_locs = ["All"] + sorted(proj_filtered['Location'].unique().tolist())
-        rec_loc = st.selectbox("Filter by Location", u_locs)
+        u_locs = ["All"] + sorted(proj_filtered['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
+        rec_loc = st.selectbox("Filter by Location", u_locs, key="rec_loc_sel")
         
     with col_f3:
         loc_filtered = proj_filtered if rec_loc == "All" else proj_filtered[proj_filtered['Location'] == rec_loc]
-        available_nodes = sorted(loc_filtered['NodeNum'].unique().tolist())
+        available_nodes = sorted(loc_filtered['NodeNum'].unique().tolist(), key=natural_sort_key)
         
         selected_nodes = st.multiselect(
             "Select Node Numbers", 
             available_nodes, 
-            default=available_nodes if len(available_nodes) < 10 else None,
+            # Default to None to prevent accidental massive API requests
+            default=None,
             help="Choose the specific sensors to backfill."
         )
     return selected_nodes
@@ -1269,10 +876,8 @@ def render_recovery_filters(sp_reg):
 
 def handle_recovery_trigger(selected_nodes, start_date, end_date):
     """Manages the API request to the Cloud Run recovery service."""
-    if not selected_nodes:
-        st.error("Operation Aborted: No sensors selected for recovery.")
-        return
-
+    import requests # Standardize import at top of file if preferred
+    
     cloud_run_url = "https://sensorpushtobigquery-1013288934882.us-west1.run.app/recover_data"
     
     payload = {
@@ -1281,18 +886,18 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
         "nodes": ",".join(selected_nodes)
     }
 
-    with st.spinner(f"Requesting data for {len(selected_nodes)} sensors..."):
+    with st.spinner(f"Triggering backfill for {len(selected_nodes)} sensors..."):
         try:
-            import requests
+            # Note: 300s timeout is good for larger batches
             response = requests.get(cloud_run_url, params=payload, timeout=300)
             
             if response.status_code == 200:
                 st.success("✅ Recovery Triggered Successfully")
-                st.code(response.text)
+                st.info("The service is processing. Data will appear in BigQuery shortly.")
+                if response.text:
+                    st.code(response.text)
             else:
                 st.error(f"Cloud Service Error ({response.status_code}): {response.text}")
-        except ImportError:
-            st.error("System Error: 'requests' library is not installed. Contact Engineering.")
         except Exception as e:
             st.error(f"Connectivity Failure: {e}")
 
@@ -1301,11 +906,11 @@ def render_recovery_logic_footer():
     """Renders documentation on how the recovery process functions."""
     st.divider()
     with st.expander("🛠️ How the Recovery Engine Works"):
-        st.markdown(f"""
-        1. **Filtered Registry**: This tool only views sensors starting with `TP` (SensorPush).
-        2. **API Handshake**: The app sends the `start`, `end`, and `nodes` parameters to a secure GCP Cloud Run endpoint.
-        3. **Processing**: Cloud Run fetches raw data from the SensorPush Cloud API and pushes it directly into BigQuery `raw_sensorpush`.
-        4. **Verification**: Once finished, data will propagate to the `master_data_view` within minutes.
+        st.markdown("""
+        1. **Filtered Registry**: Accesses active `TP` (SensorPush) sensors only.
+        2. **API Handshake**: Sends date parameters and a comma-separated node list to the Cloud Run endpoint.
+        3. **Background Processing**: Cloud Run fetches data from SensorPush and pushes to `raw_sensorpush` in BigQuery.
+        4. **Propagation**: Data updates the `master_data_view` automatically via the existing SQL view logic.
         """)
     
 # ===============================================================
@@ -1316,102 +921,130 @@ def render_project_master_page(client, selected_project, PROJECT_ID, DATASET_ID)
     """Main entry point for Project Lifecycle Management."""
     st.header("⚙️ Project Lifecycle Management")
     
-    action = st.radio("Action", ["Overview", "New Project", "Update Existing"], horizontal=True)
+    action = st.radio("Action", ["📋 Fleet Overview", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True)
     table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
 
-    if action == "Overview":
+    if action == "📋 Fleet Overview":
         render_project_overview(client, table_projects)
 
-    elif action == "New Project":
+    elif action == "🏗️ New Project":
         render_new_project_form(client, table_projects)
 
-    elif action == "Update Existing":
+    elif action == "🔧 Edit Project Metadata":
         render_update_project_form(client, selected_project, table_projects)
 
 
 def render_project_overview(client, table_projects):
-    """Displays a list of all active (non-archived) projects."""
-    st.subheader("📋 Project Fleet Status")
-    query = f"""
-        SELECT Project, ProjectStatus, Date_Freezedown, EngNotes 
-        FROM `{table_projects}` 
-        WHERE ProjectStatus != 'Archived' 
-        ORDER BY Project ASC
-    """
+    """Displays all registry information for all projects (including Archived)."""
+    st.subheader("📋 Complete Project Registry")
+    
+    # We remove the Status filter so you can see 'Archived' projects too
+    query = f"SELECT * FROM `{table_projects}` ORDER BY Project ASC"
     df = client.query(query).to_dataframe()
     
     if not df.empty:
+        # Standardize date display for the table
+        for col in ['Date_Freezedown', 'Date_Completion']:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col]).dt.date
+        
         st.dataframe(df, use_container_width=True, hide_index=True)
+        st.caption(f"Total Projects in Registry: {len(df)}")
     else:
-        st.info("No active projects found in the registry.")
+        st.info("Registry table is empty.")
 
 
 def render_new_project_form(client, table_projects):
-    """UI and logic for registering a new project ID."""
-    st.subheader("🏗️ Register New Project Code")
+    """UI for registering a new project ID."""
+    st.subheader("🏗️ Initialize New Project")
     with st.form("new_project_form"):
-        n_code = st.text_input("Project ID (e.g., 2538)")
+        col1, col2 = st.columns(2)
+        n_code = col1.text_input("Project ID / Job # (e.g., 2538)")
+        n_name = col2.text_input("Project Friendly Name (e.g., Warehouse A)")
+        
         n_notes = st.text_area("Initial Engineering Notes")
         
-        if st.form_submit_button("🚀 Initialize Project"):
+        if st.form_submit_button("🚀 Create Project Entry"):
             if not n_code:
                 st.error("Project ID is required.")
             else:
-                # Check for duplicates
                 check_q = f"SELECT Project FROM `{table_projects}` WHERE Project = '{n_code}'"
                 if not client.query(check_q).to_dataframe().empty:
-                    st.error(f"Project {n_code} already exists in the registry.")
+                    st.error(f"Project {n_code} already exists.")
                 else:
                     insert_q = f"""
-                        INSERT INTO `{table_projects}` (Project, ProjectStatus, EngNotes)
-                        VALUES ('{n_code}', 'Initialized', '{n_notes}')
+                        INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, EngNotes)
+                        VALUES ('{n_code}', '{n_name}', 'Initialized', '{n_notes}')
                     """
                     client.query(insert_q).result()
-                    st.success(f"Project {n_code} successfully initialized.")
+                    st.success(f"Project {n_code} initialized.")
                     time.sleep(1)
                     st.rerun()
 
 
 def render_update_project_form(client, selected_project, table_projects):
-    """UI and logic for updating lifecycle status and notes for the selected project."""
-    st.subheader(f"⚙️ Modifying: {selected_project}")
+    """
+    Comprehensive Edit Form: Allows viewing and replacing ALL registry fields
+    for the selected project.
+    """
+    st.subheader(f"🔧 Editing Project: {selected_project}")
     
     proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
     p_res = client.query(proj_q).to_dataframe()
     
     if p_res.empty:
-        st.error("Project not found in registry.")
+        st.error("Select a valid project from the sidebar.")
         return
 
-    p_data = p_res.iloc[0]
-    status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
+    p_data = p_res.iloc[0].to_dict()
     
-    # Safe index logic for current status
-    current_status = p_data.get('ProjectStatus', 'Initialized')
-    try:
-        default_status_idx = status_options.index(current_status)
-    except ValueError:
-        default_status_idx = 0
+    with st.form("comprehensive_edit_project"):
+        # 1. Identity & Name
+        c1, c2 = st.columns(2)
+        u_project_id = c1.text_input("Project ID (Internal Key)", value=p_data.get('Project', ''), disabled=True)
+        u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
 
-    with st.form("edit_project"):
-        u_status = st.selectbox("Update Lifecycle Status", status_options, index=default_status_idx)
-        u_notes = st.text_area("Update Engineering Notes", value=p_data.get('EngNotes', ''))
+        # 2. Status & Lifecycle
+        c3, c4 = st.columns(2)
+        status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
+        curr_status = p_data.get('ProjectStatus', 'Initialized')
+        s_idx = status_options.index(curr_status) if curr_status in status_options else 0
+        u_status = c3.selectbox("Lifecycle Status", status_options, index=s_idx)
         
-        if st.form_submit_button("💾 Save Project Rules"):
-            # Automated date stamping for Freezedown
-            date_sql = ""
-            if u_status == "Freezedown" and pd.isnull(p_data['Date_Freezedown']):
-                date_sql = ", Date_Freezedown = CURRENT_DATE()"
+        # 3. Dates
+        # Logic to handle existing dates or default to None
+        def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) else None
+
+        u_date_freeze = c3.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
+        u_date_comp = c4.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
+
+        # 4. Engineering Notes
+        u_notes = st.text_area("Engineering & Site Notes", value=p_data.get('EngNotes', ''))
+
+        if st.form_submit_button("💾 Overwrite Project Registry Information"):
+            # Prepare SQL fragments for dates
+            freeze_val = f"DATE('{u_date_freeze}')" if u_date_freeze else "NULL"
+            comp_val = f"DATE('{u_date_comp}')" if u_date_comp else "NULL"
             
             update_q = f"""
                 UPDATE `{table_projects}` 
-                SET ProjectStatus='{u_status}', EngNotes='{u_notes}' {date_sql} 
-                WHERE Project='{selected_project}'
+                SET 
+                    ProjectName = '{u_project_name}',
+                    ProjectStatus = '{u_status}',
+                    EngNotes = '{u_notes}',
+                    Date_Freezedown = {freeze_val},
+                    Date_Completion = {comp_val}
+                WHERE Project = '{selected_project}'
             """
-            client.query(update_q).result()
-            st.success(f"✅ Project {selected_project} updated.")
-            time.sleep(1)
-            st.rerun()
+            
+            try:
+                client.query(update_q).result()
+                st.success(f"✅ Successfully updated all registry data for {selected_project}")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Update failed: {e}")
+                st.code(update_q)
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
 # ===============================================================
@@ -1421,7 +1054,7 @@ def render_bulk_registry_page(client, proj_list, PROJECT_ID, DATASET_ID):
     st.header("📦 Bulk Registry Operations")
     
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-    bt1, bt2 = st.tabs(["📥 Site Deployment (CSV)", "🔚 Site Decommission"])
+    bt1, bt2 = st.tabs(["📥 Site Deployment (CSV)", "🔚 Bulk Site Decommission"])
 
     with bt1:
         render_bulk_deployment_tab(client, target_registry)
@@ -1431,12 +1064,14 @@ def render_bulk_registry_page(client, proj_list, PROJECT_ID, DATASET_ID):
 
 
 def render_bulk_deployment_tab(client, target_registry):
-    """Handles the UI and logic for uploading new site configurations via CSV."""
+    """Handles the UI for uploading new site configurations via CSV."""
     st.subheader("Initialize New Site Registry")
     st.info("Upload a CSV to register all sensors for a new project at once.")
     
-    with st.expander("📊 View Required CSV Format"):
-        st.code("NodeNum,PhysicalID,Project,Location,Bank,Depth,Start_Date,SensorStatus")
+    with st.expander("📊 View Required CSV Format (PhysicalID Removed)"):
+        # We removed PhysicalID from the required columns
+        st.code("NodeNum,Project,Location,Bank,Depth,Start_Date,SensorStatus")
+        st.caption("Note: PhysicalID column is no longer required and will be ignored if present.")
     
     u_csv = st.file_uploader("Upload Deployment CSV", type="csv")
     
@@ -1452,57 +1087,104 @@ def render_bulk_deployment_tab(client, target_registry):
 def process_bulk_upload(client, df, target_registry):
     """Validates and uploads the dataframe to BigQuery."""
     try:
-        required = {'NodeNum', 'PhysicalID', 'Project', 'Location'}
+        # Strict validation of core columns
+        required = {'NodeNum', 'Project', 'Location'}
         if not required.issubset(df.columns):
             st.error(f"Missing required columns: {required - set(df.columns)}")
             return
 
         with st.spinner("Uploading to BigQuery..."):
+            # 1. Ensure Start_Date is valid
             if 'Start_Date' in df.columns:
                 df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.date
+            else:
+                df['Start_Date'] = datetime.now().date()
             
+            # 2. Force Status to 'On Project' if missing
+            if 'SensorStatus' not in df.columns:
+                df['SensorStatus'] = 'On Project'
+
+            # 3. Clean up any PhysicalID columns if they were included by mistake
+            if 'PhysicalID' in df.columns:
+                df = df.drop(columns=['PhysicalID'])
+            
+            # 4. BigQuery Load
             job_config = bigquery.LoadTableConfig(write_disposition="WRITE_APPEND")
             client.load_table_from_dataframe(df, target_registry, job_config=job_config).result()
             
-        st.success(f"Successfully registered {len(df)} nodes to project {df['Project'].iloc[0]}.")
+        st.success(f"Successfully registered {len(df)} nodes.")
+        st.cache_data.clear() # Clear cache to update the Node Manager table
         st.balloons()
     except Exception as e:
         st.error(f"Upload Failed: {e}")
 
 
 def render_bulk_decommission_tab(client, proj_list, target_registry):
-    """Handles the UI for retiring an entire project's worth of sensors."""
+    """Handles retiring an entire project's worth of sensors."""
     st.subheader("Project-Wide Decommission")
-    st.warning("This action will set an End Date for ALL active sensors on the specified project.")
+    st.warning("Warning: This ends all active records for a project and moves hardware to 'Office' stock.")
     
-    ret_p = st.selectbox("Select Project to Retire", ["-- Select --"] + proj_list)
-    ret_date = st.date_input("Decommission Date", value=datetime.now().date())
+    # Filter out 'Office' from the retirement list
+    active_field_projects = [p for p in proj_list if p != "Office"]
+    ret_p = st.selectbox("Select Project to Retire", ["-- Select --"] + active_field_projects)
     
-    if st.button("🔚 Retire All Nodes on Site", type="primary"):
+    c1, c2 = st.columns(2)
+    ret_date = c1.date_input("Decommission Date", value=datetime.now().date())
+    ret_stat = c2.selectbox("Return Status for Hardware", ["Available", "Diagnostic", "Dead"])
+    
+    if st.button("🔚 Retire All Nodes and Move to Office", type="primary"):
         if ret_p == "-- Select --":
             st.error("Please select a valid Project ID.")
         else:
-            execute_bulk_decommission(client, ret_p, ret_date, target_registry)
+            execute_bulk_decommission(client, ret_p, ret_date, ret_stat, target_registry)
 
 
-def execute_bulk_decommission(client, project_id, decommission_date, target_registry):
-    """Executes the SQL update to set End_Dates for all active sensors in a project."""
-    try:
-        decom_sql = f"""
-            UPDATE `{target_registry}` 
-            SET End_Date = DATE('{decommission_date.isoformat()}'), 
-                SensorStatus = 'Available' 
-            WHERE Project = '{project_id}' 
-              AND End_Date IS NULL
-        """
+def execute_bulk_decommission(client, project_id, decommission_date, return_status, target_registry):
+    """
+    Executes a Multi-Step Transaction:
+    1. Ends all active records for the Project.
+    2. Inserts new 'Office' records for every sensor that was retired.
+    """
+    date_iso = decommission_date.isoformat()
+    
+    # This SQL handles the entire transition in one transaction
+    bulk_sql = f"""
+        BEGIN TRANSACTION;
         
-        with st.spinner(f"Retiring Project {project_id}..."):
-            query_job = client.query(decom_sql)
+        -- 1. Archive the existing deployments
+        UPDATE `{target_registry}` 
+        SET End_Date = DATE('{date_iso}'), 
+            SensorStatus = 'Archived' 
+        WHERE Project = '{project_id}' 
+          AND End_Date IS NULL;
+
+        -- 2. Insert the hardware back into Office Stock
+        -- We select from the records we just archived to ensure a perfect 1-to-1 move
+        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+        SELECT 
+            NodeNum, 
+            'Office' as Project, 
+            'Office' as Location, 
+            NodeNum as Bank, -- Reset Bank to NodeNum for stock
+            NULL as Depth,   -- Clear Depth for stock
+            '{return_status}' as SensorStatus,
+            DATE('{date_iso}') as Start_Date
+        FROM `{target_registry}`
+        WHERE Project = '{project_id}' AND End_Date = DATE('{date_iso}');
+        
+        COMMIT;
+    """
+    
+    try:
+        with st.spinner(f"Processing Bulk Retirement for {project_id}..."):
+            query_job = client.query(bulk_sql)
             query_job.result()
             
-        st.success(f"Project {project_id} retired. {query_job.num_dml_affected_rows} sensors moved to 'Available'.")
+        st.success(f"Project {project_id} decommissioned. Hardware moved to Office Stock as '{return_status}'.")
+        st.cache_data.clear()
     except Exception as e:
-        st.error(f"Decommission Failed: {e}")
+        st.error(f"Bulk Decommission Failed: {e}")
+        st.code(bulk_sql)
 
 # ===============================================================
 # PAGE: PROJECT MASTER
@@ -1514,120 +1196,137 @@ def render_project_master_page(client, selected_project, PROJECT_ID, DATASET_ID)
     """
     st.header("⚙️ Project Lifecycle Management")
     
-    # Navigation matching the project lifecycle flow
-    action = st.radio("Action", ["Overview", "New Project", "Update Existing"], horizontal=True)
+    # Expanded navigation to cover the full management scope
+    action = st.radio("Action", ["📋 Fleet Overview", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True)
     table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
 
-    if action == "Overview":
+    if action == "📋 Fleet Overview":
         render_project_overview(client, table_projects)
 
-    elif action == "New Project":
+    elif action == "🏗️ New Project":
         render_new_project_form(client, table_projects)
 
-    elif action == "Update Existing":
+    elif action == "🔧 Edit Project Metadata":
         render_update_project_form(client, selected_project, table_projects)
 
 
 def render_project_overview(client, table_projects):
     """
-    Displays a scannable list of all active (non-archived) projects.
+    Displays all registry information for all projects, including Archived.
     """
-    st.subheader("📋 Project Fleet Status")
+    st.subheader("📋 Complete Project Registry")
     
-    # Fetch all projects not yet archived
-    query = f"""
-        SELECT Project, ProjectStatus, Date_Freezedown, EngNotes 
-        FROM `{table_projects}` 
-        WHERE ProjectStatus != 'Archived' 
-        ORDER BY Project ASC
-    """
+    # Removed the status filter so you can see every project ever registered
+    query = f"SELECT * FROM `{table_projects}` ORDER BY Project ASC"
     try:
         df = client.query(query).to_dataframe()
         if not df.empty:
+            # Clean up date display for the UI
+            for col in ['Date_Freezedown', 'Date_Completion']:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col]).dt.date
+            
             st.dataframe(df, use_container_width=True, hide_index=True)
+            st.caption(f"Total Projects in Registry: {len(df)}")
         else:
-            st.info("No active projects found in the registry.")
+            st.info("Registry table is empty.")
     except Exception as e:
-        st.error(f"Failed to load project overview: {e}")
+        st.error(f"Failed to load project registry: {e}")
 
 
 def render_new_project_form(client, table_projects):
     """
-    UI and logic for registering a new project ID.
+    UI for registering a new project ID and Name.
     """
-    st.subheader("🏗️ Register New Project Code")
+    st.subheader("🏗️ Initialize New Project")
     with st.form("new_project_form"):
-        n_code = st.text_input("Project ID (e.g., 2538)")
+        col1, col2 = st.columns(2)
+        n_code = col1.text_input("Project ID / Job # (e.g., 2538)")
+        n_name = col2.text_input("Friendly Project Name (e.g., Cold Storage A)")
+        
         n_notes = st.text_area("Initial Engineering Notes")
         
-        if st.form_submit_button("🚀 Initialize Project"):
+        if st.form_submit_button("🚀 Create Project Entry"):
             if not n_code:
                 st.error("Project ID is required.")
             else:
-                # Check for duplicates to maintain registry integrity
                 check_q = f"SELECT Project FROM `{table_projects}` WHERE Project = '{n_code}'"
                 if not client.query(check_q).to_dataframe().empty:
-                    st.error(f"Project {n_code} already exists in the registry.")
+                    st.error(f"Project {n_code} already exists.")
                 else:
                     insert_q = f"""
-                        INSERT INTO `{table_projects}` (Project, ProjectStatus, EngNotes)
-                        VALUES ('{n_code}', 'Initialized', '{n_notes}')
+                        INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, EngNotes)
+                        VALUES ('{n_code}', '{n_name}', 'Initialized', '{n_notes}')
                     """
                     try:
                         client.query(insert_q).result()
-                        st.success(f"Project {n_code} successfully initialized.")
+                        st.success(f"Project {n_code} initialized.")
                         time.sleep(1)
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Failed to initialize project: {e}")
+                        st.error(f"Failed to create project: {e}")
 
 
 def render_update_project_form(client, selected_project, table_projects):
     """
-    UI and logic for updating lifecycle status and notes for a selected project.
+    Comprehensive Edit Form: Allows viewing and replacing ALL registry fields.
     """
-    st.subheader(f"⚙️ Modifying: {selected_project}")
+    st.subheader(f"🔧 Editing Project: {selected_project}")
     
-    # Fetch current data for the sidebar-selected project
     proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
     p_res = client.query(proj_q).to_dataframe()
     
     if p_res.empty:
-        st.error("Project not found in registry.")
+        st.error("Please select a project from the sidebar to edit.")
         return
 
-    p_data = p_res.iloc[0]
-    status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
+    p_data = p_res.iloc[0].to_dict()
     
-    # Safe index logic for current status
-    current_status = p_data.get('ProjectStatus', 'Initialized')
-    try:
-        default_status_idx = status_options.index(current_status)
-    except ValueError:
-        default_status_idx = 0
+    with st.form("comprehensive_edit_project"):
+        # 1. Identity & Name
+        c1, c2 = st.columns(2)
+        # ID is disabled to prevent breaking foreign keys in sensor data
+        u_project_id = c1.text_input("Project ID (Internal Key)", value=p_data.get('Project', ''), disabled=True)
+        u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
 
-    with st.form("edit_project"):
-        u_status = st.selectbox("Update Lifecycle Status", status_options, index=default_status_idx)
-        u_notes = st.text_area("Update Engineering Notes", value=p_data.get('EngNotes', ''))
+        # 2. Status & Lifecycle
+        c3, c4 = st.columns(2)
+        status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
+        curr_status = p_data.get('ProjectStatus', 'Initialized')
+        s_idx = status_options.index(curr_status) if curr_status in status_options else 0
+        u_status = c3.selectbox("Lifecycle Status", status_options, index=s_idx)
         
-        if st.form_submit_button("💾 Save Project Rules"):
-            # Automated date stamping for Freezedown logic
-            date_sql = ""
-            if u_status == "Freezedown" and pd.isnull(p_data['Date_Freezedown']):
-                date_sql = ", Date_Freezedown = CURRENT_DATE()"
+        # 3. Dates
+        def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) else None
+        u_date_freeze = c3.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
+        u_date_comp = c4.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
+
+        # 4. Notes
+        u_notes = st.text_area("Engineering & Site Notes", value=p_data.get('EngNotes', ''))
+
+        if st.form_submit_button("💾 Overwrite Project Registry Information"):
+            # Construct SQL fragments for date null-safety
+            freeze_val = f"DATE('{u_date_freeze}')" if u_date_freeze else "NULL"
+            comp_val = f"DATE('{u_date_comp}')" if u_date_comp else "NULL"
             
             update_q = f"""
                 UPDATE `{table_projects}` 
-                SET ProjectStatus='{u_status}', EngNotes='{u_notes}' {date_sql} 
-                WHERE Project='{selected_project}'
+                SET 
+                    ProjectName = '{u_project_name}',
+                    ProjectStatus = '{u_status}',
+                    EngNotes = '{u_notes}',
+                    Date_Freezedown = {freeze_val},
+                    Date_Completion = {comp_val}
+                WHERE Project = '{selected_project}'
             """
+            
             try:
                 client.query(update_q).result()
-                st.success(f"✅ Project {selected_project} updated.")
+                st.success(f"✅ Successfully updated all registry data for {selected_project}")
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Failed to update project: {e}")
+                st.error(f"Update failed: {e}")
 # ===============================================================
 # PAGE: REF CURVE LIBRARY
 # ===============================================================
@@ -1638,38 +1337,31 @@ def render_ref_curve_library_page(client, PROJECT_ID, DATASET_ID):
     
     table_curves = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
     
-    # 1. DATABASE SCHEMA CHECK & INVENTORY FETCH
-    inventory_df = fetch_curve_inventory(client, table_curves, PROJECT_ID, DATASET_ID)
+    # 1. FETCH INVENTORY
+    inventory_df = fetch_curve_inventory(client, table_curves)
     
     st.divider()
 
-    # 2. MANAGEMENT TOOLS (Delete & Wipe)
+    # 2. MANAGEMENT TOOLS
     render_curve_management_tools(client, inventory_df, table_curves)
 
     st.divider()
 
-    # 3. BULK UPLOAD ENGINE
-    render_curve_upload_engine(client, table_curves)
+    # 3. UPLOAD ENGINE
+    render_curve_upload_engine(client, table_curves, inventory_df)
 
 
-def fetch_curve_inventory(client, table_curves, PROJECT_ID, DATASET_ID):
-    """Checks schema for compatibility and fetches current library stats."""
-    inventory_df = pd.DataFrame()
+def fetch_curve_inventory(client, table_curves):
+    """Fetches current library stats with robust column handling."""
     try:
-        # Check for upload_date column to prevent query errors during transition
-        schema_q = f"""
-            SELECT column_name FROM `{PROJECT_ID}.{DATASET_ID}.INFORMATION_SCHEMA.COLUMNS` 
-            WHERE table_name = 'reference_curves' AND column_name = 'upload_date'
-        """
-        has_date_col = not client.query(schema_q).to_dataframe().empty
-        date_select = "MAX(upload_date)" if has_date_col else "CAST(NULL AS STRING)"
-        
+        # Simplified query: If upload_date doesn't exist, BigQuery will return an error 
+        # which we catch to identify if the table is uninitialized.
         inv_q = f"""
             SELECT 
                 CurveID, 
                 MAX(Day) as Max_Day, 
                 COUNT(*) as Total_Points,
-                {date_select} as Last_Upload
+                MAX(upload_date) as Last_Upload
             FROM `{table_curves}`
             GROUP BY CurveID
             ORDER BY CurveID ASC
@@ -1688,83 +1380,97 @@ def fetch_curve_inventory(client, table_curves, PROJECT_ID, DATASET_ID):
                 use_container_width=True,
                 hide_index=True
             )
+            return inventory_df
         else:
             st.info("The library is currently empty. Upload curve CSVs below.")
-    except Exception as e:
-        st.error(f"Inventory Sync Error: {e}")
+    except Exception:
+        st.warning("⚠️ Reference table uninitialized or missing 'upload_date' column.")
     
-    return inventory_df
+    return pd.DataFrame()
 
 
 def render_curve_management_tools(client, inventory_df, table_curves):
-    """Renders UI for deleting individual curves or purging the library."""
+    """UI for deleting curves or purging the library."""
     c1, c2 = st.columns(2)
     
     with c1.expander("🗑️ Individual Curve Delete"):
         if not inventory_df.empty:
             to_delete = st.selectbox("Select Curve to Remove", sorted(inventory_df['CurveID'].tolist()))
             if st.button(f"Permanently Delete {to_delete}", type="primary"):
-                try:
-                    client.query(f"DELETE FROM `{table_curves}` WHERE CurveID = '{to_delete}'").result()
-                    st.success(f"Removed {to_delete} from library.")
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Delete failed: {e}")
+                client.query(f"DELETE FROM `{table_curves}` WHERE CurveID = '{to_delete}'").result()
+                st.success(f"Removed {to_delete}")
+                time.sleep(1)
+                st.rerun()
 
     with c2.expander("🧨 Library Wipe"):
         st.warning("This will delete EVERY theoretical curve in the database.")
         if st.button("EXECUTE TOTAL PURGE", key="purge_all"):
-            try:
-                client.query(f"TRUNCATE TABLE `{table_curves}`").result()
-                st.success("Library wiped successfully.")
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Purge failed: {e}")
+            client.query(f"TRUNCATE TABLE `{table_curves}`").result()
+            st.success("Library wiped.")
+            time.sleep(1)
+            st.rerun()
 
 
-def render_curve_upload_engine(client, table_curves):
-    """Handles CSV file uploads and BigQuery ingestion for new curves."""
+def render_curve_upload_engine(client, table_curves, inventory_df):
+    """Handles CSV uploads with duplicate protection."""
     st.subheader("📤 Upload New Curves")
     u_files = st.file_uploader(
         "Upload Curve CSVs", 
         type=['csv'], 
         accept_multiple_files=True,
-        help="Format: Data starts on Row 3. Column 1: Day, Column 2: Temp."
+        help="Format: Day in Col 1, Temp in Col 2. Data starts Row 3."
     )
 
     if u_files:
-        if st.button("🚀 Commit Uploads to Database"):
-            process_curve_uploads(client, u_files, table_curves)
+        existing_ids = inventory_df['CurveID'].tolist() if not inventory_df.empty else []
+        
+        # Filter out files that already exist to prevent duplicates
+        valid_files = [f for f in u_files if f.name.rsplit('.', 1)[0] not in existing_ids]
+        dupes = [f.name for f in u_files if f.name.rsplit('.', 1)[0] in existing_ids]
+
+        if dupes:
+            st.warning(f"⚠️ Skipping {len(dupes)} files that already exist: {', '.join(dupes)}")
+
+        if valid_files:
+            if st.button(f"🚀 Commit {len(valid_files)} New Curves"):
+                process_curve_uploads(client, valid_files, table_curves)
 
 
 def process_curve_uploads(client, u_files, table_curves):
-    """Parses uploaded CSVs and appends cleaned data to BigQuery."""
+    """Parses and appends cleaned data to BigQuery."""
     today_str = datetime.now().strftime('%Y-%m-%d')
     total_imported = 0
     
     for f in u_files:
         try:
-            # Skip header rows (usually site info), take Day and Temp
+            # Day, Temp mapping
             df = pd.read_csv(f, skiprows=2, usecols=[0, 1], names=['Day', 'Temp'])
             df['CurveID'] = f.name.rsplit('.', 1)[0]
             df['upload_date'] = today_str
             
-            # Data Cleaning
+            # Clean
             df['Day'] = pd.to_numeric(df['Day'], errors='coerce')
             df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
             df = df.dropna(subset=['Day', 'Temp'])
 
             if not df.empty:
-                job_config = bigquery.LoadTableConfig(write_disposition="WRITE_APPEND")
+                job_config = bigquery.LoadTableConfig(
+                    schema=[
+                        bigquery.SchemaField("Day", "FLOAT"),
+                        bigquery.SchemaField("Temp", "FLOAT"),
+                        bigquery.SchemaField("CurveID", "STRING"),
+                        bigquery.SchemaField("upload_date", "STRING"),
+                    ],
+                    write_disposition="WRITE_APPEND"
+                )
                 client.load_table_from_dataframe(df, table_curves, job_config=job_config).result()
                 total_imported += 1
         except Exception as e:
             st.error(f"Error processing {f.name}: {e}")
 
     if total_imported > 0:
-        st.success(f"✅ Successfully imported {total_imported} curves.")
+        st.success(f"✅ Imported {total_imported} curves.")
+        st.cache_data.clear()
         time.sleep(1.5)
         st.rerun()
 
@@ -1773,35 +1479,45 @@ def process_curve_uploads(client, u_files, table_curves):
 # ===============================================================
 
 def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID):
-    """Main entry point for Data Management (Approval & Flagging)."""
+    """Main entry point for Data Management with refined approval statuses."""
     st.header("🧨 Data Management (Approval & Flagging)")
-    st.info("Use this tool to flag data as 'Bad' or 'Restricted' for engineering analysis without deleting the underlying records.")
+    st.info("""
+        **Status Definitions:**
+        - **TRUE**: Valid data visible to client.
+        - **BadData**: Sensor hardware/comms issues (Retained for engineering analysis).
+        - **Masked**: Valid hardware but invalid placement (e.g., Ambient temp in a Pipe).
+        - **Office**: Data recorded while hardware was unassigned.
+    """)
 
-    # 1. SCOPE & ACTION (Top Row)
-    target_scope, mode = render_management_controls()
+    # 1. SCOPE & STATUS (Top Row)
+    target_scope, new_status = render_management_controls()
     st.divider()
 
     # 2. FILTERS (Middle Section)
     filters = render_management_filters(reg_df, selected_project, target_scope)
     
     # 3. SQL CONSTRUCTION
+    # Note: We target the base table, not the view, for DML updates
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data" 
     where_str = build_management_where_clause(selected_project, target_scope, filters)
     
     # 4. VERIFICATION STEP
-    render_verification_step(client, where_str, PROJECT_ID, DATASET_ID)
+    render_verification_step(client, where_str, target_table)
 
     # 5. EXECUTION STEP
-    render_execution_step(client, where_str, mode, PROJECT_ID, DATASET_ID)
+    render_execution_step(client, where_str, new_status, target_table)
 
 
 def render_management_controls():
-    """Renders the top-level radio buttons for scope and action type."""
+    """Renders radio buttons for scope and the new specific status types."""
     c1, c2 = st.columns(2)
     with c1:
         target_scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
     with c2:
-        mode = st.radio("Action Type", ["🚫 Mask (Flag as Bad)", "✅ Approve (Restore)"], horizontal=True)
-    return target_scope, mode
+        # User defined status types
+        new_status = st.selectbox("Set Approval Status To:", ["TRUE", "BadData", "Masked", "Office"])
+        
+    return target_scope, new_status
 
 
 def render_management_filters(reg_df, selected_project, target_scope):
@@ -1861,38 +1577,39 @@ def build_management_where_clause(selected_project, target_scope, f):
     return " AND ".join(where_clauses)
 
 
-def render_verification_step(client, where_str, PROJECT_ID, DATASET_ID):
-    """Queries BigQuery to show the user how many rows will be affected."""
+def render_verification_step(client, where_str, target_table):
+    """Shows the user how many rows will be affected before they commit."""
     if st.button("🔍 Step 1: Verify Match Count"):
-        count_q = f"SELECT COUNT(*) as total FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE {where_str}"
+        count_q = f"SELECT COUNT(*) as total FROM `{target_table}` WHERE {where_str}"
         try:
             res = client.query(count_q).to_dataframe()
             count = res.iloc[0]['total']
             st.metric("Points Found", f"{count:,}")
-            st.session_state['data_ready'] = True if count > 0 else False
+            if count == 0:
+                st.warning("No data points found with these filters.")
         except Exception as e:
             st.error(f"Verification Query Failed: {e}")
 
 
-def render_execution_step(client, where_str, mode, PROJECT_ID, DATASET_ID):
-    """Renders the final confirmation and executes the UPDATE query."""
-    if st.checkbox("I confirm these data points should be flagged/updated in the master registry."):
-        new_status = "Bad" if "Mask" in mode else "Approved"
-        
-        if st.button(f"🚀 Execute {mode}"):
+def render_execution_step(client, where_str, new_status, target_table):
+    """Final confirmation and execution of the specific status update."""
+    st.warning(f"Warning: You are about to set matching data points to status: **{new_status}**")
+    
+    if st.checkbox("I confirm this status update is correct for engineering/client view."):
+        if st.button(f"🚀 Commit Status Change"):
             update_sql = f"""
-                UPDATE `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                UPDATE `{target_table}`
                 SET ApprovalStatus = '{new_status}'
                 WHERE {where_str}
             """
             try:
-                with st.spinner("Updating data flags..."):
-                    client.query(update_sql).result()
-                st.success(f"Successfully flagged matching data as '{new_status}'.")
+                with st.spinner(f"Updating flags to {new_status}..."):
+                    job = client.query(update_sql)
+                    job.result()
+                st.success(f"Successfully updated {job.num_dml_affected_rows:,} records to '{new_status}'.")
                 st.balloons()
             except Exception as e:
                 st.error(f"Execution Failed: {e}")
-
 # ===============================================================
 # FINAL INTEGRATED EXECUTION BLOCK
 # ===============================================================
@@ -1902,59 +1619,45 @@ def main():
     Unified entry point. Routes to specific tools based on sidebar selection.
     """
     # 1. Initialize Sidebar and get context
-    # Ensure render_sidebar returns these 4 variables
     admin_page, target_registry, selected_project, proj_list = render_sidebar()
     
-    # 2. Get Unit Preferences & BigQuery Pathing
+    # 2. Get Unit Preferences 
     unit_mode, unit_label = get_unit_labels()
     display_tz = "America/Los_Angeles"
     
-    # Constant IDs used across functions
-    # Make sure PROJECT_ID and DATASET_ID are defined globally or here
-    # PROJECT_ID = "sensorpush-export"
-    # DATASET_ID = "Temperature"
+    # Global BigQuery Pathing constants
+    # (Ensure these match your actual GCP environment)
+    PROJECT_ID = "sensorpush-export"
+    DATASET_ID = "Temperature"
     
-    # 3. Load Registry Data
+    # 3. Load Registry Data (Cached)
     reg_df = load_registry_data(target_registry)
 
     # --- ROUTING LOGIC ---
 
-    if admin_page == "📡 Setup Node Tool":
-        render_project_status_dashboard(client, selected_project, unit_label)
-        st.divider()
-        render_hardware_integrity_table(client, selected_project, unit_mode, unit_label)
-
-    elif admin_page == "🛠️ Node Manager":
-        st.header("🛠️ Unified Node Manager")
-        
-        # 1. Run the NEW Selector (Handles the table and grouping rules)
+    if admin_page == "🛠️ Node Manager":
+        # Using the split functions for Selection and Action
         selected_node_data = render_node_selector(reg_df, proj_list)
         
-        # 2. Run the NEW Action Manager (Handles Forms/SQL)
         if selected_node_data is not None:
             render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry)
         else:
             st.divider()
             st.info("💡 **Tip:** Select a record in the table above to Edit, Swap, or Decommission that node.")
 
+    elif admin_page == "📡 Setup Node Tool":
+        render_project_status_dashboard(client, selected_project, unit_label, target_registry)
+        st.divider()
+        render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry)
+
     elif admin_page == "🔍 Sensor Status":
         render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
         
-    elif admin_page == "🔄 Sensor Replace":
-        display_tz = "UTC"
-        render_sensor_replace_page(client, PROJECT_ID, DATASET_ID)
-
-    elif admin_page == "🩹 Sensor Switch":
-        render_sensor_switch_page(client, PROJECT_ID, DATASET_ID)
-
-    elif admin_page == "📝 Sensor Edit":
-        render_sensor_edit_page(client, reg_df, proj_list, PROJECT_ID, DATASET_ID)
+    elif admin_page == "📦 Bulk Registry Manager":
+        render_bulk_registry_page(client, proj_list, PROJECT_ID, DATASET_ID)
 
     elif admin_page == "📡 Data Recovery":
         render_data_recovery_page(reg_df)
-
-    elif admin_page == "📦 Bulk Registry Manager":
-        render_bulk_registry_page(client, proj_list, PROJECT_ID, DATASET_ID)
 
     elif admin_page == "⚙️ Project Master":
         render_project_master_page(client, selected_project, PROJECT_ID, DATASET_ID)
@@ -1964,6 +1667,14 @@ def main():
 
     elif admin_page == "🧨 Data Management":
         render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID)
+
+    # LEGACY / REDUNDANT TOOLS (Optional: Remove if Node Manager covers these)
+    elif admin_page == "🩹 Sensor Switch":
+        render_sensor_switch_page(client, PROJECT_ID, DATASET_ID)
+        
+    elif admin_page == "🔄 Sensor Replace":
+        # Repurposed to use the new Node ID centric logic
+        render_sensor_replace_page(client, PROJECT_ID, DATASET_ID)
 
 # ===============================================================
 # EXECUTION ENTRY POINT
