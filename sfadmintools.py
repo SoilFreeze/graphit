@@ -1615,21 +1615,26 @@ def build_management_where_clause(reg_df, selected_project, target_scope, f):
     return " AND ".join(where_clauses)
 
 
-def render_verification_step(client, where_str, telemetry_table, rejections_table):
-    """Queries BigQuery to show count and current status of data points."""
-    if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
-        # We add 't.' before NodeNum to resolve the ambiguity
-        status_q = f"""
-            SELECT 
-                t.NodeNum,
-                COUNT(*) as Point_Count,
-                COALESCE(r.approve, 'TRUE') as current_status
-            FROM `{telemetry_table}` t
-            LEFT JOIN `{rejections_table}` r 
-                ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
-            WHERE {where_str}
-            GROUP BY t.NodeNum, current_status
-        """
+def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
+    if st.checkbox("I confirm these changes.", key="confirm_mgmt"):
+        if st.button(f"🚀 Set All to {new_status}", key="exec_mgmt_btn"):
+            # Ensure the WHERE clause is aliased for the sub-select
+            aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
+            
+            if new_status == "TRUE":
+                # For DELETE, we don't alias because there's only one table involved
+                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
+            else:
+                # For MERGE, we use the aliased version in the Source (S) query
+                sql = f"""
+                    MERGE `{target_table}` T
+                    USING (SELECT NodeNum, timestamp FROM `{telemetry_table}` t WHERE {aliased_where}) S
+                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                    WHEN MATCHED THEN
+                        UPDATE SET approve = '{new_status}'
+                    WHEN NOT MATCHED THEN
+                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                """
         try:
             res = client.query(status_q).to_dataframe()
             
