@@ -1081,31 +1081,47 @@ def execute_record_delete(client, data, target_registry):
 
 def execute_decommission_node(client, data, target_registry):
     """
-    Closes the current deployment record and returns the hardware to 'Office' stock.
+    Closes current deployment and returns hardware to 'Office' stock.
+    Handles 'nan' safety for the transaction.
     """
     today = datetime.now().date().isoformat()
+    
+    # 1. Sanitize PhysicalID for both the WHERE and the INSERT
+    raw_phys_id = data.get('PhysicalID')
+    if pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan':
+        phys_id_val = "NULL"
+        phys_id_where = "PhysicalID IS NULL"
+    else:
+        phys_id_val = f"{raw_phys_id}"
+        phys_id_where = f"PhysicalID = {raw_phys_id}"
+
+    # 2. Transaction Logic
+    # Note: We use f-strings carefully to ensure NULL keywords are passed, not 'nan'
     sql = f"""
         BEGIN TRANSACTION;
-        -- 1. Close current assignment
+        -- Step A: Close the current assignment
         UPDATE `{target_registry}`
         SET End_Date = DATE('{today}'), 
             SensorStatus = 'Removed'
         WHERE NodeNum = '{data['NodeNum']}' 
           AND Start_Date = DATE('{data['Start_Date']}')
-          AND PhysicalID = {data['PhysicalID']};
+          AND {phys_id_where};
 
-        -- 2. Return hardware to inventory as a new available record
-        INSERT INTO `{target_registry}` (NodeNum, PhysicalID, Project, Location, SensorStatus, Start_Date)
-        VALUES ('{data['NodeNum']}', {data['PhysicalID']}, 'Office', 'Stock', 'Available', DATE('{today}'));
+        -- Step B: Re-insert into Office Stock
+        INSERT INTO `{target_registry}` (NodeNum, PhysicalID, Project, Location, SensorStatus, Start_Date, Depth)
+        VALUES ('{data['NodeNum']}', {phys_id_val}, 'Office', 'Stock', 'Available', DATE('{today}'), NULL);
         COMMIT;
     """
+    
     try:
         client.query(sql).result()
-        st.success(f"Successfully decommissioned {data['NodeNum']}. Hardware returned to Office.")
+        st.success(f"✅ Decommissioned {data['NodeNum']}. Hardware is now 'Available' in Office.")
         time.sleep(1.5)
         st.rerun()
     except Exception as e:
-        st.error(f"Decommission failed: {e}")
+        st.error("Decommission Transaction Failed")
+        st.code(sql, language="sql")
+        st.error(f"Error: {e}")
 # ===============================================================
 # PAGE: DATA RECOVERY (SensorPush API Bridge)
 # ===============================================================
