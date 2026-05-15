@@ -122,9 +122,7 @@ def get_unit_labels():
     return unit_mode, unit_label
     
 def natural_sort_key(s):
-    """
-    Helper to sort strings containing numbers (e.g., 'Bank 2' before 'Bank 10')
-    """
+    """Helper to sort strings with numbers (e.g., Bank 2 before Bank 10)."""
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split('([0-9]+)', str(s))]
 # ===============================================================
@@ -527,31 +525,77 @@ def render_registry_health_check(client, target_registry):
             st.warning("⚠️ Found orphaned records (Missing Start Dates):")
             st.dataframe(health_df, use_container_width=True)
 
+def execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry):
+    """
+    Combined Correction: Updates all metadata, status, and PhysicalID 
+    for the current active deployment of a Node.
+    """
+    # 1. Sanitize Serial Number (PhysicalID)
+    # Strip non-numeric chars. If empty, we keep the current one or set to NULL.
+    clean_sn = re.sub(r'[^0-9]', '', str(new_sn))
+    sql_phys_id = clean_sn if clean_sn else "NULL"
+    
+    # 2. Sanitize Depth
+    if pd.isna(new_depth) or new_depth == 0.0:
+        sql_depth = "NULL"
+    else:
+        sql_depth = f"{float(new_depth)}"
+
+    # 3. Construct SQL
+    # We identify the row by NodeNum + current active status (End_Date IS NULL)
+    update_sql = f"""
+        UPDATE `{target_registry}`
+        SET 
+            Project = '{new_proj}',
+            Location = '{new_loc}', 
+            Bank = '{new_bank}',
+            Depth = {sql_depth},
+            SensorStatus = '{new_status}',
+            PhysicalID = {sql_phys_id}
+        WHERE 
+            NodeNum = '{data['NodeNum']}' 
+            AND End_Date IS NULL
+    """
+    
+    try:
+        client.query(update_sql).result()
+        st.success(f"✅ Record for {data['NodeNum']} has been corrected.")
+        st.cache_data.clear() # Refresh the 'Find & Select' list
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error("Correction failed. Check your SQL syntax or connection.")
+        st.code(update_sql, language="sql")
+        st.error(str(e))
+
 # ===============================================================
 # PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
 def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
-    # Place this at the top of your render_unified_node_manager function
-    if st.button("🔄 Refresh Registry Data"):
-        st.cache_data.clear()
-        st.rerun()
-    
+    """
+    All-in-one hardware lifecycle tool.
+    - Filters: Hierarchical Project/Location search with hardware-type toggles.
+    - Correction: Combined Metadata and Serial correction for active records.
+    - Decommission: Close site history as 'Archived' and move hardware to 'Office'.
+    """
     st.header("🛠️ Unified Node Manager")
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
 
     # ===============================================================
-    # 1. FIND & SELECT RECORD
+    # 1. FIND & SELECT RECORD (Hierarchical & Natural Sorted)
     # ===============================================================
     st.subheader("🔍 Find & Select Record")
     
+    # Toggle for Archival/Historical Data (Default OFF)
     show_archived = st.checkbox("Show Archived/Historical Data", value=False)
     
     if not show_archived:
+        # End_Date is null for active sensors
         df_working = reg_df[reg_df['End_Date'].isna()].copy()
     else:
         df_working = reg_df.copy()
 
-    # Ambient Filter Logic (Rule: SP = Ambient only)
+    # Hardware Type Filter (Rule: SP = Ambient Only)
     ambient_view = st.radio(
         "Display Hardware Type",
         ["Show All", "Hide Ambient (SP)", "Ambient Only (SP)"],
@@ -563,7 +607,7 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     elif ambient_view == "Ambient Only (SP)":
         df_working = df_working[df_working['NodeNum'].str.contains('SP', case=False, na=False)]
 
-    # Filter Columns
+    # Multi-Column Filter Bar
     f_col1, f_col2, f_col3, f_col4 = st.columns(4)
 
     with f_col1:
@@ -571,7 +615,7 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         sel_proj = st.selectbox("Search by Project", ["All"] + u_projects)
 
     with f_col2:
-        # Hierarchical Natural Sort for Location Dropdown
+        # Hierarchical Location list with Natural Sorting
         if sel_proj != "All":
             u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist(), 
                             key=lambda x: tuple(natural_sort_key(x)))
@@ -587,61 +631,58 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     with f_col4:
         search_node = st.text_input("Search Node ID").strip().upper()
 
-    # Apply Filters
+    # Apply Final Filtering
     if sel_proj != "All": df_working = df_working[df_working['Project'] == sel_proj]
     if sel_loc != "All": df_working = df_working[df_working['Location'] == sel_loc]
     if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
     if search_node: df_working = df_working[df_working['NodeNum'].str.upper().str.contains(search_node)]
 
-    # --- CRITICAL FIX: NATURAL SORTING FOR THE TABLE ---
+    # --- APPLY NATURAL SORT TO TABLE ---
     if not df_working.empty:
         df_working['Depth'] = pd.to_numeric(df_working['Depth'], errors='coerce').fillna(0.0)
-        # Using TUPLE to avoid TypeError in Pandas sort_values
+        # Use TUPLE sort key for Bank (Bank 2, Bank 10)
         df_working['bank_sort'] = df_working['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
         df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth'])
         df_working = df_working.drop(columns=['bank_sort'])
 
     st.write(f"Showing **{len(df_working)}** matching records.")
-    
     selected_rows = st.dataframe(
-        df_working,
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row"
+        df_working, use_container_width=True, hide_index=True,
+        on_select="rerun", selection_mode="single-row"
     )
 
     # ===============================================================
-    # 2. ACTION MANAGER
+    # 2. ACTION MANAGER (Correction & Lifecycle)
     # ===============================================================
     if len(selected_rows.selection.rows) > 0:
         row_index = selected_rows.selection.rows[0]
         data = df_working.iloc[row_index]
         node_id = str(data['NodeNum']).upper()
         
+        # Hardware Rules Identification
         is_lord = 'CH' in node_id
         is_sp = 'SP' in node_id
         
         st.divider()
         st.subheader(f"⚡ Action Manager: {node_id}")
 
-        # Pre-populate Logic
+        # Current Metadata prep
         curr_phys_id = str(data['PhysicalID']) if pd.notnull(data['PhysicalID']) else ""
         curr_bank = str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) and str(data.get('Bank')).lower() != 'nan' else ""
         curr_depth = float(data['Depth']) if pd.notnull(data['Depth']) and str(data['Depth']).lower() != 'nan' else 0.0
 
         mgmt_action = st.radio("Management Intent", 
-                               ["📝 Edit Metadata", "🩹 Serial Correction", "🔄 Hardware Swap"], 
+                               ["📝 Correct Record", "🔄 Hardware Swap (Replace)"], 
                                horizontal=True)
 
-        # Reactive Layout (Outside form for dynamic dropdowns)
+        # Reactive Selectors (outside form for instant location refreshes)
         c_m1, c_m2, c_m3 = st.columns(3)
         
         try: p_idx = proj_list.index(data['Project'])
         except ValueError: p_idx = 0
         new_proj = c_m1.selectbox("Assign to Project", proj_list, index=p_idx, key="m_proj")
 
-        # Location Selection (Natural Sorted)
+        # Natural Sorted Locations for the chosen project
         existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), 
                                key=lambda x: tuple(natural_sort_key(x)))
         if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
@@ -650,12 +691,12 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         except ValueError: l_idx = 0
         new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
 
-        # Lord Rule: Always 'In Use'
+        # Rule: Lord (CH) is always 'In Use'. SensorPush is selectable.
         if is_lord:
             new_status = "In Use"
             c_m3.info("Status: **In Use** (Fixed Hardware)")
         else:
-            status_list = ["Active", "Available", "Diagnostic", "Dead"]
+            status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
             try: s_idx = status_list.index(data['SensorStatus'])
             except ValueError: s_idx = 0
             new_status = c_m3.selectbox("Update Status", status_list, index=s_idx, key="m_stat")
@@ -664,37 +705,39 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
             c_f1, c_f2 = st.columns(2)
             new_bank = c_f1.text_input("Bank Identifier", value="Ambient" if is_sp else curr_bank)
             new_depth = c_f2.number_input("Depth (ft)", value=0.0 if is_sp else curr_depth, format="%.1f")
+            
+            # Optional PhysicalID fix
+            new_sn = st.text_input("Physical ID / Serial # (Correct only if wrong)", value=curr_phys_id)
 
-            # 📝 Save Metadata
-            if mgmt_action == "📝 Edit Metadata":
-                if st.form_submit_button("💾 Save Metadata Updates"):
-                    execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
+            if mgmt_action == "📝 Correct Record":
+                st.info("Directly modifies the active record. Fixes typos or changes status (e.g. to Archived).")
+                if st.form_submit_button("💾 Apply Corrections"):
+                    execute_combined_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry)
 
-            # Inside the mgmt_action == "🩹 Serial Correction" block:
-            elif mgmt_action == "🩹 Serial Correction":
-                st.info("Fixing metadata typos for the current active record.")
-                # NO new_sn input here!
-                if st.form_submit_button("🚀 Apply Correction"):
-                    execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
-
-            # 🔄 Hardware Swap (New Entry)
-            elif mgmt_action == "🔄 Hardware Swap":
-                st.error("Ends current history and starts NEW entry.")
-                new_sn = st.text_input("NEW Hardware Physical ID (Serial #)")
+            elif mgmt_action == "🔄 Hardware Swap (Replace)":
+                st.error("Swap Mode: Ends current record and starts NEW entry for new hardware.")
+                new_hw_sn = st.text_input("NEW Hardware Physical ID (Serial #)")
                 swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
                 if st.form_submit_button("🔄 Execute Hardware Replacement"):
-                    if not new_sn: st.error("New Serial Required")
-                    else: execute_replacement_transaction(client, data, new_sn, swap_date, target_registry)
+                    if not new_hw_sn: st.error("New Serial Required")
+                    else: execute_replacement_transaction(client, data, new_hw_sn, swap_date, target_registry)
 
-            # Lifecycle (Decommission) - Only for SensorPush
+            # --- DECOMMISSION (Only for SensorPush/TP) ---
             if not is_lord:
                 st.divider()
-                c_d1, c_d2, c_d3 = st.columns(3)
-                final_dt = datetime.combine(c_d1.date_input("Removal Date"), c_d2.time_input("Time"))
-                stock_stat = c_d3.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
-                if st.form_submit_button("🔚 Decommission to Office"):
-                    execute_decommission_node(client, data, target_registry, final_dt, stock_stat)
-
+                st.subheader("🏁 Site Decommission")
+                st.caption("Closes the project entry as 'Archived' and creates a new entry in 'Office'.")
+                
+                cd1, cd2, cd3 = st.columns(3)
+                d_date = cd1.date_input("Removal Date", value=datetime.now().date())
+                d_time = cd2.time_input("Removal Time", value=datetime.now().time())
+                d_stat = cd3.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
+                
+                if st.form_submit_button("🔚 Execute Decommission"):
+                    final_dt = datetime.combine(d_date, d_time)
+                    execute_decommission_node(client, data, target_registry, final_dt, d_stat)
+    else:
+        st.info("💡 Select a record in the table to manage its lifecycle.")
 
 def render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID):
     """Renders charts for old vs new hardware to verify telemetry before committing."""
