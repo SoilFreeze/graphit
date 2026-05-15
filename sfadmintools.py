@@ -1501,7 +1501,7 @@ def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DA
     
     # 4. Step 1: Verify (Check Telemetry table to see what will be moved)
     # We add a unique key to prevent the Duplicate ID error
-    render_verification_step(client, where_str, telemetry_table)
+    render_verification_step(client, where_str, telemetry_table, target_table)
 
     # 5. Step 2: Execute (Insert into or Delete from Rejections table)
     render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table)
