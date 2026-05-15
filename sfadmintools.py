@@ -121,7 +121,12 @@ def get_unit_labels():
     unit_label = "°C" if unit_mode == "Celsius" else "°F"
     return unit_mode, unit_label
     
-
+def natural_sort_key(s):
+    """
+    Helper to sort strings containing numbers (e.g., 'Bank 2' before 'Bank 10')
+    """
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split('([0-9]+)', str(s))]
 # ===============================================================
 # Function: Status Dashboard
 # ===============================================================
@@ -525,33 +530,23 @@ def render_registry_health_check(client, target_registry):
 # ===============================================================
 # PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
-
 def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
-    """
-    Unified Node Manager with Hardware-Specific Logic:
-    - Lord (ch): Status "In Use", no stock inventory needed.
-    - SensorPush (SP/TP): Mobile inventory. SP is Ambient only.
-    - Ambient Filter: Toggle to show/hide/only show SP devices.
-    """
     st.header("🛠️ Unified Node Manager")
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
 
     # ===============================================================
-    # 1. FIND & SELECT RECORD (With Hardware Logic)
+    # 1. FIND & SELECT RECORD
     # ===============================================================
     st.subheader("🔍 Find & Select Record")
     
-    # Checkbox for archived data
     show_archived = st.checkbox("Show Archived/Historical Data", value=False)
     
-    # Filter for active sensors
     if not show_archived:
         df_working = reg_df[reg_df['End_Date'].isna()].copy()
     else:
         df_working = reg_df.copy()
 
-    # --- NEW: Ambient / Hardware Filter Logic ---
-    # Rule: SP = Ambient only. TP/ch = Pipe/Process.
+    # Ambient Filter Logic
     ambient_view = st.radio(
         "Display Hardware Type",
         ["Show All", "Hide Ambient (SP)", "Ambient Only (SP)"],
@@ -563,7 +558,7 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     elif ambient_view == "Ambient Only (SP)":
         df_working = df_working[df_working['NodeNum'].str.contains('SP', case=False, na=False)]
 
-    # Filter Layout
+    # Filters
     f_col1, f_col2, f_col3, f_col4 = st.columns(4)
 
     with f_col1:
@@ -572,9 +567,10 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
 
     with f_col2:
         if sel_proj != "All":
-            u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist())
+            # Apply natural sort to Location dropdown
+            u_locs = sorted(df_working[df_working['Project'] == sel_proj]['Location'].unique().tolist(), key=natural_sort_key)
         else:
-            u_locs = sorted(df_working['Location'].unique().tolist())
+            u_locs = sorted(df_working['Location'].unique().tolist(), key=natural_sort_key)
         sel_loc = st.selectbox("Search by Location", ["All"] + u_locs)
 
     with f_col3:
@@ -584,41 +580,48 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
     with f_col4:
         search_node = st.text_input("Search Node ID").strip().upper()
 
-    # Final Filtering
+    # Apply Final Filtering
     if sel_proj != "All": df_working = df_working[df_working['Project'] == sel_proj]
     if sel_loc != "All": df_working = df_working[df_working['Location'] == sel_loc]
     if sel_stat != "All": df_working = df_working[df_working['SensorStatus'] == sel_stat]
     if search_node: df_working = df_working[df_working['NodeNum'].str.upper().str.contains(search_node)]
 
+    # --- CRITICAL FIX: NATURAL SORTING FOR THE TABLE ---
+    if not df_working.empty:
+        # 1. Clean Depth column (ensure it is numeric for sorting)
+        df_working['Depth'] = pd.to_numeric(df_working['Depth'], errors='coerce').fillna(0.0)
+        
+        # 2. Sort by Location, then Bank (Natural Sort), then Depth
+        # We temporarily create a sort key column to handle 'Bank 10' vs 'Bank 2'
+        df_working['bank_sort'] = df_working['Bank'].apply(natural_sort_key)
+        df_working = df_working.sort_values(by=['Location', 'bank_sort', 'Depth'])
+        # Drop the helper column before displaying
+        df_working = df_working.drop(columns=['bank_sort'])
+
     st.write(f"Showing **{len(df_working)}** matching records.")
+    
     selected_rows = st.dataframe(
-        df_working, use_container_width=True, hide_index=True,
-        on_select="rerun", selection_mode="single-row"
+        df_working,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row"
     )
 
     # ===============================================================
-    # 2. ACTION MANAGER (With Hardware Rules)
+    # 2. ACTION MANAGER (Selection Dependent)
     # ===============================================================
     if len(selected_rows.selection.rows) > 0:
         row_index = selected_rows.selection.rows[0]
         data = df_working.iloc[row_index]
         node_id = str(data['NodeNum']).upper()
-        
-        # Hardware Identification
         is_lord = 'CH' in node_id
         is_sp = 'SP' in node_id
         
         st.divider()
         st.subheader(f"⚡ Action Manager: {node_id}")
-        
-        # Hardware Status Banner
-        if is_lord:
-            st.caption("🏷️ **Hardware Type:** Lord (Fixed Point).")
-        elif is_sp:
-            st.caption("🏷️ **Hardware Type:** SensorPush (Ambient Only).")
 
-        # Prep Values
-        curr_phys_id = str(data['PhysicalID']) if pd.notnull(data['PhysicalID']) else ""
+        # Prep Form Values
         curr_bank = str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) and str(data.get('Bank')).lower() != 'nan' else ""
         curr_depth = float(data['Depth']) if pd.notnull(data['Depth']) and str(data['Depth']).lower() != 'nan' else 0.0
 
@@ -633,15 +636,15 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
         except ValueError: p_idx = 0
         new_proj = c_m1.selectbox("Assign to Project", proj_list, index=p_idx, key="m_proj")
 
-        # Location Selector (Rule: SP defaults to Ambient)
-        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
+        # Location Selector (Natural Sorted)
+        existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist(), key=natural_sort_key)
         if is_sp and "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
         
         try: l_idx = existing_locs.index("Ambient" if is_sp else data['Location'])
         except ValueError: l_idx = 0
         new_loc = c_m2.selectbox("Assign to Location", existing_locs, index=l_idx, key="m_loc")
 
-        # Status Logic (Rule: Lord is always 'In Use')
+        # Status Rule: Lords are always 'In Use'
         if is_lord:
             new_status = "In Use"
             c_m3.info("Status: **In Use** (Fixed Hardware)")
@@ -653,29 +656,24 @@ def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_I
 
         with st.form(key=f"mgmt_form_{node_id}"):
             c_f1, c_f2 = st.columns(2)
-            # Lords usually use specific Bank names; SP uses 'Ambient'
             new_bank = c_f1.text_input("Bank Identifier", value="Ambient" if is_sp else curr_bank)
             new_depth = c_f2.number_input("Depth (ft)", value=0.0 if is_sp else curr_depth, format="%.1f")
 
+            # Execution Logic (Edit/Switch/Replace functions should be defined elsewhere)
             if mgmt_action == "📝 Edit Metadata":
                 if st.form_submit_button("💾 Save Metadata Updates"):
                     execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
 
-            # ... Switch and Replace logic remains the same ...
+            # ... [Other Actions: Switch/Replace] ...
 
-            # Lifecycle Footer
-            st.divider()
-            if is_lord:
-                st.info("Lords are fixed hardware and do not require Decommissioning to Stock.")
-            else:
+            # Lifecycle (Decommission)
+            if not is_lord:
+                st.divider()
                 c_d1, c_d2, c_d3 = st.columns(3)
-                decom_dt = datetime.combine(c_d1.date_input("Date"), c_d2.time_input("Time"))
+                final_dt = datetime.combine(c_d1.date_input("Removal Date"), c_d2.time_input("Time"))
                 stock_stat = c_d3.selectbox("Return Status", ["Available", "Diagnostic", "Dead"])
                 if st.form_submit_button("🔚 Decommission to Office"):
-                    execute_decommission_node(client, data, target_registry, decom_dt, stock_stat)
-
-    else:
-        st.info("💡 Select a row to reveal hardware-specific actions.")
+                    execute_decommission_node(client, data, target_registry, final_dt, stock_stat)
 
 
 def render_comparison_charts(client, found_row, PROJECT_ID, DATASET_ID):
