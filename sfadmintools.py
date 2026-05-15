@@ -52,7 +52,7 @@ def render_sidebar():
             "🔍 Sensor Status",
             "🔄 Sensor Replace",      
             "🩹 Sensor Switch",       
-            "📝 Sensor Edit",         
+            "📝 Sensor Manager",         
             "📦 Bulk Registry Manager",
             "📡 Data Recovery",
             "⚙️ Project Master", 
@@ -525,6 +525,115 @@ def render_registry_health_check(client, target_registry):
 # ===============================================================
 # PAGE: SENSOR REPLACE (Physical Swap Logic)
 # ===============================================================
+
+def render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID):
+    st.header("🛠️ Unified Node Manager")
+    st.info("Select a sensor to Edit Metadata, Switch Serial Numbers, or Replace Hardware.")
+
+    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+
+    # 1. SHARED SELECTION INTERFACE
+    filtered_df = render_sensor_edit_filters(reg_df) # Uses your existing filter logic
+    
+    selected_rows = st.dataframe(
+        filtered_df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row"
+    )
+
+    if len(selected_rows.selection.rows) > 0:
+        row_index = selected_rows.selection.rows[0]
+        data = filtered_df.iloc[row_index]
+        
+        st.divider()
+        # 2. ACTION SELECTOR
+        # This determines which logic block is active
+        mgmt_action = st.radio(
+            "Select Management Action", 
+            ["📝 Edit Metadata", "🩹 Serial Correction (Switch)", "🔄 Physical Hardware Swap (Replace)"],
+            horizontal=True
+        )
+
+        # Common inputs for all actions
+        with st.container():
+            # Handle NaN values for display
+            curr_bank = str(data.get('Bank', '')) if pd.notnull(data.get('Bank')) else ""
+            curr_depth = float(data['Depth']) if pd.notnull(data['Depth']) else 0.0
+            
+            # --- SHARED INPUTS (Metadata) ---
+            c1, c2, c3 = st.columns(3)
+            new_proj = c1.selectbox("Project", proj_list, index=proj_list.index(data['Project']) if data['Project'] in proj_list else 0)
+            
+            # Dynamic Location Logic
+            existing_locs = sorted(reg_df[reg_df['Project'] == new_proj]['Location'].unique().tolist())
+            if "Ambient" not in existing_locs: existing_locs.insert(0, "Ambient")
+            new_loc = c2.selectbox("Location", existing_locs, index=existing_locs.index(data['Location']) if data['Location'] in existing_locs else 0)
+            
+            status_list = ["Active", "Available", "Diagnostic", "Dead", "Archived"]
+            new_status = c3.selectbox("Status", status_list, index=status_list.index(data['SensorStatus']) if data['SensorStatus'] in status_list else 0)
+
+            c4, c5 = st.columns(2)
+            new_bank = c4.text_input("Bank / Identifier", value=curr_bank)
+            new_depth = c5.number_input("Depth (ft)", value=curr_depth)
+
+            # --- ACTION SPECIFIC LOGIC ---
+            if mgmt_action == "📝 Edit Metadata":
+                st.caption("Standard update: Changes metadata for the existing record.")
+                if st.button("💾 Save Metadata Updates", use_container_width=True):
+                    execute_record_update(client, data, new_proj, new_loc, new_bank, new_depth, new_status, target_registry)
+
+            elif mgmt_action == "🩹 Serial Correction (Switch)":
+                st.warning("Correction Mode: Use this to fix a typo in the Physical ID Serial.")
+                new_sn = st.text_input("Corrected Physical ID (Serial #)", value=str(data['PhysicalID']))
+                if st.button("🚀 Apply Serial Correction", use_container_width=True):
+                    # We reuse execute_record_update but pass the new Serial ID
+                    # We modify the update function slightly to accept PhysicalID
+                    execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry)
+
+            elif mgmt_action == "🔄 Physical Hardware Swap (Replace)":
+                st.error("Swap Mode: This ends the current record and starts a new one for the new serial.")
+                new_sn = st.text_input("NEW Hardware Physical ID (Serial #)")
+                swap_date = st.date_input("Swap Effective Date", value=datetime.now().date())
+                
+                if st.button("🔄 Execute Hardware Replacement", type="primary", use_container_width=True):
+                    if not new_sn:
+                        st.error("Please enter the NEW Serial Number.")
+                    else:
+                        execute_replacement_transaction(client, data, new_sn, swap_date, target_registry)
+
+    else:
+        st.info("💡 Select a sensor in the table above to manage its lifecycle.")
+
+def execute_switch_correction(client, data, new_proj, new_loc, new_bank, new_depth, new_status, new_sn, target_registry):
+    """Updates metadata AND changes the PhysicalID (Switch logic)."""
+    clean_sn = re.sub(r'[^0-9.]', '', str(new_sn))
+    
+    # Handle the WHERE clause for PhysicalID safely as discussed
+    raw_phys_id = data.get('PhysicalID')
+    phys_id_where = "PhysicalID IS NULL" if (pd.isna(raw_phys_id) or str(raw_phys_id).lower() == 'nan') else f"PhysicalID = {raw_phys_id}"
+
+    sql = f"""
+        UPDATE `{target_registry}`
+        SET 
+            Project = '{new_proj}',
+            Location = '{new_loc}', 
+            Bank = '{new_bank}',
+            Depth = {new_depth},
+            SensorStatus = '{new_status}',
+            PhysicalID = {clean_sn}
+        WHERE NodeNum = '{data['NodeNum']}' 
+          AND Start_Date = DATE('{data['Start_Date']}')
+          AND {phys_id_where}
+    """
+    try:
+        client.query(sql).result()
+        st.success(f"✅ Serial corrected to {clean_sn}")
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Switch Correction Failed: {e}")
 
 def render_sensor_replace_page(client, PROJECT_ID, DATASET_ID):
     """Main entry point for the Sensor Replace management tool."""
@@ -1673,7 +1782,10 @@ def main():
         render_project_status_dashboard(client, selected_project, unit_label)
         st.divider()
         render_hardware_integrity_table(client, selected_project, unit_mode, unit_label)
-        
+
+    elif admin_page == "🛠️ Node Manager":
+        render_unified_node_manager(client, reg_df, proj_list, PROJECT_ID, DATASET_ID)
+    
     elif admin_page == "🔍 Sensor Status":
         render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
         
