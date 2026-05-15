@@ -308,13 +308,9 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # PAGE: SENSOR STATUS (Modular Functions)
 # ===============================================================
 def render_node_selector(reg_df, proj_list):
-    """
-    Renders a searchable table of nodes. 
-    Returns the data of the selected row for use in other tools.
-    """
     st.subheader("🎯 Node Selection")
     
-    # 1. Filters for the table
+    # 1. Sidebar-style filters for the table
     c1, c2 = st.columns(2)
     with c1:
         f_proj = st.selectbox("Filter by Project", ["All"] + proj_list)
@@ -331,20 +327,29 @@ def render_node_selector(reg_df, proj_list):
             display_df['Location'].str.contains(search_term, case=False, na=False)
         ]
 
-    # 3. Render Data Editor with selection enabled
-    # We use column_config to make it look clean
-    selected_node = st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode=["single_row"]  # If this fails, try ["single_row"] or "single"
+    # 3. The "Legacy-Safe" Selector
+    # Instead of clicking a row (which varies by version), we use a standard selectbox
+    # but make it look like a "Selection" tool.
+    
+    node_list = display_df.apply(lambda x: f"{x['NodeNum']} | {x['Location']}", axis=1).tolist()
+    
+    if not node_list:
+        st.warning("No nodes match your search.")
+        return None
+
+    selected_option = st.selectbox(
+        "Choose a Node to manage:", 
+        ["-- Select a Node --"] + node_list,
+        help="Search results are filtered above."
     )
 
-    # 4. Return the selected row data
-    if selected_node and len(selected_node.selection.rows) > 0:
-        idx = selected_node.selection.rows[0]
-        return display_df.iloc[idx]
+    if selected_option != "-- Select a Node --":
+        # Extract the NodeID from the string
+        selected_node_id = selected_option.split(" | ")[0]
+        return display_df[display_df['NodeNum'] == selected_node_id].iloc[0]
+    
+    # 4. Display the table below just for reference
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
     
     return None
 
