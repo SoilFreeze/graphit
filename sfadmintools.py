@@ -405,7 +405,7 @@ def render_node_historical_graph(client, node_id):
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
-    Displays chart, interactive historical log selector with reporting health status,
+    Displays chart, interactive historical log selector with relative time tracking metrics,
     full attribute configuration overrides, operational task panels, and administrative 
     pipeline delete tools.
     """
@@ -416,23 +416,47 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     render_node_historical_graph(client, node_id)
     st.divider()
 
-    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER (WITH LAST SEEN METRICS)
+    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER (WITH CALCULATED LAG HOURS)
     st.markdown(f"### 📜 Assignment History Library: **{node_id}**")
     st.info("💡 Check the box next to any assignment below (active or archived) to populate and alter its fields in the editor.")
     
     # Extract structural configuration footprint
     history_df = reg_df[reg_df['NodeNum'] == node_id].sort_values(by='Start_Date', ascending=False).copy()
     
-    # Calculate explicit 'Last Seen' reporting vectors dynamically for context clarity
+    # ---------------------------------------------------------------
+    # DYNAMIC DURATION CALCULATION (REPLACING PHYSICAL ID COLS)
+    # ---------------------------------------------------------------
     if 'last_ping' in history_df.columns:
-        history_df['Last Seen'] = pd.to_datetime(history_df['last_ping']).dt.strftime('%Y-%m-%d %H:%M')
+        # Calculate exactly how many hours have passed since the record hit our servers
+        now_utc = pd.Timestamp.now(tz='UTC')
+        history_df['Hours Since Last Seen'] = history_df['last_ping'].apply(
+            lambda x: f"{max(0.0, (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600):.1f}h" 
+            if pd.notnull(x) else "No Pings"
+        )
+    elif 'hrs_lag' in history_df.columns:
+        # If the dataframe already processed a float value, format it cleanly with a suffix
+        history_df['Hours Since Last Seen'] = history_df['hrs_lag'].apply(
+            lambda x: f"{float(x):.1f}h" if pd.notnull(x) else "No Pings"
+        )
     else:
-        history_df['Last Seen'] = "No Active Pings"
-        
-    # Drop internal or unwanted legacy physical tracking attributes if present
-    cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
+        # Fallback calculation if columns aren't pre-loaded: pull directly from master view telemetry
+        try:
+            ping_q = f"SELECT MAX(timestamp) as lp FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{node_id}'"
+            lp_res = client.query(ping_q).to_dataframe()
+            if not lp_res.empty and pd.notnull(lp_res['lp'].iloc[0]):
+                now_utc = pd.Timestamp.now(tz='UTC')
+                delta_hrs = (now_utc - pd.to_datetime(lp_res['lp'].iloc[0]).tz_convert('UTC')).total_seconds() / 3600
+                history_df['Hours Since Last Seen'] = f"{max(0.0, delta_hrs):.1f}h"
+            else:
+                history_df['Hours Since Last Seen'] = "No Pings"
+        except Exception:
+            history_df['Hours Since Last Seen'] = "Offline"
+
+    # Completely scrub physical hardware key columns from screen presentation
+    cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'hrs_lag']
     history_df = history_df.drop(columns=[c for c in cols_to_drop if c in history_df.columns], errors='ignore')
     
+    # Inject our interactive control check column
     history_df.insert(0, "Edit Target", False)
     
     edited_hist_df = st.data_editor(
@@ -518,12 +542,12 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            # Formulate robust NULL validation checks for original state matching (Stripped physicalID parameters)
+            # Formulate robust NULL validation checks for original state matching
             where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
             where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
             where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
-            # FOOLPROOF STEP-BY-STEP TRANSACTION: Drops exactly ONE row copy using LIMIT 1, then inserts the fresh parameters
+            # Drops exactly ONE row copy using LIMIT 1, then inserts the fresh parameters
             update_sql = f"""
                 BEGIN TRANSACTION;
                 
