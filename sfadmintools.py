@@ -499,8 +499,8 @@ def render_data_checker(client, reg_df):
     st.markdown("---")
     st.subheader("🔍 Data Checker Diagnostics")
     
-    c1, c2, c3 = st.tabs([
-        "✅ Fully Assigned Nodes", 
+    # Cleaned tab structure focusing strictly on anomalies
+    c1, c2 = st.tabs([
         "⏱️ Gaps in Data (Missing Office Time)", 
         "🚨 Orphaned Nodes (Missing Next Assignment)"
     ])
@@ -513,11 +513,8 @@ def render_data_checker(client, reg_df):
     # Group records by sensor to analyze historical tracking lineages
     grouped = df.groupby('NodeNum')
     
-    fully_assigned = []
     gaps_in_data = []
     orphaned_nodes = []
-    
-    today = datetime.now().date()
     
     for node_id, group in grouped:
         # Sort history chronologically
@@ -553,32 +550,11 @@ def render_data_checker(client, reg_df):
             gaps_in_data.append(node_id)
         elif is_orphaned:
             orphaned_nodes.append(node_id)
-        else:
-            # Nodes with an active assignment (No End Date) and no chronological internal gaps
-            active_rec = sorted_group[sorted_group['End_Date'].isna()]
-            if not active_rec.empty:
-                fully_assigned.append({
-                    "Node ID": node_id,
-                    "Project": active_rec.iloc[0]['Project'],
-                    "Location": active_rec.iloc[0]['Location'],
-                    "Start Date": active_rec.iloc[0]['Start_Date']
-                })
 
     # ===============================================================
-    # TAB 1: FULLY ASSIGNED NODES
+    # TAB 1: Gaps in Data (Missing Office Time)
     # ===============================================================
     with c1:
-        st.markdown("##### Nodes with a start date that are actively assigned the entire time")
-        if fully_assigned:
-            fa_df = pd.DataFrame(fully_assigned)
-            st.dataframe(fa_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No active nodes currently meet the fully continuous assignment definition.")
-
-    # ===============================================================
-    # TAB 2: GAPS IN DATA (MISSING OFFICE TIME)
-    # ===============================================================
-    with c2:
         st.markdown("##### Nodes with a chronological gap where they were not assigned—requires unmonitored time to be added to Office")
         if gaps_in_data:
             gap_display_df = df[df['NodeNum'].isin(gaps_in_data)].sort_values(['NodeNum', 'Start_Date'])
@@ -591,9 +567,9 @@ def render_data_checker(client, reg_df):
             st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
 
     # ===============================================================
-    # TAB 3: ORPHANED NODES (MISSING NEXT ASSIGNMENT)
+    # TAB 2: Orphaned Nodes (Missing Next Assignment)
     # ===============================================================
-    with c3:
+    with c2:
         st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
         if orphaned_nodes:
             orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
@@ -606,6 +582,7 @@ def render_data_checker(client, reg_df):
             )
         else:
             st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
+
 
 # ===============================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
