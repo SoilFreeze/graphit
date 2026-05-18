@@ -691,16 +691,18 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
 
 def render_data_checker(client, reg_df):
     """
-    Scans node deployment timelines to isolate configuration patterns and pipeline errors.
+    Scans node deployment timelines to isolate configuration patterns, 
+    pipeline errors, and parallel sensor position conflicts.
     """
     st.markdown("---")
     st.subheader("🔍 Data Checker Diagnostics")
     
-    # 1. Initialize Tabs Cleanly
-    c1, c2, c3 = st.tabs([
+    # Added a 4th tab for position layout conflicts
+    c1, c2, c3, c4 = st.tabs([
         "⏱️ Gaps in Data (Missing Office Time)", 
         "🚨 Orphaned Nodes (Missing Next Assignment)",
-        "🚨 Multiple / Duplicate Assignments"
+        "🚨 Multiple / Duplicate Assignments",
+        "🚨 Location & Position Overlaps"
     ])
     
     df = reg_df.copy()
@@ -733,15 +735,14 @@ def render_data_checker(client, reg_df):
             if pd.isnull(current_rec['End_Date']):
                 active_count += 1
                 
-            # --- FIXED OVERLAPPING LOGIC ---
+            # Overlapping duplication checker loop logic
             for j in range(i + 1, len(records)):
                 compare_rec = records[j]
                 if pd.notnull(compare_rec['Start_Date']):
-                    # Changed from '>' to '>=' so handovers on the same day don't flag as duplicates
                     if pd.isnull(current_rec['End_Date']) or current_rec['End_Date'] > compare_rec['Start_Date']:
                         has_duplicate = True
 
-            # --- CHRONOLOGICAL GAP & ORPHAN CHECKS ---
+            # Chronological Gap & Orphan evaluation tracking checks
             if i < len(records) - 1:
                 next_rec = records[i+1]
                 if pd.notnull(current_rec['End_Date']) and pd.notnull(next_rec['Start_Date']):
@@ -754,13 +755,38 @@ def render_data_checker(client, reg_df):
         if active_count > 1:
             has_duplicate = True
 
-        # Sort cleanly into non-overlapping lists
         if has_duplicate:
             duplicate_assignments.append(node_id)
         if has_gap:
             gaps_in_data.append(node_id)
         elif is_orphaned and not has_duplicate:
             orphaned_nodes.append(node_id)
+
+    # --- DIAGNOSTIC CALCULATION FOR TAB 4: POSITION OVERLAPS ---
+    # Filter for active rows (ignore rows that have already cleanly ended)
+    today = datetime.now().date()
+    active_df = df[df['Start_Date'] <= today].copy()
+    active_df = active_df[active_df['End_Date'].isna() | (active_df['End_Date'] >= today)]
+    
+    # Exclude Office Stock from triggering layout stacking errors
+    active_field_df = active_df[active_df['Project'] != 'Office'].copy()
+    
+    # Clean up fields to guarantee accurate grouping execution
+    active_field_df['Bank'] = active_field_df['Bank'].fillna('').astype(str).str.strip()
+    active_field_df['Depth'] = active_field_df['Depth'].fillna(0.0).astype(float)
+    
+    # Group by physical footprint to find where unique NodeNum count is > 1
+    position_groups = active_field_df.groupby(['Project', 'Location', 'Bank', 'Depth'])
+    conflicting_rows_list = []
+    
+    for position_key, pos_group in position_groups:
+        if pos_group['NodeNum'].nunique() > 1:
+            conflicting_rows_list.append(pos_group)
+            
+    if conflicting_rows_list:
+        position_conflicts_df = pd.concat(conflicting_rows_list).sort_values(['Project', 'Location', 'Bank', 'Depth'])
+    else:
+        position_conflicts_df = pd.DataFrame()
 
     # ===============================================================
     # TAB 1: Gaps in Data
@@ -804,6 +830,26 @@ def render_data_checker(client, reg_df):
             )
         else:
             st.success("✅ No conflicting overlap metrics or duplicate concurrent project entries found.")
+
+    # ===============================================================
+    # TAB 4: LOCATION & POSITION OVERLAPS
+    # ===============================================================
+    with c4:
+        st.markdown("##### 🚨 Position Conflicts: Multiple physical sensors assigned to the same Location and Bank/Depth concurrently")
+        if not position_conflicts_df.empty:
+            # Format display parameters nicely
+            display_conflict_df = position_conflicts_df.copy()
+            display_conflict_df['Depth'] = display_conflict_df['Depth'].apply(lambda x: f"{x} ft" if x > 0 else "-")
+            display_conflict_df['Bank'] = display_conflict_df['Bank'].apply(lambda x: x if x != "" else "-")
+            
+            st.dataframe(
+                display_conflict_df[['Project', 'Location', 'Bank', 'Depth', 'NodeNum', 'Start_Date', 'SensorStatus']],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.success("✅ Perfect grid alignment. Every active physical installation coordinate holds exactly one distinct hardware sensor entity.")
+            
 # ===============================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
 # ===============================================================
