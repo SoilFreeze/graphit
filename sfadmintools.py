@@ -1804,23 +1804,104 @@ def render_update_project_form(client, selected_project, table_projects):
 # ===============================================================
 
 def render_ref_curve_library_page(client):
-    """Main entry point for Theoretical Curve Management."""
-    st.header("📈 Theoretical Curve Management")
+    """
+    Main workspace manager tab for tracking, graphing, and importing 
+    engineered baseline calibration reference curves.
+    """
+    st.subheader("📈 Reference Curve Library Matrix")
     
-    table_curves = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+    table_curves = f"{PROJECT_ID}.{DATASET_ID}.project_curves"
     
-    # 1. FETCH INVENTORY
-    inventory_df = fetch_curve_inventory(client, table_curves)
-    
-    st.divider()
+    # Extract live curve records for on-screen metrics and routing
+    try:
+        inventory_df = client.query(f"SELECT * FROM `{table_curves}` ORDER BY 1 ASC").to_dataframe()
+    except Exception as e:
+        st.error(f"Failed to extract live reference curve database logs: {e}")
+        inventory_df = pd.DataFrame()
 
-    # 2. MANAGEMENT TOOLS
-    render_curve_management_tools(client, inventory_df, table_curves)
+    # Layout structural workspaces split between view pane and upload form
+    tab_view, tab_upload, tab_delete = st.tabs(["📊 View Active Curves", "📥 Upload / Overwrite Curve File", "🗑️ Remove Profile"])
 
-    st.divider()
+    with tab_view:
+        if not inventory_df.empty:
+            st.dataframe(inventory_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("The reference curve asset register is currently unpopulated.")
 
-    # 3. UPLOAD ENGINE
-    render_curve_upload_engine(client, table_curves, inventory_df)
+    with tab_upload:
+        render_curve_upload_form(client, table_curves)
+
+    with tab_delete:
+        # Calls the hardened column mapping tool we just built
+        render_curve_management_tools(client, inventory_df, table_curves)
+
+
+def render_curve_upload_form(client, table_curves):
+    """
+    Handles parsing and automated overwriting routines for imported 
+    CSV/XLSX reference curve datasets.
+    """
+    st.markdown("##### 📥 Import Engineering Calibration Profile")
+    st.info("💡 Overwrite rule active: Uploading a file with an identical curve identifier will wipe its old historical data blocks and replace them completely.")
+
+    uploaded_file = st.file_uploader("Choose Curve Dataset File", type=["csv", "xlsx"], key="curve_file_uploader_stream")
+
+    if uploaded_file is not None:
+        try:
+            # 1. Parse uploaded matrix stream into memory
+            if uploaded_file.name.endswith('.csv'):
+                uploaded_df = pd.read_csv(uploaded_file)
+            else:
+                uploaded_df = pd.read_excel(uploaded_file)
+
+            if uploaded_df.empty:
+                st.error("Uploaded dataset structure contains no parsable content tracking matrices.")
+                return
+
+            st.caption("🔍 Previewing Imported Dataset Elements (First 5 Rows):")
+            st.dataframe(uploaded_df.head(5), use_container_width=True, hide_index=True)
+
+            # Detect identifier columns safely 
+            possible_id_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
+            found_id_col = next((c for c in possible_id_cols if c in uploaded_df.columns), None)
+
+            if not found_id_col:
+                st.error("Upload aborted: Missing required unique identification tag column (e.g., 'Curve Identifier').")
+                return
+
+            # Isolate the targeted name parameter from the imported file context
+            target_curve_identity = str(uploaded_df[found_id_col].iloc[0]).strip()
+
+            with st.form("confirm_curve_overwrite_upload_form"):
+                st.warning(f"Target Identity Identified: **{target_curve_identity}**")
+                
+                if st.form_submit_button("🚀 Commit & Overwrite Live Target Records"):
+                    # 2. HARDENED OVERWRITE TRANSACTION PURGE BLOCK
+                    # Drops any pre-existing rows for this curve identifier to make way for clean incoming records
+                    purge_sql = f"""
+                        DELETE FROM `{table_curves}`
+                        WHERE {found_id_col} = '{target_curve_identity}'
+                    """
+                    
+                    with st.spinner("Purging old conflicting database record lineages..."):
+                        client.query(purge_sql).result()
+
+                    # 3. STREAM STREAMLIT DATAFRAME INTO BIGQUERY STORAGE
+                    # We configure the job matrix to append cleanly since the purge handled removing the old rows
+                    from google.cloud import bigquery
+                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                    
+                    with st.spinner("Streaming updated matrix telemetry payloads..."):
+                        load_job = client.load_table_from_dataframe(uploaded_df, table_curves, job_config=job_config)
+                        load_job.result()
+
+                    st.success(f"✅ Overwrite complete! Baseline parameters for **{target_curve_identity}** updated cleanly.")
+                    st.cache_data.clear()
+                    time.sleep(1.5)
+                    st.rerun()
+
+        except Exception as file_parse_err:
+            st.error(f"Failed parsing file interface pipelines: {file_parse_err}")
 
 
 def fetch_curve_inventory(client, table_curves):
