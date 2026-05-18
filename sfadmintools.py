@@ -1314,16 +1314,27 @@ def render_playground_staging_tab(client, target_registry, table_playground):
         if st.checkbox("I verify that these staging configurations match my field criteria.", key="confirm_playground_push"):
             if st.button("🚀 Push Playground Data Live to Production", type="primary", use_container_width=True):
                 
-                # MERGE checks primary identifier keys across NodeNum and Start_Date
+                # HARDENED COMPOSITE KEY MERGE: Incorporates Project to isolate multi-project concurrent assignments
                 sync_sql = f"""
                     MERGE `{target_registry}` T
-                    USING `{table_playground}` S
-                    ON T.NodeNum = S.NodeNum AND T.Start_Date = S.Start_Date
+                    USING (
+                        SELECT * FROM (
+                            SELECT *,
+                                   ROW_NUMBER() OVER(
+                                       PARTITION BY NodeNum, Start_Date, Project 
+                                       ORDER BY End_Date DESC NULLS FIRST, SensorStatus DESC
+                                   ) as rn
+                            FROM `{table_playground}`
+                        )
+                        WHERE rn = 1
+                    ) S
+                    ON T.NodeNum = S.NodeNum 
+                       AND T.Start_Date = S.Start_Date
+                       AND T.Project = S.Project
                     
                     -- Update production fields if matching record exists
                     WHEN MATCHED THEN
                         UPDATE SET 
-                            T.Project = S.Project,
                             T.Location = S.Location,
                             T.Bank = S.Bank,
                             T.Depth = S.Depth,
