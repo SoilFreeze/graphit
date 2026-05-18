@@ -713,8 +713,8 @@ def render_data_checker(client, reg_df):
     gaps_in_data = []
     orphaned_nodes = []
     
-    # Track the separate duplicate categorization lists
-    identity_duplicates = []
+    # Track conflicting records directly instead of just Node IDs
+    identity_duplicate_rows = []
     cross_project_splits = []
     
     today = datetime.now().date()
@@ -725,7 +725,6 @@ def render_data_checker(client, reg_df):
         
         has_gap = False
         is_orphaned = False
-        has_identity_dupe = False
         
         # Track active profiles for the cross-project verification loop
         active_projects_assigned = set()
@@ -746,13 +745,14 @@ def render_data_checker(client, reg_df):
             for j in range(i + 1, len(records)):
                 compare_rec = records[j]
                 if pd.notnull(compare_rec['Start_Date']):
-                    # Hardened Strict Match Logic: Checks if project, start date, and end date are completely identical
                     same_proj = current_rec['Project'] == compare_rec['Project']
                     same_start = current_rec['Start_Date'] == compare_rec['Start_Date']
                     same_end = current_rec['End_Date'] == compare_rec['End_Date']
                     
+                    # If an exact matching row pair is found, isolate both rows directly
                     if same_proj and same_start and same_end:
-                        has_identity_dupe = True
+                        identity_duplicate_rows.append(current_rec)
+                        identity_duplicate_rows.append(compare_rec)
 
             # --- CHRONOLOGICAL GAP & ORPHAN CHECKS ---
             if i < len(records) - 1:
@@ -763,10 +763,6 @@ def render_data_checker(client, reg_df):
             else:
                 if pd.notnull(current_rec['End_Date']):
                     is_orphaned = True
-                    
-        # Sort node states into their respective diagnostic arrays
-        if has_identity_dupe:
-            identity_duplicates.append(node_id)
             
         # OPTION B MATH: Assigned to more than one active project right now
         if len(active_projects_assigned) > 1:
@@ -774,7 +770,7 @@ def render_data_checker(client, reg_df):
             
         if has_gap:
             gaps_in_data.append(node_id)
-        elif is_orphaned and not has_identity_dupe and node_id not in cross_project_splits:
+        elif is_orphaned and len(identity_duplicate_rows) == 0 and node_id not in cross_project_splits:
             orphaned_nodes.append(node_id)
 
     # --- POSITION OVERLAPS CALCULATION FOR TAB 4 ---
@@ -828,9 +824,10 @@ def render_data_checker(client, reg_df):
         )
         
         if "Same Project" in dupe_mode:
-            st.markdown("##### 🚨 Identity Overlaps: Tracking entries matching the exact same project and start/end dates.")
-            if identity_duplicates:
-                display_dupe_df = df[df['NodeNum'].isin(identity_duplicates)].sort_values(['NodeNum', 'Start_Date'])
+            st.markdown("##### 🚨 Identity Overlaps: Displaying only the exact duplicate row entries causing database conflicts.")
+            if identity_duplicate_rows:
+                # Convert our extracted conflicting dictionary lists back into a scannable DataFrame structure
+                display_dupe_df = pd.DataFrame(identity_duplicate_rows).drop_duplicates().sort_values(['NodeNum', 'Start_Date'])
                 st.dataframe(display_dupe_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
             else:
                 st.success("✅ Clean database entries. No duplicate entries discovered with identical project and date windows.")
@@ -854,7 +851,6 @@ def render_data_checker(client, reg_df):
             st.dataframe(display_conflict_df[['Project', 'Location', 'Bank', 'Depth', 'NodeNum', 'Start_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
         else:
             st.success("✅ Perfect grid alignment. Every active physical installation coordinate holds exactly one distinct hardware sensor entity.")
-
 
 # ===============================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
