@@ -572,38 +572,6 @@ def render_data_checker(client, reg_df):
         else:
             st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
 
-    # ===============================================================
-    # TAB 1: Gaps in Data (Missing Office Time)
-    # ===============================================================
-    with c1:
-        st.markdown("##### Nodes with a chronological gap where they were not assigned—requires unmonitored time to be added to Office")
-        if gaps_in_data:
-            gap_display_df = df[df['NodeNum'].isin(gaps_in_data)].sort_values(['NodeNum', 'Start_Date'])
-            st.dataframe(
-                gap_display_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
-                use_container_width=True, 
-                hide_index=True
-            )
-        else:
-            st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
-
-    # ===============================================================
-    # TAB 2: Orphaned Nodes (Missing Next Assignment)
-    # ===============================================================
-    with c2:
-        st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
-        if orphaned_nodes:
-            orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
-            # Target the trailing terminated entry row specifically for visual clarity
-            last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
-            st.dataframe(
-                last_entries[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
-                use_container_width=True, 
-                hide_index=True
-            )
-        else:
-            st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
-
 
 # ===============================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
