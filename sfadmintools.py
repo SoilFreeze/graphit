@@ -405,8 +405,9 @@ def render_node_historical_graph(client, node_id):
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
-    Displays chart, interactive historical log selector, full attribute configuration overrides,
-    operational task panels, and administrative pipeline delete tools.
+    Displays chart, interactive historical log selector with reporting health status,
+    full attribute configuration overrides, operational task panels, and administrative 
+    pipeline delete tools.
     """
     node_id = selected_node_data['NodeNum']
     start_dt = selected_node_data['Start_Date']
@@ -415,11 +416,23 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     render_node_historical_graph(client, node_id)
     st.divider()
 
-    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER
+    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER (WITH LAST SEEN METRICS)
     st.markdown(f"### 📜 Assignment History Library: **{node_id}**")
     st.info("💡 Check the box next to any assignment below (active or archived) to populate and alter its fields in the editor.")
     
+    # Extract structural configuration footprint
     history_df = reg_df[reg_df['NodeNum'] == node_id].sort_values(by='Start_Date', ascending=False).copy()
+    
+    # Calculate explicit 'Last Seen' reporting vectors dynamically for context clarity
+    if 'last_ping' in history_df.columns:
+        history_df['Last Seen'] = pd.to_datetime(history_df['last_ping']).dt.strftime('%Y-%m-%d %H:%M')
+    else:
+        history_df['Last Seen'] = "No Active Pings"
+        
+    # Drop internal or unwanted legacy physical tracking attributes if present
+    cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
+    history_df = history_df.drop(columns=[c for c in cols_to_drop if c in history_df.columns], errors='ignore')
+    
     history_df.insert(0, "Edit Target", False)
     
     edited_hist_df = st.data_editor(
@@ -505,48 +518,47 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            where_bank = f"T.Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "T.Bank IS NULL"
-            where_depth = f"T.Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "T.Depth IS NULL"
-            where_end = f"T.End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "T.End_Date IS NULL"
+            # Formulate robust NULL validation checks for original state matching (Stripped physicalID parameters)
+            where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+            where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+            where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
+            # FOOLPROOF STEP-BY-STEP TRANSACTION: Drops exactly ONE row copy using LIMIT 1, then inserts the fresh parameters
             update_sql = f"""
-                MERGE `{target_registry}` T
-                USING (
-                  SELECT * FROM (
-                    SELECT *, ROW_NUMBER() OVER() as rn
-                    FROM `{target_registry}`
-                    WHERE NodeNum = '{target_record['NodeNum']}'
-                      AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
-                      AND Project = '{target_record['Project']}'
-                      AND Location = '{target_record['Location']}'
-                  ) WHERE rn = 1
-                ) S
-                ON T.NodeNum = S.NodeNum 
-                  AND T.Start_Date = S.Start_Date 
-                  AND T.Project = S.Project 
-                  AND T.Location = S.Location
+                BEGIN TRANSACTION;
+                
+                DELETE FROM `{target_registry}`
+                WHERE NodeNum = '{target_record['NodeNum']}'
+                  AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                  AND Project = '{target_record['Project']}'
+                  AND Location = '{target_record['Location']}'
                   AND {where_bank}
                   AND {where_depth}
                   AND {where_end}
-                WHEN MATCHED THEN
-                  UPDATE SET 
-                    T.NodeNum = '{edit_nodenum.strip()}',
-                    T.Project = '{edit_proj.strip()}',
-                    T.Location = '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
-                    T.Bank = {sql_bank},
-                    T.Depth = {sql_depth},
-                    T.SensorStatus = '{edit_status}',
-                    T.Start_Date = DATE('{edit_start.isoformat()}'),
-                    T.End_Date = {sql_end};
+                LIMIT 1;
+                
+                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                VALUES (
+                  '{edit_nodenum.strip()}',
+                  '{edit_proj.strip()}',
+                  '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
+                  {sql_bank},
+                  {sql_depth},
+                  '{edit_status}',
+                  DATE('{edit_start.isoformat()}'),
+                  {sql_end}
+                );
+                
+                COMMIT;
             """
             try:
                 client.query(update_sql).result()
-                st.success("✅ Cleaned assignment row. Updated only one instance of the duplicate twins.")
+                st.success("✅ Clean split successful. Isolated and modified only your selected row copy.")
                 st.cache_data.clear()
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Failed to isolate and update targeted row copy: {e}")
+                st.error(f"Failed to safely swap unique record rows: {e}")
 
     # 4. OPERATIONAL TASK PANEL
     st.markdown("##### Quick Operational Tasks")
@@ -699,7 +711,9 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 else:
                     where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
                     where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+                    where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
+                    # Explicit LIMIT 1 clause retains targeted single row removal accuracy without cascading updates
                     delete_sql = f"""
                         DELETE FROM `{target_registry}`
                         WHERE NodeNum = '{target_record['NodeNum']}'
@@ -708,6 +722,8 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                           AND Location = '{target_record['Location']}'
                           AND {where_bank}
                           AND {where_depth}
+                          AND {where_end}
+                        LIMIT 1
                     """
                     try:
                         client.query(delete_sql).result()
