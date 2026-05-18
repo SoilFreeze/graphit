@@ -408,6 +408,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     operational task panels, and administrative pipeline delete tools.
     """
     node_id = selected_node_data['NodeNum']
+    start_dt = selected_node_data['Start_Date']
 
     # 1. SHOW THE GRAPH
     render_node_historical_graph(client, node_id)
@@ -440,27 +441,41 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         
     st.divider()
 
-    # 3. EDITOR WITH HARDENED MUTUAL EXCLUSION & DYNAMIC PROJECT LOCATION DROPDOWN
-    st.markdown("### 🛠 Rose Assignment Attributes")
+    # 3. EDITOR WITH DYNAMIC PROJECT LOCATION DROPDOWN
+    st.markdown("### 🛠️ Modify Assignment Attributes")
     
+    # CRITICAL FIX: Moving the Project selection outside of the form so the Location options rebuild instantly upon clicking
+    edit_proj = st.selectbox(
+        "Project Space", 
+        [""] + proj_list, 
+        index=proj_list.index(target_record['Project']) + 1 if target_record['Project'] in proj_list else 0,
+        key="global_editor_project_selector"
+    )
+    
+    # Dynamically build the location options based on the live selection above
+    if edit_proj == "Office":
+        location_input_type = "text"
+        default_loc_val = str(target_record.get('Location', 'Office Stock'))
+    else:
+        location_input_type = "dropdown"
+        existing_project_locations = sorted(reg_df[reg_df['Project'] == edit_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
+        if not existing_project_locations:
+            existing_project_locations = ["Unassigned"]
+        
+        try:
+            curr_loc_idx = existing_project_locations.index(target_record.get('Location'))
+        except ValueError:
+            curr_loc_idx = 0
+
     with st.form("global_node_editor_form"):
         col1, col2 = st.columns(2)
         edit_nodenum = col1.text_input("Node ID (NodeNum)", value=str(target_record.get('NodeNum', '')))
-        edit_proj = col2.selectbox("Project Space", [""] + proj_list, index=proj_list.index(target_record['Project']) + 1 if target_record['Project'] in proj_list else 0)
         
-        # Dynamic location dropdown loop mapping from the target registry project context
-        if edit_proj == "Office":
-            edit_loc = st.text_input("Office Sub-Location", value=str(target_record.get('Location', 'Office Stock')))
+        # Render the adaptive input based on your chosen project space
+        if location_input_type == "text":
+            edit_loc = col2.text_input("Office Sub-Location", value=default_loc_val)
         else:
-            existing_project_locations = sorted(reg_df[reg_df['Project'] == edit_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
-            if not existing_project_locations:
-                existing_project_locations = ["Unassigned"]
-            
-            try:
-                curr_loc_idx = existing_project_locations.index(target_record.get('Location'))
-            except ValueError:
-                curr_loc_idx = 0
-            edit_loc = st.selectbox("Assign to Location", existing_project_locations, index=curr_loc_idx)
+            edit_loc = col2.selectbox("Assign to Location", existing_project_locations, index=curr_loc_idx)
         
         col4, col5, col6 = st.columns(3)
         edit_bank = col4.text_input("Bank", value=str(target_record.get('Bank', '')) if pd.notnull(target_record.get('Bank')) else "", help="Writing a bank value automatically wipes Depth to NULL.")
@@ -508,184 +523,254 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             except Exception as e:
                 st.error(f"Failed to modify chosen timeline record: {e}")
 
-    # 4. OPERATIONAL TASK PANEL (INCLUDES NEW MANUAL ASSIGNMENT ADDITION ENGINE)
+    # 4. OPERATIONAL TASK PANEL
     st.markdown("##### Quick Operational Tasks")
     c_act1, c_act2, c_act3, c_act4 = st.columns(4)
     
     # --- END ASSIGNMENT ---
-    with c_act1.expander("🔚 End Assignment"):
-        end_date_input = st.date_input("Decommission Date Selection", value=datetime.now().date(), key="end_assign_dt")
-        end_status_input = st.selectbox("Return Stock Status Parameter", ["Available", "Diagnostic", "Dead"], key="end_assign_st")
-        
-        if st.button("Execute End Assignment", type="primary", use_container_width=True):
-            date_iso = end_date_input.isoformat()
-            bulk_sql = f"""
-                BEGIN TRANSACTION;
-                UPDATE `{target_registry}` 
-                SET End_Date = DATE('{date_iso}'), SensorStatus = 'Archived' 
-                WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
-                
-                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                VALUES ('{node_id}', 'Office', 'Office Stock', '{node_id}', NULL, '{end_status_input}', DATE('{date_iso}'));
-                COMMIT;
-            """
-            try:
-                client.query(bulk_sql).result()
-                st.success(f"✅ Node {node_id} ended and transferred to Office stock records.")
-                st.cache_data.clear()
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Transaction execution failed: {e}")
-
-    # --- CHANGE SENSOR ---
-    with c_act2.expander("🔄 Change Sensor"):
-        swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
-        swap_date_input = st.date_input("Swap Execution Date", value=datetime.now().date(), key="swap_sensor_dt")
-        
-        if st.button("Execute Change Sensor", type="primary", use_container_width=True):
-            if not swap_node_input.strip():
-                st.error("Please insert a valid target hardware replacement ID.")
-            elif swap_node_input.strip() == node_id:
-                st.error("The replacement Node ID cannot be identical to the sensor currently assigned.")
-            else:
-                date_str = swap_date_input.isoformat()
-                new_node = swap_node_input.strip()
-                
-                if new_node.upper().startswith("TP"):
-                    old_sensor_restock_loc = "Office Stock"
-                elif new_node.upper().startswith("SP"):
-                    old_sensor_restock_loc = "Ambient Stock"
-                else:
-                    old_sensor_restock_loc = "Office Stock"
-
-                swap_sql = f"""
+    with c_act1:
+        with st.expander("🔚 End Assignment"):
+            end_date_input = st.date_input("Decommission Date Selection", value=datetime.now().date(), key="end_assign_dt")
+            end_status_input = st.selectbox("Return Stock Status Parameter", ["Available", "Diagnostic", "Dead"], key="end_assign_st")
+            
+            if st.button("Execute End Assignment", type="primary", use_container_width=True):
+                date_iso = end_date_input.isoformat()
+                bulk_sql = f"""
                     BEGIN TRANSACTION;
-                    UPDATE `{target_registry}`
-                    SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                    UPDATE `{target_registry}` 
+                    SET End_Date = DATE('{date_iso}'), SensorStatus = 'Archived' 
                     WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
-
+                    
                     INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                    VALUES ('{node_id}', 'Office', '{old_sensor_restock_loc}', '{node_id}', NULL, 'Available', DATE('{date_str}'));
-
-                    UPDATE `{target_registry}`
-                    SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
-                    WHERE NodeNum = '{new_node}' 
-                      AND End_Date IS NULL;
-
-                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                    VALUES (
-                        '{new_node}', 
-                        '{selected_node_data['Project']}', 
-                        '{selected_node_data['Location']}', 
-                        {f"'{selected_node_data['Bank']}'" if pd.notnull(selected_node_data.get('Bank')) and selected_node_data.get('Bank') != 'None' else "NULL"}, 
-                        {selected_node_data['Depth'] if pd.notnull(selected_node_data.get('Depth')) and str(selected_node_data.get('Depth')).strip() != '' else "NULL"}, 
-                        'On Project', 
-                        DATE('{date_str}')
-                    );
+                    VALUES ('{node_id}', 'Office', 'Office Stock', '{node_id}', NULL, '{end_status_input}', DATE('{date_iso}'));
                     COMMIT;
                 """
                 try:
-                    with st.spinner("Processing dual-sensor swap execution matrices..."):
-                        client.query(swap_sql).result()
-                    st.success(f"🔄 Change Sensor complete: {node_id} returned to {old_sensor_restock_loc}. {new_node} initialized onto deployment timeline successfully.")
+                    client.query(bulk_sql).result()
+                    st.success(f"✅ Node {node_id} ended and transferred to Office stock records.")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Sensor change transaction execution routine failed: {e}")
+                    st.error(f"Transaction execution failed: {e}")
 
-    # --- ADD NEW MANUAL ASSIGNMENT (Fixes incorrectly stuck sensors) ---
-    with c_act3.expander("➕ Add New Manual Assignment"):
-        st.markdown("##### Force-Insert a Fresh Assignment Record Lineage")
-        
-        add_proj = st.selectbox("Manual Target Project", proj_list, key="manual_add_proj")
-        
-        # Nested adaptive location dropout rendering context matching project keys
-        if add_proj == "Office":
-            add_loc = st.text_input("Manual Office Sub-Location", value="Office Stock", key="manual_add_loc_text")
-        else:
-            add_loc_opts = sorted(reg_df[reg_df['Project'] == add_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
-            if not add_loc_opts:
-                add_loc_opts = ["Unassigned"]
-            add_loc = st.selectbox("Manual Target Location", add_loc_opts, key="manual_add_loc_drop")
+    # --- CHANGE SENSOR ---
+    with c_act2:
+        with st.expander("🔄 Change Sensor"):
+            swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
+            swap_date_input = st.date_input("Swap Execution Date", value=datetime.now().date(), key="swap_sensor_dt")
             
-        c_add1, c_add2 = st.columns(2)
-        add_bank = c_add1.text_input("Manual Bank Field", value="", key="manual_add_bank")
-        add_depth = c_add2.number_input("Manual Depth (ft)", value=0.0, key="manual_add_depth")
-        
-        add_start = st.date_input("Manual Start Date", value=datetime.now().date(), key="manual_add_start")
-        
-        if st.button("Commit Manual Assignment Row", type="primary", use_container_width=True):
-            if add_bank.strip() != "":
-                sql_manual_depth = "NULL"
+            if st.button("Execute Change Sensor", type="primary", use_container_width=True):
+                if not swap_node_input.strip():
+                    st.error("Please insert a valid target hardware replacement ID.")
+                elif swap_node_input.strip() == node_id:
+                    st.error("The replacement Node ID cannot be identical to the sensor currently assigned.")
+                else:
+                    date_str = swap_date_input.isoformat()
+                    new_node = swap_node_input.strip()
+                    
+                    if new_node.upper().startswith("TP"):
+                        old_sensor_restock_loc = "Office Stock"
+                    elif new_node.upper().startswith("SP"):
+                        old_sensor_restock_loc = "Ambient Stock"
+                    else:
+                        old_sensor_restock_loc = "Office Stock"
+
+                    swap_sql = f"""
+                        BEGIN TRANSACTION;
+                        UPDATE `{target_registry}`
+                        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                        WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
+
+                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                        VALUES ('{node_id}', 'Office', '{old_sensor_restock_loc}', '{node_id}', NULL, 'Available', DATE('{date_str}'));
+
+                        UPDATE `{target_registry}`
+                        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                        WHERE NodeNum = '{new_node}' 
+                          AND End_Date IS NULL;
+
+                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                        VALUES (
+                            '{new_node}', 
+                            '{selected_node_data['Project']}', 
+                            '{selected_node_data['Location']}', 
+                            {f"'{selected_node_data['Bank']}'" if pd.notnull(selected_node_data.get('Bank')) and selected_node_data.get('Bank') != 'None' else "NULL"}, 
+                            {selected_node_data['Depth'] if pd.notnull(selected_node_data.get('Depth')) and str(selected_node_data.get('Depth')).strip() != '' else "NULL"}, 
+                            'On Project', 
+                            DATE('{date_str}')
+                        );
+                        COMMIT;
+                    """
+                    try:
+                        with st.spinner("Processing dual-sensor swap execution matrices..."):
+                            client.query(swap_sql).result()
+                        st.success(f"🔄 Change Sensor complete: {node_id} returned to {old_sensor_restock_loc}. {new_node} initialized onto deployment timeline successfully.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Sensor change transaction execution routine failed: {e}")
+
+    # --- ADD NEW MANUAL ASSIGNMENT ---
+    with c_act3:
+        with st.expander("➕ Add New Manual Assignment"):
+            st.markdown("##### Force-Insert a Fresh Assignment Record Lineage")
+            
+            # Form-safe isolation logic: Pulling Project out here so the location box can change shape live
+            add_proj = st.selectbox("Manual Target Project", proj_list, key="manual_add_proj")
+            
+            if add_proj == "Office":
+                add_loc = st.text_input("Manual Office Sub-Location", value="Office Stock", key="manual_add_loc_text")
             else:
-                sql_manual_depth = "NULL" if add_depth == 0.0 else f"{add_depth}"
+                add_loc_opts = sorted(reg_df[reg_df['Project'] == add_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
+                if not add_loc_opts:
+                    add_loc_opts = ["Unassigned"]
+                add_loc = st.selectbox("Manual Target Location", add_loc_opts, key="manual_add_loc_drop")
                 
-            sql_manual_bank = f"'{add_bank.strip()}'" if add_bank.strip() != "" else "NULL"
-            
-            insert_manual_sql = f"""
-                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                VALUES (
-                    '{node_id}', 
-                    '{add_proj}', 
-                    '{add_loc.strip() if hasattr(add_loc, 'strip') else add_loc}', 
-                    {sql_manual_bank}, 
-                    {sql_manual_depth}, 
-                    'On Project', 
-                    DATE('{add_start.isoformat()}')
-                )
-            """
-            try:
-                client.query(insert_manual_sql).result()
-                st.success(f"✅ Clean assignment forced entry added for Node {node_id} on project {add_proj}.")
-                st.cache_data.clear()
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Manual override insert statement failed: {e}")
+            # Internal sub-form parameters containing remaining input lines
+            with st.form("manual_assignment_sub_form"):
+                c_add1, c_add2 = st.columns(2)
+                add_bank = c_add1.text_input("Manual Bank Field", value="")
+                add_depth = c_add2.number_input("Manual Depth (ft)", value=0.0)
+                add_start = st.date_input("Manual Start Date", value=datetime.now().date())
+                
+                if st.form_submit_button("Commit Manual Assignment Row", use_container_width=True):
+                    if add_bank.strip() != "":
+                        sql_manual_depth = "NULL"
+                    else:
+                        sql_manual_depth = "NULL" if add_depth == 0.0 else f"{add_depth}"
+                        
+                    sql_manual_bank = f"'{add_bank.strip()}'" if add_bank.strip() != "" else "NULL"
+                    
+                    insert_manual_sql = f"""
+                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                        VALUES (
+                            '{node_id}', 
+                            '{add_proj}', 
+                            '{add_loc.strip() if hasattr(add_loc, 'strip') else add_loc}', 
+                            {sql_manual_bank}, 
+                            {sql_manual_depth}, 
+                            'On Project', 
+                            DATE('{add_start.isoformat()}')
+                        )
+                    """
+                    try:
+                        client.query(insert_manual_sql).result()
+                        st.success(f"✅ Clean assignment forced entry added for Node {node_id} on project {add_proj}.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Manual override insert statement failed: {e}")
 
     # --- DELETE ENTRY ---
-    with c_act4.expander("🗑️ Delete Entry"):
-        st.warning("⚠️ Danger Zone: This drops the targeted assignment entry row completely out of your BigQuery system logs.")
-        confirm_check = st.checkbox("Confirm permanent deletion of this row", key=f"del_confirm_{target_record['Start_Date']}")
-        
-        if st.button("Delete Selected Assignment Record", type="primary", use_container_width=True):
-            if not confirm_check:
-                st.error("Please click the confirmation checkbox to authorize the database removal transaction.")
-            else:
-                delete_sql = f"""
-                    DELETE FROM `{target_registry}`
-                    WHERE NodeNum = '{target_record['NodeNum']}'
-                      AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
-                """
-                try:
-                    client.query(delete_sql).result()
-                    st.warning(f"🗑️ Assignment row deleted for Node {target_record['NodeNum']} starting on {target_record['Start_Date']}.")
-                    st.cache_data.clear()
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to execute row delete query logic: {e}")
+    with c_act4:
+        with st.expander("🗑️ Delete Entry"):
+            st.warning("⚠️ Danger Zone: This drops the targeted assignment entry row completely out of your BigQuery system logs.")
+            confirm_check = st.checkbox("Confirm permanent deletion of this row", key=f"del_confirm_{target_record['Start_Date']}")
+            
+            if st.button("Delete Selected Assignment Record", type="primary", use_container_width=True):
+                if not confirm_check:
+                    st.error("Please click the confirmation checkbox to authorize the database removal transaction.")
+                else:
+                    delete_sql = f"""
+                        DELETE FROM `{target_registry}`
+                        WHERE NodeNum = '{target_record['NodeNum']}'
+                          AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                    """
+                    try:
+                        client.query(delete_sql).result()
+                        st.warning(f"🗑️ Assignment row deleted for Node {target_record['NodeNum']} starting on {target_record['Start_Date']}.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to execute row delete query logic: {e}")
 
-    # ===============================================================
-    # TAB 1: Gaps in Data
-    # ===============================================================
+    def render_data_checker(client, reg_df):
+    """
+    Scans node deployment timelines to isolate configuration patterns and pipeline errors.
+    """
+    st.markdown("---")
+    st.subheader("🔍 Data Checker Diagnostics")
+    
+    c1, c2, c3 = st.tabs([
+        "⏱️ Gaps in Data (Missing Office Time)", 
+        "🚨 Orphaned Nodes (Missing Next Assignment)",
+        "🚨 Multiple / Duplicate Assignments"
+    ])
+    
+    df = reg_df.copy()
+    df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.date
+    df['End_Date'] = pd.to_datetime(df['End_Date']).dt.date
+    
+    grouped = df.groupby('NodeNum')
+    
+    gaps_in_data = []
+    orphaned_nodes = []
+    duplicate_assignments = []
+    
+    for node_id, group in grouped:
+        sorted_group = group.sort_values(by='Start_Date')
+        records = sorted_group.to_dict('records')
+        
+        has_gap = False
+        is_orphaned = False
+        has_duplicate = False
+        
+        active_count = 0
+        
+        for i in range(len(records)):
+            current_rec = records[i]
+            
+            if pd.isnull(current_rec['Start_Date']):
+                has_gap = True
+                continue
+            
+            if pd.isnull(current_rec['End_Date']):
+                active_count += 1
+                
+            # Overlapping logic
+            for j in range(i + 1, len(records)):
+                compare_rec = records[j]
+                if pd.notnull(compare_rec['Start_Date']):
+                    if pd.isnull(current_rec['End_Date']) or current_rec['End_Date'] > compare_rec['Start_Date']:
+                        has_duplicate = True
+
+            # Chronological Gap & Orphan check loops
+            if i < len(records) - 1:
+                next_rec = records[i+1]
+                if pd.notnull(current_rec['End_Date']) and pd.notnull(next_rec['Start_Date']):
+                    if (next_rec['Start_Date'] - current_rec['End_Date']).days > 1:
+                        has_gap = True
+            else:
+                if pd.notnull(current_rec['End_Date']):
+                    is_orphaned = True
+                    
+        if active_count > 1:
+            has_duplicate = True
+
+        if has_duplicate:
+            duplicate_assignments.append(node_id)
+        if has_gap:
+            gaps_in_data.append(node_id)
+        elif is_orphaned and not has_duplicate:
+            orphaned_nodes.append(node_id)
+
+    # --- TAB 1: Gaps in Data ---
     with c1:
         st.markdown("##### Nodes with a chronological gap where they were not assigned—requires unmonitored time to be added to Office")
         if gaps_in_data:
             gap_display_df = df[df['NodeNum'].isin(gaps_in_data)].sort_values(['NodeNum', 'Start_Date'])
             st.dataframe(
                 gap_display_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
-                use_container_width=True, 
-                hide_index=True
+                use_container_width=True, hide_index=True
             )
         else:
             st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
 
-    # ===============================================================
-    # TAB 2: Orphaned Nodes
-    # ===============================================================
+    # --- TAB 2: Orphaned Nodes ---
     with c2:
         st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
         if orphaned_nodes:
@@ -693,11 +778,22 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
             st.dataframe(
                 last_entries[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
-                use_container_width=True, 
-                hide_index=True
+                use_container_width=True, hide_index=True
             )
         else:
             st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
+
+    # --- TAB 3: Multiple / Duplicate Assignments ---
+    with c3:
+        st.markdown("##### Nodes featuring multiple active assignments or overlapping deployment timeline records")
+        if duplicate_assignments:
+            dupe_display_df = df[df['NodeNum'].isin(duplicate_assignments)].sort_values(['NodeNum', 'Start_Date'])
+            st.dataframe(
+                dupe_display_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']],
+                use_container_width=True, hide_index=True
+            )
+        else:
+            st.success("✅ No conflicting overlap metrics or duplicate concurrent project entries found.")
 
     # ===============================================================
     # TAB 3: MULTIPLE / DUPLICATE ASSIGNMENTS
