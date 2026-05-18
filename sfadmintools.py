@@ -742,15 +742,16 @@ def render_data_checker(client, reg_df):
             if is_currently_active and pd.notnull(current_rec['Project']):
                 active_projects_assigned.add(current_rec['Project'])
                 
-            # --- OPTION A MATH: IDENTITY DUPLICATE OVERLAPS ---
+            # --- OPTION A MATH: IDENTITY DUPLICATE OVERLAPS (STRICT MATCH) ---
             for j in range(i + 1, len(records)):
                 compare_rec = records[j]
                 if pd.notnull(compare_rec['Start_Date']):
-                    # Check if they share the same project footprint window
+                    # Hardened Strict Match Logic: Checks if project, start date, and end date are completely identical
                     same_proj = current_rec['Project'] == compare_rec['Project']
-                    timeline_overlap = pd.isnull(current_rec['End_Date']) or current_rec['End_Date'] > compare_rec['Start_Date']
+                    same_start = current_rec['Start_Date'] == compare_rec['Start_Date']
+                    same_end = current_rec['End_Date'] == compare_rec['End_Date']
                     
-                    if same_proj and timeline_overlap:
+                    if same_proj and same_start and same_end:
                         has_identity_dupe = True
 
             # --- CHRONOLOGICAL GAP & ORPHAN CHECKS ---
@@ -816,27 +817,26 @@ def render_data_checker(client, reg_df):
             st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
 
     # ===============================================================
-    # TAB 3: MULTIPLE / DUPLICATE ASSIGNMENTS (WITH SELECTION TOGGLE OPTIONS)
+    # TAB 3: MULTIPLE / DUPLICATE ASSIGNMENTS
     # ===============================================================
     with c3:
         dupe_mode = st.radio(
             "Select Duplication Diagnostic View Filter Mode:",
-            ["View Timeline Overlaps (Same Project / Overlapping Dates)", "View Cross-Project Splits (Assigned to > 1 Project Concurrently)"],
+            ["View Timeline Overlaps (Same Project / Same Start & End Dates)", "View Cross-Project Splits (Assigned to > 1 Project Concurrently)"],
             horizontal=True,
             key="dupe_diagnostic_mode_toggle"
         )
         
         if "Same Project" in dupe_mode:
-            st.markdown("##### 🚨 Identity Overlaps: Tracking entries matching the same project timeline footprint boundaries.")
+            st.markdown("##### 🚨 Identity Overlaps: Tracking entries matching the exact same project and start/end dates.")
             if identity_duplicates:
                 display_dupe_df = df[df['NodeNum'].isin(identity_duplicates)].sort_values(['NodeNum', 'Start_Date'])
                 st.dataframe(display_dupe_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
             else:
-                st.success("✅ Clean chronological lines. No duplicate overlapping entries discovered inside identical project bounds.")
+                st.success("✅ Clean database entries. No duplicate entries discovered with identical project and date windows.")
         else:
             st.markdown("##### 🚨 Split Deployments: Physical sensors that hold more than one active project assignment row simultaneously.")
             if cross_project_splits:
-                # Isolate only the rows causing the split conflict right now
                 display_split_df = df[(df['NodeNum'].isin(cross_project_splits)) & (df['Start_Date'] <= today) & (df['End_Date'].isna() | (df['End_Date'] >= today))].sort_values(['NodeNum', 'Project'])
                 st.dataframe(display_split_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
             else:
@@ -854,7 +854,8 @@ def render_data_checker(client, reg_df):
             st.dataframe(display_conflict_df[['Project', 'Location', 'Bank', 'Depth', 'NodeNum', 'Start_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
         else:
             st.success("✅ Perfect grid alignment. Every active physical installation coordinate holds exactly one distinct hardware sensor entity.")
-            
+
+
 # ===============================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
 # ===============================================================
