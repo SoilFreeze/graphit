@@ -492,51 +492,65 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         # New feature toggle for open-ended timeline allocations
         is_open_ended = col8.checkbox("Open-Ended (No End Date)", value=pd.isnull(target_record.get('End_Date')))
         if is_open_ended:
-            edit_end = None
-            col8.caption("ℹ️ This assignment will remain active with no set expiration.")
-        else:
-            edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else datetime.now().date())
-        
-        if st.form_submit_button("💾 Save Changes"):
-            if edit_bank.strip() != "":
-                sql_depth = "NULL"
+                edit_end = None
+                col8.caption("ℹ️ This assignment will remain active with no set expiration.")
             else:
-                sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
-                
-            sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
-            sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
+                edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else datetime.now().date())
             
-            # Helper logic to precisely target original fields inside the WHERE statement, checking for nulls safely
-            where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
-            where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
-
-            # MAXIMAL SECURED CONSTRAINTS: Prevents sibling duplicates on the same project from mirroring modifications
-            update_sql = f"""
-                UPDATE `{target_registry}`
-                SET NodeNum = '{edit_nodenum.strip()}',
-                    Project = '{edit_proj.strip()}',
-                    Location = '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
-                    Bank = {sql_bank},
-                    Depth = {sql_depth},
-                    SensorStatus = '{edit_status}',
-                    Start_Date = DATE('{edit_start.isoformat()}'),
-                    End_Date = {sql_end}
-                WHERE NodeNum = '{target_record['NodeNum']}' 
-                  AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
-                  AND Project = '{target_record['Project']}'
-                  AND Location = '{target_record['Location']}'
-                  AND {where_bank}
-                  AND {where_depth}
-            """
-            try:
-                client.query(update_sql).result()
-                st.success("✅ Configuration modifications saved directly to BigQuery records.")
-                st.cache_data.clear()
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to modify chosen timeline record: {e}")
-
+            if st.form_submit_button("💾 Save Changes"):
+                if edit_bank.strip() != "":
+                    sql_depth = "NULL"
+                else:
+                    sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+                    
+                sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
+                sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
+                
+                # Formulate safe validation markers for the matching block
+                where_bank = f"T.Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "T.Bank IS NULL"
+                where_depth = f"T.Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "T.Depth IS NULL"
+                where_end = f"T.End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "T.End_Date IS NULL"
+    
+                # HARDENED MERGE TRANSACTION MATRIX: Uses a row-number limit filter to intercept ONLY ONE identical clone row
+                update_sql = f"""
+                    MERGE `{target_registry}` T
+                    USING (
+                      SELECT * FROM (
+                        SELECT *, ROW_NUMBER() OVER() as rn
+                        FROM `{target_registry}`
+                        WHERE NodeNum = '{target_record['NodeNum']}'
+                          AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                          AND Project = '{target_record['Project']}'
+                          AND Location = '{target_record['Location']}'
+                      ) WHERE rn = 1
+                    ) S
+                    ON T.NodeNum = S.NodeNum 
+                      AND T.Start_Date = S.Start_Date 
+                      AND T.Project = S.Project 
+                      AND T.Location = S.Location
+                      AND {where_bank}
+                      AND {where_depth}
+                      AND {where_end}
+                    WHEN MATCHED THEN
+                      UPDATE SET 
+                        T.NodeNum = '{edit_nodenum.strip()}',
+                        T.Project = '{edit_proj.strip()}',
+                        T.Location = '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
+                        T.Bank = {sql_bank},
+                        T.Depth = {sql_depth},
+                        T.SensorStatus = '{edit_status}',
+                        T.Start_Date = DATE('{edit_start.isoformat()}'),
+                        T.End_Date = {sql_end};
+                """
+                try:
+                    client.query(update_sql).result()
+                    st.success("✅ Cleaned assignment row. Updated only one instance of the duplicate twins.")
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to isolate and update targeted row copy: {e}")
+                
     # 4. OPERATIONAL TASK PANEL
     st.markdown("##### Quick Operational Tasks")
     c_act1, c_act2, c_act3, c_act4 = st.columns(4)
