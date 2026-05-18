@@ -1239,17 +1239,90 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 # ===============================================================
 
 def render_bulk_registry_page(client, proj_list):
-    """Main entry point for Bulk Registry Operations."""
+    """Main entry point for Bulk Registry Operations & Playground Staging."""
     st.header("📦 Bulk Registry Operations")
     
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-    bt1, bt2 = st.tabs(["📥 Site Deployment (CSV)", "🔚 Bulk Site Decommission"])
+    table_playground = f"{PROJECT_ID}.{DATASET_ID}.playground_registry"
+    
+    # Expanded tab structure to place Playground Staging at the front
+    bt0, bt1, bt2 = st.tabs(["🎮 Playground Staging Console", "📥 Site Deployment (CSV)", "🔚 Bulk Site Decommission"])
+
+    with bt0:
+        render_playground_staging_tab(client, target_registry, table_playground)
 
     with bt1:
         render_bulk_deployment_tab(client, target_registry)
 
     with bt2:
         render_bulk_decommission_tab(client, proj_list, target_registry)
+
+
+def render_playground_staging_tab(client, target_registry, table_playground):
+    """Provides a safe space to view staging configurations and push to production."""
+    st.subheader("🎮 Playground Pre-Update Staging Workspace")
+    st.markdown(
+        """
+        Review your pre-update configurations below. Clicking the button matches and syncs your 
+        **Playground** asset states straight into the active production registry.
+        """
+    )
+    
+    # Pull staging data for instant on-screen audit
+    try:
+        play_df = client.query(f"SELECT * FROM `{table_playground}` ORDER BY NodeNum ASC, Start_Date DESC").to_dataframe()
+        if not play_df.empty:
+            st.caption("📋 Current Staging Inventory (Playground View)")
+            st.dataframe(play_df, use_container_width=True, hide_index=True)
+            st.metric("Total Staged Records Pending Push", f"{len(play_df)}")
+        else:
+            st.info("The playground staging database table is currently empty.")
+            play_df = pd.DataFrame()
+    except Exception as e:
+        st.error(f"Failed to scan playground staging records: {e}")
+        play_df = pd.DataFrame()
+
+    st.divider()
+    
+    if not play_df.empty:
+        st.warning("⚠️ Action Check: This will override live production node assignments with the metrics staged in your playground table.")
+        if st.checkbox("I verify that these staging configurations match my field criteria.", key="confirm_playground_push"):
+            if st.button("🚀 Push Playground Data Live to Production", type="primary", use_container_width=True):
+                
+                # MERGE checks primary identifier keys across NodeNum and Start_Date
+                sync_sql = f"""
+                    MERGE `{target_registry}` T
+                    USING `{table_playground}` S
+                    ON T.NodeNum = S.NodeNum AND T.Start_Date = S.Start_Date
+                    
+                    -- Update production fields if matching record exists
+                    WHEN MATCHED THEN
+                        UPDATE SET 
+                            T.Project = S.Project,
+                            T.Location = S.Location,
+                            T.Bank = S.Bank,
+                            T.Depth = S.Depth,
+                            T.SensorStatus = S.SensorStatus,
+                            T.End_Date = S.End_Date
+                            
+                    -- Insert record if it doesn't exist in production yet
+                    WHEN NOT MATCHED THEN
+                        INSERT (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                        VALUES (S.NodeNum, S.Project, S.Location, S.Bank, S.Depth, S.SensorStatus, S.Start_Date, S.End_Date);
+                """
+                
+                try:
+                    with st.spinner("Processing production synchronization merge transaction..."):
+                        job = client.query(sync_sql)
+                        job.result()
+                        
+                    st.success(f"✅ Sync Successful! Processed and updated {job.num_dml_affected_rows:,} records inside production registry.")
+                    st.cache_data.clear()  # Drop active cache paradigms so page datasets refresh instantly
+                    time.sleep(1.5)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Staging pipeline merge execution failure: {e}")
+                    st.code(sync_sql, language="sql")
 
 
 def render_bulk_deployment_tab(client, target_registry):
@@ -1347,12 +1420,11 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
           AND End_Date IS NULL;
 
         -- 2. Insert the hardware back into Office Stock
-        -- We select from the records we just archived to ensure a perfect 1-to-1 move
         INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
         SELECT 
             NodeNum, 
             'Office' as Project, 
-            'Office' as Location, 
+            'Office Stock' as Location, 
             NodeNum as Bank, -- Reset Bank to NodeNum for stock
             NULL as Depth,   -- Clear Depth for stock
             '{return_status}' as SensorStatus,
@@ -1373,7 +1445,6 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
     except Exception as e:
         st.error(f"Bulk Decommission Failed: {e}")
         st.code(bulk_sql)
-        
 # ===============================================================
 # PAGE: DATA RECOVERY (SensorPush API Bridge)
 # ===============================================================
