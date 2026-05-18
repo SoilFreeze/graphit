@@ -2428,9 +2428,14 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
             if new_status == "TRUE":
                 sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
             else:
+                # HARDENED MERGE SCRIPT: Added DISTINCT to prevent duplicate source row tracking collisions
                 sql = f"""
                     MERGE `{target_table}` T
-                    USING (SELECT NodeNum, timestamp FROM `{telemetry_table}` t WHERE {aliased_where}) S
+                    USING (
+                        SELECT DISTINCT NodeNum, timestamp 
+                        FROM `{telemetry_table}` t 
+                        WHERE {aliased_where}
+                    ) S
                     ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
                     WHEN MATCHED THEN
                         UPDATE SET approve = '{new_status}'
@@ -2447,7 +2452,6 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
             except Exception as e:
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
-
 
 def render_management_filters(reg_df, selected_project, target_scope):
     """
