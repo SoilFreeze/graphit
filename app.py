@@ -55,32 +55,28 @@ def get_bq_client():
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    """
-    Core data fetcher with built-in visibility logic for Client vs Engineering.
-    """
     client = get_bq_client()
-    if client is None:
-        return pd.DataFrame()
+    if client is None: return pd.DataFrame()
 
-    # 1. Classification & Visibility Logic
+    is_office = "OFFICE" in str(project_id).upper()
+
     if view_mode == "client":
-        # Clients only see data marked as approved
         filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
-        # Client ONLY sees data from the official Freezedown date onwards
-        visibility_sql = "AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)"
     else:
-        # Engineering sees everything except what was explicitly MASKED
-        filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('FALSE', '0', 'MASKED')"
-        visibility_sql = ""
+        # If Office, show everything except BadData. If regular project, hide False/0.
+        if is_office:
+            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
+        else:
+            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
 
     query = f"""
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
         WHERE m.Project = @project_id
-        {visibility_sql}
         {filter_sql}
-        ORDER BY m.Location ASC, m.timestamp ASC
+        ORDER BY m.timestamp ASC
     """
+    # ... rest of function
     
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -92,20 +88,16 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         query_job = client.query(query, job_config=job_config)
         return query_job.to_dataframe()
     except Exception as e:
-        st.error(f"⚠️ Data Sync Error for '{project_id}': {e}")
-        print(traceback.format_exc())
+        st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
-        
-###########################
-# - SIDEBAR NAVIGATION -  #
-###########################
+
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
 
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# --- NAVIGATION ---
+# 1. PAGE NAVIGATION
 page = st.sidebar.selectbox(
     "Navigation", 
     [
@@ -123,7 +115,14 @@ page = st.sidebar.selectbox(
 
 st.sidebar.divider()
 
+# 2. PROJECT SELECTION
+selected_project = "All Projects"
+project_metadata = None  
+
+sidebar_client = get_bq_client()
+
 # --- PROJECT SELECTION ---
+# 2. PROJECT SELECTION
 selected_project = "All Projects"
 project_metadata = None  
 
@@ -131,14 +130,21 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # UPDATED: Added SoilType to the selection
+        # SQL fix: Exclude empty strings and force inclusion of 'Office'
         proj_q = f"""
             SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
-            WHERE ProjectStatus != 'Archived'
+            WHERE Project IS NOT NULL 
+              AND TRIM(Project) != ''
+              AND (ProjectStatus != 'Archived' OR UPPER(Project) LIKE '%OFFICE%')
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
-        proj_list = sorted(proj_df['Project'].dropna().unique().tolist())
+        
+        # Python fix: Strip whitespace and filter out non-values to kill "No Project"
+        proj_list = sorted([
+            str(p).strip() for p in proj_df['Project'].unique() 
+            if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
+        ])
         
         selected_project = st.sidebar.selectbox(
             "🎯 Active Project", 
@@ -160,16 +166,36 @@ if sidebar_client is not None:
         st.sidebar.error(f"Registry Link Offline: {e}")
         
 st.sidebar.divider()
-show_ref = st.sidebar.toggle("Show Theoretical Curves", value=True)
-mobile_optimized = st.sidebar.toggle(
+
+# 3. GLOBAL VIEW TOGGLES
+st.sidebar.subheader("👁️ Visibility Controls")
+
+st.sidebar.toggle(
+    "Show Theoretical Curves", 
+    value=True, 
+    key="global_show_ref",
+    help="Superimpose goal curves on Time vs Temp charts."
+)
+
+st.sidebar.toggle(
+    "Show Masked Data", 
+    value=False, 
+    key="global_show_masked",
+    help="Display data points manually hidden by admins."
+)
+
+st.sidebar.toggle(
     "Mobile Layout", 
     value=False, 
     key="mobile_optimized_toggle"
 )
+
 st.sidebar.divider()
-# --- UNIT & MEASUREMENT
+
+# 4. MEASUREMENT & UNITS
+st.sidebar.subheader("🌡️ Units")
 unit_mode = st.sidebar.radio(
-    "Temperature Unit", 
+    "Temperature Scale", 
     ["Fahrenheit", "Celsius"], 
     horizontal=True,
     key="unit_toggle"
@@ -180,9 +206,10 @@ st.session_state["unit_label"] = unit_label
 
 st.sidebar.divider()
 
-# --- TIME & DISPLAY ---
+# 5. TIMEZONE & DISPLAY
 st.sidebar.subheader("📱 Display & Time")
 
+# Smart Defaulting based on Project Metadata
 default_tz_index = 2 # Default to Pacific
 if project_metadata and project_metadata.get('Timezone') == "US/Eastern":
     default_tz_index = 1
@@ -200,14 +227,11 @@ tz_mode = st.sidebar.selectbox(
     key="tz_picker"
 )
 
-display_tz = tz_lookup[tz_mode]
-st.session_state["display_tz"] = display_tz
-
-
+st.session_state["display_tz"] = tz_lookup[tz_mode]
 
 st.sidebar.divider()
 
-# --- REFERENCE LINES ---
+# 6. REFERENCE LINES (Static Constants)
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
 
@@ -219,6 +243,15 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False, key="ref_type_a"):
     active_refs.append((10.2, "Type A"))
 
 st.session_state["active_refs"] = tuple(active_refs)
+
+# --- SCOPE DEFINITIONS ---
+# This pulls the values from the Sidebar inputs into variables 
+# that the rest of the script can use.
+
+unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+unit_label = st.session_state.get("unit_label", "°F")
+display_tz = st.session_state.get("display_tz", "UTC")
+active_refs = st.session_state.get("active_refs", [])
 
 #############
 # - Graph - #
@@ -370,6 +403,36 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
     
     return x_times, y_temps
 
+def run_office_auto_assignment():
+    """
+    Surgically assigns 'OFFICE' status to all telemetry 
+    where the node is currently assigned to the Office project.
+    """
+    client = get_bq_client()
+    
+    # This SQL finds all raw data for nodes currently assigned to 'Office' 
+    # in the registry and ensures they are marked as 'OFFICE' in the override table.
+    sql = f"""
+        MERGE `{OVERRIDE_TABLE}` T
+        USING (
+            SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
+            FROM (
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
+                UNION ALL 
+                SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+            ) AS r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
+            WHERE n.Project LIKE '%OFFICE%' 
+        ) S ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
+        WHEN MATCHED THEN UPDATE SET approve = 'OFFICE'
+        WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'OFFICE')
+    """
+    try:
+        client.query(sql).result()
+        st.success("✅ Successfully assigned 'OFFICE' status to all relevant telemetry.")
+    except Exception as e:
+        st.error(f"Auto-assignment failed: {e}")
+
 ##################
 # High temp mask #
 ##################
@@ -417,68 +480,63 @@ def apply_sanity_filter(df):
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Includes the Master Switch for Reference Curves and logic for chart borders.
+    Updated: Strict status filtering (TRUE, NULL, MASKED only).
     """
-    # 1. INITIALIZE UI STATE VARIABLES
-    mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
-    active_refs = st.session_state.get("active_refs", [])
+    # 1. INITIALIZE UI STATE VARIABLES FROM SIDEBAR KEYS
+    # Ensure these keys match the ones defined in your sidebar exactly
+    show_ref = st.session_state.get("global_show_ref", True)
+    show_masked = st.session_state.get("global_show_masked", False)
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
     unit_label = st.session_state.get("unit_label", "°F")
+    active_refs = st.session_state.get("active_refs", [])
 
     # 2. EXTRACT PROJECT METADATA
     p_name = selected_project
     status = "Active"
     f_start_date = None
-    assigned_curve = "None"
 
     if project_metadata:
         p_name = project_metadata.get('ProjectName', selected_project)
         status = project_metadata.get('ProjectStatus', 'Active')
-        assigned_curve = project_metadata.get('SoilType', 'None')
-        
         raw_f_date = project_metadata.get('Date_Freezedown')
         if pd.notnull(raw_f_date):
             f_start_date = pd.to_datetime(raw_f_date).date()
 
-    # 3. HEADER & FREEZEDOWN TRACKER
+    # 3. HEADER
     st.header(f"📈 Time vs Temp: {p_name} [{status}]")
     
     if f_start_date:
         today = pd.Timestamp.now(tz=display_tz).date()
         days_since = (today - f_start_date).days
         st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
-    else:
-        st.caption("ℹ️ Freeze start date not yet initialized in Project Master.")
 
-    # 4. SIDEBAR TOGGLES (The Master Switch)
-    st.sidebar.subheader("👁️ Visibility Settings")
-    
-    # The Switch to turn curves ON/OFF
-    show_ref = st.sidebar.toggle("Show Theoretical Curves", value=True, help="Toggle background reference curves for TP locations.")
-    show_masked = st.sidebar.toggle("Show Masked Points", value=False)
-
-    # 5. DATA PRE-FLIGHT
+    # 4. DATA PRE-FLIGHT
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Select a project in the sidebar to view engineering trends.")
         return
 
     with st.spinner(f"Syncing {p_name} telemetry..."):
+        # The data engine now handles the strict 'BadData' exclusion
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if p_df.empty:
         st.warning(f"No engineering data found for '{p_name}'.")
         return
 
-    # 6. MASKING FILTER
-    if not show_masked and 'approve' in p_df.columns:
-        p_df = p_df[p_df['approve'] != 'MASKED'].copy()
+    # 5. DYNAMIC UI FILTERING
+    # This logic ensures MASKED data only shows if the toggle is ON.
+    # BadData and False are already removed by the SQL engine.
+    mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
+    
+    if not show_masked and mask_col in p_df.columns:
+        # Filter out MASKED points if the toggle is OFF
+        p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
 
-    # 7. TIMELINE CONFIG (With 1-Day Cushion)
+    # 6. TIMELINE CONFIG
     st.sidebar.subheader("📅 Timeline Controls")
     lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
     
     now_local = pd.Timestamp.now(tz=display_tz)
-    # Set end_view to tomorrow at midnight for a visual cushion
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     
     if lookback == 0:
@@ -486,21 +544,16 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     else:
         start_view = end_view - pd.Timedelta(weeks=lookback)
 
-    # 8. DEFINE LOCATIONS
+    # 7. LOCATION-BASED PLOTTING LOOP
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
 
-    # 9. LOCATION-BASED PLOTTING LOOP
     for loc in locations:
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
-            # --- THE FIX ---
-            # We only want the ID (2527), not the full name (2527-Elizabeth)
-            # This extracts '2527' from '2527-Elizabeth'
-            clean_proj_id = str(selected_project).split('-')[0] 
-            
-            # This creates "2527-TP4" (matching your library files)
-            search_id = f"{clean_proj_id}-{loc}" 
+            # Extract ID and Location for Curve Matching
+            clean_proj_id = str(selected_project).split('-')[0]
+            search_id = f"{clean_proj_id}-{loc}"
             
             is_temp_pipe = any(x in loc.upper() for x in ["TP", "T", "PIPE", "TEMP"])
             
@@ -514,6 +567,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_label=unit_label, 
                 display_tz=display_tz,
                 f_start_date=f_start_date,
+                # Toggle theoretical curves based on sidebar state
                 curve_id=search_id if (show_ref and is_temp_pipe) else None
             )
             
@@ -1976,19 +2030,22 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
             cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
             
-            # Classification
+            # Classification Logic
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
             is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
-
+            
+            # NEW: Catch-all for Office/Lab nodes that don't fit the above
+            is_office_node = (p_df['Project'].str.contains('OFFICE', case=False)) & ~is_s & ~is_r & ~is_tp & ~is_amb
+            
+            # Update your groups list to include the new column
             groups = [
                 (cols[0], "📥 Supply", p_df[is_s], "supply_kpi", -10), 
                 (cols[2], "📤 Return", p_df[is_r], "return_kpi", 0), 
                 (cols[4], "📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
-                (cols[6], "☁️ Ambient", p_df[is_amb], None, None)
+                (cols[6], "🖥️ Office/Lab", p_df[is_office_node], None, None) # Swapped Ambient for Office or add a 5th col
             ]
-
             for s_idx in [1, 3, 5]:
                 cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 300px; margin: auto;'></div>", unsafe_allow_html=True)
 
@@ -2051,15 +2108,22 @@ def get_trend_arrow(current, previous):
 ###################
 # 12. MAIN ROUTER #
 ###################
-# --- MAIN ROUTING LOGIC ---
-# Initialize the DB Client one time for the main execution
+
+# 1. RETRIEVE GLOBAL STATE
+# This ensures variables like display_tz exist before we pass them to functions
+display_tz = st.session_state.get("display_tz", "UTC")
+unit_label = st.session_state.get("unit_label", "°F")
+unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+active_refs = st.session_state.get("active_refs", [])
+
+# 2. INITIALIZE DB CLIENT
 client = get_bq_client() 
 
+# 3. PAGE ROUTING
 if page == "Summary":
     render_summary_dashboard(unit_label, unit_mode, display_tz)
 
 elif page == "Time vs Temp":
-    # Pass the metadata dictionary from session state
     render_global_overview(
         selected_project, 
         st.session_state.get('project_metadata'), 
@@ -2067,11 +2131,7 @@ elif page == "Time vs Temp":
     ) 
 
 elif page == "Sensor Status":
-    # Ensure this function exists in your script or is defined
-    try:
-        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
-    except NameError:
-        st.warning("Sensor Status module is currently being updated.")
+    render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
 
 elif page == "Depth Charts":
     render_depth_charts(selected_project, unit_label, display_tz)
@@ -2091,7 +2151,6 @@ elif page == "Client Portal":
 
 # --- PASSWORD PROTECTED SECTIONS ---
 elif page in ["Data Intake Lab", "Admin Tools"]:
-    # Check if user is already authenticated
     if st.session_state.get('authenticated', False):
         if page == "Data Intake Lab":
             render_data_intake_page(selected_project)
@@ -2104,7 +2163,6 @@ elif page in ["Data Intake Lab", "Admin Tools"]:
                 active_refs
             )
     else:
-        # Display the login gate
         st.divider()
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
