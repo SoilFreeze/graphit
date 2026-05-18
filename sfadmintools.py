@@ -1214,6 +1214,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         SELECT * FROM HistoricalStats
     """
     try:
+        # Fetch the initial data from BigQuery safely
         df = client.query(query, job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
         )).to_dataframe()
@@ -1233,28 +1234,37 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         st.subheader("🔍 Detailed Sensor Audit")
         
-        # UI Upgrade: Convert static dataframe presentation into an interactive checkbox table
+        # Prepare the presentation dataframe structure
         display_df = df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"]].sort_values(['Location', 'NodeNum']).copy()
         display_df.insert(0, "Select", False)
-        
-        edited_df = st.data_editor(
-            display_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
-            disabled=[col for col in display_df.columns if col != "Select"],
-            key="sensor_status_editor"
-        )
 
-        # Resolve interactive row checkbox choice to generate comparative charts
-        selected_rows = edited_df[edited_df["Select"] == True]
-        
-        if not selected_rows.empty:
-            st.divider()
-            target_node = selected_rows.iloc[0]["NodeNum"]
-            render_sensor_status_charts(client, target_node, selected_project)
-        else:
-            st.info("💡 **Tip:** Use the checkbox in the audit table above to instantly pull up a comparative analysis graph for any sensor.")
+        # -----------------------------------------------------------
+        # ST.FRAGMENT INNER FUNCTION: CALL ISOLATION CONTAINER
+        # -----------------------------------------------------------
+        @st.fragment
+        def render_interactive_audit_grid(data_source_df):
+            """Isolates the interactive data editor state from resetting page loops."""
+            edited_df = st.data_editor(
+                data_source_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
+                disabled=[col for col in data_source_df.columns if col != "Select"],
+                key="sensor_status_editor"
+            )
+
+            # Resolve interactive row checkbox choice to generate comparative charts
+            selected_rows = edited_df[edited_df["Select"] == True]
+            
+            if not selected_rows.empty:
+                st.divider()
+                target_node = selected_rows.iloc[0]["NodeNum"]
+                render_sensor_status_charts(client, target_node, selected_project)
+            else:
+                st.info("💡 **Tip:** Use the checkbox in the audit table above to instantly pull up a comparative analysis graph for any sensor.")
+
+        # Run our newly isolated fragment render cycle passing the pre-fetched data
+        render_interactive_audit_grid(display_df)
 
     except Exception as e:
         st.error(f"Sensor Status Error: {e}")
