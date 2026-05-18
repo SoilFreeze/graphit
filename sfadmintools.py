@@ -404,7 +404,8 @@ def render_node_historical_graph(client, node_id):
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
-    Displays chart, interactive historical log selector, and full attribute configuration overrides.
+    Displays chart, interactive historical log selector, full attribute configuration overrides,
+    and administrative pipeline delete tools.
     """
     node_id = selected_node_data['NodeNum']
 
@@ -412,7 +413,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     render_node_historical_graph(client, node_id)
     st.divider()
 
-    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER (Upgraded via data_editor checkboxes)
+    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER
     st.markdown(f"### 📜 Assignment History Library: **{node_id}**")
     st.info("💡 Check the box next to any assignment below (active or archived) to populate and alter its fields in the editor.")
     
@@ -430,7 +431,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     
     chosen_rows = edited_hist_df[edited_hist_df["Edit Target"] == True]
     
-    # Context Rule: If no row is manually selected from history, fallback default to the row clicked in the primary table above
     if not chosen_rows.empty:
         target_record = chosen_rows.iloc[0].drop("Edit Target").to_dict()
         st.success(f"✏️ Currently Editing Chosen Assignment row starting on: `{target_record['Start_Date']}`")
@@ -465,7 +465,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else None)
         
         if st.form_submit_button("💾 Save Changes"):
-            # Enforce strict Mutual Exclusion: "either a bank or a depth"
             if edit_bank.strip() != "":
                 sql_depth = "NULL"
             else:
@@ -474,7 +473,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             sql_end = f"DATE('{edit_end.isoformat()}')" if edit_end else "NULL"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            # Target the original row using its distinct baseline primary key markers before editing
+            # Target row utilizes the original unedited NodeNum and Start Date reference targets
             update_sql = f"""
                 UPDATE `{target_registry}`
                 SET NodeNum = '{edit_nodenum.strip()}',
@@ -497,9 +496,9 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             except Exception as e:
                 st.error(f"Failed to modify chosen timeline record: {e}")
 
-    # 4. OPERATIONAL TASK BUTTONS
+    # 4. OPERATIONAL TASK PANEL (INCLUDES NEW DELETE RECORD ACTION)
     st.markdown("##### Quick Operational Tasks")
-    c_act1, c_act2 = st.columns(2)
+    c_act1, c_act2, c_act3 = st.columns(3)
     
     # --- END ASSIGNMENT ---
     with c_act1.expander("🔚 End Assignment"):
@@ -563,6 +562,30 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     st.rerun()
                 except Exception as e:
                     st.error(f"Sensor change transaction execution routine failed: {e}")
+
+    # --- NEW CRITICAL TASK: DELETE ENTRIES ---
+    with c_act3.expander("🗑️ Delete Entry"):
+        st.warning("⚠️ Danger Zone: This drops the targeted assignment entry row completely out of your BigQuery system logs.")
+        confirm_check = st.checkbox("Confirm permanent deletion of this row", key=f"del_confirm_{target_record['Start_Date']}")
+        
+        if st.button("Delete Selected Assignment Record", type="primary", use_container_width=True):
+            if not confirm_check:
+                st.error("Please click the confirmation checkbox to authorize the database removal transaction.")
+            else:
+                delete_sql = f"""
+                    DELETE FROM `{target_registry}`
+                    WHERE NodeNum = '{target_record['NodeNum']}'
+                      AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                """
+                try:
+                    client.query(delete_sql).result()
+                    st.warning(f"🗑️ Assignment row deleted for Node {target_record['NodeNum']} starting on {target_record['Start_Date']}.")
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to execute row delete query logic: {e}")
+
 
 def render_data_checker(client, reg_df):
     """
@@ -639,7 +662,6 @@ def render_data_checker(client, reg_df):
             )
         else:
             st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
-
 # ===============================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
 # ===============================================================
