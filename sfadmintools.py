@@ -594,7 +594,6 @@ def render_data_checker(client, reg_df):
     st.markdown("---")
     st.subheader("🔍 Data Checker Diagnostics")
     
-    # Expanded tab structure to incorporate overlapping timeline errors
     c1, c2, c3 = st.tabs([
         "⏱️ Gaps in Data (Missing Office Time)", 
         "🚨 Orphaned Nodes (Missing Next Assignment)",
@@ -619,7 +618,6 @@ def render_data_checker(client, reg_df):
         is_orphaned = False
         has_duplicate = False
         
-        # Track active assignment count to detect parallel duplicates
         active_count = 0
         
         for i in range(len(records)):
@@ -633,12 +631,12 @@ def render_data_checker(client, reg_df):
                 active_count += 1
                 
             # --- OVERLAPPING / DUPLICATE ASSIGNMENT CHECK ---
-            # Look at all subsequent records to find timeline intersections
             for j in range(i + 1, len(records)):
                 compare_rec = records[j]
                 if pd.notnull(compare_rec['Start_Date']):
-                    # Check if current assignment window runs over the start of the next assignment
-                    if pd.isnull(current_rec['End_Date']) or current_rec['End_Date'] >= compare_rec['Start_Date']:
+                    # Hardened Overlap Logic: Flags rows where the next assignment begins 
+                    # strictly BEFORE the current assignment has ended.
+                    if pd.isnull(current_rec['End_Date']) or current_rec['End_Date'] > compare_rec['Start_Date']:
                         has_duplicate = True
 
             # --- CHRONOLOGICAL GAP & ORPHAN CHECKS ---
@@ -651,17 +649,63 @@ def render_data_checker(client, reg_df):
                 if pd.notnull(current_rec['End_Date']):
                     is_orphaned = True
                     
-        # If a single sensor holds more than one active record concurrently, it is a duplicate configuration
+        # Flagging if multiple rows are left running without an End_Date simultaneously
         if active_count > 1:
             has_duplicate = True
 
-        # Sort the Node IDs into their respective diagnostic metrics
+        # Route the Node IDs to their respective diagnostic panels
         if has_duplicate:
             duplicate_assignments.append(node_id)
         if has_gap:
             gaps_in_data.append(node_id)
         elif is_orphaned and not has_duplicate:
             orphaned_nodes.append(node_id)
+
+    # ===============================================================
+    # TAB 1: Gaps in Data
+    # ===============================================================
+    with c1:
+        st.markdown("##### Nodes with a chronological gap where they were not assigned—requires unmonitored time to be added to Office")
+        if gaps_in_data:
+            gap_display_df = df[df['NodeNum'].isin(gaps_in_data)].sort_values(['NodeNum', 'Start_Date'])
+            st.dataframe(
+                gap_display_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
+
+    # ===============================================================
+    # TAB 2: Orphaned Nodes
+    # ===============================================================
+    with c2:
+        st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
+        if orphaned_nodes:
+            orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
+            last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
+            st.dataframe(
+                last_entries[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
+
+    # ===============================================================
+    # TAB 3: MULTIPLE / DUPLICATE ASSIGNMENTS
+    # ===============================================================
+    with c3:
+        st.markdown("##### Nodes featuring multiple active assignments or overlapping deployment timeline records")
+        if duplicate_assignments:
+            dupe_display_df = df[df['NodeNum'].isin(duplicate_assignments)].sort_values(['NodeNum', 'Start_Date'])
+            st.dataframe(
+                dupe_display_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.success("✅ No conflicting overlap metrics or duplicate concurrent project entries found.")
 
     # ===============================================================
     # TAB 1: Gaps in Data
