@@ -1535,6 +1535,40 @@ def render_playground_staging_tab(client, target_registry, table_playground):
                     st.error(f"Staging pipeline merge execution failure: {e}")
                     st.code(sync_sql, language="sql")
 
+def force_overwrite_production_with_playground(client):
+    """
+    Completely erases the live production node registry table and
+    replaces it with a perfect copy of the dummy playground state.
+    """
+    prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
+    
+    # Configure the load job to overwrite the destination table directly
+    from google.cloud import bigquery
+    job_config = bigquery.QueryJobConfig(
+        write_disposition="WRITE_TRUNCATE"
+    )
+    
+    sql = f"SELECT * FROM `{dummy_table}`"
+    
+    try:
+        with st.spinner("💥 Wiping production and copying playground matrices..."):
+            # Direct the query results to overwrite production
+            query_job = client.query(sql, job_config=job_config)
+            # Set the destination table explicitly
+            query_job._properties['configuration']['query']['destinationTable'] = {
+                'projectId': PROJECT_ID,
+                'datasetId': DATASET_ID,
+                'tableId': 'node_registry'
+            }
+            query_job.result()
+            
+        st.success("🔥 Production registry completely reset and replaced with dummy staging copy!")
+        st.cache_data.clear()
+        time.sleep(1.5)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Failed to force clear and replace table profiles: {e}")
 
 def render_bulk_deployment_tab(client, target_registry):
     """Handles the UI for uploading new site configurations via CSV."""
