@@ -308,126 +308,204 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # PAGE: SENSOR STATUS (Modular Functions)
 # ===============================================================
 def render_node_selector(reg_df, proj_list):
-    st.subheader("🎯 Node Selection")
+    """
+    Renders an active inventory node selection engine.
+    Filters out archived and dead records. Supports hierarchical project/location sorting.
+    """
+    st.subheader("🎯 Active Node Registry")
     
-    # 1. Sidebar-style filters for the table
-    c1, c2 = st.columns(2)
+    # Clean dataframe baseline: Strip out archived and dead statuses entirely
+    active_mask = (
+        (reg_df['Location'].str.contains("Archive", case=False, na=False) == False) &
+        (reg_df['Project'].str.contains("Archive", case=False, na=False) == False) &
+        (reg_df['Location'].str.lower() != "dead") &
+        (reg_df['Project'].str.lower() != "dead")
+    )
+    df = reg_df[active_mask].copy()
+
+    # Layout Filter Row
+    c1, c2, c3 = st.columns(3)
     with c1:
-        f_proj = st.selectbox("Filter by Project", ["All"] + proj_list)
+        f_proj = st.selectbox("Filter by Project Space", ["All", "Unassigned"] + proj_list, key="ns_proj_f")
     with c2:
-        search_term = st.text_input("Search by Node ID or Location", "")
+        # Dynamically discover locations matching current project filter state
+        if f_proj == "All":
+            loc_opts = df['Location'].dropna().unique().tolist()
+        elif f_proj == "Unassigned":
+            loc_opts = df[df['Project'].isna() | (df['Project'] == "")]['Location'].dropna().unique().tolist()
+        else:
+            loc_opts = df[df['Project'] == f_proj]['Location'].dropna().unique().tolist()
+            
+        f_loc = st.selectbox("Filter by Physical Location", ["All"] + sorted(loc_opts), key="ns_loc_f")
+    with c3:
+        search_term = st.text_input("Global Search (Node ID)", "", key="ns_search_f")
 
-    # 2. Apply Filtering
-    display_df = reg_df.copy()
-    if f_proj != "All":
-        display_df = display_df[display_df['Project'] == f_proj]
+    # 2. Execute Cascading Filters
+    if f_proj == "Unassigned":
+        df = df[df['Project'].isna() | (df['Project'] == "")]
+    elif f_proj != "All":
+        df = df[df['Project'] == f_proj]
+        
+    if f_loc != "All":
+        df = df[df['Location'] == f_loc]
+        
     if search_term:
-        display_df = display_df[
-            display_df['NodeNum'].str.contains(search_term, case=False, na=False) | 
-            display_df['Location'].str.contains(search_term, case=False, na=False)
-        ]
+        df = df[df['NodeNum'].str.contains(search_term, case=False, na=False)]
 
-    # 3. The "Legacy-Safe" Selector
-    # Instead of clicking a row (which varies by version), we use a standard selectbox
-    # but make it look like a "Selection" tool.
-    
-    node_list = display_df.apply(lambda x: f"{x['NodeNum']} | {x['Location']}", axis=1).tolist()
-    
-    if not node_list:
-        st.warning("No nodes match your search.")
+    if df.empty:
+        st.info("No matching functional nodes located under current filter parameters.")
         return None
 
-    selected_option = st.selectbox(
-        "Choose a Node to manage:", 
-        ["-- Select a Node --"] + node_list,
-        help="Search results are filtered above."
+    # 3. Render Selection Table UI using checkboxes
+    df.insert(0, "Select", False)
+    
+    edited_df = st.data_editor(
+        df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
+        disabled=[col for col in df.columns if col != "Select"],
+        key="node_registry_editor"
     )
 
-    if selected_option != "-- Select a Node --":
-        # Extract the NodeID from the string
-        selected_node_id = selected_option.split(" | ")[0]
-        return display_df[display_df['NodeNum'] == selected_node_id].iloc[0]
-    
-    # 4. Display the table below just for reference
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    # Resolve interactive row choice
+    selected_rows = edited_df[edited_df["Select"] == True]
+    if not selected_rows.empty:
+        return selected_rows.iloc[0].drop("Select").to_dict()
     
     return None
 
+def render_add_node_form(client, target_registry, proj_list):
+    """Generates creation module to insert fresh nodes into tracking networks."""
+    st.markdown("### ➕ Provision New Hardware Asset")
+    
+    with st.form("provision_node_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_id = st.text_input("Hardware ID (NodeNum)*", placeholder="e.g., TP-0105 or SP-ch02")
+            new_placement = st.text_input("Assigned Location*", placeholder="Leave blank or declare placement")
+        with col2:
+            mode = st.selectbox("Routing Rule Profile", ["Standard Automation Rules", "Force Override to Diagnostic"])
+            
+        if st.form_submit_button("💾 Save Asset To BigQuery"):
+            if not new_id.strip():
+                st.error("Hardware identifier string (NodeNum) required.")
+                return
+                
+            force_diag = (mode == "Force Override to Diagnostic")
+            routed_project = determine_auto_project(new_id.strip(), force_diagnostic=force_diag)
+            final_loc = new_placement.strip() if new_placement.strip() else "Unassigned / Office"
+            
+            sql = f"""
+                INSERT INTO `{target_registry}` (NodeNum, Location, Project)
+                VALUES ('{new_id.strip()}', '{final_loc}', '{routed_project}')
+            """
+            try:
+                client.query(sql).result()
+                st.success(f"Success! Registered asset **{new_id}** automatically routed to: **{routed_project}**")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed provisioning asset registry: {e}")
+
+def determine_auto_project(node_id, force_diagnostic=False):
+    """
+    Applies business routing rules for hardware categorization:
+    - Diagnostic option takes absolute priority.
+    - 'Lord' if lowercase/uppercase 'ch' is in the hardware string.
+    - 'Ambient' if it features 'SP'.
+    - 'Office' if it features 'TP'.
+    """
+    if force_diagnostic:
+        return "Diagnostic"
+        
+    node_upper = str(node_id).upper()
+    node_raw = str(node_id) 
+    
+    if "ch" in node_raw:
+        return "Lord"
+    elif "SP" in node_upper:
+        return "Ambient"
+    elif "TP" in node_upper:
+        return "Office"
+    
+    return "Office" # Global safe fallback
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
-    """
-    Handles the Edit, Swap, and Decommission logic for a selected node.
-    """
+    """Handles operational workflow adjustments for the actively targeted hardware context."""
     node_id = selected_node_data['NodeNum']
-    curr_proj = selected_node_data['Project']
-    curr_loc = selected_node_data['Location']
+    curr_proj = selected_node_data['Project'] if pd.notna(selected_node_data['Project']) else "Unassigned"
+    curr_loc = selected_node_data['Location'] if pd.notna(selected_node_data['Location']) else "Unassigned"
 
-    st.success(f"Selected: **{node_id}** at {curr_loc} ({curr_proj})")
+    st.success(f"Selected Context: **{node_id}** | Current Location: `{curr_loc}` | Active Project: `{curr_proj}`")
+    tabs = st.tabs(["📝 Quick Meta-Edit", "🔄 Swap Infrastructure", "🗄️ Decommission & Archive"])
     
-    tabs = st.tabs(["📝 Quick Edit", "🔄 Swap Sensor", "🚫 Decommission"])
-    
-    # --- TAB 1: QUICK EDIT ---
+    # --- TAB 1: META EDIT ---
     with tabs[0]:
-        st.markdown(f"### Edit Metadata for {node_id}")
-        with st.form("quick_edit_form"):
-            new_loc = st.text_input("New Location Name", value=curr_loc)
-            new_proj = st.selectbox("Assign to Project", proj_list, index=proj_list.index(curr_proj) if curr_proj in proj_list else 0)
+        st.markdown("#### Adjust Active Registry Information")
+        with st.form("meta_edit_form"):
+            edit_loc = st.text_input("Update Location Context", value=curr_loc)
+            edit_proj = st.selectbox("Update Project Designation Override", [""] + proj_list, index=proj_list.index(curr_proj) + 1 if curr_proj in proj_list else 0)
             
-            if st.form_submit_button("Update Registry"):
+            if st.form_submit_button("Commit Changes"):
                 sql = f"""
-                    UPDATE `{target_registry}`
-                    SET Location = '{new_loc}', Project = '{new_proj}'
+                    UPDATE `{target_registry}` 
+                    SET Location = '{edit_loc.strip()}', Project = '{edit_proj}' 
                     WHERE NodeNum = '{node_id}'
                 """
                 try:
                     client.query(sql).result()
-                    st.success(f"Updated {node_id} successfully! Refreshing...")
+                    st.success("Target node modifications updated.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Update failed: {e}")
+                    st.error(f"Modification execution failed: {e}")
 
-    # --- TAB 2: SWAP SENSOR ---
+    # --- TAB 2: HARDWARE SWAP ---
     with tabs[1]:
-        st.markdown("### Swap Hardware")
-        st.info("Use this when physical hardware is replaced but the Location/Project remains the same.")
-        with st.form("swap_sensor_form"):
-            new_node_id = st.text_input("New Hardware ID (NodeNum)")
-            
-            if st.form_submit_button("Execute Swap"):
-                if not new_node_id:
-                    st.error("Please enter a new Node ID.")
+        st.markdown("#### Hot-Swap Physical Core Device")
+        with st.form("hardware_swap_form"):
+            swap_id = st.text_input("Replacement Hardware Serial ID (NodeNum)")
+            if st.form_submit_button("Finalize Core Swap Sequence"):
+                if not swap_id.strip():
+                    st.error("Valid alternative node identifier required.")
                 else:
-                    # Update the NodeNum while keeping Project/Location
-                    sql = f"""
-                        UPDATE `{target_registry}`
-                        SET NodeNum = '{new_node_id}'
-                        WHERE NodeNum = '{node_id}'
-                    """
+                    sql = f"UPDATE `{target_registry}` SET NodeNum = '{swap_id.strip()}' WHERE NodeNum = '{node_id}'"
                     try:
                         client.query(sql).result()
-                        st.success(f"Swapped {node_id} with {new_node_id}!")
+                        st.success(f"Hardware swapped. Old: {node_id} -> New: {swap_id.strip()}")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Swap failed: {e}")
+                        st.error(f"Swap transaction failed: {e}")
 
-    # --- TAB 3: DECOMMISSION ---
+    # --- TAB 3: OPERATION DECOMMISSION ARCHIVE ---
     with tabs[2]:
-        st.markdown("### Remove from Registry")
-        st.warning(f"This will delete **{node_id}** from the active registration list.")
+        st.markdown("#### Safe Asset Archival Protocol")
+        st.warning("Archiving wipes infrastructure placement, resets system exposure tags, and transfers management groups.")
         
-        confirm_code = st.text_input(f"Type '{node_id}' to confirm deletion")
+        archive_mode = st.radio("Archival Routing Paradigm:", ["Follow Automations (Revert to Core Office Routing)", "Force Route directly to Diagnostic Workspace"], horizontal=True)
+        verification_token = st.text_input(f"Type '{node_id}' to autographed authorization details")
         
-        if st.button("🚨 Permanently Decommission"):
-            if confirm_code == node_id:
-                sql = f"DELETE FROM `{target_registry}` WHERE NodeNum = '{node_id}'"
+        if st.button("🚨 Process Archival Sequence"):
+            if verification_token == node_id:
+                force_diag = (archive_mode == "Force Route directly to Diagnostic Workspace")
+                target_archived_project = determine_auto_project(node_id, force_diagnostic=force_diag)
+                
+                sql = f"""
+                    UPDATE `{target_registry}`
+                    SET Location = 'Unassigned Archive / Office',
+                        Project = '{target_archived_project}'
+                    WHERE NodeNum = '{node_id}'
+                """
                 try:
                     client.query(sql).result()
-                    st.success(f"{node_id} removed from registry.")
+                    st.success(f"Asset archived safely. Moved {node_id} to environment storage tracking under group: **{target_archived_project}**")
+                    time.sleep(1.5)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Decommission failed: {e}")
+                    st.error(f"Archival storage task failed: {e}")
             else:
-                st.error("Confirmation ID does not match.")
+                st.error("Verification confirmation string match mismatch.")
+                
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Enhanced Sensor Status: Peer Trend Analysis and Performance Scoring.
@@ -1863,7 +1941,6 @@ def main():
     display_tz = "America/Los_Angeles"
     
     # Global BigQuery Pathing constants
-    # (Ensure these match your actual GCP environment)
     PROJECT_ID = "sensorpush-export"
     DATASET_ID = "Temperature"
     
@@ -1873,14 +1950,21 @@ def main():
     # --- ROUTING LOGIC ---
 
     if admin_page == "🛠️ Node Manager":
-        # Using the split functions for Selection and Action
+        # 1. Component to provision brand new nodes using your auto-routing rules
+        render_add_node_form(client, target_registry, proj_list)
+        st.divider()
+        
+        # 2. Interactive Data Editor with checkbox selections & dynamic filters
+        # Filters out dead/archived nodes; preserves blank/unassigned nodes
         selected_node_data = render_node_selector(reg_df, proj_list)
         
         if selected_node_data is not None:
+            st.divider()
+            # 3. Action center (Edit, Core Swap, Decommission to Office/Diagnostic Archive)
             render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry)
         else:
             st.divider()
-            st.info("💡 **Tip:** Select a record in the table above to Edit, Swap, or Decommission that node.")
+            st.info("💡 **Tip:** Use the checkbox in the table above to choose an active node to Edit, Swap, or Decommission.")
 
     elif admin_page == "📡 Setup Node Tool":
         render_project_status_dashboard(client, selected_project, unit_label, target_registry)
