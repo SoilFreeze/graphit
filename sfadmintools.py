@@ -306,12 +306,10 @@ def render_node_selector(reg_df, proj_list):
     """
     st.subheader("🎯 Active Node Registry")
     
-    # Toggle control to selectively hide only archived records
     hide_archived = st.checkbox("Hide Archived Records", value=True, key="ns_hide_archived_toggle")
     
     df = reg_df.copy()
     if hide_archived:
-        # Strictly filters out only rows with an 'Archived' status or location tag
         df = df[
             (df['SensorStatus'].str.lower() != "archived") & 
             (df['Location'].str.contains("Archive", case=False, na=False) == False)
@@ -405,95 +403,142 @@ def render_node_historical_graph(client, node_id):
 
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
-    """Handles workflows to give a new assignment, move, hot-swap, archive, or mark dead."""
+    """
+    Shows graph, full historical assignment profiles, and a complete database editor.
+    """
     node_id = selected_node_data['NodeNum']
-    curr_proj = selected_node_data['Project'] if pd.notna(selected_node_data['Project']) else "Unassigned"
-    curr_loc = selected_node_data['Location'] if pd.notna(selected_node_data['Location']) else "Unassigned"
+    start_dt = selected_node_data['Start_Date']
 
-    st.success(f"Selected Context: **{node_id}** | Current Placement: `{curr_loc}` | Active Project: `{curr_proj}`")
-    
+    # 1. SHOW THE GRAPH
     render_node_historical_graph(client, node_id)
     st.divider()
 
-    tabs = st.tabs(["📝 New Assignment / Move Node", "🔄 Hot-Swap Asset", "🗄️ Archival & Dead Controls"])
+    # 2. SHOW THE COMPLETE ASSIGNMENT HISTORY TABLE (Including archived/historical items)
+    st.markdown(f"### 📜 Complete Assignment History: **{node_id}**")
+    history_df = reg_df[reg_df['NodeNum'] == node_id].sort_values(by='Start_Date', ascending=False).copy()
+    st.dataframe(history_df, use_container_width=True, hide_index=True)
+    st.divider()
+
+    # 3. EDITOR & DIRECT WORKFLOW ACTION BUTTONS
+    st.markdown("### 🛠️ Modify Node Assignment Profile")
     
-    # --- TAB 1: GIVE NEW ASSIGNMENT / MOVE ---
-    with tabs[0]:
-        st.markdown("#### Give a New Assignment or Move Node Placement")
-        with st.form("assignment_edit_form"):
-            edit_loc = st.text_input("Assign Target Location Context", value=curr_loc if curr_loc != "Office Stock" else "")
-            edit_proj = st.selectbox("Assign Target Project", [""] + proj_list, index=proj_list.index(curr_proj) + 1 if curr_proj in proj_list else 0)
+    # Global Form allowing you to override ANY data attribute, including the NodeNum
+    with st.form("global_node_editor_form"):
+        st.markdown("##### Global Attribute Editor")
+        col1, col2, col3 = st.columns(3)
+        
+        edit_nodenum = col1.text_input("Node ID (NodeNum)", value=str(selected_node_data.get('NodeNum', '')))
+        edit_proj = col2.selectbox("Project", [""] + proj_list, index=proj_list.index(selected_node_data['Project']) + 1 if selected_node_data['Project'] in proj_list else 0)
+        edit_loc = col3.text_input("Location", value=str(selected_node_data.get('Location', '')))
+        
+        col4, col5, col6 = st.columns(3)
+        edit_bank = col4.text_input("Bank", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
+        
+        raw_depth = selected_node_data.get('Depth')
+        edit_depth = col5.number_input("Depth (ft)", value=float(raw_depth) if (pd.notnull(raw_depth) and str(raw_depth).strip() != '') else 0.0)
+        
+        status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
+        curr_stat = selected_node_data.get('SensorStatus', 'On Project')
+        s_idx = status_options.index(curr_stat) if curr_stat in status_options else 0
+        edit_status = col6.selectbox("SensorStatus", status_options, index=s_idx)
+        
+        col7, col8 = st.columns(2)
+        edit_start = col7.date_input("Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date() if pd.notnull(selected_node_data.get('Start_Date')) else datetime.now().date())
+        edit_end = col8.date_input("End Date", value=pd.to_datetime(selected_node_data.get('End_Date')).date() if pd.notnull(selected_node_data.get('End_Date')) else None)
+        
+        if st.form_submit_button("💾 Save Changes"):
+            sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+            sql_end = f"DATE('{edit_end.isoformat()}')" if edit_end else "NULL"
             
-            if st.form_submit_button("Commit New Assignment"):
-                sql = f"""
+            # Update query locates the record using its primary tracking criteria keys
+            update_sql = f"""
+                UPDATE `{target_registry}`
+                SET NodeNum = '{edit_nodenum.strip()}',
+                    Project = '{edit_proj.strip()}',
+                    Location = '{edit_loc.strip()}',
+                    Bank = '{edit_bank.strip()}',
+                    Depth = {sql_depth},
+                    SensorStatus = '{edit_status}',
+                    Start_Date = DATE('{edit_start.isoformat()}'),
+                    End_Date = {sql_end}
+                WHERE NodeNum = '{node_id}' 
+                  AND Start_Date = DATE('{pd.to_datetime(start_dt).strftime('%Y-%m-%d')}')
+            """
+            try:
+                client.query(update_sql).result()
+                st.success("✅ Changes saved to registry database successfully.")
+                st.cache_data.clear()
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to update node properties: {e}")
+
+    # 4. WORKFLOW EXECUTION BUTTONS
+    st.markdown("##### Quick Operational Tasks")
+    c_act1, c_act2 = st.columns(2)
+    
+    # --- ACTION A: END ASSIGNMENT ---
+    with c_act1.expander("🔚 End Assignment"):
+        end_date_input = st.date_input("Decommission Date Selection", value=datetime.now().date(), key="end_assign_dt")
+        end_status_input = st.selectbox("Return Stock Status Parameter", ["Available", "Diagnostic", "Dead"], key="end_assign_st")
+        
+        if st.button("Execute End Assignment", type="primary", use_container_width=True):
+            date_iso = end_date_input.isoformat()
+            bulk_sql = f"""
+                BEGIN TRANSACTION;
+                UPDATE `{target_registry}` 
+                SET End_Date = DATE('{date_iso}'), SensorStatus = 'Archived' 
+                WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
+                
+                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                VALUES ('{node_id}', 'Office', 'Office Stock', '{node_id}', NULL, '{end_status_input}', DATE('{date_iso}'));
+                COMMIT;
+            """
+            try:
+                client.query(bulk_sql).result()
+                st.success(f"✅ Node {node_id} returned back to Office stock configurations.")
+                st.cache_data.clear()
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Transaction failed: {e}")
+
+    # --- ACTION B: CHANGE SENSOR (SWAP WORKFLOW) ---
+    with c_act2.expander("🔄 Change Sensor"):
+        swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
+        swap_date_input = st.date_input("Swap Execution Date", value=datetime.now().date(), key="swap_sensor_dt")
+        
+        if st.button("Execute Change Sensor", type="primary", use_container_width=True):
+            if not swap_node_input.strip():
+                st.error("Please insert a valid target hardware serialization replacement value.")
+            else:
+                date_str = swap_date_input.isoformat()
+                swap_sql = f"""
                     BEGIN TRANSACTION;
-                    UPDATE `{target_registry}` SET End_Date = CURRENT_DATE(), SensorStatus = 'Archived' WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
-                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Start_Date, SensorStatus)
-                    VALUES ('{node_id}', '{edit_proj}', '{edit_loc.strip()}', CURRENT_DATE(), 'On Project');
+                    UPDATE `{target_registry}`
+                    SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                    WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
+
+                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                    VALUES (
+                        '{swap_node_input.strip()}', 
+                        '{selected_node_data['Project']}', 
+                        '{selected_node_data['Location']}', 
+                        '{selected_node_data.get('Bank', '')}', 
+                        {selected_node_data.get('Depth', 'NULL') if pd.notnull(selected_node_data.get('Depth')) else 'NULL'}, 
+                        'On Project', 
+                        DATE('{date_str}')
+                    );
                     COMMIT;
                 """
                 try:
-                    client.query(sql).result()
-                    st.success(f"✅ New assignment successfully committed for node {node_id}.")
+                    client.query(swap_sql).result()
+                    st.success(f"🔄 Component changed successfully: {node_id} swapped out for {swap_node_input.strip()}.")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Assignment execution sequence failed: {e}")
-
-    # --- TAB 2: HOT-SWAP ---
-    with tabs[1]:
-        st.markdown("#### Hot-Swap Physical Core Hardware")
-        with st.form("hardware_swap_form"):
-            swap_id = st.text_input("Replacement Hardware Serial ID (NodeNum)")
-            if st.form_submit_button("Finalize Core Swap Sequence"):
-                if not swap_id.strip():
-                    st.error("Valid alternative node identifier required.")
-                else:
-                    sql = f"UPDATE `{target_registry}` SET NodeNum = '{swap_id.strip()}' WHERE NodeNum = '{node_id}' AND End_Date IS NULL"
-                    try:
-                        client.query(sql).result()
-                        st.success(f"Hardware swapped. Old: {node_id} -> New: {swap_id.strip()}")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Swap transaction failed: {e}")
-
-    # --- TAB 3: ARCHIVE & MARK DEAD ---
-    with tabs[2]:
-        st.markdown("#### Complete Status Escalation")
-        action_mode = st.radio("Target Status Objective:", ["Archive Asset (Return to Stock)", "Mark Asset as DEAD"], horizontal=True)
-        verification_token = st.text_input(f"Type '{node_id}' to authorize assignment termination")
-        
-        if st.button("🚨 Process Status Update Protocol"):
-            if verification_token == node_id:
-                if action_mode == "Archive Asset (Return to Stock)":
-                    sql = f"""
-                        BEGIN TRANSACTION;
-                        UPDATE `{target_registry}` SET End_Date = CURRENT_DATE(), SensorStatus = 'Archived' WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
-                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                        VALUES ('{node_id}', 'Office', 'Office Stock', '{node_id}', NULL, 'Available', CURRENT_DATE());
-                        COMMIT;
-                    """
-                    msg = "Asset archived safely back to Office Stock tracking space."
-                else:
-                    sql = f"""
-                        UPDATE `{target_registry}` 
-                        SET End_Date = CURRENT_DATE(), SensorStatus = 'Dead' 
-                        WHERE NodeNum = '{node_id}' AND End_Date IS NULL
-                    """
-                    msg = "Asset decommissioned from system networks. Marked permanently as DEAD."
-                
-                try:
-                    client.query(sql).result()
-                    st.success(msg)
-                    st.cache_data.clear()
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Transaction failed: {e}")
-            else:
-                st.error("Verification string mismatch.")
+                    st.error(f"Core sensor change routine execution failed: {e}")
 
 
 def render_data_checker(client, reg_df):
@@ -571,7 +616,6 @@ def render_data_checker(client, reg_df):
             )
         else:
             st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
-
 
 # ===============================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
