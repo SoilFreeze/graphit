@@ -296,8 +296,6 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         hide_index=True
     )
 
-
-
 # ===============================================================
 # PAGE MODULE: 🛠️ NODE MANAGER
 # ===============================================================
@@ -308,9 +306,16 @@ def render_node_selector(reg_df, proj_list):
     """
     st.subheader("🎯 Active Node Registry")
     
-    # Exclude permanently dead sensors from the operational assignment board
-    active_mask = (reg_df['SensorStatus'].str.lower() != "dead")
-    df = reg_df[active_mask].copy()
+    # Toggle control to selectively hide only archived records
+    hide_archived = st.checkbox("Hide Archived Records", value=True, key="ns_hide_archived_toggle")
+    
+    df = reg_df.copy()
+    if hide_archived:
+        # Strictly filters out only rows with an 'Archived' status or location tag
+        df = df[
+            (df['SensorStatus'].str.lower() != "archived") & 
+            (df['Location'].str.contains("Archive", case=False, na=False) == False)
+        ]
 
     # Layout Filter Row
     c1, c2, c3 = st.columns(3)
@@ -320,7 +325,7 @@ def render_node_selector(reg_df, proj_list):
         if f_proj == "All":
             loc_opts = df['Location'].dropna().unique().tolist()
         elif f_proj == "Unassigned":
-            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office")]['Location'].dropna().unique().tolist()
+            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office") | (df['Location'] == "Office Stock")]['Location'].dropna().unique().tolist()
         else:
             loc_opts = df[df['Project'] == f_proj]['Location'].dropna().unique().tolist()
             
@@ -420,7 +425,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             edit_proj = st.selectbox("Assign Target Project", [""] + proj_list, index=proj_list.index(curr_proj) + 1 if curr_proj in proj_list else 0)
             
             if st.form_submit_button("Commit New Assignment"):
-                # Clean transaction: Closes out old record lineage date, starts fresh entry row
                 sql = f"""
                     BEGIN TRANSACTION;
                     UPDATE `{target_registry}` SET End_Date = CURRENT_DATE(), SensorStatus = 'Archived' WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
@@ -499,57 +503,74 @@ def render_data_checker(client, reg_df):
     st.markdown("---")
     st.subheader("🔍 Data Checker Diagnostics")
     
-    # Cleaned tab structure focusing strictly on anomalies
     c1, c2 = st.tabs([
         "⏱️ Gaps in Data (Missing Office Time)", 
         "🚨 Orphaned Nodes (Missing Next Assignment)"
     ])
     
-    # Ensure date objects are handled correctly for sorting and arithmetic comparisons
     df = reg_df.copy()
     df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.date
     df['End_Date'] = pd.to_datetime(df['End_Date']).dt.date
     
-    # Group records by sensor to analyze historical tracking lineages
     grouped = df.groupby('NodeNum')
     
     gaps_in_data = []
     orphaned_nodes = []
     
     for node_id, group in grouped:
-        # Sort history chronologically
         sorted_group = group.sort_values(by='Start_Date')
         records = sorted_group.to_dict('records')
         
         has_gap = False
         is_orphaned = False
         
-        # Check tracking lineage for chronological gaps or trailing loose ends
         for i in range(len(records)):
             current_rec = records[i]
             
-            # Condition A: Check if any row is missing a critical Start Date
             if pd.isnull(current_rec['Start_Date']):
                 has_gap = True
                 continue
                 
-            # Condition B: Check for an internal date discrepancy between historical rows
             if i < len(records) - 1:
                 next_rec = records[i+1]
                 if pd.notnull(current_rec['End_Date']) and pd.notnull(next_rec['Start_Date']):
-                    # If there is a lapse of more than 1 day between tracking entries, it's an unassigned gap
                     if (next_rec['Start_Date'] - current_rec['End_Date']).days > 1:
                         has_gap = True
             else:
-                # Condition C: Examine the final timeline entry for an unresolved trailing end date
                 if pd.notnull(current_rec['End_Date']):
                     is_orphaned = True
 
-        # Sort the Node IDs into their respective diagnostic reporting lists
         if has_gap:
             gaps_in_data.append(node_id)
         elif is_orphaned:
             orphaned_nodes.append(node_id)
+
+    # --- TAB 1: Gaps in Data ---
+    with c1:
+        st.markdown("##### Nodes with a chronological gap where they were not assigned—requires unmonitored time to be added to Office")
+        if gaps_in_data:
+            gap_display_df = df[df['NodeNum'].isin(gaps_in_data)].sort_values(['NodeNum', 'Start_Date'])
+            st.dataframe(
+                gap_display_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
+
+    # --- TAB 2: Orphaned Nodes ---
+    with c2:
+        st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
+        if orphaned_nodes:
+            orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
+            last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
+            st.dataframe(
+                last_entries[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
 
     # ===============================================================
     # TAB 1: Gaps in Data (Missing Office Time)
