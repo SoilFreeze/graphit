@@ -405,9 +405,10 @@ def render_node_historical_graph(client, node_id):
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
     Displays chart, interactive historical log selector, full attribute configuration overrides,
-    and administrative pipeline delete tools.
+    operational task panels, and administrative pipeline delete tools.
     """
     node_id = selected_node_data['NodeNum']
+    start_dt = selected_node_data['Start_Date']
 
     # 1. SHOW THE GRAPH
     render_node_historical_graph(client, node_id)
@@ -473,7 +474,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             sql_end = f"DATE('{edit_end.isoformat()}')" if edit_end else "NULL"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            # Target row utilizes the original unedited NodeNum and Start Date reference targets
             update_sql = f"""
                 UPDATE `{target_registry}`
                 SET NodeNum = '{edit_nodenum.strip()}',
@@ -496,7 +496,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             except Exception as e:
                 st.error(f"Failed to modify chosen timeline record: {e}")
 
-    # 4. OPERATIONAL TASK PANEL (INCLUDES NEW DELETE RECORD ACTION)
+    # 4. OPERATIONAL TASK PANEL
     st.markdown("##### Quick Operational Tasks")
     c_act1, c_act2, c_act3 = st.columns(3)
     
@@ -534,36 +534,66 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         if st.button("Execute Change Sensor", type="primary", use_container_width=True):
             if not swap_node_input.strip():
                 st.error("Please insert a valid target hardware replacement ID.")
+            elif swap_node_input.strip() == node_id:
+                st.error("The replacement Node ID cannot be identical to the sensor currently assigned.")
             else:
                 date_str = swap_date_input.isoformat()
+                new_node = swap_node_input.strip()
+                
+                if new_node.upper().startswith("TP"):
+                    old_sensor_restock_loc = "Office Stock"
+                elif new_node.upper().startswith("SP"):
+                    old_sensor_restock_loc = "Ambient Stock"
+                else:
+                    old_sensor_restock_loc = "Office Stock"
+
                 swap_sql = f"""
                     BEGIN TRANSACTION;
+                    
+                    -- STEP 1: End the current assignment for the old sensor
                     UPDATE `{target_registry}`
-                    SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
-                    WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
+                    SET End_Date = DATE('{date_str}'), 
+                        SensorStatus = 'Archived'
+                    WHERE NodeNum = '{node_id}' 
+                      AND End_Date IS NULL;
 
+                    -- STEP 2: Create a brand-new entry sending the old sensor back to Office as Available
+                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                    VALUES ('{node_id}', 'Office', '{old_sensor_restock_loc}', '{node_id}', NULL, 'Available', DATE('{date_str}'));
+
+                    -- STEP 3: Terminate the incoming sensor's previous active assignment lineage
+                    UPDATE `{target_registry}`
+                    SET End_Date = DATE('{date_str}'), 
+                        SensorStatus = 'Archived'
+                    WHERE NodeNum = '{new_node}' 
+                      AND End_Date IS NULL;
+
+                    -- STEP 4: Make a new entry for the new sensor, identical to the old assignment minus dates and nodenum
                     INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
                     VALUES (
-                        '{swap_node_input.strip()}', 
+                        '{new_node}', 
                         '{selected_node_data['Project']}', 
                         '{selected_node_data['Location']}', 
-                        '{selected_node_data.get('Bank', '')}', 
-                        {selected_node_data.get('Depth', 'NULL') if pd.notnull(selected_node_data.get('Depth')) else 'NULL'}, 
+                        {f"'{selected_node_data['Bank']}'" if pd.notnull(selected_node_data.get('Bank')) and selected_node_data.get('Bank') != 'None' else "NULL"}, 
+                        {selected_node_data['Depth'] if pd.notnull(selected_node_data.get('Depth')) and str(selected_node_data.get('Depth')).strip() != '' else "NULL"}, 
                         'On Project', 
                         DATE('{date_str}')
                     );
+                    
                     COMMIT;
                 """
                 try:
-                    client.query(swap_sql).result()
-                    st.success(f"🔄 Sensor changed successfully: {node_id} swapped for {swap_node_input.strip()}.")
+                    with st.spinner("Processing dual-sensor swap execution matrices..."):
+                        client.query(swap_sql).result()
+                    st.success(f"🔄 Change Sensor complete: {node_id} returned to {old_sensor_restock_loc}. {new_node} initialized onto deployment timeline successfully.")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Sensor change transaction execution routine failed: {e}")
+                    st.code(swap_sql, language="sql")
 
-    # --- NEW CRITICAL TASK: DELETE ENTRIES ---
+    # --- DELETE ENTRY ---
     with c_act3.expander("🗑️ Delete Entry"):
         st.warning("⚠️ Danger Zone: This drops the targeted assignment entry row completely out of your BigQuery system logs.")
         confirm_check = st.checkbox("Confirm permanent deletion of this row", key=f"del_confirm_{target_record['Start_Date']}")
@@ -585,7 +615,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to execute row delete query logic: {e}")
-
 
 def render_data_checker(client, reg_df):
     """
