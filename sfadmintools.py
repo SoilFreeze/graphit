@@ -680,21 +680,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 
                 COMMIT;
             """
-                
-                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                VALUES (
-                  '{edit_nodenum.strip()}',
-                  '{edit_proj.strip()}',
-                  '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
-                  {sql_bank},
-                  {sql_depth},
-                  '{edit_status}',
-                  DATE('{edit_start.isoformat()}'),
-                  {sql_end}
-                );
-                
-                COMMIT;
-            """
             try:
                 client.query(update_sql).result()
                 st.success("✅ Clean split successful. Isolated and modified only your selected row copy.")
