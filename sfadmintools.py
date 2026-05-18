@@ -814,54 +814,6 @@ def execute_replacement_transaction(client, data, new_node_num, swap_date, targe
         st.error(str(e))
 
 # ===============================================================
-# PAGE: SENSOR SWITCH (Correction Logic)
-# ===============================================================
-
-def render_sensor_switch_page(client, PROJECT_ID, DATASET_ID):
-    """
-    Repurposed for metadata corrections (typos) using only NodeNum.
-    This page is now a 'Quick Fix' tool for active deployments.
-    """
-    st.header("🩹 Metadata Quick-Fix")
-    st.info("""
-        **Purpose:** Use this to fix typos (Location, Bank, Depth) on an active node 
-        without changing history or start dates.
-    """)
-    
-    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-    
-    node_id = st.text_input("Enter Node ID to correct (e.g., TP-0001)").strip().upper()
-    
-    if node_id:
-        # Search for the active record
-        query = f"SELECT * FROM `{target_registry}` WHERE NodeNum = '{node_id}' AND End_Date IS NULL"
-        df = client.query(query).to_dataframe()
-        
-        if not df.empty:
-            row = df.iloc[0]
-            st.subheader(f"Current Config: {node_id}")
-            
-            with st.form("quick_fix_form"):
-                c1, c2 = st.columns(2)
-                # Allow editing of the core metadata
-                new_loc = c1.text_input("Corrected Location", value=row['Location'])
-                new_bank = c2.text_input("Corrected Bank", value=row['Bank'])
-                
-                c3, c4 = st.columns(2)
-                new_depth = c3.number_input("Corrected Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
-                new_status = c4.selectbox("Corrected Status", ["On Project", "Available", "Diagnostic", "Dead"], index=0)
-
-                if st.form_submit_button("🚀 Apply Corrections"):
-                    execute_combined_correction(
-                        client, row, row['Project'], new_loc, 
-                        new_bank, new_depth, new_status, target_registry
-                    )
-        else:
-            st.error(f"No active record found for Node '{node_id}'.")
-
-# Note: This function now calls 'execute_combined_correction' 
-# which we already updated to ignore PhysicalID.
-# ===============================================================
 # PAGE: SENSOR EDIT (Interactive Registry Editor)
 # ===============================================================
 
@@ -1110,139 +1062,7 @@ def render_recovery_logic_footer():
         3. **Background Processing**: Cloud Run fetches data from SensorPush and pushes to `raw_sensorpush` in BigQuery.
         4. **Propagation**: Data updates the `master_data_view` automatically via the existing SQL view logic.
         """)
-    
-# ===============================================================
-# PAGE: PROJECT MASTER
-# ===============================================================
 
-def render_project_master_page(client, selected_project, PROJECT_ID, DATASET_ID):
-    """Main entry point for Project Lifecycle Management."""
-    st.header("⚙️ Project Lifecycle Management")
-    
-    action = st.radio("Action", ["📋 Fleet Overview", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True)
-    table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
-
-    if action == "📋 Fleet Overview":
-        render_project_overview(client, table_projects)
-
-    elif action == "🏗️ New Project":
-        render_new_project_form(client, table_projects)
-
-    elif action == "🔧 Edit Project Metadata":
-        render_update_project_form(client, selected_project, table_projects)
-
-
-def render_project_overview(client, table_projects):
-    """Displays all registry information for all projects (including Archived)."""
-    st.subheader("📋 Complete Project Registry")
-    
-    # We remove the Status filter so you can see 'Archived' projects too
-    query = f"SELECT * FROM `{table_projects}` ORDER BY Project ASC"
-    df = client.query(query).to_dataframe()
-    
-    if not df.empty:
-        # Standardize date display for the table
-        for col in ['Date_Freezedown', 'Date_Completion']:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col]).dt.date
-        
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.caption(f"Total Projects in Registry: {len(df)}")
-    else:
-        st.info("Registry table is empty.")
-
-
-def render_new_project_form(client, table_projects):
-    """UI for registering a new project ID."""
-    st.subheader("🏗️ Initialize New Project")
-    with st.form("new_project_form"):
-        col1, col2 = st.columns(2)
-        n_code = col1.text_input("Project ID / Job # (e.g., 2538)")
-        n_name = col2.text_input("Project Friendly Name (e.g., Warehouse A)")
-        
-        n_notes = st.text_area("Initial Engineering Notes")
-        
-        if st.form_submit_button("🚀 Create Project Entry"):
-            if not n_code:
-                st.error("Project ID is required.")
-            else:
-                check_q = f"SELECT Project FROM `{table_projects}` WHERE Project = '{n_code}'"
-                if not client.query(check_q).to_dataframe().empty:
-                    st.error(f"Project {n_code} already exists.")
-                else:
-                    insert_q = f"""
-                        INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, EngNotes)
-                        VALUES ('{n_code}', '{n_name}', 'Initialized', '{n_notes}')
-                    """
-                    client.query(insert_q).result()
-                    st.success(f"Project {n_code} initialized.")
-                    time.sleep(1)
-                    st.rerun()
-
-
-def render_update_project_form(client, selected_project, table_projects):
-    """
-    Comprehensive Edit Form: Allows viewing and replacing ALL registry fields
-    for the selected project.
-    """
-    st.subheader(f"🔧 Editing Project: {selected_project}")
-    
-    proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
-    p_res = client.query(proj_q).to_dataframe()
-    
-    if p_res.empty:
-        st.error("Select a valid project from the sidebar.")
-        return
-
-    p_data = p_res.iloc[0].to_dict()
-    
-    with st.form("comprehensive_edit_project"):
-        # 1. Identity & Name
-        c1, c2 = st.columns(2)
-        u_project_id = c1.text_input("Project ID (Internal Key)", value=p_data.get('Project', ''), disabled=True)
-        u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
-
-        # 2. Status & Lifecycle
-        c3, c4 = st.columns(2)
-        status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
-        curr_status = p_data.get('ProjectStatus', 'Initialized')
-        s_idx = status_options.index(curr_status) if curr_status in status_options else 0
-        u_status = c3.selectbox("Lifecycle Status", status_options, index=s_idx)
-        
-        # 3. Dates
-        # Logic to handle existing dates or default to None
-        def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) else None
-
-        u_date_freeze = c3.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
-        u_date_comp = c4.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
-
-        # 4. Engineering Notes
-        u_notes = st.text_area("Engineering & Site Notes", value=p_data.get('EngNotes', ''))
-
-        if st.form_submit_button("💾 Overwrite Project Registry Information"):
-            # Prepare SQL fragments for dates
-            freeze_val = f"DATE('{u_date_freeze}')" if u_date_freeze else "NULL"
-            comp_val = f"DATE('{u_date_comp}')" if u_date_comp else "NULL"
-            
-            update_q = f"""
-                UPDATE `{table_projects}` 
-                SET 
-                    ProjectName = '{u_project_name}',
-                    ProjectStatus = '{u_status}',
-                    EngNotes = '{u_notes}',
-                    Date_Freezedown = {freeze_val},
-                    Date_Completion = {comp_val}
-                WHERE Project = '{selected_project}'
-            """
-            
-            try:
-                client.query(update_q).result()
-                st.success(f"✅ Successfully updated all registry data for {selected_project}")
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Update failed: {e}")
-                st.code(update_q)
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
 # ===============================================================
@@ -1800,33 +1620,6 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
             # status_q is now guaranteed to exist for this block:
             st.code(status_q, language="sql")
 
-
-def render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID):
-    st.header("🧨 Data Management (Manual Rejections)")
-    
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
-    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" # Make sure this is your physical table
-
-    target_scope, new_status = render_management_controls()
-    st.divider()
-
-    filters = render_management_filters(reg_df, selected_project, target_scope)
-    where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
-    
-    render_verification_step(client, where_str, telemetry_table, target_table)
-    render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table)
-def render_management_controls():
-    """Renders radio buttons for scope and the new specific status types."""
-    c1, c2 = st.columns(2)
-    with c1:
-        target_scope = st.radio("Target Scope", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
-    with c2:
-        # User defined status types
-        new_status = st.selectbox("Set Approval Status To:", ["TRUE", "BadData", "Masked", "Office"])
-        
-    return target_scope, new_status
-
-
 def render_management_filters(reg_df, selected_project, target_scope):
     """
     Renders hierarchical filters.
@@ -1988,15 +1781,7 @@ def main():
 
     elif admin_page == "🧨 Data Management":
         render_data_management_page(client, reg_df, selected_project, PROJECT_ID, DATASET_ID)
-
-    # LEGACY / REDUNDANT TOOLS (Optional: Remove if Node Manager covers these)
-    elif admin_page == "🩹 Sensor Switch":
-        render_sensor_switch_page(client, PROJECT_ID, DATASET_ID)
-        
-    elif admin_page == "🔄 Sensor Replace":
-        # Repurposed to use the new Node ID centric logic
-        render_sensor_replace_page(client, PROJECT_ID, DATASET_ID)
-
+      
 # ===============================================================
 # EXECUTION ENTRY POINT
 # ===============================================================
