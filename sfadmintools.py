@@ -89,11 +89,43 @@ def render_sidebar():
 # ===============================================================
 @st.cache_data(ttl=600)
 def load_registry_data(target_table):
-    """Queries active schema inventory data safely."""
+    """
+    Queries active schema inventory data safely, merging real-time 'Last Seen' 
+    lag hours and scrubbing legacy PhysicalID markers.
+    """
     try:
-        df = client.query(f"SELECT * FROM `{target_table}`").to_dataframe()
-        if 'PhysicalID' in df.columns:
-            df['PhysicalID'] = df['PhysicalID'].astype(str).replace(['nan', 'None', '<NA>'], '')
+        # High-performance single-pass join tracking the latest ping across all assets
+        master_query = f"""
+            WITH LatestTelemetry AS (
+                SELECT 
+                    NodeNum, 
+                    MAX(timestamp) as last_ping
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                GROUP BY NodeNum
+            )
+            SELECT 
+                R.*,
+                T.last_ping
+            FROM `{target_table}` R
+            LEFT JOIN LatestTelemetry T 
+              ON R.NodeNum = T.NodeNum
+        """
+        df = client.query(master_query).to_dataframe()
+        
+        # Calculate precise decimal hour latency relative to current execution time
+        now_utc = pd.Timestamp.now(tz='UTC')
+        if not df.empty and 'last_ping' in df.columns:
+            df['Last Seen'] = df['last_ping'].apply(
+                lambda x: f"{max(0.0, (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600):.1f}h" 
+                if pd.notnull(x) else "No Pings"
+            )
+        else:
+            df['Last Seen'] = "No Pings"
+            
+        # Absolute force-scrub of legacy columns before distribution to view states
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
+        df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+        
         return df
     except Exception as e:
         st.error(f"Error loading registry: {e}")
@@ -302,14 +334,15 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 
 def render_node_selector(reg_df, proj_list):
     """
-    Renders an active inventory node selection engine.
+    Renders an active inventory node selection engine with integrated 
+    Last Seen reporting and no physical target remnants.
     """
     st.subheader("🎯 Active Node Registry")
     
     hide_archived = st.checkbox("Hide Archived Records", value=True, key="ns_hide_archived_toggle")
     
     df = reg_df.copy()
-    if hide_archived:
+    if hide_archived and 'SensorStatus' in df.columns:
         df = df[
             (df['SensorStatus'].str.lower() != "archived") & 
             (df['Location'].str.contains("Archive", case=False, na=False) == False)
@@ -349,11 +382,15 @@ def render_node_selector(reg_df, proj_list):
 
     # Render interactive row choosing engine via checkboxes
     df.insert(0, "Select", False)
+    
     edited_df = st.data_editor(
         df,
         hide_index=True,
         use_container_width=True,
-        column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+            "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping")
+        },
         disabled=[col for col in df.columns if col != "Select"],
         key="node_registry_editor"
     )
@@ -363,7 +400,6 @@ def render_node_selector(reg_df, proj_list):
         return selected_rows.iloc[0].drop("Select").to_dict()
     
     return None
-
 
 def render_node_historical_graph(client, node_id):
     """Fetches and displays the complete historical thermal chart for the chosen node context."""
