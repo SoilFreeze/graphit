@@ -445,7 +445,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     # 3. EDITOR WITH DYNAMIC PROJECT LOCATION DROPDOWN
     st.markdown("### 🛠️ Modify Assignment Attributes")
     
-    # CRITICAL FIX: Moving the Project selection outside of the form so the Location options rebuild instantly upon clicking
     edit_proj = st.selectbox(
         "Project Space", 
         [""] + proj_list, 
@@ -453,7 +452,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         key="global_editor_project_selector"
     )
     
-    # Dynamically build the location options based on the live selection above
     if edit_proj == "Office":
         location_input_type = "text"
         default_loc_val = str(target_record.get('Location', 'Office Stock'))
@@ -472,7 +470,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         col1, col2 = st.columns(2)
         edit_nodenum = col1.text_input("Node ID (NodeNum)", value=str(target_record.get('NodeNum', '')))
         
-        # Render the adaptive input based on your chosen project space
         if location_input_type == "text":
             edit_loc = col2.text_input("Office Sub-Location", value=default_loc_val)
         else:
@@ -502,6 +499,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             sql_end = f"DATE('{edit_end.isoformat()}')" if edit_end else "NULL"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
+            # HARDENED FIX: Added Project & Location constraints to ensure strict 1-row precision updates
             update_sql = f"""
                 UPDATE `{target_registry}`
                 SET NodeNum = '{edit_nodenum.strip()}',
@@ -514,6 +512,8 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     End_Date = {sql_end}
                 WHERE NodeNum = '{target_record['NodeNum']}' 
                   AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                  AND Project = '{target_record['Project']}'
+                  AND Location = '{target_record['Location']}'
             """
             try:
                 client.query(update_sql).result()
@@ -618,7 +618,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         with st.expander("➕ Add New Manual Assignment"):
             st.markdown("##### Force-Insert a Fresh Assignment Record Lineage")
             
-            # Form-safe isolation logic: Pulling Project out here so the location box can change shape live
             add_proj = st.selectbox("Manual Target Project", proj_list, key="manual_add_proj")
             
             if add_proj == "Office":
@@ -629,7 +628,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     add_loc_opts = ["Unassigned"]
                 add_loc = st.selectbox("Manual Target Location", add_loc_opts, key="manual_add_loc_drop")
                 
-            # Internal sub-form parameters containing remaining input lines
             with st.form("manual_assignment_sub_form"):
                 c_add1, c_add2 = st.columns(2)
                 add_bank = c_add1.text_input("Manual Bank Field", value="")
@@ -675,14 +673,17 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 if not confirm_check:
                     st.error("Please click the confirmation checkbox to authorize the database removal transaction.")
                 else:
+                    # HARDENED FIX: Added Project & Location qualifiers to delete only the specified duplicate row instance
                     delete_sql = f"""
                         DELETE FROM `{target_registry}`
                         WHERE NodeNum = '{target_record['NodeNum']}'
                           AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                          AND Project = '{target_record['Project']}'
+                          AND Location = '{target_record['Location']}'
                     """
                     try:
                         client.query(delete_sql).result()
-                        st.warning(f"🗑️ Assignment row deleted for Node {target_record['NodeNum']} starting on {target_record['Start_Date']}.")
+                        st.warning(f"🗑️ Assignment row deleted for Node {target_record['NodeNum']} on {target_record['Project']}.")
                         st.cache_data.clear()
                         time.sleep(1)
                         st.rerun()
