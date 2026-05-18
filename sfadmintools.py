@@ -488,7 +488,14 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         
         col7, col8 = st.columns(2)
         edit_start = col7.date_input("Start Date", value=pd.to_datetime(target_record.get('Start_Date')).date() if pd.notnull(target_record.get('Start_Date')) else datetime.now().date())
-        edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else None)
+        
+        # New feature toggle for open-ended timeline allocations
+        is_open_ended = col8.checkbox("Open-Ended (No End Date)", value=pd.isnull(target_record.get('End_Date')))
+        if is_open_ended:
+            edit_end = None
+            col8.caption("ℹ️ This assignment will remain active with no set expiration.")
+        else:
+            edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else datetime.now().date())
         
         if st.form_submit_button("💾 Save Changes"):
             if edit_bank.strip() != "":
@@ -496,10 +503,14 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             else:
                 sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
                 
-            sql_end = f"DATE('{edit_end.isoformat()}')" if edit_end else "NULL"
+            sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            # HARDENED FIX: Added Project & Location constraints to ensure strict 1-row precision updates
+            # Helper logic to precisely target original fields inside the WHERE statement, checking for nulls safely
+            where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+            where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+
+            # MAXIMAL SECURED CONSTRAINTS: Prevents sibling duplicates on the same project from mirroring modifications
             update_sql = f"""
                 UPDATE `{target_registry}`
                 SET NodeNum = '{edit_nodenum.strip()}',
@@ -514,6 +525,8 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                   AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
                   AND Project = '{target_record['Project']}'
                   AND Location = '{target_record['Location']}'
+                  AND {where_bank}
+                  AND {where_depth}
             """
             try:
                 client.query(update_sql).result()
@@ -673,13 +686,18 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 if not confirm_check:
                     st.error("Please click the confirmation checkbox to authorize the database removal transaction.")
                 else:
-                    # HARDENED FIX: Added Project & Location qualifiers to delete only the specified duplicate row instance
+                    where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+                    where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+
+                    # MAXIMAL SECURED CONSTRAINTS: Isolates and drops strictly the checked duplicate row
                     delete_sql = f"""
                         DELETE FROM `{target_registry}`
                         WHERE NodeNum = '{target_record['NodeNum']}'
                           AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
                           AND Project = '{target_record['Project']}'
                           AND Location = '{target_record['Location']}'
+                          AND {where_bank}
+                          AND {where_depth}
                     """
                     try:
                         client.query(delete_sql).result()
