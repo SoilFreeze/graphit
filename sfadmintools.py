@@ -366,18 +366,19 @@ def render_node_selector(reg_df, proj_list):
 
 
 def render_node_historical_graph(client, node_id):
-    """Fetches and displays the trailing 7-day thermal chart for the chosen node context."""
-    st.markdown(f"### 📈 Trailing Thermal Trace: **{node_id}**")
+    """Fetches and displays the complete historical thermal chart for the chosen node context."""
+    # Renamed header tracking category
+    st.markdown(f"### 📈 Historic Data: **{node_id}**")
     
+    # Restructured Query: Removed the 7-day interval constraint to pull all available history
     hist_q = f"""
         SELECT timestamp, temperature 
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
         WHERE NodeNum = '{node_id}' 
-          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
         ORDER BY timestamp ASC
     """
     try:
-        with st.spinner("Retrieving telemetric history logs..."):
+        with st.spinner("Retrieving complete historical telemetric data logs..."):
             tel_df = client.query(hist_q).to_dataframe()
         
         if not tel_df.empty:
@@ -397,7 +398,7 @@ def render_node_historical_graph(client, node_id):
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.caption("ℹ️ No telemetric data markers discovered for this hardware footprint in the last 7 days.")
+            st.caption("ℹ️ No historical telemetric data markers discovered for this hardware footprint.")
     except Exception as e:
         st.error(f"Failed generating historical context graph: {e}")
 
@@ -731,14 +732,14 @@ def render_data_checker(client, reg_df):
             if pd.isnull(current_rec['End_Date']):
                 active_count += 1
                 
-            # Overlapping logic
+            # Overlapping duplication checker loop logic
             for j in range(i + 1, len(records)):
                 compare_rec = records[j]
                 if pd.notnull(compare_rec['Start_Date']):
                     if pd.isnull(current_rec['End_Date']) or current_rec['End_Date'] > compare_rec['Start_Date']:
                         has_duplicate = True
 
-            # Chronological Gap & Orphan check loops
+            # Chronological Gap & Orphan evaluation tracking checks
             if i < len(records) - 1:
                 next_rec = records[i+1]
                 if pd.notnull(current_rec['End_Date']) and pd.notnull(next_rec['Start_Date']):
