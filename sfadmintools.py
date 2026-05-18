@@ -1879,27 +1879,73 @@ def fetch_curve_inventory(client, table_curves):
 
 
 def render_curve_management_tools(client, inventory_df, table_curves):
-    """UI for deleting curves or purging the library."""
-    c1, c2 = st.columns(2)
-    
-    with c1.expander("🗑️ Individual Curve Delete"):
-        if not inventory_df.empty:
-            to_delete = st.selectbox("Select Curve to Remove", sorted(inventory_df['Curve Identifier'].tolist()))
-            if st.button(f"Permanently Delete {to_delete}", type="primary"):
-                client.query(f"DELETE FROM `{table_curves}` WHERE CurveID = '{to_delete}'").result()
-                st.success(f"Removed {to_delete}")
-                st.cache_data.clear()
-                time.sleep(1)
-                st.rerun()
+    """
+    Administrative deletion panel toolset for stripping unwanted historical 
+    curve reference matrix strings out of the primary dataset registry.
+    """
+    st.subheader("🗑️ Individual Curve Delete")
+    st.markdown("Select a baseline calibration profile curve map from the library to remove it from the system.")
 
-    with c2.expander("🧨 Library Wipe"):
-        st.warning("This will delete EVERY theoretical curve in the database.")
-        if st.button("EXECUTE TOTAL PURGE", key="purge_all"):
-            client.query(f"TRUNCATE TABLE `{table_curves}`").result()
-            st.success("Library wiped.")
-            st.cache_data.clear()
-            time.sleep(1)
-            st.rerun()
+    if inventory_df.empty:
+        st.info("No active curves available for configuration modifications.")
+        return
+
+    # 1. HARDENED COLUMN DETECTOR MATCH METHOD
+    # Scans the dataframe to dynamically find the correct column string name variant
+    possible_identifier_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
+    target_id_col = None
+
+    for col in possible_identifier_cols:
+        if col in inventory_df.columns:
+            target_id_col = col
+            break
+
+    # Fallback to the very first dataframe column if none of our expected keys match perfectly
+    if not target_id_col:
+        target_id_col = inventory_df.columns[0]
+
+    # 2. SAFE DROPDOWN EXECUTOR LOGIC
+    try:
+        # Pull drop selector list values cleanly using our audited key locator string
+        curve_dropdown_options = sorted(inventory_df[target_id_col].dropna().unique().tolist())
+        
+        if not curve_dropdown_options:
+            st.warning("No unique curve mapping strings found inside the targeted data layer.")
+            return
+
+        to_delete = st.selectbox(
+            "Select Curve to Remove", 
+            curve_dropdown_options,
+            key="individual_curve_deletion_selector"
+        )
+        
+    except Exception as parse_err:
+        st.error(f"Failed to assemble selection dropdown bounds list structure: {parse_err}")
+        return
+
+    # 3. SECURED DELETION FORM ACTION TRANSACTION
+    with st.expander("⚠️ Confirm Deletion Parameters"):
+        st.warning(f"This will permanently drop all calibration records linked to: **{to_delete}**")
+        confirm_check = st.checkbox("Verify permanent removal of this curve sequence.", key="curve_delete_auth_token_check")
+        
+        if st.button("Delete Selected Reference Curve", type="primary", use_container_width=True):
+            if not confirm_check:
+                st.error("Please acknowledge the warning checkbox before executing this database deletion workflow.")
+            else:
+                # Target the actual BigQuery column string key context dynamically
+                delete_sql = f"""
+                    DELETE FROM `{table_curves}`
+                    WHERE {target_id_col} = '{to_delete}'
+                """
+                try:
+                    with st.spinner("Processing structural catalog deletion index updates..."):
+                        client.query(delete_sql).result()
+                    st.success(f"🗑️ Reference curve **{to_delete}** has been successfully dropped from the database.")
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as query_err:
+                    st.error(f"Failed to drop target curve profile row instance from server storage: {query_err}")
 
 
 def render_curve_upload_engine(client, table_curves, inventory_df):
