@@ -404,80 +404,104 @@ def render_node_historical_graph(client, node_id):
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
-    Shows graph, full historical assignment profiles, and a complete database editor.
+    Displays chart, interactive historical log selector, and full attribute configuration overrides.
     """
     node_id = selected_node_data['NodeNum']
-    start_dt = selected_node_data['Start_Date']
 
     # 1. SHOW THE GRAPH
     render_node_historical_graph(client, node_id)
     st.divider()
 
-    # 2. SHOW THE COMPLETE ASSIGNMENT HISTORY TABLE (Including archived/historical items)
-    st.markdown(f"### 📜 Complete Assignment History: **{node_id}**")
+    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER (Upgraded via data_editor checkboxes)
+    st.markdown(f"### 📜 Assignment History Library: **{node_id}**")
+    st.info("💡 Check the box next to any assignment below (active or archived) to populate and alter its fields in the editor.")
+    
     history_df = reg_df[reg_df['NodeNum'] == node_id].sort_values(by='Start_Date', ascending=False).copy()
-    st.dataframe(history_df, use_container_width=True, hide_index=True)
+    history_df.insert(0, "Edit Target", False)
+    
+    edited_hist_df = st.data_editor(
+        history_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={"Edit Target": st.column_config.CheckboxColumn("Edit Target", default=False, required=True)},
+        disabled=[col for col in history_df.columns if col != "Edit Target"],
+        key=f"hist_editor_{node_id}"
+    )
+    
+    chosen_rows = edited_hist_df[edited_hist_df["Edit Target"] == True]
+    
+    # Context Rule: If no row is manually selected from history, fallback default to the row clicked in the primary table above
+    if not chosen_rows.empty:
+        target_record = chosen_rows.iloc[0].drop("Edit Target").to_dict()
+        st.success(f"✏️ Currently Editing Chosen Assignment row starting on: `{target_record['Start_Date']}`")
+    else:
+        target_record = selected_node_data
+        st.info(f"✏️ Currently Editing Active Assignment row starting on: `{target_record['Start_Date']}`")
+        
     st.divider()
 
-    # 3. EDITOR & DIRECT WORKFLOW ACTION BUTTONS
-    st.markdown("### 🛠️ Modify Node Assignment Profile")
+    # 3. EDITOR WITH HARDENED MUTUAL EXCLUSION (BANK VS DEPTH)
+    st.markdown("### 🛠️ Modify Assignment Attributes")
     
-    # Global Form allowing you to override ANY data attribute, including the NodeNum
     with st.form("global_node_editor_form"):
-        st.markdown("##### Global Attribute Editor")
         col1, col2, col3 = st.columns(3)
-        
-        edit_nodenum = col1.text_input("Node ID (NodeNum)", value=str(selected_node_data.get('NodeNum', '')))
-        edit_proj = col2.selectbox("Project", [""] + proj_list, index=proj_list.index(selected_node_data['Project']) + 1 if selected_node_data['Project'] in proj_list else 0)
-        edit_loc = col3.text_input("Location", value=str(selected_node_data.get('Location', '')))
+        edit_nodenum = col1.text_input("Node ID (NodeNum)", value=str(target_record.get('NodeNum', '')))
+        edit_proj = col2.selectbox("Project", [""] + proj_list, index=proj_list.index(target_record['Project']) + 1 if target_record['Project'] in proj_list else 0)
+        edit_loc = col3.text_input("Location", value=str(target_record.get('Location', '')))
         
         col4, col5, col6 = st.columns(3)
-        edit_bank = col4.text_input("Bank", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
+        edit_bank = col4.text_input("Bank", value=str(target_record.get('Bank', '')) if pd.notnull(target_record.get('Bank')) else "", help="Writing a bank value automatically wipes Depth to NULL.")
         
-        raw_depth = selected_node_data.get('Depth')
+        raw_depth = target_record.get('Depth')
         edit_depth = col5.number_input("Depth (ft)", value=float(raw_depth) if (pd.notnull(raw_depth) and str(raw_depth).strip() != '') else 0.0)
         
         status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
-        curr_stat = selected_node_data.get('SensorStatus', 'On Project')
+        curr_stat = target_record.get('SensorStatus', 'On Project')
         s_idx = status_options.index(curr_stat) if curr_stat in status_options else 0
         edit_status = col6.selectbox("SensorStatus", status_options, index=s_idx)
         
         col7, col8 = st.columns(2)
-        edit_start = col7.date_input("Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date() if pd.notnull(selected_node_data.get('Start_Date')) else datetime.now().date())
-        edit_end = col8.date_input("End Date", value=pd.to_datetime(selected_node_data.get('End_Date')).date() if pd.notnull(selected_node_data.get('End_Date')) else None)
+        edit_start = col7.date_input("Start Date", value=pd.to_datetime(target_record.get('Start_Date')).date() if pd.notnull(target_record.get('Start_Date')) else datetime.now().date())
+        edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else None)
         
         if st.form_submit_button("💾 Save Changes"):
-            sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+            # Enforce strict Mutual Exclusion: "either a bank or a depth"
+            if edit_bank.strip() != "":
+                sql_depth = "NULL"
+            else:
+                sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+                
             sql_end = f"DATE('{edit_end.isoformat()}')" if edit_end else "NULL"
+            sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            # Update query locates the record using its primary tracking criteria keys
+            # Target the original row using its distinct baseline primary key markers before editing
             update_sql = f"""
                 UPDATE `{target_registry}`
                 SET NodeNum = '{edit_nodenum.strip()}',
                     Project = '{edit_proj.strip()}',
                     Location = '{edit_loc.strip()}',
-                    Bank = '{edit_bank.strip()}',
+                    Bank = {sql_bank},
                     Depth = {sql_depth},
                     SensorStatus = '{edit_status}',
                     Start_Date = DATE('{edit_start.isoformat()}'),
                     End_Date = {sql_end}
-                WHERE NodeNum = '{node_id}' 
-                  AND Start_Date = DATE('{pd.to_datetime(start_dt).strftime('%Y-%m-%d')}')
+                WHERE NodeNum = '{target_record['NodeNum']}' 
+                  AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
             """
             try:
                 client.query(update_sql).result()
-                st.success("✅ Changes saved to registry database successfully.")
+                st.success("✅ Configuration modifications saved directly to BigQuery records.")
                 st.cache_data.clear()
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Failed to update node properties: {e}")
+                st.error(f"Failed to modify chosen timeline record: {e}")
 
-    # 4. WORKFLOW EXECUTION BUTTONS
+    # 4. OPERATIONAL TASK BUTTONS
     st.markdown("##### Quick Operational Tasks")
     c_act1, c_act2 = st.columns(2)
     
-    # --- ACTION A: END ASSIGNMENT ---
+    # --- END ASSIGNMENT ---
     with c_act1.expander("🔚 End Assignment"):
         end_date_input = st.date_input("Decommission Date Selection", value=datetime.now().date(), key="end_assign_dt")
         end_status_input = st.selectbox("Return Stock Status Parameter", ["Available", "Diagnostic", "Dead"], key="end_assign_st")
@@ -496,21 +520,21 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             """
             try:
                 client.query(bulk_sql).result()
-                st.success(f"✅ Node {node_id} returned back to Office stock configurations.")
+                st.success(f"✅ Node {node_id} ended and transferred to Office stock records.")
                 st.cache_data.clear()
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Transaction failed: {e}")
+                st.error(f"Transaction execution failed: {e}")
 
-    # --- ACTION B: CHANGE SENSOR (SWAP WORKFLOW) ---
+    # --- CHANGE SENSOR ---
     with c_act2.expander("🔄 Change Sensor"):
         swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
         swap_date_input = st.date_input("Swap Execution Date", value=datetime.now().date(), key="swap_sensor_dt")
         
         if st.button("Execute Change Sensor", type="primary", use_container_width=True):
             if not swap_node_input.strip():
-                st.error("Please insert a valid target hardware serialization replacement value.")
+                st.error("Please insert a valid target hardware replacement ID.")
             else:
                 date_str = swap_date_input.isoformat()
                 swap_sql = f"""
@@ -533,13 +557,12 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 """
                 try:
                     client.query(swap_sql).result()
-                    st.success(f"🔄 Component changed successfully: {node_id} swapped out for {swap_node_input.strip()}.")
+                    st.success(f"🔄 Sensor changed successfully: {node_id} swapped for {swap_node_input.strip()}.")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Core sensor change routine execution failed: {e}")
-
+                    st.error(f"Sensor change transaction execution routine failed: {e}")
 
 def render_data_checker(client, reg_df):
     """
