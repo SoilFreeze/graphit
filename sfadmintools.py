@@ -688,7 +688,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     except Exception as e:
                         st.error(f"Failed to execute row delete query logic: {e}")
 
-    def render_data_checker(client, reg_df):
+def render_data_checker(client, reg_df):
     """
     Scans node deployment timelines to isolate configuration patterns and pipeline errors.
     """
