@@ -494,68 +494,118 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
 
 def render_data_checker(client, reg_df):
     """
-    Scans entire inventory system to pinpoint nodes that are unassigned, 
-    have gaps in service, or hold dirty telemetry flags.
+    Scans node deployment timelines to isolate configuration patterns and pipeline errors.
     """
     st.markdown("---")
     st.subheader("🔍 Data Checker Diagnostics")
     
-    c1, c2, c3 = st.tabs(["⚠️ Currently Unassigned Nodes", "⏱️ Gaps in Service (>2hr)", "🧨 Data That Isn't Clean"])
+    c1, c2, c3 = st.tabs([
+        "✅ Fully Assigned Nodes", 
+        "⏱️ Gaps in Data (Missing Office Time)", 
+        "🚨 Orphaned Nodes (Missing Next Assignment)"
+    ])
     
-    # 1. CURRENTLY UNASSIGNED NODES
-    with c1:
-        unassigned_df = reg_df[
-            (reg_df['End_Date'].isna()) & 
-            ((reg_df['Project'].isna()) | (reg_df['Project'] == "") | (reg_df['Project'] == "Office") | (reg_df['Location'] == "Office Stock"))
-        ].copy()
-        if not unassigned_df.empty:
-            st.dataframe(unassigned_df[['NodeNum', 'SensorStatus', 'Start_Date']], use_container_width=True, hide_index=True)
+    # Ensure date objects are handled correctly for sorting and arithmetic comparisons
+    df = reg_df.copy()
+    df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.date
+    df['End_Date'] = pd.to_datetime(df['End_Date']).dt.date
+    
+    # Group records by sensor to analyze historical tracking lineages
+    grouped = df.groupby('NodeNum')
+    
+    fully_assigned = []
+    gaps_in_data = []
+    orphaned_nodes = []
+    
+    today = datetime.now().date()
+    
+    for node_id, group in grouped:
+        # Sort history chronologically
+        sorted_group = group.sort_values(by='Start_Date')
+        records = sorted_group.to_dict('records')
+        
+        has_gap = False
+        is_orphaned = False
+        
+        # Check tracking lineage for chronological gaps or trailing loose ends
+        for i in range(len(records)):
+            current_rec = records[i]
+            
+            # Condition A: Check if any row is missing a critical Start Date
+            if pd.isnull(current_rec['Start_Date']):
+                has_gap = True
+                continue
+                
+            # Condition B: Check for an internal date discrepancy between historical rows
+            if i < len(records) - 1:
+                next_rec = records[i+1]
+                if pd.notnull(current_rec['End_Date']) and pd.notnull(next_rec['Start_Date']):
+                    # If there is a lapse of more than 1 day between tracking entries, it's an unassigned gap
+                    if (next_rec['Start_Date'] - current_rec['End_Date']).days > 1:
+                        has_gap = True
+            else:
+                # Condition C: Examine the final timeline entry for an unresolved trailing end date
+                if pd.notnull(current_rec['End_Date']):
+                    is_orphaned = True
+
+        # Sort the Node IDs into their respective diagnostic reporting lists
+        if has_gap:
+            gaps_in_data.append(node_id)
+        elif is_orphaned:
+            orphaned_nodes.append(node_id)
         else:
-            st.success("✅ All tracking hardware is currently deployed to active projects.")
+            # Nodes with an active assignment (No End Date) and no chronological internal gaps
+            active_rec = sorted_group[sorted_group['End_Date'].isna()]
+            if not active_rec.empty:
+                fully_assigned.append({
+                    "Node ID": node_id,
+                    "Project": active_rec.iloc[0]['Project'],
+                    "Location": active_rec.iloc[0]['Location'],
+                    "Start Date": active_rec.iloc[0]['Start_Date']
+                })
 
-    # 2. GAPS IN SERVICE (>2 Hours)
+    # ===============================================================
+    # TAB 1: FULLY ASSIGNED NODES
+    # ===============================================================
+    with c1:
+        st.markdown("##### Nodes with a start date that are actively assigned the entire time")
+        if fully_assigned:
+            fa_df = pd.DataFrame(fully_assigned)
+            st.dataframe(fa_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No active nodes currently meet the fully continuous assignment definition.")
+
+    # ===============================================================
+    # TAB 2: GAPS IN DATA (MISSING OFFICE TIME)
+    # ===============================================================
     with c2:
-        gap_q = f"""
-            SELECT n.NodeNum, n.Project, n.Location, MAX(m.timestamp) as last_ping,
-                   TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), MAX(m.timestamp), HOUR) as hours_offline
-            FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
-            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
-            WHERE n.End_Date IS NULL AND n.Project != 'Office'
-            GROUP BY 1, 2, 3
-            HAVING hours_offline >= 2 OR last_ping IS NULL
-            ORDER BY hours_offline DESC
-        """
-        try:
-            gap_df = client.query(gap_q).to_dataframe()
-            if not gap_df.empty:
-                gap_df['last_ping'] = gap_df['last_ping'].dt.strftime('%Y-%m-%d %H:%M')
-                st.dataframe(gap_df.rename(columns={
-                    'NodeNum': 'Node ID', 'hours_offline': 'Gaps in Service (Hours)', 'last_ping': 'Last Activity Log'
-                }), use_container_width=True, hide_index=True)
-            else:
-                st.success("✅ No operational sensor arrays show active coverage gaps at this time.")
-        except Exception as e:
-            st.error(f"Failed to scan service gaps: {e}")
+        st.markdown("##### Nodes with a chronological gap where they were not assigned—requires unmonitored time to be added to Office")
+        if gaps_in_data:
+            gap_display_df = df[df['NodeNum'].isin(gaps_in_data)].sort_values(['NodeNum', 'Start_Date'])
+            st.dataframe(
+                gap_display_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
 
-    # 3. DATA THAT ISN'T CLEAN (Active rejections)
+    # ===============================================================
+    # TAB 3: ORPHANED NODES (MISSING NEXT ASSIGNMENT)
+    # ===============================================================
     with c3:
-        dirty_q = f"""
-            SELECT NodeNum, approve as flag_status, COUNT(*) as dirty_point_count
-            FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections`
-            WHERE approve IN ('BadData', 'Masked')
-            GROUP BY 1, 2
-            ORDER BY dirty_point_count DESC
-        """
-        try:
-            dirty_df = client.query(dirty_q).to_dataframe()
-            if not dirty_df.empty:
-                st.dataframe(dirty_df.rename(columns={
-                    'NodeNum': 'Node ID', 'flag_status': 'Applied Data Label', 'dirty_point_count': 'Total Marked Rejections'
-                }), use_container_width=True, hide_index=True)
-            else:
-                st.success("✅ Central database rejection library holds no flagged manual anomalies.")
-        except Exception as e:
-            st.error(f"Failed to compile dirty data report: {e}")
+        st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
+        if orphaned_nodes:
+            orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
+            # Target the trailing terminated entry row specifically for visual clarity
+            last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
+            st.dataframe(
+                last_entries[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], 
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
 
 # ===============================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
@@ -779,13 +829,14 @@ def render_sensor_status_charts(client, node_id, project_id):
     """
     st.markdown(f"### 📊 Comparative Analysis: **{node_id}** vs. Location Baseline")
     
-    # Optimized window query utilizing a Window function to get both traces side-by-side
+    # Bug Fix: Referencing the global constants explicitly via string concatenation safely
     chart_q = f"""
         WITH TimedPeers AS (
             SELECT 
                 timestamp,
                 temperature,
                 Location,
+                NodeNum,
                 AVG(temperature) OVER (PARTITION BY Location, timestamp) as peer_avg
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             WHERE Project = @proj_id
@@ -907,20 +958,29 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         df['Status'] = df['hrs_lag'].apply(lambda x: f"🟢 {x:.1f}h" if x <= 1.1 else f"🔴 {x:.1f}h")
 
         st.subheader("🔍 Detailed Sensor Audit")
-        st.dataframe(
-            df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"]].sort_values(['Location', 'NodeNum']),
-            use_container_width=True, hide_index=True
+        
+        # UI Upgrade: Convert static dataframe presentation into an interactive checkbox table
+        display_df = df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"]].sort_values(['Location', 'NodeNum']).copy()
+        display_df.insert(0, "Select", False)
+        
+        edited_df = st.data_editor(
+            display_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
+            disabled=[col for col in display_df.columns if col != "Select"],
+            key="sensor_status_editor"
         )
+
+        # Resolve interactive row checkbox choice to generate comparative charts
+        selected_rows = edited_df[edited_df["Select"] == True]
         
-        # --- NEW VISUAL INVESTIGATION ENGINE BLOCK ---
-        st.divider()
-        st.subheader("🔬 Target Node Visual Investigator")
-        
-        node_options = sorted(df['NodeNum'].unique().tolist(), key=natural_sort_key)
-        target_node = st.selectbox("Select a sensor to chart against its location mean baseline:", node_options)
-        
-        if target_node:
+        if not selected_rows.empty:
+            st.divider()
+            target_node = selected_rows.iloc[0]["NodeNum"]
             render_sensor_status_charts(client, target_node, selected_project)
+        else:
+            st.info("💡 **Tip:** Use the checkbox in the audit table above to instantly pull up a comparative analysis graph for any sensor.")
 
     except Exception as e:
         st.error(f"Sensor Status Error: {e}")
