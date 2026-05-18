@@ -1580,11 +1580,11 @@ def render_recovery_logic_footer():
 
 def render_project_master_page(client, selected_project):
     """
-    Main entry point for Project Lifecycle Management.
+    Main entry point for Project Lifecycle Management workspace dashboards.
     """
     st.header("⚙️ Project Lifecycle Management")
     
-    # Updated tab navigation labeling schemas
+    # Navigation mapping matrix choices
     action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True)
     table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
 
@@ -1598,6 +1598,11 @@ def render_project_master_page(client, selected_project):
         render_update_project_form(client, selected_project, table_projects)
 
 
+def local_datetime_converter(series):
+    """Helper formatting string parser utility converting datetimes to clean dates."""
+    return pd.to_datetime(series, errors='coerce').dt.date
+
+
 def render_project_overview(client, table_projects):
     """
     Displays all core schema fields across all registered system environments.
@@ -1606,12 +1611,14 @@ def render_project_overview(client, table_projects):
     
     query = f"SELECT * FROM `{table_projects}` ORDER BY Project ASC"
     try:
-        df = client.query(query).to_dataframe()
+        with st.spinner("Extracting structural project lists..."):
+            df = client.query(query).to_dataframe()
+            
         if not df.empty:
-            # Clean up date display formatting paradigms for data tables
+            # FIXED: Calling the corrected local utility function cleanly instead of patching the pd module namespace
             for col in ['Date_Freezedown', 'Date_Completion']:
                 if col in df.columns:
-                    df[col] = pd.to_dataframe_datetime_if_needed_or_date(df[col])
+                    df[col] = local_datetime_converter(df[col])
             
             st.dataframe(df, use_container_width=True, hide_index=True)
             st.caption(f"Total Combined Tracking Configurations in Registry: {len(df)}")
@@ -1621,11 +1628,6 @@ def render_project_overview(client, table_projects):
         st.error(f"Failed to extract historical project configuration records: {e}")
 
 
-def pd_to_dataframe_datetime_if_needed_or_date(series):
-    """Helper formatting string parser utility."""
-    return pd.to_datetime(series).dt.date
-
-
 def render_new_project_form(client, table_projects):
     """
     UI for registering a brand new job environment, supporting optional 
@@ -1633,7 +1635,6 @@ def render_new_project_form(client, table_projects):
     """
     st.subheader("🏗️ Initialize New Project Profile")
     
-    # Phase Duplicate Template Configuration Interface Block
     try:
         all_p_q = f"SELECT Project FROM `{table_projects}` ORDER BY Project ASC"
         existing_p_list = client.query(all_p_q).to_dataframe()['Project'].tolist()
@@ -1786,7 +1787,6 @@ def render_update_project_form(client, selected_project, table_projects):
                     st.error(f"Failed processing delete statement parameters: {e}")
             else:
                 st.error("Authorization verification mismatch token error.")
-
 
 # ===============================================================
 # PAGE: REF CURVE LIBRARY
