@@ -438,6 +438,30 @@ def render_node_historical_graph(client, node_id):
     except Exception as e:
         st.error(f"Failed generating historical context graph: {e}")
 
+def render_bulk_registry_page(client, proj_list):
+    """
+    Main orchestrator page for the Bulk Registry Manager toolset.
+    Splits layout between file ingestion and mass decommissioning.
+    """
+    st.title("📦 Bulk Registry Manager")
+    st.markdown(
+        """
+        Execute large-scale database operations across entire project lifecycles. 
+        Use the tabs below to initialize a fresh site deployment or decommission a field project.
+        """
+    )
+    
+    # Establish local table path context
+    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    
+    # Build structural sub-tabs matching your component workflows
+    tab_upload, tab_retire = st.tabs(["📥 Bulk Upload Deployment", "🔚 Project-Wide Decommission"])
+    
+    with tab_upload:
+        render_bulk_deployment_tab(client, target_registry)
+        
+    with tab_retire:
+        render_bulk_decommission_tab(client, proj_list, target_registry)
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
