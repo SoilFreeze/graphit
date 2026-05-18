@@ -335,7 +335,7 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 def render_node_selector(reg_df, proj_list):
     """
     Renders an active inventory node selection engine with integrated 
-    Last Seen reporting and no physical target remnants.
+    Last Seen reporting and administrative playground overwrite utilities.
     """
     st.subheader("🎯 Active Node Registry")
     
@@ -378,27 +378,72 @@ def render_node_selector(reg_df, proj_list):
 
     if df.empty:
         st.info("No matching nodes located under current filter parameters.")
-        return None
+    else:
+        # Render interactive row choosing engine via checkboxes
+        df.insert(0, "Select", False)
+        
+        edited_df = st.data_editor(
+            df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+                "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping")
+            },
+            disabled=[col for col in df.columns if col != "Select"],
+            key="node_registry_editor"
+        )
 
-    # Render interactive row choosing engine via checkboxes
-    df.insert(0, "Select", False)
+        selected_rows = edited_df[edited_df["Select"] == True]
+        if not selected_rows.empty:
+            return selected_rows.iloc[0].drop("Select").to_dict()
     
-    edited_df = st.data_editor(
-        df,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
-            "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping")
-        },
-        disabled=[col for col in df.columns if col != "Select"],
-        key="node_registry_editor"
-    )
-
-    selected_rows = edited_df[edited_df["Select"] == True]
-    if not selected_rows.empty:
-        return selected_rows.iloc[0].drop("Select").to_dict()
-    
+    # -----------------------------------------------------------------
+    # NEW ADMINISTRATIVE TOOL: FORCE OVERWRITE FROM PLAYGROUND DUMMY
+    # -----------------------------------------------------------------
+    st.markdown("---")
+    with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
+        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact snapshot copy of your `node_registry_dummy` table.")
+        
+        confirm_token = st.text_input(
+            "Type out 'OVERWRITE' to authorize replacing your production environment data models:", 
+            value="", 
+            key="force_production_overwrite_token_input"
+        )
+        
+        if st.button("💥 Wipe Production & Clone Playground Table", type="primary", use_container_width=True):
+            if confirm_token.strip() != "OVERWRITE":
+                st.error("Authorization token verification failed. Action aborted.")
+            else:
+                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+                dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
+                
+                # Configure query to execute an atomic rewrite snapshot truncate
+                job_config = bigquery.QueryJobConfig(
+                    write_disposition="WRITE_TRUNCATE"
+                )
+                
+                sql = f"SELECT * FROM `{dummy_table}`"
+                
+                try:
+                    with st.spinner("Executing complete environment teardown and reconstruction workflows..."):
+                        query_job = client.query(sql, job_config=job_config)
+                        # Explicit configuration layer pointing directly to destination table schemas
+                        query_job._properties['configuration']['query']['destinationTable'] = {
+                            'projectId': PROJECT_ID,
+                            'datasetId': DATASET_ID,
+                            'tableId': 'node_registry'
+                        }
+                        query_job.result()
+                        
+                    st.success("🔥 Production registry completely reset and replaced with dummy playground snapshot!")
+                    st.cache_data.clear()
+                    time.sleep(1.5)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to copy staging parameters: {e}")
+                    st.code(sql, language="sql")
+                    
     return None
 
 def render_node_historical_graph(client, node_id):
