@@ -1810,14 +1810,18 @@ def render_ref_curve_library_page(client):
     """
     st.subheader("📈 Reference Curve Library Matrix")
     
-    table_curves = f"{PROJECT_ID}.{DATASET_ID}.project_curves"
+    # Updated to point exactly to your table name
+    table_curves = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+    inventory_df = pd.DataFrame()
     
-    # Extract live curve records for on-screen metrics and routing
+    # Extract live curve records with built-in 404 missing table safety
     try:
         inventory_df = client.query(f"SELECT * FROM `{table_curves}` ORDER BY 1 ASC").to_dataframe()
+    except NotFound:
+        # Table doesn't exist yet - intercept error and display a clean setup message
+        st.info("ℹ️ Reference curve library initialized. Ready for your first base profile import setup below.")
     except Exception as e:
         st.error(f"Failed to extract live reference curve database logs: {e}")
-        inventory_df = pd.DataFrame()
 
     # Layout structural workspaces split between view pane and upload form
     tab_view, tab_upload, tab_delete = st.tabs(["📊 View Active Curves", "📥 Upload / Overwrite Curve File", "🗑️ Remove Profile"])
@@ -1832,7 +1836,6 @@ def render_ref_curve_library_page(client):
         render_curve_upload_form(client, table_curves)
 
     with tab_delete:
-        # Calls the hardened column mapping tool we just built
         render_curve_management_tools(client, inventory_df, table_curves)
 
 
@@ -1876,19 +1879,26 @@ def render_curve_upload_form(client, table_curves):
                 st.warning(f"Target Identity Identified: **{target_curve_identity}**")
                 
                 if st.form_submit_button("🚀 Commit & Overwrite Live Target Records"):
-                    # 2. HARDENED OVERWRITE TRANSACTION PURGE BLOCK
-                    # Drops any pre-existing rows for this curve identifier to make way for clean incoming records
-                    purge_sql = f"""
-                        DELETE FROM `{table_curves}`
-                        WHERE {found_id_col} = '{target_curve_identity}'
-                    """
                     
-                    with st.spinner("Purging old conflicting database record lineages..."):
-                        client.query(purge_sql).result()
+                    # 2. HARDENED TABLE EXISTENCE CHECK BEFORE PURGING
+                    table_exists = True
+                    try:
+                        client.get_table(table_curves)
+                    except NotFound:
+                        table_exists = False
+
+                    # Only run the DELETE purge if the table actually exists to run it against
+                    if table_exists:
+                        purge_sql = f"""
+                            DELETE FROM `{table_curves}`
+                            WHERE {found_id_col} = '{target_curve_identity}'
+                        """
+                        with st.spinner("Purging old conflicting database record lineages..."):
+                            client.query(purge_sql).result()
+                    else:
+                        st.caption("Creating brand new `reference_curves` table blueprint catalog in your dataset...")
 
                     # 3. STREAM STREAMLIT DATAFRAME INTO BIGQUERY STORAGE
-                    # We configure the job matrix to append cleanly since the purge handled removing the old rows
-                    from google.cloud import bigquery
                     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                     
                     with st.spinner("Streaming updated matrix telemetry payloads..."):
@@ -1902,7 +1912,6 @@ def render_curve_upload_form(client, table_curves):
 
         except Exception as file_parse_err:
             st.error(f"Failed parsing file interface pipelines: {file_parse_err}")
-
 
 def fetch_curve_inventory(client, table_curves):
     """
