@@ -1312,25 +1312,90 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
 # ===============================================================
-def render_bulk_registry_page(client, proj_list):
-    """Main entry point for Bulk Registry Operations & Playground Staging."""
-    st.header("📦 Bulk Registry Operations")
+def render_active_node_registry_page(client, target_registry):
+    """
+    Renders the master Active Node Registry inventory data grid, replacing 
+    the legacy PhysicalID column with real-time calculated 'Last Seen' telemetry hours.
+    """
+    st.header("🎯 Active Node Registry")
     
-    target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-    # Updated to point exactly to your dummy table name
-    table_playground = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
+    # 1. READ CONFIGURATION FILTER PARAMETERS
+    hide_archived = st.checkbox("Hide Archived Records", value=True, key="registry_hide_archived_toggle")
     
-    # Expanded tab structure to place Playground Staging at the front
-    bt0, bt1, bt2 = st.tabs(["🎮 Playground Staging Console", "📥 Site Deployment (CSV)", "🔚 Bulk Site Decommission"])
-
-    with bt0:
-        render_playground_staging_tab(client, target_registry, table_playground)
-
-    with bt1:
-        render_bulk_deployment_tab(client, target_registry)
-
-    with bt2:
-        render_bulk_decommission_tab(client, proj_list, target_registry)
+    # -----------------------------------------------------------------
+    # OPTIMIZED SINGLE-PASS TELEMETRY JOIN QUERY
+    # -----------------------------------------------------------------
+    # Pulls the deployment registration data and joins it with the most recent ping timestamp
+    master_query = f"""
+        WITH LatestTelemetry AS (
+            SELECT 
+                NodeNum, 
+                MAX(timestamp) as last_ping
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            GROUP BY NodeNum
+        )
+        SELECT 
+            R.*,
+            T.last_ping
+        FROM `{target_registry}` R
+        LEFT JOIN LatestTelemetry T 
+          ON R.NodeNum = T.NodeNum
+        ORDER BY R.Project ASC, R.Location ASC, R.NodeNum ASC
+    """
+    
+    try:
+        with st.spinner("Assembling structural timeline registry and telemetry profiles..."):
+            reg_df = client.query(master_query).to_dataframe()
+            
+        if reg_df.empty:
+            st.info("The node registry directory is currently empty.")
+            return
+            
+        # 2. RUN REAL-TIME DURATION LAG CALCULATION
+        now_utc = pd.Timestamp.now(tz='UTC')
+        reg_df['Last Seen'] = reg_df['last_ping'].apply(
+            lambda x: f"{max(0.0, (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600):.1f}h" 
+            if pd.notnull(x) else "No Pings"
+        )
+        
+        # 3. SCRUB PHYSICAL ID AND INTERNAL COLUMNS FROM THE INTERFACE
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
+        reg_df = reg_df.drop(columns=[c for c in cols_to_drop if c in reg_df.columns], errors='ignore')
+        
+        # 4. APPLY ON-SCREEN FILTERS (e.g., Hide Archived Records)
+        if hide_archived and 'SensorStatus' in reg_df.columns:
+            reg_df = reg_df[reg_df['SensorStatus'] != 'Archived']
+            
+        # 5. RENDER THE INTERACTIVE SELECTION GRID (Matching your layout)
+        st.markdown("### 📋 Current Asset Allocation Matrix")
+        
+        display_df = reg_df.copy()
+        display_df.insert(0, "Select", False)
+        
+        edited_registry_df = st.data_editor(
+            display_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
+            disabled=[col for col in display_df.columns if col != "Select"],
+            key="master_node_registry_interactive_grid"
+        )
+        
+        # Route checked rows into the detailed editor panel
+        chosen_nodes = edited_registry_df[edited_registry_df["Select"] == True]
+        if not chosen_nodes.empty:
+            st.divider()
+            # Isolate the original row dict structure to pass down to your render_node_action_manager
+            target_node_record = chosen_nodes.iloc[0].drop("Select").to_dict()
+            
+            # Extract clean unique projects for layout selectors
+            proj_list = sorted(reg_df['Project'].dropna().unique().tolist())
+            
+            # Pass our updated data into your custom action component manager
+            render_node_action_manager(client, target_node_record, reg_df, proj_list, target_registry)
+            
+    except Exception as e:
+        st.error(f"Failed to compile master node registry view grid: {e}")
 
 
 def render_playground_staging_tab(client, target_registry, table_playground):
