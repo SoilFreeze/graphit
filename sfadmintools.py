@@ -1237,13 +1237,13 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
 # ===============================================================
-
 def render_bulk_registry_page(client, proj_list):
     """Main entry point for Bulk Registry Operations & Playground Staging."""
     st.header("📦 Bulk Registry Operations")
     
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-    table_playground = f"{PROJECT_ID}.{DATASET_ID}.playground_registry"
+    # Updated to point exactly to your dummy table name
+    table_playground = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
     
     # Expanded tab structure to place Playground Staging at the front
     bt0, bt1, bt2 = st.tabs(["🎮 Playground Staging Console", "📥 Site Deployment (CSV)", "🔚 Bulk Site Decommission"])
