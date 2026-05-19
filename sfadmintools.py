@@ -689,7 +689,9 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             except Exception as e:
                 st.error(f"Failed to safely swap unique record rows: {e}")
 
+    # ===============================================================
     # 4. OPERATIONAL TASK PANEL
+    # ===============================================================
     st.markdown("##### Quick Operational Tasks")
     c_act1, c_act2, c_act3, c_act4 = st.columns(4)
     
@@ -701,6 +703,8 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             
             if st.button("Execute End Assignment", type="primary", use_container_width=True):
                 date_iso = end_date_input.isoformat()
+                
+                # FIXED: Standardized to BigQuery SQL compliance by removing the LIMIT keyword
                 bulk_sql = f"""
                     BEGIN TRANSACTION;
                     UPDATE `{target_registry}` 
@@ -719,7 +723,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     st.rerun()
                 except Exception as e:
                     st.error(f"Transaction execution failed: {e}")
-
     # --- CHANGE SENSOR ---
     with c_act2:
         with st.expander("🔄 Change Sensor"):
