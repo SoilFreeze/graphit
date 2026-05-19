@@ -2125,8 +2125,8 @@ def render_curve_upload_form(client, table_curves):
                 uploaded_file.seek(0)
                 uploaded_df = pd.read_excel(uploaded_file)
 
-            # Explicit check to verify if data points were extracted
-            if uploaded_df is Barney or uploaded_df.empty:
+            # Explicit check to verify if data points were extracted safely
+            if uploaded_df is None or uploaded_df.empty:
                 st.error("Uploaded dataset structure contains no parsable content tracking matrices. Stream pointer empty.")
                 return
 
