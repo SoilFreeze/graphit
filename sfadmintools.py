@@ -845,7 +845,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
                     where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
-                    # Explicit LIMIT 1 clause retains targeted single row removal accuracy without cascading updates
+                    # FIXED: Stripped out the illegal trailing 'LIMIT 1' keyword for BigQuery compliance
                     delete_sql = f"""
                         DELETE FROM `{target_registry}`
                         WHERE NodeNum = '{target_record['NodeNum']}'
@@ -855,7 +855,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                           AND {where_bank}
                           AND {where_depth}
                           AND {where_end}
-                        LIMIT 1
                     """
                     try:
                         client.query(delete_sql).result()
