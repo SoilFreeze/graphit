@@ -2378,80 +2378,64 @@ def render_management_controls():
     return target_scope, new_status
 
 
-def render_verification_step(client, where_str, telemetry_table, rejections_table):
-    """Queries BigQuery to show count and current status of data points."""
-    status_q = "Query not yet generated." 
-    
+def render_verification_step(client, where_str, raw_tables):
+    """Queries the actual raw telemetry tables to show match counts before deletion."""
     if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
-        # Resolve ambiguity by aliasing columns to 't'
-        aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
+        total_points = 0
+        summary_data = []
         
-        status_q = f"""
-            SELECT 
-                t.NodeNum,
-                COUNT(*) as Point_Count,
-                COALESCE(r.approve, 'TRUE') as current_status
-            FROM `{telemetry_table}` t
-            LEFT JOIN `{rejections_table}` r 
-                ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
-            WHERE {aliased_where}
-            GROUP BY t.NodeNum, current_status
-        """
-        
-        try:
-            with st.spinner("Analyzing current database flags..."):
-                res = client.query(status_q).to_dataframe()
-            
-            if not res.empty:
-                st.subheader("📊 Current Data Profile")
-                st.info("The table below shows how many points are currently 'TRUE' vs. already flagged.")
-                st.dataframe(res, use_container_width=True, hide_index=True)
-                
-                total_points = res['Point_Count'].sum()
-                st.metric("Total Points in Selection", f"{total_points:,}")
-            else:
-                st.warning("No data points found for this selection. Check your date and hour ranges.")
-                
-        except Exception as e:
-            st.error(f"Verification Failed: {e}")
-            st.code(status_q, language="sql")
-
-
-def render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table):
-    """Executes the actual database update via DELETE or MERGE transaction."""
-    st.info(f"Target Status for these points: **{new_status}**")
-    
-    if st.checkbox("I confirm these changes to the rejection library.", key="confirm_mgmt"):
-        if st.button(f"🚀 Execute Set to {new_status}", key="exec_mgmt_btn"):
-            aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
-            
-            if new_status == "TRUE":
-                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
-            else:
-                # HARDENED MERGE SCRIPT: Added DISTINCT to prevent duplicate source row tracking collisions
-                sql = f"""
-                    MERGE `{target_table}` T
-                    USING (
-                        SELECT DISTINCT NodeNum, timestamp 
-                        FROM `{telemetry_table}` t 
-                        WHERE {aliased_where}
-                    ) S
-                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
-                    WHEN MATCHED THEN
-                        UPDATE SET approve = '{new_status}'
-                    WHEN NOT MATCHED THEN
-                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
-                """
+        for table in raw_tables:
+            query = f"""
+                SELECT NodeNum, COUNT(*) as Point_Count
+                FROM `{table}`
+                WHERE {where_str}
+                GROUP BY NodeNum
+            """
             try:
-                with st.spinner("Executing database merge..."):
-                    job = client.query(sql)
-                    job.result()
-                st.success(f"Successfully processed {job.num_dml_affected_rows:,} records.")
-                st.cache_data.clear()
-                st.balloons()
+                res = client.query(query).to_dataframe()
+                if not res.empty:
+                    res['Raw_Table_Source'] = table.split('.')[-1]
+                    summary_data.append(res)
+                    total_points += res['Point_Count'].sum()
             except Exception as e:
-                st.error(f"Execution Error: {e}")
-                st.code(sql, language="sql")
+                st.warning(f"Could not scan table `{table.split('.')[-1]}`: {e}")
+                
+        if summary_data:
+            df_all = pd.concat(summary_data, ignore_index=True)
+            st.subheader("📊 Current Raw Data Profile")
+            st.info("The table below shows the exact number of matching data rows located inside your raw source tables.")
+            st.dataframe(df_all, use_container_width=True, hide_index=True)
+            st.metric("Total Points to be Permanently Removed", f"{total_points:,}")
+        else:
+            st.warning("No data points found for this selection across your raw telemetry tables. Check your date or threshold ranges.")
+
+
+def render_rejection_execution_step(client, where_str, raw_tables):
+    """Executes a direct physical DELETE on the targeted raw telemetry tables."""
+    st.markdown("##### 🚀 Step 2: Execute Hard Purge")
+    st.warning("⚠️ CRITICAL WARNING: This action will permanently delete these records from your raw database tables. This cannot be undone.")
+    
+    if st.checkbox("I confirm that I want to permanently delete these records from the raw tables.", key="confirm_mgmt"):
+        if st.button("🔥 Permanently Delete Target Records from Source Tables", type="primary", key="exec_mgmt_btn"):
+            total_deleted = 0
+            
+            for table in raw_tables:
+                sql = f"""
+                    DELETE FROM `{table}`
+                    WHERE {where_str}
+                """
+                try:
+                    with st.spinner(f"Purging data rows directly from `{table.split('.')[-1]}`..."):
+                        job = client.query(sql)
+                        job.result()
+                    total_deleted += job.num_dml_affected_rows
+                except Exception as e:
+                    st.error(f"Failed to delete from table `{table.split('.')[-1]}`: {e}")
+                    st.code(sql, language="sql")
+                    
+            st.success(f"✅ Clean purge successful! Permanently removed {total_deleted:,} rows directly from your raw telemetry storage tables.")
+            st.cache_data.clear()
+            st.balloons()
 
 def render_management_filters(reg_df, selected_project, target_scope):
     """
@@ -2543,24 +2527,40 @@ def build_management_where_clause(reg_df, selected_project, target_scope, f):
 
 
 def render_data_management_page(client, reg_df, selected_project):
-    """Main administrative block executing targeted telemetry rejections."""
-    st.header("🧨 Data Management (Manual Rejections)")
+    """Main administrative block for physically removing bad data from raw telemetry tables."""
+    st.header("🧨 Data Management (Direct Raw Data Purge)")
     
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
-    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush" 
-
-    target_scope, new_status = render_management_controls()
+    # 1. DEFINE YOUR ACTUAL RAW TELEMETRY TABLES
+    SENSORPUSH_RAW = f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush"
+    LORD_RAW = f"{PROJECT_ID}.{DATASET_ID}.raw_lord"  # <-- 💡 Note: If your Lord raw table is named differently (e.g. raw_twoway), change this string name
+    
+    # Scope Selection Panel
+    target_scope = st.radio(
+        "Target Scope", 
+        ["Project Wide", "Specific Location", "Specific Node"], 
+        horizontal=True, 
+        key="mgmt_target_scope"
+    )
     st.divider()
 
     filters = render_management_filters(reg_df, selected_project, target_scope)
     where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
     
-    # 1. Step 1: Verification
-    render_verification_step(client, where_str, telemetry_table, target_table)
+    # 2. DYNAMICALLY ROUTE TO THE CORRECT RAW SOURCE TABLES
+    if target_scope == "Specific Node":
+        selected_node = filters['scope_val']
+        if str(selected_node).startswith("TP-"):
+            raw_tables = [SENSORPUSH_RAW]
+        else:
+            raw_tables = [LORD_RAW]
+    else:
+        # For project-wide or location-wide operations, sweep both tables to catch everything
+        raw_tables = [SENSORPUSH_RAW, LORD_RAW]
+        
+    # 3. RUN THE SIMPLIFIED DIRECT PURGE WORKFLOW
+    render_verification_step(client, where_str, raw_tables)
     st.divider()
-    # 2. Step 2: Execution
-    render_rejection_execution_step(client, where_str, new_status, target_table, telemetry_table)
-
+    render_rejection_execution_step(client, where_str, raw_tables)
 
 # ===============================================================
 # FINAL INTEGRATED EXECUTION BLOCK
