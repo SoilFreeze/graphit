@@ -2099,8 +2099,8 @@ def render_ref_curve_library_page(client):
 def render_curve_upload_form(client, table_curves):
     """
     Handles parsing and automated overwriting routines for imported 
-    CSV/XLSX reference curve datasets. Automatically derives the unique 
-    curve identifier from the file name and dynamically handles row layout offsets.
+    CSV/XLSX reference curve datasets. Automatically derives headers from 
+    shifted positions and handles unlabelled row index templates safely.
     """
     st.markdown("##### 📥 Import Engineering Calibration Profile")
     st.info("💡 Overwrite rule active: Uploading a file with an identical curve identifier will wipe its old historical data blocks and replace them completely.")
@@ -2109,11 +2109,10 @@ def render_curve_upload_form(client, table_curves):
 
     if uploaded_file is not None:
         try:
-            # 1. HARDENED STREAM HANDLING & DYNAMIC PARSING LAYER
+            # 1. ENCODING SAFE PARSING LAYER
             if uploaded_file.name.endswith('.csv'):
                 try:
                     uploaded_file.seek(0)
-                    # Read without skipping first to evaluate true row alignment
                     uploaded_df = pd.read_csv(uploaded_file)
                 except UnicodeDecodeError:
                     uploaded_file.seek(0)  
@@ -2127,38 +2126,47 @@ def render_curve_upload_form(client, table_curves):
                 return
 
             # -----------------------------------------------------------------
-            # SMART SCANNER: Fix empty previews by detecting data row shifts
+            # DYNAMIC ROW HEADER PROMOTER (Fixes the Empty Preview)
             # -----------------------------------------------------------------
-            # If the first column name looks like an unparsed number, the file doesn't have headers
-            first_col_name = str(uploaded_df.columns[0]).strip()
-            if first_col_name.replace('.','',1).isdigit() or first_col_name.startswith('-'):
-                # Reload file forcing clean positional index labels to prevent data loss
-                uploaded_file.seek(0)
-                if uploaded_file.name.endswith('.csv'):
-                    try:
-                        uploaded_df = pd.read_csv(uploaded_file, header=None, names=['Day', 'Temp'])
-                    except UnicodeDecodeError:
-                        uploaded_file.seek(0)
-                        uploaded_df = pd.read_csv(uploaded_file, encoding='ISO-8859-1', header=None, names=['Day', 'Temp'])
-                else:
-                    uploaded_df = pd.read_excel(uploaded_file, header=None, names=['Day', 'Temp'])
-                st.caption("ℹ️ No text header row detected. Automatically mapped columns to 'Day' and 'Temp'.")
+            # If row 1 column headers are completely unlabelled/blank:
+            if all(str(col).startswith("Unnamed:") for col in uploaded_df.columns):
+                # Check if row 2 contains the actual column names (like Time (d) or Temperature)
+                if not uploaded_df.empty and any(any(x in str(val) for x in ['Time', 'Temp', '°']) for val in uploaded_df.iloc[0].values):
+                    # Extract row 2 values to serve as the real headers
+                    real_headers = [str(val).strip() for val in uploaded_df.iloc[0].values]
+                    uploaded_df.columns = real_headers
+                    uploaded_df = uploaded_df.iloc[1:].reset_index(drop=True)
+                    st.caption("🧹 Detected and removed empty placeholder row at the top. Promoted text metrics to headers.")
 
-            # Strip out completely empty rows or auto-generated index labels safely
-            uploaded_df = uploaded_df.dropna(how='all')
+            # Drop any remaining unmapped junk columns safely without wiping the valid data
             unnamed_cols = [col for col in uploaded_df.columns if str(col).startswith("Unnamed:")]
-            if unnamed_cols:
+            if unnamed_cols and len(unnamed_cols) < len(uploaded_df.columns):
                 uploaded_df = uploaded_df.drop(columns=unnamed_cols)
+
+            # Strip completely empty separator lines out of the frame
+            uploaded_df = uploaded_df.dropna(how='all')
+
+            # Force standardized names for BigQuery schema alignment
+            rename_dict = {}
+            for col in uploaded_df.columns:
+                c_upper = str(col).upper()
+                if 'TIME' in c_upper or 'DAY' in c_upper:
+                    rename_dict[col] = 'Day'
+                elif 'TEMP' in c_upper or '°' in c_upper:
+                    rename_dict[col] = 'Temp'
+            
+            if rename_dict:
+                uploaded_df = uploaded_df.rename(columns=rename_dict)
 
             # Final check to guarantee data rows are ready for preview display
             if len(uploaded_df) == 0:
-                st.error("❌ File parsing yielded zero records. Open your CSV to confirm data exists below the headers.")
+                st.error("❌ File parsing yielded zero records. Check your column headers.")
                 return
 
-            st.caption(f"🔍 Previewing Imported Dataset Elements ({len(uploaded_df)} total rows found):")
+            st.caption(f"🔍 Previewing Verified Dataset Elements ({len(uploaded_df)} total data rows found):")
             st.dataframe(uploaded_df.head(5), use_container_width=True, hide_index=True)
 
-            # 2. IDENTIFIER RESOLUTION LOGIC
+            # 2. IDENTIFIER RESOLUTION LOGIC (Filename Fallback Extraction)
             possible_id_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
             found_id_col = next((c for c in possible_id_cols if c in uploaded_df.columns), None)
 
@@ -2185,7 +2193,7 @@ def render_curve_upload_form(client, table_curves):
                         purge_sql = f"DELETE FROM `{table_curves}` WHERE {sql_id_match_col} = '{target_curve_identity}'"
                         client.query(purge_sql).result()
 
-                    # Ensure standard column data type consistency before sending to BigQuery
+                    # Clean data formatting variables to match decimal configurations
                     if 'Day' in uploaded_df.columns and 'Temp' in uploaded_df.columns:
                         uploaded_df['Day'] = pd.to_numeric(uploaded_df['Day'], errors='coerce')
                         uploaded_df['Temp'] = pd.to_numeric(uploaded_df['Temp'], errors='coerce')
@@ -2202,7 +2210,7 @@ def render_curve_upload_form(client, table_curves):
 
         except Exception as file_parse_err:
             st.error(f"Failed parsing file interface pipelines: {file_parse_err}")
-
+            
 def fetch_curve_inventory(client, table_curves):
     """
     Fetches current library stats with robust column handling.
