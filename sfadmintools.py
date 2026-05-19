@@ -2099,7 +2099,8 @@ def render_ref_curve_library_page(client):
 def render_curve_upload_form(client, table_curves):
     """
     Handles parsing and automated overwriting routines for imported 
-    CSV/XLSX reference curve datasets with robust encoding defense fallback layers.
+    CSV/XLSX reference curve datasets. Automatically derives the unique 
+    curve identifier from the file name if a column match isn't present.
     """
     st.markdown("##### 📥 Import Engineering Calibration Profile")
     st.info("💡 Overwrite rule active: Uploading a file with an identical curve identifier will wipe its old historical data blocks and replace them completely.")
@@ -2108,14 +2109,12 @@ def render_curve_upload_form(client, table_curves):
 
     if uploaded_file is not None:
         try:
-            # 1. HARDENED PARSING ENGINE: Multi-encoding fallbacks for handling degree symbols safely
+            # 1. ENCODING SAFE PARSING LAYER
             if uploaded_file.name.endswith('.csv'):
                 try:
-                    # Attempt strict standard UTF-8 parsing first
                     uploaded_df = pd.read_csv(uploaded_file)
                 except UnicodeDecodeError:
-                    # Fall back to Latin-1/Windows encoding if degree symbol (° / 0xb0) breaks standard UTF-8 rules
-                    uploaded_file.seek(0)  # Rewind file pointer stream back to start
+                    uploaded_file.seek(0)  # Rewind file stream pointer
                     uploaded_df = pd.read_csv(uploaded_file, encoding='ISO-8859-1')
             else:
                 uploaded_df = pd.read_excel(uploaded_file)
@@ -2127,41 +2126,50 @@ def render_curve_upload_form(client, table_curves):
             st.caption("🔍 Previewing Imported Dataset Elements (First 5 Rows):")
             st.dataframe(uploaded_df.head(5), use_container_width=True, hide_index=True)
 
-            # Detect identifier columns safely 
+            # 2. FIXED IDENTIFIER RESOLUTION LOGIC
             possible_id_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
             found_id_col = next((c for c in possible_id_cols if c in uploaded_df.columns), None)
 
-            if not found_id_col:
-                st.error("Upload aborted: Missing required unique identification tag column (e.g., 'Curve Identifier').")
-                return
-
-            # Isolate the targeted name parameter from the imported file context
-            target_curve_identity = str(uploaded_df[found_id_col].iloc[0]).strip()
+            if found_id_col:
+                # If the spreadsheet contains an ID column, extract it from row 1
+                target_curve_identity = str(uploaded_df[found_id_col].iloc[0]).strip()
+                sql_id_match_col = found_id_col
+            else:
+                # FALLBACK UTILITY: Derive identity string directly from the file name (e.g. "2527-TP...t Clay")
+                target_curve_identity = uploaded_file.name.rsplit('.', 1)[0].strip()
+                
+                # Check your primary schema database to use the correct target column mapping variant
+                # Default to CurveID for standard multi-file uploads compliance
+                sql_id_match_col = "CurveID" 
+                
+                # Automatically inject the Derived Identifier into the memory DataFrame so BigQuery can store it
+                uploaded_df[sql_id_match_col] = target_curve_identity
+                st.info(f"📋 Derived unique tracking reference identifier from filename: **{target_curve_identity}**")
 
             with st.form("confirm_curve_overwrite_upload_form"):
-                st.warning(f"Target Identity Identified: **{target_curve_identity}**")
+                st.warning(f"Target Identity Scheduled for Overwrite: **{target_curve_identity}**")
                 
                 if st.form_submit_button("🚀 Commit & Overwrite Live Target Records"):
                     
-                    # 2. HARDENED TABLE EXISTENCE CHECK BEFORE PURGING
                     table_exists = True
                     try:
                         client.get_table(table_curves)
                     except NotFound:
                         table_exists = False
 
-                    # Only run the DELETE purge if the table actually exists to run it against
+                    # Only run the database purge statement if the target table exists
                     if table_exists:
                         purge_sql = f"""
                             DELETE FROM `{table_curves}`
-                            WHERE {found_id_col} = '{target_curve_identity}'
+                            WHERE {sql_id_match_col} = '{target_curve_identity}'
                         """
                         with st.spinner("Purging old conflicting database record lineages..."):
                             client.query(purge_sql).result()
                     else:
                         st.caption("Creating brand new `reference_curves` table blueprint catalog in your dataset...")
 
-                    # 3. STREAM STREAMLIT DATAFRAME INTO BIGQUERY STORAGE
+                    # 3. STREAM AND WRITE DATAFRAME PAYLOADS
+                    # Explicit load job layout setup configures flexible schema generation
                     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                     
                     with st.spinner("Streaming updated matrix telemetry payloads..."):
