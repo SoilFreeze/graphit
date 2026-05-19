@@ -2099,7 +2099,7 @@ def render_ref_curve_library_page(client):
 def render_curve_upload_form(client, table_curves):
     """
     Handles parsing and automated overwriting routines for imported 
-    CSV/XLSX reference curve datasets.
+    CSV/XLSX reference curve datasets with robust encoding defense fallback layers.
     """
     st.markdown("##### 📥 Import Engineering Calibration Profile")
     st.info("💡 Overwrite rule active: Uploading a file with an identical curve identifier will wipe its old historical data blocks and replace them completely.")
@@ -2108,9 +2108,15 @@ def render_curve_upload_form(client, table_curves):
 
     if uploaded_file is not None:
         try:
-            # 1. Parse uploaded matrix stream into memory
+            # 1. HARDENED PARSING ENGINE: Multi-encoding fallbacks for handling degree symbols safely
             if uploaded_file.name.endswith('.csv'):
-                uploaded_df = pd.read_csv(uploaded_file)
+                try:
+                    # Attempt strict standard UTF-8 parsing first
+                    uploaded_df = pd.read_csv(uploaded_file)
+                except UnicodeDecodeError:
+                    # Fall back to Latin-1/Windows encoding if degree symbol (° / 0xb0) breaks standard UTF-8 rules
+                    uploaded_file.seek(0)  # Rewind file pointer stream back to start
+                    uploaded_df = pd.read_csv(uploaded_file, encoding='ISO-8859-1')
             else:
                 uploaded_df = pd.read_excel(uploaded_file)
 
