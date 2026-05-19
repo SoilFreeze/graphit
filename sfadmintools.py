@@ -2100,8 +2100,7 @@ def render_curve_upload_form(client, table_curves):
     """
     Handles parsing and automated overwriting routines for imported 
     CSV/XLSX reference curve datasets. Automatically derives the unique 
-    curve identifier from the file name if a column match isn't present,
-    and strips out unintended auto-generated row index columns.
+    curve identifier from the file name and dynamically handles row layout offsets.
     """
     st.markdown("##### 📥 Import Engineering Calibration Profile")
     st.info("💡 Overwrite rule active: Uploading a file with an identical curve identifier will wipe its old historical data blocks and replace them completely.")
@@ -2110,37 +2109,56 @@ def render_curve_upload_form(client, table_curves):
 
     if uploaded_file is not None:
         try:
-            # 1. HARDENED STREAM HANDLING & ENCODING SAFE PARSING LAYER
+            # 1. HARDENED STREAM HANDLING & DYNAMIC PARSING LAYER
             if uploaded_file.name.endswith('.csv'):
                 try:
-                    # Ensure the file stream pointer is exactly at the start
                     uploaded_file.seek(0)
+                    # Read without skipping first to evaluate true row alignment
                     uploaded_df = pd.read_csv(uploaded_file)
                 except UnicodeDecodeError:
-                    # Rewind file stream pointer before attempting fallback Windows codec parsing
                     uploaded_file.seek(0)  
                     uploaded_df = pd.read_csv(uploaded_file, encoding='ISO-8859-1')
             else:
-                # Ensure stream pointer is at the start for Excel spreadsheets too
                 uploaded_file.seek(0)
                 uploaded_df = pd.read_excel(uploaded_file)
 
-            # Explicit check to verify if data points were extracted safely
             if uploaded_df is None or uploaded_df.empty:
-                st.error("Uploaded dataset structure contains no parsable content tracking matrices. Stream pointer empty.")
+                st.error("Uploaded dataset structure contains no parsable rows. Stream pointer empty.")
                 return
 
-            # 2. STRIP AUTOMATIC ROW INDEX COLUMNS TO MATCH BIGQUERY SCHEMA
-            # Drops auto-generated columns like 'Unnamed: 0' caused by blank index headers
+            # -----------------------------------------------------------------
+            # SMART SCANNER: Fix empty previews by detecting data row shifts
+            # -----------------------------------------------------------------
+            # If the first column name looks like an unparsed number, the file doesn't have headers
+            first_col_name = str(uploaded_df.columns[0]).strip()
+            if first_col_name.replace('.','',1).isdigit() or first_col_name.startswith('-'):
+                # Reload file forcing clean positional index labels to prevent data loss
+                uploaded_file.seek(0)
+                if uploaded_file.name.endswith('.csv'):
+                    try:
+                        uploaded_df = pd.read_csv(uploaded_file, header=None, names=['Day', 'Temp'])
+                    except UnicodeDecodeError:
+                        uploaded_file.seek(0)
+                        uploaded_df = pd.read_csv(uploaded_file, encoding='ISO-8859-1', header=None, names=['Day', 'Temp'])
+                else:
+                    uploaded_df = pd.read_excel(uploaded_file, header=None, names=['Day', 'Temp'])
+                st.caption("ℹ️ No text header row detected. Automatically mapped columns to 'Day' and 'Temp'.")
+
+            # Strip out completely empty rows or auto-generated index labels safely
+            uploaded_df = uploaded_df.dropna(how='all')
             unnamed_cols = [col for col in uploaded_df.columns if str(col).startswith("Unnamed:")]
             if unnamed_cols:
                 uploaded_df = uploaded_df.drop(columns=unnamed_cols)
-                st.caption(f"🧹 Cleaned up {len(unnamed_cols)} unmapped index column(s) from memory layout.")
 
-            st.caption("🔍 Previewing Imported Dataset Elements (First 5 Rows):")
+            # Final check to guarantee data rows are ready for preview display
+            if len(uploaded_df) == 0:
+                st.error("❌ File parsing yielded zero records. Open your CSV to confirm data exists below the headers.")
+                return
+
+            st.caption(f"🔍 Previewing Imported Dataset Elements ({len(uploaded_df)} total rows found):")
             st.dataframe(uploaded_df.head(5), use_container_width=True, hide_index=True)
 
-            # 3. IDENTIFIER RESOLUTION LOGIC (Filename Fallback Extraction)
+            # 2. IDENTIFIER RESOLUTION LOGIC
             possible_id_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
             found_id_col = next((c for c in possible_id_cols if c in uploaded_df.columns), None)
 
@@ -2157,30 +2175,25 @@ def render_curve_upload_form(client, table_curves):
                 st.warning(f"Target Identity Scheduled for Overwrite: **{target_curve_identity}**")
                 
                 if st.form_submit_button("🚀 Commit & Overwrite Live Target Records"):
-                    
                     table_exists = True
                     try:
                         client.get_table(table_curves)
                     except NotFound:
                         table_exists = False
 
-                    # Only run the database purge statement if the target table exists
                     if table_exists:
-                        purge_sql = f"""
-                            DELETE FROM `{table_curves}`
-                            WHERE {sql_id_match_col} = '{target_curve_identity}'
-                        """
-                        with st.spinner("Purging old conflicting database record lineages..."):
-                            client.query(purge_sql).result()
-                    else:
-                        st.caption("Creating brand new `reference_curves` table blueprint catalog in your dataset...")
+                        purge_sql = f"DELETE FROM `{table_curves}` WHERE {sql_id_match_col} = '{target_curve_identity}'"
+                        client.query(purge_sql).result()
 
-                    # 4. STREAM AND WRITE CLEANED DATAFRAME PAYLOADS TO BIGQUERY
+                    # Ensure standard column data type consistency before sending to BigQuery
+                    if 'Day' in uploaded_df.columns and 'Temp' in uploaded_df.columns:
+                        uploaded_df['Day'] = pd.to_numeric(uploaded_df['Day'], errors='coerce')
+                        uploaded_df['Temp'] = pd.to_numeric(uploaded_df['Temp'], errors='coerce')
+                        uploaded_df = uploaded_df.dropna(subset=['Day', 'Temp'])
+
                     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                    
-                    with st.spinner("Streaming updated matrix telemetry payloads..."):
-                        load_job = client.load_table_from_dataframe(uploaded_df, table_curves, job_config=job_config)
-                        load_job.result()
+                    load_job = client.load_table_from_dataframe(uploaded_df, table_curves, job_config=job_config)
+                    load_job.result()
 
                     st.success(f"✅ Overwrite complete! Baseline parameters for **{target_curve_identity}** updated cleanly.")
                     st.cache_data.clear()
