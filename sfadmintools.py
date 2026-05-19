@@ -2012,6 +2012,8 @@ def render_update_project_form(client, selected_project, table_projects):
             freeze_val = f"DATE('{u_date_freeze}')" if u_date_freeze else "NULL"
             comp_val = f"DATE('{u_date_comp}')" if u_date_comp else "NULL"
             
+            # FIXED: Removed Date_Completion from the UPDATE string to prevent the 400 error.
+            # If you add this column to BigQuery later, you can add "Date_Completion = {comp_val}" back here.
             update_q = f"""
                 UPDATE `{table_projects}` 
                 SET 
@@ -2022,8 +2024,7 @@ def render_update_project_form(client, selected_project, table_projects):
                     UploadNote = '{u_up_notes.strip()}',
                     AsBuiltFile = '{u_as_built.strip()}',
                     EngNotes = '{u_notes.strip()}',
-                    Date_Freezedown = {freeze_val},
-                    Date_Completion = {comp_val}
+                    Date_Freezedown = {freeze_val}
                 WHERE Project = '{selected_project}'
             """
             try:
@@ -2034,7 +2035,7 @@ def render_update_project_form(client, selected_project, table_projects):
                 st.rerun()
             except Exception as e:
                 st.error(f"Database translation pipeline update failure: {e}")
-
+                
     # Administrative Context Removal Tool (Separated from form updates to maintain safety scopes)
     st.markdown("---")
     with st.expander("🧨 Administrative Removal Tool Area"):
