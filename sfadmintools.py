@@ -23,7 +23,7 @@ def initialize_app():
     return "Temperature", "sensorpush-export"
 
 DATASET_ID, PROJECT_ID = initialize_app()
-display_tz = "America/Los_Angeles" 
+display_tz = "America/Los_Angeles"
 
 # ===============================================================
 # 2. DATABASE CLIENT
@@ -150,7 +150,7 @@ def load_registry_data(target_table):
         st.error(f"Error loading registry: {e}")
         return pd.DataFrame()
 # =============================================================================
-# 1. Helper functions
+# 1. Helper functions & Styling Engine
 # =============================================================================
 def get_trend_arrow(current, previous):
     if pd.isnull(current) or pd.isnull(previous): 
@@ -179,7 +179,7 @@ def assign_row_color(hours):
     """
     Returns the CSS background color based on the age of the data in hours.
     """
-    if hours is None or pd.isna(hours):  # Handles "Never" seen nodes safely
+    if hours is None or pd.isna(hours) or hours == float('inf'):  # Handles "Never" seen / offline nodes safely
         return "background-color: #d1d5db; color: #1f2937;"  # Gray
     elif hours < 1:
         return "background-color: #d1fae5; color: #065f46;"  # Green (<1 hr)
@@ -316,6 +316,8 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
             latest_time = g_df['latest_ts'].max()
             if latest_time.tzinfo is None:
                 latest_time = latest_time.tz_localize('UTC')
+            else:
+                latest_time = latest_time.tz_convert('UTC')
             
             lag_hrs = (now_utc - latest_time).total_seconds() / 3600
             val = g_df['avg_now'].mean() if pd.notnull(g_df['avg_now'].mean()) else g_df['latest_temp'].mean()
@@ -323,19 +325,52 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
             if lag_hrs > 1.1: 
                 st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
             else: 
-                st.title(f"{val:.1f}{unit_label}")
+                # Convert reading dynamically to reflect current global Celsius / Fahrenheit scale configurations
+                unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
+                display_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                st.title(f"{display_val:.1f}{unit_label}")
             
             # Simplified Summary Stats
             active_1h = int(g_df['avg_now'].notnull().sum())
             active_24h = int((g_df['pings_24h'] > 0).sum())
             st.write(f"**{active_1h}/{len(g_df)}** (1h) | **{active_24h}/{len(g_df)}** (24h)")
             
-            st.caption(f"Cur: {g_df['min_now'].min():.1f} to {g_df['max_now'].max():.1f}{unit_label}")
-            st.caption(f"24h: {g_df['min_24h'].min():.1f} to {g_df['max_24h'].max():.1f}{unit_label}")
+            # Safely check boundaries to prevent crash conditions on missing datasets
+            min_now_val = g_df['min_now'].min()
+            max_now_val = g_df['max_now'].max()
+            min_24h_val = g_df['min_24h'].min()
+            max_24h_val = g_df['max_24h'].max()
             
+            # Convert status thresholds for displaying localized caption text units cleanly
+            if pd.notnull(min_now_val) and pd.notnull(max_now_val):
+                mn = (min_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_now_val
+                mx = (max_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_now_val
+                st.caption(f"Cur: {mn:.1f} to {mx:.1f}{unit_label}")
+            else:
+                st.caption(f"Cur: N/A to N/A")
+                
+            if pd.notnull(min_24h_val) and pd.notnull(max_24h_val):
+                mn24 = (min_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_24h_val
+                mx24 = (max_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_24h_val
+                st.caption(f"24h: {mn24:.1f} to {mx24:.1f}{unit_label}")
+            else:
+                st.caption(f"24h: N/A to N/A")
+            
+            # Safely parse historical variance indexes inside secondary row allocations
             t_row = st.columns(2)
-            t_row[0].caption(f"1h\n{get_trend_arrow(val, g_df['avg_1h_prev'].mean())}")
-            t_row[1].caption(f"6h\n{get_trend_arrow(val, g_df['avg_6h_prev'].mean())}")
+            try:
+                prev_1h = g_df['avg_1h_prev'].mean()
+                arrow_1h = get_trend_arrow(val, prev_1h) if pd.notnull(prev_1h) else "➡️ N/A"
+                t_row[0].caption(f"1h\n{arrow_1h}")
+            except Exception:
+                t_row[0].caption("1h\n➡️ N/A")
+                
+            try:
+                prev_6h = g_df['avg_6h_prev'].mean()
+                arrow_6h = get_trend_arrow(val, prev_6h) if pd.notnull(prev_6h) else "➡️ N/A"
+                t_row[1].caption(f"6h\n{arrow_6h}")
+            except Exception:
+                t_row[1].caption("6h\n➡️ N/A")
             
 # ===============================================================
 # Function: Hardware integrity table
@@ -343,7 +378,7 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
 def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
     """
     Renders a detailed table showing connectivity, coverage, and recent activity.
-    Now includes natural sorting for improved readability.
+    Sorted chronologically by data latency (minutes first, then hours).
     """
     st.subheader("📋 Hardware Integrity & Connectivity")
     
@@ -367,46 +402,74 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         GROUP BY 1, 2, 3, 4, 5
     """
     
-    df = client.query(query, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-    )).to_dataframe()
+    try:
+        df = client.query(query, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        )).to_dataframe()
+    except Exception as e:
+        st.error(f"Hardware Table Query Failed: {e}")
+        return
 
     if df.empty: 
         st.info("No active nodes found for connectivity table.")
         return
 
-    # Natural Sorting Logic
-    df['bank_sort'] = df['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
-    df = df.sort_values(by=['Location', 'bank_sort', 'Depth']).drop(columns=['bank_sort'])
-
     now_utc = pd.Timestamp.now(tz='UTC')
 
+    # =============================================================================
+    # 1. PROCESS ROW METRICS & INJECT COLOR PROFILES
+    # =============================================================================
     def row_processor(row):
         ping = row['last_ping']
+        
         if pd.isnull(ping):
-            txt, style = "❌ Never", "background-color: #d3d3d3"
+            hours_hidden = float('inf')
+            txt = "❌ Never"
+            style = "background-color: #d1d5db; color: #1f2937;" # Gray
         else:
             ts = ping if ping.tzinfo else ping.tz_localize('UTC')
-            diff = (now_utc - ts).total_seconds() / 60
-            if diff <= 15: 
-                txt, style = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
-            elif diff <= 60: 
-                txt, style = f"{int(diff)}m ago", "background-color: #ffe4b5; color: black"
-            else: 
-                txt, style = f"{round(diff/60, 1)}h ago", "background-color: #ffcccb; color: black"
+            diff_mins = (now_utc - ts).total_seconds() / 60.0
+            hours_hidden = diff_mins / 60.0
+            
+            # Absolute matching for requested color boundaries
+            if hours_hidden < 1.0:
+                txt = f"{int(diff_mins)}m ago" if diff_mins >= 1.0 else "Just now"
+                style = "background-color: #d1fae5; color: #065f46;" # Green (<1 hr)
+            elif 1.0 <= hours_hidden <= 6.0:
+                txt = f"{hours_hidden:.1f}h ago"
+                style = "background-color: #fef08a; color: #854d0e;" # Yellow (1-6 hrs)
+            elif 6.0 < hours_hidden <= 12.0:
+                txt = f"{hours_hidden:.1f}h ago"
+                style = "background-color: #fed7aa; color: #9a3412;" # Orange (6-12 hrs)
+            elif 12.0 < hours_hidden <= 24.0:
+                txt = f"{hours_hidden:.1f}h ago"
+                style = "background-color: #fca5a5; color: #991b1b;" # Red (12-24 hrs)
+            else:
+                txt = f"{hours_hidden:.1f}h ago"
+                style = "background-color: #d1d5db; color: #1f2937;" # Gray (>24 hrs)
         
         pos = f"{row['Depth']}ft" if (pd.notnull(row['Depth']) and row['Depth'] != 0) else f"Bank {row['Bank']}"
         trend = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
-        return pd.Series([txt, style, pos, trend])
+        
+        return pd.Series([txt, style, pos, trend, hours_hidden])
 
-    df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend']] = df.apply(row_processor, axis=1)
+    # Map processors down into structural data frames
+    df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend', 'hours_hidden']] = df.apply(row_processor, axis=1)
 
+    # =============================================================================
+    # 2. ENFORCE CHRONOLOGICAL SORT SEQUENCE
+    # =============================================================================
+    # Force data field formats to floats, sorting true active pings ahead of infinity states
+    df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+    df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+
+    # Build optimized rendering dictionary structure 
     display_df = pd.DataFrame({
         "Node ID": df['NodeNum'],
         "Location": df['Location'],
         "Position": df['Pos_Label'],
         "Last Seen": df['Seen_Text'],
-        "24h Coverage": df['coverage_24h'].apply(lambda x: f"{x:.1f}%"),
+        "24h Coverage": df['coverage_24h'], # Kept numeric float value for native Progress Column mapping
         "1h Change": df['Trend'],
         "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label)),
         "1h Pings": df['pings_1h'],
@@ -414,29 +477,50 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         "24h Pings": df['pings_24h']
     })
 
+    # =============================================================================
+    # 3. UNIFIED MATRIX STYLER (Row and Cell overrides)
+    # =============================================================================
     def diagnostic_styler(data):
+        # Establish blank style canvas matching target configuration
         style_df = pd.DataFrame('', index=data.index, columns=data.columns)
-        ref = df.reset_index(drop=True)
-        for i, row in data.iterrows():
-            if ref.loc[i, 'SensorStatus'] == 'Diagnostic':
+        
+        for i in data.index:
+            # Inject uniform background status tracking color explicitly to the cell index
+            style_df.loc[i, 'Last Seen'] = df.loc[i, 'Seen_Style']
+            
+            # Apply distinctive alert override if device status flags diagnostics
+            if df.loc[i, 'SensorStatus'] == 'Diagnostic':
                 style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
-            style_df.loc[i, 'Last Seen'] = ref.loc[i, 'Seen_Style']
+                
         return style_df
 
+    # Lock properties inside view states and render to grid
     st.dataframe(
         display_df.style.apply(diagnostic_styler, axis=None), 
         use_container_width=True, 
-        hide_index=True
+        hide_index=True,
+        column_config={
+            "24h Coverage": st.column_config.ProgressColumn(
+                "24h Coverage", 
+                format="%.1f%%", 
+                min_value=0, 
+                max_value=100
+            ),
+            "1h Pings": st.column_config.NumberColumn("1h Pings", format="%d"),
+            "6h Pings": st.column_config.NumberColumn("6h Pings", format="%d"),
+            "24h Pings": st.column_config.NumberColumn("24h Pings", format="%d"),
+        }
     )
 
-# ===============================================================
+# =============================================================================
 # PAGE MODULE: 🛠️ NODE MANAGER
-# ===============================================================
+# =============================================================================
 
 def render_node_selector(reg_df, proj_list):
     """
     Renders an active inventory node selection engine with integrated 
     Last Seen reporting and administrative playground overwrite utilities.
+    Now supports real-time chronological sorting and row-level alert colors.
     """
     st.subheader("🎯 Active Node Registry")
     
@@ -479,29 +563,72 @@ def render_node_selector(reg_df, proj_list):
 
     if df.empty:
         st.info("No matching nodes located under current filter parameters.")
+        selected_returned_row = None
     else:
-        # Render interactive row choosing engine via checkboxes
+        # =============================================================================
+        # CHRONOLOGICAL SORTING LAYER
+        # =============================================================================
+        # Safely treat missing metrics as float('inf') so unpinged tokens sit at the bottom
+        if 'hours_hidden' in df.columns:
+            df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+            df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+        else:
+            df['hours_hidden'] = float('inf')
+
+        # Insert active checkbox interaction array
         df.insert(0, "Select", False)
         
+        # =============================================================================
+        # STYLING ENGINE OVERLAY
+        # =============================================================================
+        def node_selector_styler(data):
+            """
+            Applies standard alert color backgrounds to every row within the editor layout.
+            """
+            style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
+            for i in data.index:
+                try:
+                    val = data.loc[i, 'hours_hidden']
+                    hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                    color_style = assign_row_color(hours_val)
+                except Exception:
+                    color_style = "background-color: transparent;"
+                
+                # Apply background hex color rules across the row cells
+                for col in data.columns:
+                    if col != "Select": # Leave checkbox background neutral for UX clarity
+                        style_canvas.loc[i, col] = color_style
+            return style_canvas
+
+        # Freeze the colors directly onto the pandas dataframe structure
+        styled_df = df.style.apply(node_selector_styler, axis=None)
+
+        # =============================================================================
+        # INTERACTIVE DATA EDITOR UI COMPONENT
+        # =============================================================================
         edited_df = st.data_editor(
-            df,
+            styled_df,
             hide_index=True,
             use_container_width=True,
             column_config={
                 "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+                "NodeNum": "Node ID",
                 "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping")
             },
             disabled=[col for col in df.columns if col != "Select"],
+            column_order=[c for c in df.columns if c != "hours_hidden"], # Suppresses raw layout decimals
             key="node_registry_editor"
         )
 
         selected_rows = edited_df[edited_df["Select"] == True]
         if not selected_rows.empty:
-            return selected_rows.iloc[0].drop("Select").to_dict()
-    
-    # -----------------------------------------------------------------
+            selected_returned_row = selected_rows.iloc[0].drop(["Select", "hours_hidden"]).to_dict()
+        else:
+            selected_returned_row = None
+            
+    # =============================================================================
     # NEW ADMINISTRATIVE TOOL: FORCE OVERWRITE FROM PLAYGROUND DUMMY
-    # -----------------------------------------------------------------
+    # =============================================================================
     st.markdown("---")
     with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
         st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact snapshot copy of your `node_registry_dummy` table.")
@@ -521,7 +648,8 @@ def render_node_selector(reg_df, proj_list):
                 
                 # Configure query to execute an atomic rewrite snapshot truncate
                 job_config = bigquery.QueryJobConfig(
-                    write_disposition="WRITE_TRUNCATE"
+                    write_disposition="WRITE_TRUNCATE",
+                    destination=prod_table
                 )
                 
                 sql = f"SELECT * FROM `{dummy_table}`"
@@ -529,12 +657,6 @@ def render_node_selector(reg_df, proj_list):
                 try:
                     with st.spinner("Executing complete environment teardown and reconstruction workflows..."):
                         query_job = client.query(sql, job_config=job_config)
-                        # Explicit configuration layer pointing directly to destination table schemas
-                        query_job._properties['configuration']['query']['destinationTable'] = {
-                            'projectId': PROJECT_ID,
-                            'datasetId': DATASET_ID,
-                            'tableId': 'node_registry'
-                        }
                         query_job.result()
                         
                     st.success("🔥 Production registry completely reset and replaced with dummy playground snapshot!")
@@ -545,14 +667,15 @@ def render_node_selector(reg_df, proj_list):
                     st.error(f"Failed to copy staging parameters: {e}")
                     st.code(sql, language="sql")
                     
-    return None
+    return selected_returned_row
 
+# =============================================================================
+# 1. HISTORICAL TELEMETRY GRAPH COMPONENT
+# =============================================================================
 def render_node_historical_graph(client, node_id):
     """Fetches and displays the complete historical thermal chart for the chosen node context."""
-    # Renamed header tracking category
     st.markdown(f"### 📈 Historic Data: **{node_id}**")
     
-    # Restructured Query: Removed the 7-day interval constraint to pull all available history
     hist_q = f"""
         SELECT timestamp, temperature 
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
@@ -584,6 +707,9 @@ def render_node_historical_graph(client, node_id):
     except Exception as e:
         st.error(f"Failed generating historical context graph: {e}")
 
+# =============================================================================
+# 2. BULK ORCHESTRATOR TABS
+# =============================================================================
 def render_bulk_registry_page(client, proj_list):
     """
     Main orchestrator page for the Bulk Registry Manager toolset.
@@ -597,10 +723,7 @@ def render_bulk_registry_page(client, proj_list):
         """
     )
     
-    # Establish local table path context
     target_registry = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-    
-    # Build structural sub-tabs matching your component workflows
     tab_upload, tab_retire = st.tabs(["📥 Bulk Upload Deployment", "🔚 Project-Wide Decommission"])
     
     with tab_upload:
@@ -609,6 +732,9 @@ def render_bulk_registry_page(client, proj_list):
     with tab_retire:
         render_bulk_decommission_tab(client, proj_list, target_registry)
 
+# =============================================================================
+# 3. INTERACTIVE ATTRIBUTE & ACTION MANAGER
+# =============================================================================
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
     Displays chart, interactive historical log selector with relative time tracking metrics,
@@ -622,55 +748,87 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     render_node_historical_graph(client, node_id)
     st.divider()
 
-    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER (WITH CALCULATED LAG HOURS)
+    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER
     st.markdown(f"### 📜 Assignment History Library: **{node_id}**")
     st.info("💡 Check the box next to any assignment below (active or archived) to populate and alter its fields in the editor.")
     
-    # Extract structural configuration footprint
     history_df = reg_df[reg_df['NodeNum'] == node_id].sort_values(by='Start_Date', ascending=False).copy()
+    now_utc = pd.Timestamp.now(tz='UTC')
     
     # ---------------------------------------------------------------
-    # DYNAMIC DURATION CALCULATION (REPLACING PHYSICAL ID COLS)
+    # CHRONOLOGICAL AGE CALCULATION LAYER
     # ---------------------------------------------------------------
     if 'last_ping' in history_df.columns:
-        # Calculate exactly how many hours have passed since the record hit our servers
-        now_utc = pd.Timestamp.now(tz='UTC')
-        history_df['Hours Since Last Seen'] = history_df['last_ping'].apply(
-            lambda x: f"{max(0.0, (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600):.1f}h" 
-            if pd.notnull(x) else "No Pings"
+        history_df['hours_hidden'] = history_df['last_ping'].apply(
+            lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
+            if pd.notnull(x) else np.nan
         )
     elif 'hrs_lag' in history_df.columns:
-        # If the dataframe already processed a float value, format it cleanly with a suffix
-        history_df['Hours Since Last Seen'] = history_df['hrs_lag'].apply(
-            lambda x: f"{float(x):.1f}h" if pd.notnull(x) else "No Pings"
-        )
+        history_df['hours_hidden'] = pd.to_numeric(history_df['hrs_lag'], errors='coerce')
     else:
-        # Fallback calculation if columns aren't pre-loaded: pull directly from master view telemetry
         try:
             ping_q = f"SELECT MAX(timestamp) as lp FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{node_id}'"
             lp_res = client.query(ping_q).to_dataframe()
             if not lp_res.empty and pd.notnull(lp_res['lp'].iloc[0]):
-                now_utc = pd.Timestamp.now(tz='UTC')
-                delta_hrs = (now_utc - pd.to_datetime(lp_res['lp'].iloc[0]).tz_convert('UTC')).total_seconds() / 3600
-                history_df['Hours Since Last Seen'] = f"{max(0.0, delta_hrs):.1f}h"
+                history_df['hours_hidden'] = (now_utc - pd.to_datetime(lp_res['lp'].iloc[0]).tz_convert('UTC')).total_seconds() / 3600.0
             else:
-                history_df['Hours Since Last Seen'] = "No Pings"
+                history_df['hours_hidden'] = np.nan
         except Exception:
-            history_df['Hours Since Last Seen'] = "Offline"
+            history_df['hours_hidden'] = np.nan
 
-    # Completely scrub physical hardware key columns from screen presentation
+    # Generate the readable text display from our calculated float
+    def format_history_lag(hours):
+        if pd.isna(hours) or hours == float('inf'):
+            return "No Pings"
+        elif hours < 1.0:
+            mins = int(hours * 60)
+            return f"{mins}m ago" if mins > 0 else "Just now"
+        else:
+            return f"{hours:.1f}h ago"
+
+    history_df['hours_hidden'] = pd.to_numeric(history_df['hours_hidden'], errors='coerce').fillna(float('inf'))
+    history_df['Hours Since Last Seen'] = history_df['hours_hidden'].apply(format_history_lag)
+    
+    # Pre-sort chronologically (active pings up top, missing links at the bottom)
+    history_df = history_df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+
+    # Scrub physical tracking hash columns from screen presentation
     cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'hrs_lag']
     history_df = history_df.drop(columns=[c for c in cols_to_drop if c in history_df.columns], errors='ignore')
     
     # Inject our interactive control check column
     history_df.insert(0, "Edit Target", False)
     
+    # ---------------------------------------------------------------
+    # HISTORY GRID CELL-LEVEL BACKGROUND STYLER
+    # ---------------------------------------------------------------
+    def assignment_history_styler(data):
+        canvas = pd.DataFrame('', index=data.index, columns=data.columns)
+        for i in data.index:
+            try:
+                val = data.loc[i, 'hours_hidden']
+                hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                color_style = assign_row_color(hours_val)
+            except Exception:
+                color_style = "background-color: transparent;"
+            
+            for col in data.columns:
+                if col != "Edit Target":
+                    canvas.loc[i, col] = color_style
+        return canvas
+
+    styled_history_df = history_df.style.apply(assignment_history_styler, axis=None)
+    
     edited_hist_df = st.data_editor(
-        history_df,
+        styled_history_df,
         hide_index=True,
         use_container_width=True,
-        column_config={"Edit Target": st.column_config.CheckboxColumn("Edit Target", default=False, required=True)},
+        column_config={
+            "Edit Target": st.column_config.CheckboxColumn("Edit Target", default=False, required=True),
+            "Hours Since Last Seen": st.column_config.TextColumn("Hours Since Last Seen")
+        },
         disabled=[col for col in history_df.columns if col != "Edit Target"],
+        column_order=[c for c in history_df.columns if c != "hours_hidden"],
         key=f"hist_editor_{node_id}"
     )
     
@@ -748,13 +906,10 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            # Formulate robust NULL validation checks for original state matching
             where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
             where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
             where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
-            # Drops exactly ONE row copy using LIMIT 1, then inserts the fresh parameters
-            # REMOVED LIMIT 1: Drops exactly the targeted row using absolute attribute matching
             update_sql = f"""
                 BEGIN TRANSACTION;
                 
@@ -805,7 +960,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             if st.button("Execute End Assignment", type="primary", use_container_width=True):
                 date_iso = end_date_input.isoformat()
                 
-                # FIXED: Standardized to BigQuery SQL compliance by removing the LIMIT keyword
                 bulk_sql = f"""
                     BEGIN TRANSACTION;
                     UPDATE `{target_registry}` 
@@ -824,6 +978,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     st.rerun()
                 except Exception as e:
                     st.error(f"Transaction execution failed: {e}")
+
     # --- CHANGE SENSOR ---
     with c_act2:
         with st.expander("🔄 Change Sensor"):
@@ -946,7 +1101,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
                     where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
-                    # FIXED: Stripped out the illegal trailing 'LIMIT 1' keyword for BigQuery compliance
                     delete_sql = f"""
                         DELETE FROM `{target_registry}`
                         WHERE NodeNum = '{target_record['NodeNum']}'
@@ -966,10 +1120,14 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     except Exception as e:
                         st.error(f"Failed to execute row delete query logic: {e}")
 
+# =============================================================================
+# FUNCTION: DATA CHECKER DIAGNOSTICS MODULE
+# =============================================================================
 def render_data_checker(client, reg_df):
     """
     Scans node deployment timelines to isolate configuration patterns, 
     pipeline errors, parallel sensor position conflicts, and distinct duplication modes.
+    Applies real-time alert row-level color coding to all diagnostic grids.
     """
     st.markdown("---")
     st.subheader("🔍 Data Checker Diagnostics")
@@ -1066,6 +1224,30 @@ def render_data_checker(client, reg_df):
             
     position_conflicts_df = pd.concat(conflicting_rows_list).sort_values(['Project', 'Location', 'Bank', 'Depth']) if conflicting_rows_list else pd.DataFrame()
 
+    # =============================================================================
+    # INTERNAL REUSABLE ROW STYLING NESTED LOGIC
+    # =============================================================================
+    def apply_diagnostic_row_colors(target_df):
+        """
+        Parses hours_hidden floats within data checker subsets to return a styled matrix object.
+        """
+        working_df = target_df.copy()
+        if 'hours_hidden' not in working_df.columns:
+            working_df['hours_hidden'] = float('inf')
+        else:
+            working_df['hours_hidden'] = pd.to_numeric(working_df['hours_hidden'], errors='coerce').fillna(float('inf'))
+            
+        def row_styler(row):
+            try:
+                val = row['hours_hidden']
+                hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                color_style = assign_row_color(hours_val)
+            except Exception:
+                color_style = "background-color: transparent;"
+            return [color_style] * len(row)
+            
+        return working_df.style.apply(row_styler, axis=1)
+
     # ===============================================================
     # TAB 1: Gaps in Data
     # ===============================================================
@@ -1073,7 +1255,14 @@ def render_data_checker(client, reg_df):
         st.markdown("##### Nodes with a chronological gap where they were not assigned—requires unmonitored time to be added to Office")
         if gaps_in_data:
             gap_display_df = df[df['NodeNum'].isin(gaps_in_data)].sort_values(['NodeNum', 'Start_Date'])
-            st.dataframe(gap_display_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
+            styled_gaps = apply_diagnostic_row_colors(gap_display_df)
+            st.dataframe(
+                styled_gaps, 
+                use_container_width=True, 
+                hide_index=True,
+                column_order=['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'],
+                column_config={"NodeNum": "Node ID"}
+            )
         else:
             st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
 
@@ -1085,7 +1274,14 @@ def render_data_checker(client, reg_df):
         if orphaned_nodes:
             orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
             last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
-            st.dataframe(last_entries[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
+            styled_orphans = apply_diagnostic_row_colors(last_entries)
+            st.dataframe(
+                styled_orphans, 
+                use_container_width=True, 
+                hide_index=True,
+                column_order=['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'],
+                column_config={"NodeNum": "Node ID"}
+            )
         else:
             st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
 
@@ -1103,16 +1299,29 @@ def render_data_checker(client, reg_df):
         if "Same Project" in dupe_mode:
             st.markdown("##### 🚨 Identity Overlaps: Displaying only the exact duplicate row entries causing database conflicts.")
             if identity_duplicate_rows:
-                # Convert our extracted conflicting dictionary lists back into a scannable DataFrame structure
                 display_dupe_df = pd.DataFrame(identity_duplicate_rows).drop_duplicates().sort_values(['NodeNum', 'Start_Date'])
-                st.dataframe(display_dupe_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
+                styled_dupes = apply_diagnostic_row_colors(display_dupe_df)
+                st.dataframe(
+                    styled_dupes, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_order=['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'],
+                    column_config={"NodeNum": "Node ID"}
+                )
             else:
                 st.success("✅ Clean database entries. No duplicate entries discovered with identical project and date windows.")
         else:
             st.markdown("##### 🚨 Split Deployments: Physical sensors that hold more than one active project assignment row simultaneously.")
             if cross_project_splits:
                 display_split_df = df[(df['NodeNum'].isin(cross_project_splits)) & (df['Start_Date'] <= today) & (df['End_Date'].isna() | (df['End_Date'] >= today))].sort_values(['NodeNum', 'Project'])
-                st.dataframe(display_split_df[['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
+                styled_splits = apply_diagnostic_row_colors(display_split_df)
+                st.dataframe(
+                    styled_splits, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_order=['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'],
+                    column_config={"NodeNum": "Node ID"}
+                )
             else:
                 st.success("✅ Clean single-project allocation. All system sensors map to a maximum of one active project environment.")
 
@@ -1125,16 +1334,27 @@ def render_data_checker(client, reg_df):
             display_conflict_df = position_conflicts_df.copy()
             display_conflict_df['Depth'] = display_conflict_df['Depth'].apply(lambda x: f"{x} ft" if x > 0 else "-")
             display_conflict_df['Bank'] = display_conflict_df['Bank'].apply(lambda x: x if x != "" else "-")
-            st.dataframe(display_conflict_df[['Project', 'Location', 'Bank', 'Depth', 'NodeNum', 'Start_Date', 'SensorStatus']], use_container_width=True, hide_index=True)
+            
+            styled_conflicts = apply_diagnostic_row_colors(display_conflict_df)
+            st.dataframe(
+                styled_conflicts, 
+                use_container_width=True, 
+                hide_index=True,
+                column_order=['Project', 'Location', 'Bank', 'Depth', 'NodeNum', 'Start_Date', 'SensorStatus'],
+                column_config={"NodeNum": "Node ID"}
+            )
         else:
             st.success("✅ Perfect grid alignment. Every active physical installation coordinate holds exactly one distinct hardware sensor entity.")
 
-# ===============================================================
-# PAGE MODULE: 📡 PROJECT OVERVIEW (Formerly Setup Node Tool)
-# ===============================================================
+# =============================================================================
+# PAGE MODULE: 📡 PROJECT OVERVIEW
+# =============================================================================
 
 def render_project_status_dashboard(client, selected_project, unit_label, target_registry):
-    """Renders high-level data aggregation metrics alongside custom thermal threshold distributions."""
+    """
+    Renders high-level data aggregation metrics alongside custom thermal threshold distributions.
+    Dynamically scales soil freezing engineering targets based on Fahrenheit or Celsius units.
+    """
     st.subheader("📊 Project Status Summary")
     
     query = f"""
@@ -1177,6 +1397,7 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
     cols = st.columns(4)
     type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient": (cols[3], "☁️")}
     now_utc = pd.Timestamp.now(tz='UTC')
+    unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
 
     for h_type, (col, icon) in type_map.items():
         g_df = df[df['hardware_type'] == h_type]
@@ -1189,6 +1410,8 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
             latest_time = g_df['latest_ts'].max()
             if latest_time.tzinfo is None:
                 latest_time = latest_time.tz_localize('UTC')
+            else:
+                latest_time = latest_time.tz_convert('UTC')
             
             lag_hrs = (now_utc - latest_time).total_seconds() / 3600
             val = g_df['avg_now'].mean() if pd.notnull(g_df['avg_now'].mean()) else g_df['latest_temp'].mean()
@@ -1196,50 +1419,99 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
             if lag_hrs > 1.1: 
                 st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
             else: 
-                st.title(f"{val:.1f}{unit_label}")
+                display_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                st.title(f"{display_val:.1f}{unit_label}")
             
             active_1h = int(g_df['avg_now'].notnull().sum())
             active_24h = int((g_df['pings_24h'] > 0).sum())
             st.write(f"**{active_1h}/{len(g_df)}** (1h) | **{active_24h}/{len(g_df)}** (24h)")
             
-            st.caption(f"Cur: {g_df['min_now'].min():.1f} to {g_df['max_now'].max():.1f}{unit_label}")
-            st.caption(f"24h: {g_df['min_24h'].min():.1f} to {g_df['max_24h'].max():.1f}{unit_label}")
+            # Extract boundaries safely, filtering out missing values
+            min_now_val = g_df['min_now'].dropna().min()
+            max_now_val = g_df['max_now'].dropna().max()
+            min_24h_val = g_df['min_24h'].dropna().min()
+            max_24h_val = g_df['max_24h'].dropna().max()
+            
+            if pd.notnull(min_now_val) and pd.notnull(max_now_val):
+                mn = (min_now_val - 32) * 5/9 if unit_mode == "Celsius" else min_now_val
+                mx = (max_now_val - 32) * 5/9 if unit_mode == "Celsius" else max_now_val
+                st.caption(f"Cur: {mn:.1f} to {mx:.1f}{unit_label}")
+            else:
+                st.caption("Cur: N/A to N/A")
+                
+            if pd.notnull(min_24h_val) and pd.notnull(max_24h_val):
+                mn24 = (min_24h_val - 32) * 5/9 if unit_mode == "Celsius" else min_24h_val
+                mx24 = (max_24h_val - 32) * 5/9 if unit_mode == "Celsius" else max_24h_val
+                st.caption(f"24h: {mn24:.1f} to {mx24:.1f}{unit_label}")
+            else:
+                st.caption("24h: N/A to N/A")
             
             t_row = st.columns(2)
-            t_row[0].caption(f"1h\n{get_trend_arrow(val, g_df['avg_1h_prev'].mean())}")
-            t_row[1].caption(f"6h\n{get_trend_arrow(val, g_df['avg_6h_prev'].mean())}")
+            try:
+                prev_1h = g_df['avg_1h_prev'].mean()
+                arrow_1h = get_trend_arrow(val, prev_1h) if pd.notnull(prev_1h) else "➡️ N/A"
+                t_row[0].caption(f"1h\n{arrow_1h}")
+            except Exception:
+                t_row[0].caption("1h\n➡️ N/A")
+                
+            try:
+                prev_6h = g_df['avg_6h_prev'].mean()
+                arrow_6h = get_trend_arrow(val, prev_6h) if pd.notnull(prev_6h) else "➡️ N/A"
+                t_row[1].caption(f"6h\n{arrow_6h}")
+            except Exception:
+                t_row[1].caption("6h\n➡️ N/A")
             
-            # --- CUSTOM ENGINEERING RANGE DISTRIBUTIONS ---
+            # =============================================================================
+            # DYNAMIC FREEZING THRESHOLD EVALUATION
+            # =============================================================================
             st.markdown("---")
             temps = g_df['latest_temp'].dropna()
+            total_sensors = len(g_df)
             
+            # Calculate metrics dynamically using converted Fahrenheit values
+            if unit_mode == "Celsius":
+                converted_temps = (temps - 32) * 5/9
+                t_0, t_neg10, t_neg15, t_32, t_20 = -17.8, -23.3, -26.1, 0.0, -6.7
+            else:
+                converted_temps = temps
+                t_0, t_neg10, t_neg15, t_32, t_20 = 0.0, -10.0, -15.0, 32.0, 20.0
+                
             if h_type == "Supply":
-                sub_0 = sum(temps < 0)
-                sub_10 = sum(temps < -10)
-                sub_15 = sum(temps < -15)
-                st.markdown(f"❄️ **Below 0°F:** `{sub_0}/{len(g_df)}`")
-                st.markdown(f"🥶 **Below -10°F:** `{sub_10}/{len(g_df)}`")
-                st.markdown(f"🧊 **Below -15°F:** `{sub_15}/{len(g_df)}`")
+                sub_0 = sum(converted_temps < t_0)
+                sub_10 = sum(converted_temps < t_neg10)
+                sub_15 = sum(converted_temps < t_neg15)
+                st.markdown(f"❄️ **Below 0°F / -17.8°C:** `{sub_0}/{total_sensors}`")
+                st.markdown(f"🥶 **Below -10°F / -23.3°C:** `{sub_10}/{total_sensors}`")
+                st.markdown(f"🧊 **Below -15°F / -26.1°C:** `{sub_15}/{total_sensors}`")
                 
             elif h_type == "Return":
-                sub_10 = sum(temps < 10)
-                sub_0 = sum(temps < 0)
-                sub_10_neg = sum(temps < -10)
-                st.markdown(f"🟢 **Below 10°F:** `{sub_10}/{len(g_df)}`")
-                st.markdown(f"❄️ **Below 0°F:** `{sub_0}/{len(g_df)}`")
-                st.markdown(f"🥶 **Below -10°F:** `{sub_10_neg}/{len(g_df)}`")
+                # For return line arrays, look for target thresholds (10°F, 0°F, -10°F)
+                t_10_target = -12.2 if unit_mode == "Celsius" else 10.0
+                sub_10 = sum(converted_temps < t_10_target)
+                sub_0 = sum(converted_temps < t_0)
+                sub_10_neg = sum(converted_temps < t_neg10)
+                st.markdown(f"🟢 **Below 10°F / -12.2°C:** `{sub_10}/{total_sensors}`")
+                st.markdown(f"❄️ **Below 0°F / -17.8°C:** `{sub_0}/{total_sensors}`")
+                st.markdown(f"🥶 **Below -10°F / -23.3°C:** `{sub_10_neg}/{total_sensors}`")
                 
             elif h_type == "TempPipes":
-                sub_freezing = sum(temps < 32)
-                sub_20 = sum(temps < 20)
-                sub_0 = sum(temps < 0)
-                st.markdown(f"💧 **Below Freezing:** `{sub_freezing}/{len(g_df)}`")
-                st.markdown(f"❄️ **Below 20°F:** `{sub_20}/{len(g_df)}`")
-                st.markdown(f"🥶 **Below 0°F:** `{sub_0}/{len(g_df)}`")
+                sub_freezing = sum(converted_temps < t_32)
+                sub_20 = sum(converted_temps < t_20)
+                sub_0 = sum(converted_temps < t_0)
+                st.markdown(f"💧 **Below Freezing:** `{sub_freezing}/{total_sensors}`")
+                st.markdown(f"❄️ **Below 20°F / -6.7°C:** `{sub_20}/{total_sensors}`")
+                st.markdown(f"🥶 **Below 0°F / -17.8°C:** `{sub_0}/{total_sensors}`")
 
-
+# =============================================================================
+# FUNCTION: HARDWARE INTEGRITY TABLE
+# =============================================================================
 def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
+    """
+    Renders a detailed table showing connectivity, coverage, and recent activity.
+    Chronologically sorted by telemetry latency (most recent pings up top).
+    """
     st.subheader("📋 Hardware Integrity & Connectivity")
+    
     query = f"""
         SELECT 
             n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus,
@@ -1259,41 +1531,73 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         WHERE n.Project = @proj_id AND n.End_Date IS NULL
         GROUP BY 1, 2, 3, 4, 5
     """
-    df = client.query(query, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-    )).to_dataframe()
+    
+    try:
+        df = client.query(query, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        )).to_dataframe()
+    except Exception as e:
+        st.error(f"Hardware Table Query Failed: {e}")
+        return
 
     if df.empty: 
         st.info("No active nodes found for connectivity table.")
         return
 
-    df['bank_sort'] = df['Bank'].apply(lambda x: tuple(natural_sort_key(x)))
-    df = df.sort_values(by=['Location', 'bank_sort', 'Depth']).drop(columns=['bank_sort'])
     now_utc = pd.Timestamp.now(tz='UTC')
 
+    # =============================================================================
+    # 1. LOOP PROCESSOR: TIME CALCULATION & ALIGNED COLOR PROFILING
+    # =============================================================================
     def row_processor(row):
         ping = row['last_ping']
+        
         if pd.isnull(ping):
-            txt, style = "❌ Never", "background-color: #d3d3d3"
+            hours_hidden = float('inf')
+            txt = "❌ Never"
+            style = "background-color: #d1d5db; color: #1f2937;" # Gray for Never Seen
         else:
             ts = ping if ping.tzinfo else ping.tz_localize('UTC')
-            diff = (now_utc - ts).total_seconds() / 60
-            if diff <= 15: txt, style = f"{int(diff)}m ago", "background-color: #ccffcc; color: black"
-            elif diff <= 60: txt, style = f"{int(diff)}m ago", "background-color: #ffe4b5; color: black"
-            else: txt, style = f"{round(diff/60, 1)}h ago", "background-color: #ffcccb; color: black"
+            diff_mins = (now_utc - ts).total_seconds() / 60.0
+            hours_hidden = diff_mins / 60.0
+            
+            # Match your precise threshold alert requests
+            if hours_hidden < 1.0:
+                txt = f"{int(diff_mins)}m ago" if diff_mins >= 1.0 else "Just now"
+                style = "background-color: #d1fae5; color: #065f46;" # Green (<1h)
+            elif 1.0 <= hours_hidden <= 6.0:
+                txt = f"{hours_hidden:.1f}h ago"
+                style = "background-color: #fef08a; color: #854d0e;" # Yellow (1-6h)
+            elif 6.0 < hours_hidden <= 12.0:
+                txt = f"{hours_hidden:.1f}h ago"
+                style = "background-color: #fed7aa; color: #9a3412;" # Orange (6-12h)
+            elif 12.0 < hours_hidden <= 24.0:
+                txt = f"{hours_hidden:.1f}h ago"
+                style = "background-color: #fca5a5; color: #991b1b;" # Red (12-24h)
+            else:
+                txt = f"{hours_hidden:.1f}h ago"
+                style = "background-color: #d1d5db; color: #1f2937;" # Gray (>24h)
         
         pos = f"{row['Depth']}ft" if (pd.notnull(row['Depth']) and row['Depth'] != 0) else f"Bank {row['Bank']}"
         trend = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
-        return pd.Series([txt, style, pos, trend])
+        
+        return pd.Series([txt, style, pos, trend, hours_hidden])
 
-    df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend']] = df.apply(row_processor, axis=1)
+    df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend', 'hours_hidden']] = df.apply(row_processor, axis=1)
 
+    # =============================================================================
+    # 2. RUN LATENCY CHRONOLOGICAL SORT SEQUENCE
+    # =============================================================================
+    df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+    df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+
+    # Reassemble presentation frame context
     display_df = pd.DataFrame({
         "Node ID": df['NodeNum'],
         "Location": df['Location'],
         "Position": df['Pos_Label'],
         "Last Seen": df['Seen_Text'],
-        "24h Coverage": df['coverage_24h'].apply(lambda x: f"{x:.1f}%"),
+        "24h Coverage": df['coverage_24h'], # Floats preserved for native progress column mapping
         "1h Change": df['Trend'],
         "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label)),
         "1h Pings": df['pings_1h'],
@@ -1301,20 +1605,41 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         "24h Pings": df['pings_24h']
     })
 
+    # =============================================================================
+    # 3. DIRECT STREAMLIT GRAPHICS CELL OVERLAY
+    # =============================================================================
     def diagnostic_styler(data):
         style_df = pd.DataFrame('', index=data.index, columns=data.columns)
-        ref = df.reset_index(drop=True)
-        for i, row in data.iterrows():
-            if ref.loc[i, 'SensorStatus'] == 'Diagnostic':
+        for i in data.index:
+            # Inject row-level status background explicitly to the cell index
+            style_df.loc[i, 'Last Seen'] = df.loc[i, 'Seen_Style']
+            
+            # Apply distinctive alert override if device status flags diagnostics
+            if df.loc[i, 'SensorStatus'] == 'Diagnostic':
                 style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
-            style_df.loc[i, 'Last Seen'] = ref.loc[i, 'Seen_Style']
+                
         return style_df
 
-    st.dataframe(display_df.style.apply(diagnostic_styler, axis=None), use_container_width=True, hide_index=True)
+    st.dataframe(
+        display_df.style.apply(diagnostic_styler, axis=None), 
+        use_container_width=True, 
+        hide_index=True,
+        column_config={
+            "24h Coverage": st.column_config.ProgressColumn(
+                "24h Coverage", 
+                format="%.1f%%", 
+                min_value=0, 
+                max_value=100
+            ),
+            "1h Pings": st.column_config.NumberColumn("1h Pings", format="%d"),
+            "6h Pings": st.column_config.NumberColumn("6h Pings", format="%d"),
+            "24h Pings": st.column_config.NumberColumn("24h Pings", format="%d"),
+        }
+    )
 
-# ===============================================================
+# =============================================================================
 # PAGE MODULE: 🔍 SENSOR STATUS
-# ===============================================================
+# =============================================================================
 
 def calculate_custom_metrics(row):
     """
@@ -1349,9 +1674,11 @@ def render_sensor_status_charts(client, node_id, project_id):
     Fetches and renders a dual-trace chart comparing the individual sensor 
     against its physical location's baseline peer average over 7 days.
     """
+    unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
+    unit_label = "°C" if unit_mode == "Celsius" else "°F"
+    
     st.markdown(f"### 📊 Comparative Analysis: **{node_id}** vs. Location Baseline")
     
-    # Bug Fix: Referencing the global constants explicitly via string concatenation safely
     chart_q = f"""
         WITH TimedPeers AS (
             SELECT 
@@ -1383,6 +1710,11 @@ def render_sensor_status_charts(client, node_id, project_id):
         if not data_df.empty:
             loc_label = data_df['Location'].iloc[0]
             
+            # Dynamically convert temperature metrics if Celsius scale is selected
+            if unit_mode == "Celsius":
+                data_df['temperature'] = (data_df['temperature'] - 32) * 5/9
+                data_df['peer_avg'] = (data_df['peer_avg'] - 32) * 5/9
+            
             fig = go.Figure()
             
             # Trace 1: The Selected Node
@@ -1408,7 +1740,7 @@ def render_sensor_status_charts(client, node_id, project_id):
                 template="plotly_dark",
                 margin=dict(l=20, r=20, t=30, b=20),
                 xaxis_title="Timeline Logs",
-                yaxis_title="Temperature (°F)",
+                yaxis_title=f"Temperature ({unit_label})",
                 legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -1475,15 +1807,36 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         df[['Peer Trend', 'Performance']] = df.apply(calculate_custom_metrics, axis=1)
         now_local = pd.Timestamp.now(tz=display_tz)
         
-        df['hrs_lag'] = df['last_ping'].apply(
-            lambda x: (now_local - pd.to_datetime(x).tz_convert(display_tz)).total_seconds() / 3600 if pd.notnull(x) else 999.0
-        )
-        df['Status'] = df['hrs_lag'].apply(lambda x: f"🟢 {x:.1f}h" if x <= 1.1 else f"🔴 {x:.1f}h")
+        # =============================================================================
+        # CHRONOLOGICAL AGE SORT SEQUENCE
+        # =============================================================================
+        def age_processor(x):
+            if pd.isnull(x):
+                return float('inf')
+            return (now_local - pd.to_datetime(x).tz_convert(display_tz)).total_seconds() / 3600.0
+
+        df['hours_hidden'] = df['last_ping'].apply(age_processor)
+        df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+
+        # Form user-readable Status text strings
+        def generate_status_text(hours):
+            if hours == float('inf'):
+                return "❌ Never"
+            elif hours < 1.0:
+                mins = int(hours * 60)
+                return f"🟢 {mins}m ago" if mins > 0 else "🟢 Just now"
+            elif hours <= 1.1:
+                return f"🟢 {hours:.1f}h ago"
+            else:
+                return f"🔴 {hours:.1f}h ago"
+
+        df['Status'] = df['hours_hidden'].apply(generate_status_text)
 
         st.subheader("🔍 Detailed Sensor Audit")
         
-        # Prepare the presentation dataframe structure
-        display_df = df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"]].sort_values(['Location', 'NodeNum']).copy()
+        # Prepare presentation dataframe blueprint
+        display_df = df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h", "hours_hidden"]].copy()
         display_df.insert(0, "Select", False)
 
         # -----------------------------------------------------------
@@ -1492,12 +1845,36 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         @st.fragment
         def render_interactive_audit_grid(data_source_df):
             """Isolates the interactive data editor state from resetting page loops."""
+            
+            # Build inline canvas styling mapper
+            def sensor_status_styler(data):
+                canvas = pd.DataFrame('', index=data.index, columns=data.columns)
+                for i in data.index:
+                    try:
+                        val = data.loc[i, 'hours_hidden']
+                        hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                        color_style = assign_row_color(hours_val)
+                    except Exception:
+                        color_style = "background-color: transparent;"
+                    
+                    for col in data.columns:
+                        if col != "Select":
+                            canvas.loc[i, col] = color_style
+                return canvas
+
+            styled_audit_df = data_source_df.style.apply(sensor_status_styler, axis=None)
+
             edited_df = st.data_editor(
-                data_source_df,
+                styled_audit_df,
                 hide_index=True,
                 use_container_width=True,
-                column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+                    "NodeNum": "Node ID",
+                    "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
+                },
                 disabled=[col for col in data_source_df.columns if col != "Select"],
+                column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"],
                 key="sensor_status_editor"
             )
 
