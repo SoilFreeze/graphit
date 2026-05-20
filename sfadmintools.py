@@ -149,9 +149,9 @@ def load_registry_data(target_table):
     except Exception as e:
         st.error(f"Error loading registry: {e}")
         return pd.DataFrame()
-# ===============================================================
-# Helper functions
-# ===============================================================
+# =============================================================================
+# 1. Helper functions
+# =============================================================================
 def get_trend_arrow(current, previous):
     if pd.isnull(current) or pd.isnull(previous): 
         return "N/A"
@@ -175,12 +175,11 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split('([0-9]+)', str(s))]
 
-
 def assign_row_color(hours):
     """
     Returns the CSS background color based on the age of the data in hours.
     """
-    if hours is None:  # Handles "Never" seen nodes
+    if hours is None or pd.isna(hours):  # Handles "Never" seen nodes safely
         return "background-color: #d1d5db; color: #1f2937;"  # Gray
     elif hours < 1:
         return "background-color: #d1fae5; color: #065f46;"  # Green (<1 hr)
@@ -203,21 +202,20 @@ def style_dataframe(row):
         hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
         color_style = assign_row_color(hours_val)
     except Exception:
-        color_style = "background-color: #d1d5db; color: #1f2937;" # Standard gray fallback
+        color_style = "background-color: transparent;" # Safe backup overlay
         
     return [color_style] * len(row)
 
 
-# Create the styling mapper function for the Streamlit engine
 # =============================================================================
-# 2. CRITICAL JUMP: FETCH THE DATA FIRST
+# 2. FETCH THE REGISTRY DATA FROM YOUR SOURCE WORKSPACE
 # =============================================================================
-# Replace 'your_target_table_name' with your actual table variable or string name
+# Calls the active loader script using your explicit GCP destination pointer
 df = load_registry_data('sensorpush-export.Temperature.hardware_inventory')
 
 
 # =============================================================================
-# 3. NOW RUN YOUR DATA LAYOUTS & STYLING (Line 199)
+# 3. RUN CHRONOLOGICAL SORTING & APPLIED LAYOUT STYLING
 # =============================================================================
 if not df.empty:
     # Safely substitute missing/NaN hours with infinity so they sink to the bottom naturally
@@ -226,21 +224,35 @@ if not df.empty:
     # Sort chronologically by the hidden decimal hours first 
     df = df.sort_values(by='hours_hidden', ascending=True)
 
-# Freeze data states into the active CSS engine
+# Freeze styled layouts directly onto your dataset reference
 styled_df = df.style.apply(style_dataframe, axis=1)
 
-# Render to the dashboard
+# Render to the active dashboard view state cleanly with correct schema tags
 st.dataframe(
     styled_df,
     column_config={
-        "NodeID": "Node ID",
+        "NodeNum": "Node ID",
+        "Project": "Project",
         "Location": "Location",
-        "Position": "Position",
+        "Bank": "Bank",
+        "Depth": "Depth",
+        "Start_Date": "Start Date",
+        "End_Date": "End Date",
+        "SensorStatus": "Sensor Status",
         "Last Seen": "Last Seen",
-        "24h Coverage": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100),
+        "24h Coverage": st.column_config.ProgressColumn(
+            "24h Coverage", 
+            format="%.1f%%", 
+            min_value=0, 
+            max_value=100
+        ),
     },
     hide_index=True,
-    column_order=["NodeID", "Location", "Position", "Last Seen", "24h Coverage", "1h Change", "Last Temp", "1h Pings", "6h Pings", "24h Pings"]
+    column_order=[
+        "NodeNum", "Project", "Location", "Bank", "Depth", 
+        "Start_Date", "End_Date", "SensorStatus", "Last Seen", 
+        "24h Coverage", "1h Change", "Last Temp", "1h Pings", "6h Pings", "24h Pings"
+    ]
 )
 
 # ===============================================================
