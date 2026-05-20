@@ -148,7 +148,9 @@ def load_registry_data(target_table):
     except Exception as e:
         st.error(f"Error loading registry: {e}")
         return pd.DataFrame()
-
+# ===============================================================
+# Helper functions
+# ===============================================================
 def get_trend_arrow(current, previous):
     if pd.isnull(current) or pd.isnull(previous): 
         return "N/A"
@@ -191,15 +193,44 @@ def assign_row_color(hours):
         return "background-color: #d1d5db; color: #1f2937;"  # Gray (>24 hrs)
 
 # Create the styling mapper function for the Streamlit engine
+# =============================================================================
+# 1. CLEAN DATA OVERLAYS & APPLY SORTING SEQUENCES
+# =============================================================================
+if not df.empty:
+    # Safely substitute missing/NaN hours with infinity so they sink to the bottom naturally
+    df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+    
+    # Sort chronologically by the hidden decimal hours first 
+    df = df.sort_values(by='hours_hidden', ascending=True)
+    
+    # Optional: If you want to fall back to sorting by Node ID alphanumeric string (TP-0001, etc.) 
+    # when timestamps match exactly, uncomment the line below:
+    # df['sort_key'] = df['NodeID'].apply(natural_sort_key)
+    # df = df.sort_values(by=['hours_hidden', 'sort_key'], ascending=[True, True]).drop(columns=['sort_key'])
+
+# =============================================================================
+# 2. APPLICATION ROW COLOR PROFILING
+# =============================================================================
 def style_dataframe(row):
-    color_style = assign_row_color(row['hours_hidden'])
-    # Apply this color string to every column cell in this specific row
+    """
+    Scans row lag floats and cleanly overlays hex coloring alerts to visible cells.
+    """
+    try:
+        val = row['hours_hidden']
+        # Convert explicit infinity or null structures to None for our color rules function
+        hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+        color_style = assign_row_color(hours_val)
+    except Exception:
+        color_style = "background-color: #d1d5db; color: #1f2937;" # Standard gray fallback
+        
     return [color_style] * len(row)
 
-# 1. Apply the color logic
+# Freeze data states into the active CSS engine
 styled_df = df.style.apply(style_dataframe, axis=1)
 
-# 2. Render to the dashboard, hiding the background sorting columns
+# =============================================================================
+# 3. COMPONENT GRAPHICS RENDERING
+# =============================================================================
 st.dataframe(
     styled_df,
     column_config={
@@ -207,11 +238,21 @@ st.dataframe(
         "Location": "Location",
         "Position": "Position",
         "Last Seen": "Last Seen",
-        "24h Coverage": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100),
+        "24h Coverage": st.column_config.ProgressColumn(
+            "24h Coverage", 
+            format="%.1f%%", 
+            min_value=0, 
+            max_value=100
+        ),
     },
     hide_index=True,
-    column_order=["NodeID", "Location", "Position", "Last Seen", "24h Coverage", "1h Change", "Last Temp", "1h Pings", "6h Pings", "24h Pings"]
+    column_order=[
+        "NodeID", "Location", "Position", "Last Seen", 
+        "24h Coverage", "1h Change", "Last Temp", 
+        "1h Pings", "6h Pings", "24h Pings"
+    ]
 )
+
 # ===============================================================
 # Function: Status Dashboard
 # ===============================================================
