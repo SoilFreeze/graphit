@@ -210,53 +210,6 @@ def style_dataframe(row):
     return [color_style] * len(row)
 
 
-# =============================================================================
-# 2. FETCH THE REGISTRY DATA FROM YOUR SOURCE WORKSPACE
-# =============================================================================
-# Calls the active loader script using your explicit GCP destination pointer
-df = load_registry_data('sensorpush-export.Temperature.hardware_inventory')
-
-
-# =============================================================================
-# 3. RUN CHRONOLOGICAL SORTING & APPLIED LAYOUT STYLING
-# =============================================================================
-if not df.empty:
-    # Safely substitute missing/NaN hours with infinity so they sink to the bottom naturally
-    df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
-    
-    # Sort chronologically by the hidden decimal hours first 
-    df = df.sort_values(by='hours_hidden', ascending=True)
-
-# Freeze styled layouts directly onto your dataset reference
-styled_df = df.style.apply(style_dataframe, axis=1)
-
-# Render to the active dashboard view state cleanly with correct schema tags
-st.dataframe(
-    styled_df,
-    column_config={
-        "NodeNum": "Node ID",
-        "Project": "Project",
-        "Location": "Location",
-        "Bank": "Bank",
-        "Depth": "Depth",
-        "Start_Date": "Start Date",
-        "End_Date": "End Date",
-        "SensorStatus": "Sensor Status",
-        "Last Seen": "Last Seen",
-        "24h Coverage": st.column_config.ProgressColumn(
-            "24h Coverage", 
-            format="%.1f%%", 
-            min_value=0, 
-            max_value=100
-        ),
-    },
-    hide_index=True,
-    column_order=[
-        "NodeNum", "Project", "Location", "Bank", "Depth", 
-        "Start_Date", "End_Date", "SensorStatus", "Last Seen", 
-        "24h Coverage", "1h Change", "Last Temp", "1h Pings", "6h Pings", "24h Pings"
-    ]
-)
 
 # ===============================================================
 # Function: Status Dashboard
