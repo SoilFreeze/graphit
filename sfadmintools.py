@@ -192,25 +192,6 @@ def assign_row_color(hours):
     else:
         return "background-color: #d1d5db; color: #1f2937;"  # Gray (>24 hrs)
 
-# Create the styling mapper function for the Streamlit engine
-# =============================================================================
-# 1. CLEAN DATA OVERLAYS & APPLY SORTING SEQUENCES
-# =============================================================================
-if not df.empty:
-    # Safely substitute missing/NaN hours with infinity so they sink to the bottom naturally
-    df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
-    
-    # Sort chronologically by the hidden decimal hours first 
-    df = df.sort_values(by='hours_hidden', ascending=True)
-    
-    # Optional: If you want to fall back to sorting by Node ID alphanumeric string (TP-0001, etc.) 
-    # when timestamps match exactly, uncomment the line below:
-    # df['sort_key'] = df['NodeID'].apply(natural_sort_key)
-    # df = df.sort_values(by=['hours_hidden', 'sort_key'], ascending=[True, True]).drop(columns=['sort_key'])
-
-# =============================================================================
-# 2. APPLICATION ROW COLOR PROFILING
-# =============================================================================
 def style_dataframe(row):
     """
     Scans row lag floats and cleanly overlays hex coloring alerts to visible cells.
@@ -225,12 +206,29 @@ def style_dataframe(row):
         
     return [color_style] * len(row)
 
+
+# Create the styling mapper function for the Streamlit engine
+# =============================================================================
+# 2. CRITICAL JUMP: FETCH THE DATA FIRST
+# =============================================================================
+# Replace 'your_target_table_name' with your actual table variable or string name
+df = load_registry_data('sensorpush-export.Temperature.hardware_inventory')
+
+
+# =============================================================================
+# 3. NOW RUN YOUR DATA LAYOUTS & STYLING (Line 199)
+# =============================================================================
+if not df.empty:
+    # Safely substitute missing/NaN hours with infinity so they sink to the bottom naturally
+    df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+    
+    # Sort chronologically by the hidden decimal hours first 
+    df = df.sort_values(by='hours_hidden', ascending=True)
+
 # Freeze data states into the active CSS engine
 styled_df = df.style.apply(style_dataframe, axis=1)
 
-# =============================================================================
-# 3. COMPONENT GRAPHICS RENDERING
-# =============================================================================
+# Render to the dashboard
 st.dataframe(
     styled_df,
     column_config={
@@ -238,19 +236,10 @@ st.dataframe(
         "Location": "Location",
         "Position": "Position",
         "Last Seen": "Last Seen",
-        "24h Coverage": st.column_config.ProgressColumn(
-            "24h Coverage", 
-            format="%.1f%%", 
-            min_value=0, 
-            max_value=100
-        ),
+        "24h Coverage": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100),
     },
     hide_index=True,
-    column_order=[
-        "NodeID", "Location", "Position", "Last Seen", 
-        "24h Coverage", "1h Change", "Last Temp", 
-        "1h Pings", "6h Pings", "24h Pings"
-    ]
+    column_order=["NodeID", "Location", "Position", "Last Seen", "24h Coverage", "1h Change", "Last Temp", "1h Pings", "6h Pings", "24h Pings"]
 )
 
 # ===============================================================
