@@ -114,17 +114,35 @@ def load_registry_data(target_table):
         
         # Calculate precise decimal hour latency relative to current execution time
         now_utc = pd.Timestamp.now(tz='UTC')
+        
         if not df.empty and 'last_ping' in df.columns:
-            df['Last Seen'] = df['last_ping'].apply(
-                lambda x: f"{max(0.0, (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600):.1f}h" 
-                if pd.notnull(x) else "No Pings"
+            # Step A: Create the hidden raw float column for sorting and styling
+            df['hours_hidden'] = df['last_ping'].apply(
+                lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
+                if pd.notnull(x) else np.nan
             )
-        else:
-            df['Last Seen'] = "No Pings"
             
-        # Absolute force-scrub of legacy columns before distribution to view states
+            # Step B: Create the pristine text display column for user readability
+            def format_last_seen(hours):
+                if pd.isna(hours):
+                    return "❌ Never"
+                elif hours < 1:
+                    mins = int(hours * 60)
+                    return f"{mins}m ago" if mins > 0 else "Just now"
+                else:
+                    return f"{hours:.1f}h ago"
+            
+            df['Last Seen'] = df['hours_hidden'].apply(format_last_seen)
+        else:
+            df['hours_hidden'] = np.nan
+            df['Last Seen'] = "❌ Never"
+            
+        # Absolute force-scrub of legacy tracking keys, but KEEP hours_hidden for table layout steps
         cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+        
+        # Pre-sort the dataframe immediately by age so it returns cleanly ordered by time
+        df = df.sort_values(by='hours_hidden', ascending=True, na_position='last')
         
         return df
     except Exception as e:
@@ -153,7 +171,47 @@ def get_unit_labels():
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split('([0-9]+)', str(s))]
-    
+
+
+def assign_row_color(hours):
+    """
+    Returns the CSS background color based on the age of the data in hours.
+    """
+    if hours is None:  # Handles "Never" seen nodes
+        return "background-color: #d1d5db; color: #1f2937;"  # Gray
+    elif hours < 1:
+        return "background-color: #d1fae5; color: #065f46;"  # Green (<1 hr)
+    elif 1 <= hours <= 6:
+        return "background-color: #fef08a; color: #854d0e;"  # Yellow (1-6 hrs)
+    elif 6 < hours <= 12:
+        return "background-color: #fed7aa; color: #9a3412;"  # Orange (6-12 hrs)
+    elif 12 < hours <= 24:
+        return "background-color: #fca5a5; color: #991b1b;"  # Red (12-24 hrs)
+    else:
+        return "background-color: #d1d5db; color: #1f2937;"  # Gray (>24 hrs)
+
+# Create the styling mapper function for the Streamlit engine
+def style_dataframe(row):
+    color_style = assign_row_color(row['hours_hidden'])
+    # Apply this color string to every column cell in this specific row
+    return [color_style] * len(row)
+
+# 1. Apply the color logic
+styled_df = df.style.apply(style_dataframe, axis=1)
+
+# 2. Render to the dashboard, hiding the background sorting columns
+st.dataframe(
+    styled_df,
+    column_config={
+        "NodeID": "Node ID",
+        "Location": "Location",
+        "Position": "Position",
+        "Last Seen": "Last Seen",
+        "24h Coverage": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100),
+    },
+    hide_index=True,
+    column_order=["NodeID", "Location", "Position", "Last Seen", "24h Coverage", "1h Change", "Last Temp", "1h Pings", "6h Pings", "24h Pings"]
+)
 # ===============================================================
 # Function: Status Dashboard
 # ===============================================================
