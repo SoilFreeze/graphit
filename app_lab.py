@@ -256,11 +256,20 @@ active_refs = st.session_state.get("active_refs", [])
 #############
 # - Graph - #
 #############
+import re
+
+def natural_sort_key(s):
+    """
+    Splits strings into chunks of text and numbers to allow natural sorting.
+    e.g., "10ft (SP32)" -> [10, "ft (sp", 32, ")"]
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
-    - Legend: Cleaned priority logic.
+    - Legend: Naturally sorted by logical numerical order (1, 2, ... 10).
     - Hover: Date at top, Time only on entries.
     - Gaps: Lines break if data is missing for > 6 hours.
     - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
@@ -311,36 +320,56 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     ))
         except: pass
 
-    # 4. SENSOR DATA (Cleaned Legend & Gap Logic)
+    # 4. SENSOR DATA (Naturally Sorted Group Loops)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
-    unique_nodes = sorted(plot_df['NodeNum'].unique())
     
-    for i, sn in enumerate(unique_nodes):
-        # Filter and sort
-        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
-        
-        # Gap Breaking: Resample to 1h. If gap > 6h, NaNs will persist and break the line.
-        # We use 'first' to keep original readings and 'asfreq' to insert NaNs in gaps.
-        s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
-        
-        depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
-        
-        # Legend Logic
+    # Pre-build a temporary list of dictionaries containing metadata to sort them naturally
+    node_metadata = []
+    for sn in plot_df['NodeNum'].unique():
+        node_df = plot_df[plot_df['NodeNum'] == sn]
+        depth_val = node_df['Depth'].iloc[0]
+        bank_val = node_df['Bank'].iloc[0]
+        loc_val = node_df['Location'].iloc[0]
+
+        # Generate the identical legend label format
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
             display_name = f"{bank_val} ({sn})"
+            sort_val = str(bank_val)  # Sort by bank name
         elif pd.notnull(depth_val) and not pd.isna(depth_val): 
             display_name = f"{depth_val}ft ({sn})"
+            # Use a zero-padded structural string or direct digit float conversion for perfect sorting
+            sort_val = f"depth_{float(depth_val):05.1f}" 
         else: 
             display_name = f"{loc_val} ({sn})"
+            sort_val = str(display_name)
+
+        node_metadata.append({
+            'node_num': sn,
+            'display_name': display_name,
+            'sort_key': sort_val
+        })
+
+    # Sort the configuration blocks using our natural sort helper tool
+    sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
+
+    # Loop through the logically sorted metadata structures to plot traces in sequence
+    for i, config in enumerate(sorted_node_configs):
+        sn = config['node_num']
+        display_name = config['display_name']
+        
+        # Filter and sort raw timeseries data chronologically
+        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
+        
+        # Gap Breaking via hourly resampling allocation
+        s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
         
         fig.add_trace(go.Scatter(
             x=s_df['timestamp'], 
             y=s_df['temperature'],
             name=display_name, 
             mode='lines',
-            connectgaps=False, # Breaks line on NaNs
+            connectgaps=False, 
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            # Hover Template: Time only per entry
             hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
@@ -367,7 +396,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             range=[final_start_view, final_end_view], 
             showgrid=True, gridcolor='Gainsboro',
             showline=True, mirror=True, linecolor='black', linewidth=2,
-            # Unified Hover Formatting: Date at the top
             hoverformat='%A, %b %d, %Y', 
             tickformat='%b %d',
             minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')
@@ -434,13 +462,7 @@ def run_office_auto_assignment():
 
 import re
 
-def natural_sort_key(s):
-    """
-    Splits a string into a list of text and integers.
-    e.g., "T2"  -> ["T", 2]
-          "T10" -> ["T", 10]
-    """
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\index+)', str(s))]
+import re
 
 ##################
 # High temp mask #
