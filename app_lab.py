@@ -2000,14 +2000,14 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # SQL QUERY: Changed timestamp comparisons to look back from the MAX found timestamp
-    # instead of CURRENT_TIMESTAMP() to protect against server/database clock drift.
+    # SQL QUERY: Surgically removed the Office project constraints
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
-            WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze', 'Office')
-               OR UPPER(Project) LIKE '%OFFICE%'
+            -- Restriced strictly to true field operational states
+            WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
+              AND UPPER(Project) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
             SELECT 
@@ -2032,7 +2032,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
                 MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
                 
-                -- Count unique checkins within the last hour/24h relative to newest data
                 COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
                 COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
                 
