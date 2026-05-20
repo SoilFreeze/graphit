@@ -14,3 +14,4 @@ xlrd
 pyarrow
 streamlit-plotly-events
 streamlit>=1.35.0
+numpy
