@@ -116,7 +116,7 @@ def load_registry_data(target_table):
         # Calculate precise decimal hour latency relative to current execution time
         now_utc = pd.Timestamp.now(tz='UTC')
         
-        if not df.empty and 'last_ping' in df.columns:
+       if not df.empty and 'last_ping' in df.columns:
             # Step A: Create the hidden raw float column for sorting and styling
             df['hours_hidden'] = df['last_ping'].apply(
                 lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
@@ -125,17 +125,19 @@ def load_registry_data(target_table):
             
             # Step B: Create the pristine text display column for user readability
             def format_last_seen(hours):
-                if pd.isna(hours):
+                if pd.isna(hours) or hours == float('inf'):
                     return "❌ Never"
-                elif hours < 1:
+                elif hours < 1.0:
                     mins = int(hours * 60)
                     return f"{mins}m ago" if mins > 0 else "Just now"
                 else:
                     return f"{hours:.1f}h ago"
             
+            # Safely handle any infinity padding transformations before formatting text
+            df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
             df['Last Seen'] = df['hours_hidden'].apply(format_last_seen)
         else:
-            df['hours_hidden'] = np.nan
+            df['hours_hidden'] = float('inf')
             df['Last Seen'] = "❌ Never"
             
         # Absolute force-scrub of legacy tracking keys, but KEEP hours_hidden for table layout steps
@@ -143,7 +145,9 @@ def load_registry_data(target_table):
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
         
         # Pre-sort the dataframe immediately by age so it returns cleanly ordered by time
-        df = df.sort_values(by='hours_hidden', ascending=True, na_position='last')
+        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+        
+        return df
         
         return df
     except Exception as e:
