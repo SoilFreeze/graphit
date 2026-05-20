@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import time
 import re
 import requests
+import numpy as np
 
 # ===============================================================
 # 1. CONFIGURATION, GLOBAL CONSTANTS & SESSION STATE
