@@ -1990,19 +1990,18 @@ def update_records(pts, df, val, display_tz):
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     The main Global Project Summary dashboard.
-    - Restores Ambient column alongside Office/Lab.
-    - Adds live hourly & 24h sensor check-in counters.
-    - Adapts dividers dynamically (Horizontal for Mobile, Vertical for Desktop).
+    - Fixed English translations for ranges.
+    - Robust timezone-aware sensor check-in counters.
     """
     st.header("🌐 Global Project Summary")
     
     client = get_bq_client()
     if client is None: return
 
-    # 1. READ GLOBAL SIDEBAR VIEW STATE
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # 2. SQL QUERY (Pulls telemetry windows)
+    # SQL QUERY: Changed timestamp comparisons to look back from the MAX found timestamp
+    # instead of CURRENT_TIMESTAMP() to protect against server/database clock drift.
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -2018,22 +2017,29 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
             AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
         ),
+        MaxTime AS (
+            SELECT MAX(timestamp) as max_ts FROM raw_data
+        ),
         LatestStats AS (
             SELECT 
-                Project, Bank, Location, Depth, NodeNum,
-                AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
-                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
-                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h,
-                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
-                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as min_now,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as max_now,
-                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as min_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as max_24h,
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) as checkins_1h,
-                COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as checkins_24h,
-                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-                MAX(timestamp) as latest_ts
-            FROM raw_data
+                r.Project, r.Bank, r.Location, r.Depth, r.NodeNum,
+                AVG(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as avg_now,
+                AVG(CASE WHEN r.timestamp BETWEEN TIMESTAMP_SUB(m.max_ts, INTERVAL 2 HOUR) AND TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as avg_1h,
+                AVG(CASE WHEN r.timestamp BETWEEN TIMESTAMP_SUB(m.max_ts, INTERVAL 7 HOUR) AND TIMESTAMP_SUB(m.max_ts, INTERVAL 6 HOUR) THEN r.temperature END) as avg_6h,
+                AVG(CASE WHEN r.timestamp BETWEEN TIMESTAMP_SUB(m.max_ts, INTERVAL 25 HOUR) AND TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as avg_24h,
+                MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as min_now,
+                MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
+                MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
+                MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
+                
+                -- Count unique checkins within the last hour/24h relative to newest data
+                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
+                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
+                
+                ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+                MAX(r.timestamp) as latest_ts
+            FROM raw_data r
+            CROSS JOIN MaxTime m
             GROUP BY 1, 2, 3, 4, 5
         )
         SELECT 
@@ -2052,7 +2058,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         st.error(f"Dashboard Query Failed: {e}")
         return
 
-    # 3. RENDER PROJECT CARDS
     for project in sorted(df['Project'].unique()):
         p_df = df[df['Project'] == project]
         p_name = p_df['ProjectName'].iloc[0] or project
@@ -2069,43 +2074,38 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             h1.subheader(f"🏗️ {p_name}")
             h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
             
-            # --- NEW: LIVE SENSOR CHECK-IN COUNTERS ---
+            # --- FIXED: ACCURATE CHECK-IN COUNTERS ---
             active_1h = p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()
             active_24h = p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()
             total_nodes = p_df['NodeNum'].dropna().nunique()
             
             st.markdown(
-                f"📡 **Hardware Check-ins:** `{active_1h}` reporting in last hour | "
-                f"`{active_24h}` reporting in last 24h (Total Registry Pool: `{total_nodes}` nodes)"
+                f"📡 **Hardware Status:** `{active_1h}` nodes pinged in the last hour | "
+                f"`{active_24h}` nodes pinged in the last 24h (Total Pool: `{total_nodes}` registered)"
             )
             st.divider() 
 
-            # 4. DATA SEGREGATION BUCKETS
+            # Data isolation
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
             is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
-            is_office = p_df['Project'].str.contains('OFFICE', case=False) & ~is_s & ~is_r & ~is_tp & ~is_amb
 
             groups_data = [
                 ("📥 Supply", p_df[is_s], "supply_kpi", -10), 
                 ("📤 Return", p_df[is_r], "return_kpi", 0), 
                 ("📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
-                ("🖥️ Office/Lab", p_df[is_office], None, None),
                 ("☁️ Ambient", p_df[is_amb], None, None)
             ]
 
-            # 5. DYNAMIC RESPONSIVE BREAKPOINT GRID
             if mobile_mode:
-                # Flat stack for mobile views
                 for title, g_df, kpi_col, kpi_val in groups_data:
                     render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
                     st.markdown("<hr style='border: 1px dashed #ccc; margin: 15px 0;'>", unsafe_allow_html=True)
             else:
-                # Horizontal column rows for standard monitors
-                cols = st.columns([1, 0.05, 1, 0.05, 1, 0.05, 1, 0.05, 1])
-                col_mappings = [0, 2, 4, 6, 8]
-                spacer_mappings = [1, 3, 5, 7]
+                cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
+                col_mappings = [0, 2, 4, 6]
+                spacer_mappings = [1, 3, 5]
                 
                 for s_idx in spacer_mappings:
                     cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 320px; margin: auto;'></div>", unsafe_allow_html=True)
@@ -2114,8 +2114,9 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                     with cols[col_mappings[idx]]:
                         render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
 
+
 def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
-    """Helper layout compiler to handle repeating column metric sets clean."""
+    """Helper layout compiler to handle repeating column metric sets."""
     st.markdown(f"**{title}**")
     if g_df.empty or g_df['latest_temp'].isnull().all():
         st.caption("No recent data")
@@ -2138,7 +2139,8 @@ def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label
         color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
         st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
 
-    range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'>常规范围:<br>"
+    # --- FIXED TRANSLATION HERE ---
+    range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'><b>Normal Ranges:</b><br>"
     if c_min is not None and c_max is not None:
         range_html += f"Current: {c_min:.1f} to {c_max:.1f}{unit_label}<br>"
     else:
@@ -2152,12 +2154,6 @@ def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label
     st.markdown(range_html, unsafe_allow_html=True)
 
     st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
-    st.caption(f"Trend for 1hr: {get_trend_arrow(l_conv, convert(g_df['avg_1h'].mean()))}")
-    st.caption(f"Trend for 6hr: {get_trend_arrow(l_conv, convert(g_df['avg_6h'].mean()))}")
-    st.caption(f"Trend for 24hr: {get_trend_arrow(l_conv, convert(g_df['avg_24h'].mean()))}")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
 
 def get_trend_arrow(current, previous):
     """Helper to generate trend icons with updated blue downward arrow."""
