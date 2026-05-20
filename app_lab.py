@@ -265,8 +265,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     - Gaps: Lines break if data is missing for > 6 hours.
     - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
     """
-    import plotly.graph_objects as go
-    import re
+
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
@@ -433,6 +432,16 @@ def run_office_auto_assignment():
     except Exception as e:
         st.error(f"Auto-assignment failed: {e}")
 
+import re
+
+def natural_sort_key(s):
+    """
+    Splits a string into a list of text and integers.
+    e.g., "T2"  -> ["T", 2]
+          "T10" -> ["T", 10]
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\index+)', str(s))]
+
 ##################
 # High temp mask #
 ##################
@@ -545,7 +554,10 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         start_view = end_view - pd.Timedelta(weeks=lookback)
 
     # 7. LOCATION-BASED PLOTTING LOOP
-    locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
+    locations = sorted(
+        [str(loc) for loc in p_df['Location'].dropna().unique()], 
+        key=natural_sort_key
+    )
 
     for loc in locations:
         with st.expander(f"📍 Location: {loc}", expanded=True):
@@ -909,7 +921,10 @@ def render_client_portal(selected_project, project_metadata, display_tz, unit_mo
         now_utc = pd.Timestamp.now(tz='UTC')
         start_view = now_utc - timedelta(weeks=weeks_view)
         
-        locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
+        locations = sorted(
+            [str(loc) for loc in p_df['Location'].dropna().unique()], 
+            key=natural_sort_key
+        )
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = p_df[p_df['Location'] == loc].copy()
