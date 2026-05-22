@@ -92,10 +92,10 @@ def render_sidebar():
 def load_registry_data(target_table):
     """
     Queries active schema inventory data safely, merging real-time 'Last Seen' 
-    lag hours and scrubbing legacy PhysicalID markers.
+    lag hours, scrubbing legacy PhysicalID markers, and calculating historical 
+    project tracking uptime metrics.
     """
     try:
-        # High-performance single-pass join tracking the latest ping across all assets
         master_query = f"""
             WITH LatestTelemetry AS (
                 SELECT 
@@ -103,30 +103,54 @@ def load_registry_data(target_table):
                     MAX(timestamp) as last_ping
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
                 GROUP BY NodeNum
+            ),
+            
+            AssignmentWindows AS (
+                SELECT 
+                    NodeNum,
+                    Start_Date,
+                    COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
+                    DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
+                FROM `{target_table}`
+                WHERE Project != 'Dead'
+            ),
+            
+            ActualProjectPings AS (
+                SELECT 
+                    m.NodeNum,
+                    a.Start_Date,
+                    COUNT(DISTINCT TIMESTAMP_TRUNC(m.timestamp, HOUR)) AS Actual_Pings_Logged
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                INNER JOIN AssignmentWindows a 
+                  ON m.NodeNum = a.NodeNum 
+                  AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
+                GROUP BY m.NodeNum, a.Start_Date
             )
+            
             SELECT 
                 R.*,
-                T.last_ping
+                T.last_ping,
+                A.Expected_Hours,
+                COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
             FROM `{target_table}` R
-            LEFT JOIN LatestTelemetry T 
-              ON R.NodeNum = T.NodeNum
+            LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
+            LEFT JOIN AssignmentWindows A 
+              ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
+            LEFT JOIN ActualProjectPings P 
+              ON R.NodeNum = P.NodeNum AND R.Start_Date = P.Start_Date
         """
         df = client.query(master_query).to_dataframe()
         
-        # Calculate precise decimal hour latency relative to current execution time
         now_utc = pd.Timestamp.now(tz='UTC')
         
         if not df.empty and 'last_ping' in df.columns:
-            # Step A: Create the hidden raw float column for sorting and styling
             df['hours_hidden'] = df['last_ping'].apply(
                 lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
                 if pd.notnull(x) else np.nan
             )
             
-            # Safely handle any infinity padding transformations before formatting text
             df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
             
-            # Step B: Create the pristine text display column for user readability
             def format_last_seen(hours):
                 if pd.isna(hours) or hours == float('inf'):
                     return "❌ Never"
@@ -141,11 +165,22 @@ def load_registry_data(target_table):
             df['hours_hidden'] = float('inf')
             df['Last Seen'] = "❌ Never"
             
-        # Absolute force-scrub of legacy tracking keys, but KEEP hours_hidden for table layout steps
-        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
+        if not df.empty and 'Expected_Hours' in df.columns:
+            exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
+            act_pings = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
+            
+            raw_efficiency = np.where(
+                exp_hours <= 0, 
+                0.0, 
+                np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1))
+            )
+            df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_efficiency]
+        else:
+            df['Reporting Efficiency'] = "0.0%"
+            
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
         
-        # Pre-sort the dataframe immediately by age so it returns cleanly ordered by time
         df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
         
         return df
