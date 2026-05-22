@@ -946,7 +946,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     if is_target_lord:
         st.warning(f"📡 Multi-Channel Logger Context: This channel belongs to Lord Logger **{base_logger_id}**.")
 
-  with st.form("global_node_editor_form"):
+    with st.form("global_node_editor_form"):
         col1, col2 = st.columns(2)
         edit_nodenum = col1.text_input("Node ID (NodeNum)", value=str(target_record.get('NodeNum', '')))
         
