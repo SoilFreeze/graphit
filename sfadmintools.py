@@ -472,11 +472,14 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # PAGE MODULE: 🛠️ NODE MANAGER
 # =============================================================================
 
+# =============================================================================
+# PAGE MODULE: 🛠️ NODE MANAGER
+# =============================================================================
+
 def render_node_selector(reg_df, proj_list):
     """
     Renders an active inventory node selection engine with integrated 
-    Last Seen reporting and administrative playground overwrite utilities.
-    Now supports real-time chronological sorting and row-level alert colors.
+    Last Seen reporting, project uptime efficiencies, and a fleet hardware status matrix.
     """
     st.subheader("🎯 Active Node Registry")
     
@@ -497,7 +500,7 @@ def render_node_selector(reg_df, proj_list):
         if f_proj == "All":
             loc_opts = df['Location'].dropna().unique().tolist()
         elif f_proj == "Unassigned":
-            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office") | (df['Location'] == "Office Stock")]['Location'].dropna().unique().tolist()
+            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office") | (df['Location'] == "Office")]['Location'].dropna().unique().tolist()
         else:
             loc_opts = df[df['Project'] == f_proj]['Location'].dropna().unique().tolist()
             
@@ -519,72 +522,149 @@ def render_node_selector(reg_df, proj_list):
 
     if df.empty:
         st.info("No matching nodes located under current filter parameters.")
-        selected_returned_row = None
+        return None
+
+    # Calculate real-time project ping efficiency ratios
+    if 'Expected_Hours' in df.columns and 'Actual_Pings_Logged' in df.columns:
+        exp_h = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
+        act_p = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
+        raw_eff = np.where(exp_h <= 0, 0.0, np.minimum(100.0, np.round((act_p / exp_h) * 100, 1)))
+        df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_eff]
     else:
-        # =============================================================================
-        # CHRONOLOGICAL SORTING LAYER
-        # =============================================================================
-        # Safely treat missing metrics as float('inf') so unpinged tokens sit at the bottom
-        if 'hours_hidden' in df.columns:
-            df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
-            df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
-        else:
-            df['hours_hidden'] = float('inf')
+        df['Reporting Efficiency'] = "0.0%"
 
-        # Insert active checkbox interaction array
-        df.insert(0, "Select", False)
+    # Chronological sorting layer
+    if 'hours_hidden' in df.columns:
+        df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+    else:
+        df['hours_hidden'] = float('inf')
+
+    # =============================================================================
+    # ASSET FLEET SUMMARY METRICS BREAKDOWN
+    # =============================================================================
+    st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
+    
+    def classify_hardware_family(node):
+        node_str = str(node).lower()
+        if "-ch" in node_str:
+            return "Lord"
+        elif node_str.startswith("sp"):
+            return "SP"
+        elif node_str.startswith("tp"):
+            return "TP"
+        else:
+            return "None of the Above"
+
+    summary_df = reg_df.copy()
+    summary_df['Hardware Family'] = summary_df['NodeNum'].apply(classify_hardware_family)
+    
+    # Isolate parent units to avoid splitting multi-channel boxes into inflated categories
+    summary_df['Parent ID'] = summary_df['NodeNum'].apply(
+        lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x
+    )
+    
+    if 'End_Date' in summary_df.columns:
+        summary_df['is_active'] = summary_df['End_Date'].isna()
+    else:
+        summary_df['is_active'] = True
         
-        # =============================================================================
-        # STYLING ENGINE OVERLAY
-        # =============================================================================
-        def node_selector_styler(data):
-            """
-            Applies standard alert color backgrounds to every row within the editor layout.
-            """
-            style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
-            for i in data.index:
-                try:
-                    val = data.loc[i, 'hours_hidden']
-                    hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
-                    color_style = assign_row_color(hours_val)
-                except Exception:
-                    color_style = "background-color: transparent;"
+    sort_keys = ['Parent ID', 'is_active']
+    sort_asc = [True, False]
+    
+    if 'Start_Date' in summary_df.columns:
+        sort_keys.append('Start_Date')
+        sort_asc.append(False)
+        
+    summary_df = summary_df.sort_values(by=sort_keys, ascending=sort_asc)
+    deduped_units = summary_df.drop_duplicates(subset=['Parent ID']).copy()
+    
+    try:
+        fleet_pivot = deduped_units.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
+        desired_order = ["TP", "SP", "Lord", "None of the Above"]
+        fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
+        fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
+        
+        st.dataframe(fleet_pivot, use_container_width=True)
+    except Exception as pivot_err:
+        st.info("💡 Inventory matrix is populating. Assign statuses to your hardware to generate totals.")
+        
+    st.markdown("---")
+
+    # =============================================================================
+    # INTERACTIVE DATA EDITOR UI (WITH INDEPENDENT LOCAL STYLER)
+    # =============================================================================
+    st.markdown("### 📋 Current Asset Allocation Matrix")
+
+    if "last_selected_node" not in st.session_state:
+        st.session_state["last_selected_node"] = None
+    if "active_selected_node_record" not in st.session_state:
+        st.session_state["active_selected_node_record"] = None
+
+    ed_key = "node_registry_editor"
+    if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
+        changed_rows = st.session_state[ed_key]["edited_rows"]
+        newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
+        
+        if newly_checked and not df.empty:
+            latest_idx = newly_checked[-1]
+            if latest_idx != st.session_state["last_selected_node"]:
+                st.session_state["last_selected_node"] = latest_idx
                 
-                # Apply background hex color rules across the row cells
-                for col in data.columns:
-                    if col != "Select": # Leave checkbox background neutral for UX clarity
-                        style_canvas.loc[i, col] = color_style
-            return style_canvas
+                rec_dict = df.loc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
+                rec_dict["Select"] = True
+                st.session_state["active_selected_node_record"] = rec_dict
+                st.session_state[ed_key]["edited_rows"] = {}
+                st.rerun()
+        
+        elif any(changes.get("Select") == False for idx, changes in changed_rows.items()):
+            st.session_state["last_selected_node"] = None
+            st.session_state["active_selected_node_record"] = None
+            st.session_state[ed_key]["edited_rows"] = {}
+            st.rerun()
 
-        # Freeze the colors directly onto the pandas dataframe structure
-        styled_df = df.style.apply(node_selector_styler, axis=None)
+    df.insert(0, "Select", False)
+    if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(df):
+        df.loc[st.session_state["last_selected_node"], "Select"] = True
 
-        # =============================================================================
-        # INTERACTIVE DATA EDITOR UI COMPONENT
-        # =============================================================================
-        edited_df = st.data_editor(
-            styled_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
-                "NodeNum": "Node ID",
-                "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping")
-            },
-            disabled=[col for col in df.columns if col != "Select"],
-            column_order=[c for c in df.columns if c != "hours_hidden"], # Suppresses raw layout decimals
-            key="node_registry_editor"
-        )
-
-        selected_rows = edited_df[edited_df["Select"] == True]
-        if not selected_rows.empty:
-            selected_returned_row = selected_rows.iloc[0].drop(["Select", "hours_hidden"]).to_dict()
-        else:
-            selected_returned_row = None
+    def node_selector_styler(data):
+        style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
+        for i in data.index:
+            try:
+                val = data.loc[i, 'hours_hidden']
+                hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                color_style = assign_row_color(hours_val)
+            except Exception:
+                color_style = "background-color: transparent;"
             
-    # =============================================================================
-    # NEW ADMINISTRATIVE TOOL: FORCE OVERWRITE FROM PLAYGROUND DUMMY
-    # =============================================================================
+            for col in data.columns:
+                if col != "Select":
+                    style_canvas.loc[i, col] = color_style
+        return style_canvas
+
+    edited_df = st.data_editor(
+        df.style.apply(node_selector_styler, axis=None) if not df.empty else df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+            "NodeNum": "Node ID",
+            "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping"),
+            "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Percentage of expected hourly logs written while on job"),
+            "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
+        },
+        disabled=[col for col in df.columns if col != "Select"],
+        column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "Reporting Efficiency", "coverage_24h"], 
+        key=ed_key
+    )
+
+    if st.session_state["active_selected_node_record"] is not None:
+        selected_returned_row = st.session_state["active_selected_node_record"].copy()
+        if "Select" in selected_returned_row:
+            del selected_returned_row["Select"]
+    else:
+        selected_returned_row = None
+            
     st.markdown("---")
     with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
         st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact snapshot copy of your `node_registry_dummy` table.")
@@ -602,7 +682,6 @@ def render_node_selector(reg_df, proj_list):
                 prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
                 dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
                 
-                # Configure query to execute an atomic rewrite snapshot truncate
                 job_config = bigquery.QueryJobConfig(
                     write_disposition="WRITE_TRUNCATE",
                     destination=prod_table
