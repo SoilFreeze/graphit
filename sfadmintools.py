@@ -2147,7 +2147,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             if "Hours Since Last Seen" in sort_metric:
                 df = df.sort_values(by="hours_hidden", ascending=is_asc).reset_index(drop=True)
             elif "Node ID" in sort_metric:
-                # Uses natural sorting key matching your project layouts
                 df['sort_key'] = df['NodeNum'].apply(natural_sort_key)
                 df = df.sort_values(by="sort_key", ascending=is_asc).drop(columns=['sort_key']).reset_index(drop=True)
             elif "Project Space" in sort_metric:
@@ -2157,37 +2156,28 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         # Inject our interactive single-selection checkbox row control flag
         df.insert(0, "Select", False)
-        
-        # [The rest of your persistent row manager and st.data_editor rendering logic runs below...]
-            edited_df = st.data_editor(
-                styled_audit_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
-                    "NodeNum": "Node ID",
-                    "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
-                },
-                disabled=[col for col in data_source_df.columns if col != "Select"],
-                column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"],
-                key="sensor_status_editor"
-            )
 
-            # Resolve interactive row checkbox choice to generate comparative charts
-            selected_rows = edited_df[edited_df["Select"] == True]
-            
-            if not selected_rows.empty:
-                st.divider()
-                target_node = selected_rows.iloc[0]["NodeNum"]
-                render_sensor_status_charts(client, target_node, selected_project)
-            else:
-                st.info("💡 **Tip:** Use the checkbox in the audit table above to instantly pull up a comparative analysis graph for any sensor.")
+        # =============================================================================
+        # DATA EDITOR VIEW LAYOUT
+        # =============================================================================
+        if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(df):
+            df["Select"] = False
+            df.loc[st.session_state["last_selected_node"], "Select"] = True
 
-        # Run our newly isolated fragment render cycle passing the pre-fetched data
-        render_interactive_audit_grid(display_df)
-
-    except Exception as e:
-        st.error(f"Sensor Status Error: {e}")
+        edited_df = st.data_editor(
+            df.style.apply(node_selector_styler, axis=None),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+                "NodeNum": "Node ID",
+                "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping"),
+                "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Telemetry reporting yield percentage")
+            },
+            disabled=[col for col in df.columns if col != "Select"],
+            column_order=[c for c in df.columns if c != "hours_hidden"], 
+            key=ed_key
+        )
 
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
