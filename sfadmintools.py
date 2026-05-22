@@ -2443,6 +2443,8 @@ def render_active_node_registry_page(client, target_registry):
             
     except Exception as e:
         st.error(f"Failed to compile master node registry view grid: {e}")
+
+
 def render_playground_staging_tab(client, target_registry, table_playground):
     """Provides a safe space to view staging configurations and push to production."""
     st.subheader("🎮 Playground Pre-Update Staging Workspace")
