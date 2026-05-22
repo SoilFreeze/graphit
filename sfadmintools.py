@@ -881,51 +881,35 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
-            where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
-            where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
-
             if is_target_lord and apply_all_channels:
                 # =============================================================================
-                # ATOMIC TRANSACTION FOR ALL 12 SENSOR CHANNELS
+                # FIXED BULK UPDATE: PRESERVES INDIVIDUAL DEPTHS/BANKS
                 # =============================================================================
+                # Instead of a blind insert loop, we update active records for the base logger ID.
+                # This leaves pre-existing distinct Depths and Banks untouched.
                 update_sql = f"""
                     BEGIN TRANSACTION;
                     
-                    -- 1. End or delete old active rows for all channels belonging to this base unit
                     UPDATE `{target_registry}`
-                    SET End_Date = DATE('{edit_start.isoformat()}'), SensorStatus = 'Archived'
+                    SET 
+                        Project = '{edit_proj.strip()}',
+                        Location = '{edit_loc.strip()}',
+                        SensorStatus = '{edit_status}',
+                        Start_Date = DATE('{edit_start.isoformat()}'),
+                        End_Date = {sql_end}
                     WHERE NodeNum LIKE '{base_logger_id}-ch%' 
-                      AND Project = '{target_record['Project']}'
                       AND End_Date IS NULL;
-                    
-                    -- 2. Clear out any conflicts if we are overwriting an exact start day
-                    DELETE FROM `{target_registry}`
-                    WHERE NodeNum LIKE '{base_logger_id}-ch%'
-                      AND Start_Date = DATE('{edit_start.isoformat()}')
-                      AND Project = '{edit_proj.strip()}';
-
-                    -- 3. Unroll fresh parameters down to all 12 target channels
-                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                    SELECT 
-                        CONCAT('{base_logger_id}-ch', LPAD(CAST(num AS STRING), 2, '0')),
-                        '{edit_proj.strip()}',
-                        '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
-                        -- Fallback assignment preservation patterns
-                        CASE WHEN {sql_bank} IS NULL THEN NULL ELSE {sql_bank} END,
-                        {sql_depth},
-                        '{edit_status}',
-                        DATE('{edit_start.isoformat()}'),
-                        {sql_end}
-                    FROM UNNEST(GENERATE_ARRAY(1, 12)) as num;
                     
                     COMMIT;
                 """
             else:
-                # Standard single asset row tracking isolation rule (Your original code block)
+                # Standard single-row isolation rule
+                where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+                where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+                where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
+
                 update_sql = f"""
                     BEGIN TRANSACTION;
-                    
                     DELETE FROM `{target_registry}`
                     WHERE NodeNum = '{target_record['NodeNum']}'
                       AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
@@ -946,7 +930,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                       DATE('{edit_start.isoformat()}'),
                       {sql_end}
                     );
-                    
                     COMMIT;
                 """
             try:
