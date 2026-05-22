@@ -509,10 +509,6 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # PAGE MODULE: 🛠️ NODE MANAGER
 # =============================================================================
 
-# =============================================================================
-# PAGE MODULE: 🛠️ NODE MANAGER
-# =============================================================================
-
 def render_node_selector(reg_df, proj_list):
     """
     Renders an active inventory node selection engine with integrated 
@@ -560,15 +556,6 @@ def render_node_selector(reg_df, proj_list):
     if df.empty:
         st.info("No matching nodes located under current filter parameters.")
         return None
-
-    # Calculate real-time project ping efficiency ratios
-    if 'Expected_Hours' in df.columns and 'Actual_Pings_Logged' in df.columns:
-        exp_h = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
-        act_p = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
-        raw_eff = np.where(exp_h <= 0, 0.0, np.minimum(100.0, np.round((act_p / exp_h) * 100, 1)))
-        df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_eff]
-    else:
-        df['Reporting Efficiency'] = "0.0%"
 
     # Chronological sorting layer
     if 'hours_hidden' in df.columns:
@@ -679,6 +666,7 @@ def render_node_selector(reg_df, proj_list):
                     style_canvas.loc[i, col] = color_style
         return style_canvas
 
+    # FIXED: "Reporting Efficiency" added to column_config and column_order map constraints
     edited_df = st.data_editor(
         df.style.apply(node_selector_styler, axis=None) if not df.empty else df,
         hide_index=True,
@@ -740,7 +728,6 @@ def render_node_selector(reg_df, proj_list):
                     st.code(sql, language="sql")
                     
     return selected_returned_row
-
 # =============================================================================
 # 1. HISTORICAL TELEMETRY GRAPH COMPONENT
 # =============================================================================
