@@ -957,47 +957,47 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                             COMMIT;
                         """
                     else:
-                # =============================================================================
-                # STANDARD SINGLE-ROW ISOLATION UPDATE RULES
-                # =============================================================================
-                where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
-                where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
-                where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
-
-                update_sql = f"""
-                    BEGIN TRANSACTION;
-                    
-                    DELETE FROM `{target_registry}`
-                    WHERE NodeNum = '{target_record['NodeNum']}'
-                      AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
-                      AND Project = '{target_record['Project']}'
-                      AND Location = '{target_record['Location']}'
-                      AND {where_bank}
-                      AND {where_depth}
-                      AND {where_end};
-                    
-                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                    VALUES (
-                      '{edit_nodenum.strip()}',
-                      '{final_project}',
-                      '{final_location}',
-                      {sql_bank},
-                      {sql_depth},
-                      '{edit_status}',
-                      DATE('{edit_start.isoformat()}'),
-                      {sql_end}
-                    );
-                    
-                    COMMIT;
-                """
-            try:
-                client.query(update_sql).result()
-                st.success(f"✅ Changes committed successfully. Status assigned to '{edit_status}' and routed to Project '{final_project}'.")
-                st.cache_data.clear()
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to safely modify database record tables: {e}")
+                        # =============================================================================
+                        # STANDARD SINGLE-ROW ISOLATION UPDATE RULES
+                        # =============================================================================
+                        where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+                        where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+                        where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
+        
+                        update_sql = f"""
+                            BEGIN TRANSACTION;
+                            
+                            DELETE FROM `{target_registry}`
+                            WHERE NodeNum = '{target_record['NodeNum']}'
+                              AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                              AND Project = '{target_record['Project']}'
+                              AND Location = '{target_record['Location']}'
+                              AND {where_bank}
+                              AND {where_depth}
+                              AND {where_end};
+                            
+                            INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                            VALUES (
+                              '{edit_nodenum.strip()}',
+                              '{final_project}',
+                              '{final_location}',
+                              {sql_bank},
+                              {sql_depth},
+                              '{edit_status}',
+                              DATE('{edit_start.isoformat()}'),
+                              {sql_end}
+                            );
+                            
+                            COMMIT;
+                        """
+                    try:
+                        client.query(update_sql).result()
+                        st.success(f"✅ Changes committed successfully. Status assigned to '{edit_status}' and routed to Project '{final_project}'.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to safely modify database record tables: {e}")
 
     # ===============================================================
     # 4. OPERATIONAL TASK PANEL
