@@ -560,45 +560,66 @@ def render_node_selector(reg_df, proj_list):
         styled_df = df.style.apply(node_selector_styler, axis=None)
 
         # =============================================================================
-        # ASSET FLEET SUMMARY METRICS PIPELINE (EXACT 4-ROW SPECIFICATION)
+        # ASSET FLEET SUMMARY METRICS PIPELINE (FIXED FOR DISTINCT NAMED UNITS)
         # =============================================================================
         st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
         
+        # 1. Define classification rules using the original lowercase string
         def classify_hardware_family(node):
-            node_str = str(node).upper()
+            node_str = str(node).lower()
             if "-ch" in node_str:
                 return "Lord"
-            elif node_str.startswith("SP"):
+            elif node_str.startswith("sp"):
                 return "SP"
-            elif node_str.startswith("TP"):
+            elif node_str.startswith("tp"):
                 return "TP"
             else:
                 return "None of the Above"
 
         summary_df = reg_df.copy()
         
-        # Deduplicate Lord Channels to count distinct physical box units instead of split channels
+        # 2. Run classification on original NodeNum BEFORE any text modification
+        summary_df['Hardware Family'] = summary_df['NodeNum'].apply(classify_hardware_family)
+        
+        # 3. Extract Parent ID to handle multi-channel or single-unit matching names
         summary_df['Parent ID'] = summary_df['NodeNum'].apply(
             lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x
         )
-        deduped_df = summary_df.drop_duplicates(subset=['Parent ID', 'SensorStatus']).copy()
-        deduped_df['Hardware Family'] = deduped_df['Parent ID'].apply(classify_hardware_family)
         
-        # Build the status matrix pivot table
+        # 4. Chronological Sorting Layer: Prioritize active records (where End_Date is null) 
+        # and the latest assignment start dates.
+        if 'End_Date' in summary_df.columns:
+            summary_df['is_active'] = summary_df['End_Date'].isna()
+        else:
+            summary_df['is_active'] = True
+            
+        sort_keys = ['Parent ID', 'is_active']
+        sort_asc = [True, False]
+        
+        if 'Start_Date' in summary_df.columns:
+            sort_keys.append('Start_Date')
+            sort_asc.append(False)
+            
+        summary_df = summary_df.sort_values(by=sort_keys, ascending=sort_asc)
+        
+        # 5. CRITICAL DEDUPLICATION: Drop historical rows per physical device.
+        # Keeps only the single current/most-recent active row per named hardware asset.
+        deduped_units = summary_df.drop_duplicates(subset=['Parent ID']).copy()
+        
+        # Build the clean status matrix pivot table
         try:
-            fleet_pivot = deduped_df.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
+            fleet_pivot = deduped_units.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
             
-            # Enforce your exact precise row ordering and categories
+            # Enforce your exact requested row order and categories
             desired_order = ["TP", "SP", "Lord", "None of the Above"]
-            existing_order = [r for r in desired_order if r in fleet_pivot.index]
             
-            # Reindex to force rows to exist in your custom requested layout structure
+            # Reindex to force all 4 rows to display cleanly even if counts are 0
             fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
             
-            # Inject a Total column for quick asset group auditing
+            # Calculate true total unique units completely uninflated by history
             fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
             
-            # Render cleanly to the container grid layout view
+            # Render cleanly to the dashboard view layout
             st.dataframe(
                 fleet_pivot,
                 use_container_width=True
