@@ -560,34 +560,49 @@ def render_node_selector(reg_df, proj_list):
         styled_df = df.style.apply(node_selector_styler, axis=None)
 
         # =============================================================================
-        # INTERACTIVE DATA EDITOR UI COMPONENT (ENFORCED SINGLE SELECTION)
+        # INTERACTIVE DATA EDITOR UI COMPONENT (PERSISTENT SINGLE SELECTION)
         # =============================================================================
-        # Initialize a dedicated state tracking key for tracking selection drift
         if "last_selected_node" not in st.session_state:
             st.session_state["last_selected_node"] = None
+        if "active_selected_node_record" not in st.session_state:
+            st.session_state["active_selected_node_record"] = None
 
-        # Determine if the user has changed selections since the last render cycle
         ed_key = "node_registry_editor"
         if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
             changed_rows = st.session_state[ed_key]["edited_rows"]
-            
-            # Isolate rows where the 'Select' checkbox was explicitly set to True
             newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
             
             if newly_checked:
                 latest_idx = newly_checked[-1]
-                # If the selection changed, reset all others by altering the key suffix to force a re-render
                 if latest_idx != st.session_state["last_selected_node"]:
                     st.session_state["last_selected_node"] = latest_idx
-                    # Uncheck all rows except the latest choice inside the underlying dataframe snapshot
+                    
+                    # Capture and persist the node record BEFORE clearing the widget state
+                    rec_dict = df.loc[latest_idx].drop(["hours_hidden"]).to_dict()
+                    # Explicitly ensure the Select key is forced true in our storage copy
+                    rec_dict["Select"] = True
+                    st.session_state["active_selected_node_record"] = rec_dict
+                    
+                    # Force clean underlying dataframe state
                     df["Select"] = False
                     df.loc[latest_idx, "Select"] = True
-                    # Reset the widget state to clear stale interaction buffers
                     st.session_state[ed_key]["edited_rows"] = {}
                     st.rerun()
+            
+            # Handle the case where a user manually unchecks the active node
+            elif any(changes.get("Select") == False for idx, changes in changed_rows.items()):
+                st.session_state["last_selected_node"] = None
+                st.session_state["active_selected_node_record"] = None
+                st.session_state[ed_key]["edited_rows"] = {}
+                st.rerun()
+
+        # Fallback synchronization: Keep the checkbox visually checked across state redraws
+        if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(df):
+            df["Select"] = False
+            df.loc[st.session_state["last_selected_node"], "Select"] = True
 
         edited_df = st.data_editor(
-            styled_df,
+            df.style.apply(node_selector_styler, axis=None), # Cleanly pass live styled frame straight down
             hide_index=True,
             use_container_width=True,
             column_config={
@@ -600,9 +615,12 @@ def render_node_selector(reg_df, proj_list):
             key=ed_key
         )
 
-        selected_rows = edited_df[edited_df["Select"] == True]
-        if not selected_rows.empty:
-            selected_returned_row = selected_rows.iloc[0].drop(["Select", "hours_hidden"]).to_dict()
+        # Pull directly from our persistent memory box instead of the raw ephemeral widget output
+        if st.session_state["active_selected_node_record"] is not None:
+            selected_returned_row = st.session_state["active_selected_node_record"].copy()
+            # Drop structural UI helper flags before returning to the action engine manager
+            if "Select" in selected_returned_row:
+                del selected_returned_row["Select"]
         else:
             selected_returned_row = None
             
