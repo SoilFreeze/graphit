@@ -92,10 +92,11 @@ def render_sidebar():
 def load_registry_data(target_table):
     """
     Queries active schema inventory data safely, merging real-time 'Last Seen' 
-    lag hours and scrubbing legacy PhysicalID markers.
+    lag hours, computing lifetime project reporting efficiency, and scrubbing 
+    legacy PhysicalID markers.
     """
     try:
-        # High-performance single-pass join tracking the latest ping across all assets
+        # High-performance query that tracks latest ping AND counts actual project pings
         master_query = f"""
             WITH LatestTelemetry AS (
                 SELECT 
@@ -103,13 +104,43 @@ def load_registry_data(target_table):
                     MAX(timestamp) as last_ping
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
                 GROUP BY NodeNum
+            ),
+            
+            AssignmentWindows AS (
+                SELECT 
+                    NodeNum,
+                    Start_Date,
+                    -- Calculate expected hours from start up to end date (or right now if still active)
+                    COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
+                    DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
+                FROM `{target_table}`
+                WHERE Project != 'Dead'
+            ),
+            
+            ActualProjectPings AS (
+                SELECT 
+                    m.NodeNum,
+                    a.Start_Date,
+                    COUNT(m.timestamp) AS Actual_Pings_Logged
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                INNER JOIN AssignmentWindows a 
+                  ON m.NodeNum = a.NodeNum 
+                  -- Count pings that occurred strictly within the project timeline window
+                  AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
+                GROUP BY m.NodeNum, a.Start_Date
             )
+            
             SELECT 
                 R.*,
-                T.last_ping
+                T.last_ping,
+                A.Expected_Hours,
+                COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
             FROM `{target_table}` R
-            LEFT JOIN LatestTelemetry T 
-              ON R.NodeNum = T.NodeNum
+            LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
+            LEFT JOIN AssignmentWindows A 
+              ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
+            LEFT JOIN ActualProjectPings P 
+              ON R.NodeNum = P.NodeNum AND R.Start_Date = P.Start_Date
         """
         df = client.query(master_query).to_dataframe()
         
@@ -141,8 +172,24 @@ def load_registry_data(target_table):
             df['hours_hidden'] = float('inf')
             df['Last Seen'] = "❌ Never"
             
-        # Absolute force-scrub of legacy tracking keys, but KEEP hours_hidden for table layout steps
-        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
+        # =============================================================================
+        # CALCULATE REPORTING EFFICIENCY PERCENTAGE COLUMN
+        # =============================================================================
+        if not df.empty and 'Expected_Hours' in df.columns:
+            # Prevent DivisionByZero errors, cap at 100.0% max, and round to 1 decimal place
+            df['Reporting Efficiency'] = np.where(
+                df['Expected_Hours'] <= 0, 
+                0.0, 
+                np.minimum(100.0, np.round((df['Actual_Pings_Logged'] / df['Expected_Hours']) * 100, 1))
+            )
+            
+            # Formats the raw floats into a clean string view (e.g., "98.4%")
+            df['Reporting Efficiency'] = df['Reporting Efficiency'].apply(lambda x: f"{x:.1f}%")
+        else:
+            df['Reporting Efficiency'] = "0.0%"
+
+        # Absolute force-scrub of legacy tracking keys and query metrics from final table
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
         
         # Pre-sort the dataframe immediately by age so it returns cleanly ordered by time
