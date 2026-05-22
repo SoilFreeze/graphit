@@ -1897,10 +1897,6 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # PAGE MODULE: 🔍 SENSOR STATUS
 # =============================================================================
 
-# =============================================================================
-# PAGE MODULE: 🔍 SENSOR STATUS
-# =============================================================================
-
 def calculate_custom_metrics(row):
     """
     Evaluates individual sensor behavior by comparing its current state 
@@ -2125,7 +2121,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         df['Reporting Efficiency'] = [f"{x:.1f}%" for x in df['raw_eff']]
 
         # =============================================================================
-        # 📋 LIVE LOCATION FILTER CONTROLS
+        # 📋 LIVE LOCATION FILTER DROPDOWN
         # =============================================================================
         st.subheader("📋 Segment Allocation View")
         available_locations = sorted(df['Location'].dropna().unique().tolist())
@@ -2195,6 +2191,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                             canvas.loc[i, col] = color_style
                 return canvas
 
+            # FIXED: Canvas now safely maps locally defined styler function signature
             styled_audit_df = data_source_df.style.apply(sensor_status_styler, axis=None)
 
             edited_df = st.data_editor(
