@@ -521,14 +521,8 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # =============================================================================
 
 def render_node_selector(reg_df, proj_list):
-    """
-    Renders an active inventory node selection engine with integrated 
-    Last Seen reporting and administrative playground overwrite utilities.
-    Now supports real-time chronological sorting and row-level alert colors.
-    """
     st.subheader("🎯 Active Node Registry")
     
-    # 1. READ CONFIGURATION FILTER PARAMETERS
     hide_archived = st.checkbox("Hide Archived Records", value=True, key="ns_hide_archived_toggle")
     
     df = reg_df.copy()
@@ -538,7 +532,6 @@ def render_node_selector(reg_df, proj_list):
             (df['Location'].str.contains("Archive", case=False, na=False) == False)
         ]
 
-    # Layout Filter Row
     c1, c2, c3 = st.columns(3)
     with c1:
         f_proj = st.selectbox("Filter by Project Space", ["All", "Unassigned"] + proj_list, key="ns_proj_f")
@@ -554,7 +547,6 @@ def render_node_selector(reg_df, proj_list):
     with c3:
         search_term = st.text_input("Global Search (Node ID)", "", key="ns_search_f")
 
-    # Execute Cascading Filters
     if f_proj == "Unassigned":
         df = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office")]
     elif f_proj != "All":
@@ -570,18 +562,12 @@ def render_node_selector(reg_df, proj_list):
         st.info("No matching nodes located under current filter parameters.")
         return None
 
-    # =============================================================================
-    # CHRONOLOGICAL SORTING LAYER
-    # =============================================================================
     if 'hours_hidden' in df.columns:
         df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
         df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
     else:
         df['hours_hidden'] = float('inf')
 
-    # =============================================================================
-    # ASSET FLEET SUMMARY METRICS PIPELINE (FIXED FOR DISTINCT NAMED UNITS)
-    # =============================================================================
     st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
     
     def classify_hardware_family(node):
@@ -598,12 +584,10 @@ def render_node_selector(reg_df, proj_list):
     summary_df = reg_df.copy()
     summary_df['Hardware Family'] = summary_df['NodeNum'].apply(classify_hardware_family)
     
-    # Extract Parent ID to handle multi-channel or single-unit matching names
     summary_df['Parent ID'] = summary_df['NodeNum'].apply(
         lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x
     )
     
-    # Chronological Sorting Layer: Prioritize active records (where End_Date is null)
     if 'End_Date' in summary_df.columns:
         summary_df['is_active'] = summary_df['End_Date'].isna()
     else:
@@ -618,7 +602,6 @@ def render_node_selector(reg_df, proj_list):
         
     summary_df = summary_df.sort_values(by=sort_keys, ascending=sort_asc)
     
-    # Keeps only the single current/most-recent active row per named hardware asset.
     deduped_units = summary_df.drop_duplicates(subset=['Parent ID']).copy()
     
     try:
@@ -633,12 +616,8 @@ def render_node_selector(reg_df, proj_list):
         
     st.markdown("---")
 
-    # =============================================================================
-    # INTERACTIVE DATA EDITOR UI COMPONENT (PERSISTENT SINGLE SELECTION)
-    # =============================================================================
     st.markdown("### 📋 Current Asset Allocation Matrix")
 
-    # Persistent selection synchronization management block
     if "last_selected_node" not in st.session_state:
         st.session_state["last_selected_node"] = None
     if "active_selected_node_record" not in st.session_state:
@@ -654,7 +633,6 @@ def render_node_selector(reg_df, proj_list):
             if latest_idx != st.session_state["last_selected_node"]:
                 st.session_state["last_selected_node"] = latest_idx
                 
-                # Capture and persist the node record BEFORE clearing the widget state
                 rec_dict = df.loc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
                 rec_dict["Select"] = True
                 st.session_state["active_selected_node_record"] = rec_dict
@@ -667,12 +645,10 @@ def render_node_selector(reg_df, proj_list):
             st.session_state[ed_key]["edited_rows"] = {}
             st.rerun()
 
-    # Pre-inject Select column and handle fallback synchronization across redraws
     df.insert(0, "Select", False)
     if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(df):
         df.loc[st.session_state["last_selected_node"], "Select"] = True
 
-    # Build local inline canvas styling mapper
     def node_manager_styler(data):
         style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
         for i in data.index:
@@ -704,7 +680,6 @@ def render_node_selector(reg_df, proj_list):
         key=ed_key
     )
 
-    # Pull directly from our persistent memory box instead of the raw ephemeral widget output
     if st.session_state["active_selected_node_record"] is not None:
         selected_returned_row = st.session_state["active_selected_node_record"].copy()
         if "Select" in selected_returned_row:
@@ -712,9 +687,6 @@ def render_node_selector(reg_df, proj_list):
     else:
         selected_returned_row = None
             
-    # =============================================================================
-    # NEW ADMINISTRATIVE TOOL: FORCE OVERWRITE FROM PLAYGROUND DUMMY
-    # =============================================================================
     st.markdown("---")
     with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
         st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact snapshot copy of your `node_registry_dummy` table.")
