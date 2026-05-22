@@ -946,7 +946,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     if is_target_lord:
         st.warning(f"📡 Multi-Channel Logger Context: This channel belongs to Lord Logger **{base_logger_id}**.")
 
-    with st.form("global_node_editor_form"):
+  with st.form("global_node_editor_form"):
         col1, col2 = st.columns(2)
         edit_nodenum = col1.text_input("Node ID (NodeNum)", value=str(target_record.get('NodeNum', '')))
         
@@ -986,34 +986,18 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 help="Checking this will update Project, Location, Status, and Dates for all channels belonging to this logger. Individual depths/banks will remain distinct unless explicitly configured."
             )
 
-        if st.form_submit_button("💾 Save Changes"):
-                    if edit_bank.strip() != "":
-                        sql_depth = "NULL"
-                    else:
-                        sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
-                        
-                    sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
-                    sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
-                    
-                    # =============================================================================
-        # APPLICATION-LAYER AUTOMATION FOR "DEAD" & "OFFICE" ROUTING
-        # =============================================================================
-        if edit_status == "Dead":
-            final_project = "Dead"
-            final_location = "Dead"  # Stripped "Stock"
-        else:
-            final_project = edit_proj.strip()
-            final_location = edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc
-            if final_location == "Office Stock":
-                final_location = "Office"  # Stripped "Stock"
+        # Generate a distinct runtime key for the submit button to eliminate duplicate ID collisions
+        clean_start_str = pd.to_datetime(target_record.get('Start_Date')).strftime('%Y%m%d') if pd.notnull(target_record.get('Start_Date')) else "new"
+        submit_btn_key = f"submit_changes_{node_id}_{clean_start_str}"
 
-        if st.form_submit_button("💾 Save Changes"):
+        # SINGLE SUBMISSION POINT WITH UNIQUE KEY
+        if st.form_submit_button("💾 Save Changes", key=submit_btn_key):
             if edit_bank.strip() != "":
                 sql_depth = "NULL"
             else:
                 sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
                 
-            # If marked dead, force the end date to be the exact date it was marked dead
+            # If marked dead, force the end date to be the exact execution start date
             if edit_status == "Dead":
                 sql_end = f"DATE('{edit_start.isoformat()}')"
             else:
@@ -1021,6 +1005,19 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
+            # =============================================================================
+            # APPLICATION-LAYER AUTOMATION FOR "DEAD" & "OFFICE" ROUTING
+            # =============================================================================
+            # Intercepts and overrides target project/location parameters cleanly
+            if edit_status == "Dead":
+                final_project = "Dead"
+                final_location = "Dead"  # Stripped "Stock"
+            else:
+                final_project = edit_proj.strip()
+                final_location = edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc
+                if final_location == "Office Stock":
+                    final_location = "Office"  # Stripped "Stock"
+
             if is_target_lord and apply_all_channels:
                 # =============================================================================
                 # BULK LORD LOGGER UPDATE (PRESERVES DEPTH/BANK + ENFORCES 'DEAD' END_DATE)
@@ -1076,7 +1073,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 """
             try:
                 client.query(update_sql).result()
-                st.success(f"✅ Changes committed. Status: '{edit_status}' | Project: '{final_project}' | End Date: {edit_start.isoformat() if edit_status == 'Dead' else 'Open'}")
+                st.success(f"✅ Changes committed successfully. Status: '{edit_status}' | Project: '{final_project}'")
                 st.cache_data.clear()
                 time.sleep(1)
                 st.rerun()
