@@ -2190,17 +2190,26 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
 # ===============================================================
-def render_active_node_registry_page(client, target_registry):
+def render_active_node_registry_page(client, target_registry=None, **kwargs):
     """
     Renders the master Active Node Registry inventory data grid, calculating
     real-time 'Last Seen' telemetry latencies, distinct hardware fleet breakdowns,
     interactive multi-column sorting, and project reporting efficiencies.
     """
+    # SAFETY LAYER: Safely capture the table path regardless of parameter naming mismatches
+    table_path = target_registry if target_registry is not None else kwargs.get('target_table')
+    if table_path is None:
+        st.error("❌ Critical Application Error: No active database target table identifier was provided.")
+        return
+
     st.header("🎯 Active Node Registry")
     
     # 1. READ CONFIGURATION FILTER PARAMETERS
     hide_archived = st.checkbox("Hide Archived Records", value=True, key="registry_hide_archived_toggle")
     
+    # -----------------------------------------------------------------
+    # ENHANCED SINGLE-PASS TELEMETRY & EFFICIENCY PIPELINE
+    # -----------------------------------------------------------------
     # -----------------------------------------------------------------
     # ENHANCED SINGLE-PASS TELEMETRY & EFFICIENCY PIPELINE
     # -----------------------------------------------------------------
@@ -2219,7 +2228,7 @@ def render_active_node_registry_page(client, target_registry):
                 Start_Date,
                 COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
                 DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
-            FROM `{target_registry}`
+            FROM `{table_path}`
             WHERE Project != 'Dead'
         ),
         
@@ -2240,7 +2249,7 @@ def render_active_node_registry_page(client, target_registry):
             T.last_ping,
             A.Expected_Hours,
             COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
-        FROM `{target_registry}` R
+        FROM `{table_path}` R
         LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
         LEFT JOIN AssignmentWindows A 
           ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
@@ -2439,11 +2448,8 @@ def render_active_node_registry_page(client, target_registry):
             target_node_record = st.session_state["active_selected_node_record"].copy()
             proj_list = sorted(reg_df['Project'].dropna().unique().tolist())
             
-            render_node_action_manager(client, target_node_record, reg_df, proj_list, target_registry)
-            
-    except Exception as e:
-        st.error(f"Failed to compile master node registry view grid: {e}")
-
+            # Use table_path here to guarantee compliance
+            render_node_action_manager(client, target_node_record, reg_df, proj_list, table_path)
 
 def render_playground_staging_tab(client, target_registry, table_playground):
     """Provides a safe space to view staging configurations and push to production."""
