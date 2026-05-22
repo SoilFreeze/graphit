@@ -2009,7 +2009,7 @@ def render_sensor_status_charts(client, node_id, project_id):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Queries historical windows to analyze peer drift trends, stability performance scoring,
-    and reporting efficiencies across project scopes filtered dynamically by Project and Location.
+    and reporting efficiencies across project scopes filtered dynamically by Project, Location, and custom metrics.
     """
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
@@ -2056,30 +2056,24 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
               AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
             WHERE m.Project = @proj_id
             GROUP BY m.NodeNum, a.Start_Date
-        ),
-
-        HistoricalStats AS (
-            SELECT 
-                b.NodeNum, b.Location, b.Bank, b.Depth,
-                MAX(b.timestamp) AS last_ping,
-                ARRAY_AGG(b.temperature ORDER BY b.timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
-                ARRAY_AGG(b.peer_avg ORDER BY b.timestamp DESC LIMIT 1)[OFFSET(0)] AS current_peer_avg,
-                MAX(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN b.temperature END) - 
-                MIN(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN b.temperature END) as swing_2h,
-                MAX(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN b.temperature END) - 
-                MIN(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN b.temperature END) as swing_24h,
-                (COUNT(DISTINCT CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(b.timestamp, HOUR) END) / 24.0) * 100 as coverage_24h
-            FROM BaseReporting b
-            GROUP BY b.NodeNum, b.Location, b.Bank, b.Depth
         )
         
         SELECT 
-            h.*,
-            a.Expected_Hours,
-            COALESCE(p.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
-        FROM HistoricalStats h
-        LEFT JOIN AssignmentWindows a ON h.NodeNum = a.NodeNum
-        LEFT JOIN ActualProjectPings p ON h.NodeNum = p.NodeNum AND a.Start_Date = p.Start_Date
+            b.NodeNum, b.Location, b.Bank, b.Depth,
+            MAX(b.timestamp) AS last_ping,
+            ARRAY_AGG(b.temperature ORDER BY b.timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
+            ARRAY_AGG(b.peer_avg ORDER BY b.timestamp DESC LIMIT 1)[OFFSET(0)] AS current_peer_avg,
+            MAX(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN b.temperature END) - 
+            MIN(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN b.temperature END) as swing_2h,
+            MAX(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN b.temperature END) - 
+            MIN(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN b.temperature END) as swing_24h,
+            (COUNT(DISTINCT CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(b.timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
+            MAX(a.Expected_Hours) AS Expected_Hours,
+            COALESCE(MAX(p.Actual_Pings_Logged), 0) AS Actual_Pings_Logged
+        FROM BaseReporting b
+        LEFT JOIN AssignmentWindows a ON b.NodeNum = a.NodeNum
+        LEFT JOIN ActualProjectPings p ON b.NodeNum = p.NodeNum AND a.Start_Date = p.Start_Date
+        GROUP BY b.NodeNum, b.Location, b.Bank, b.Depth
     """
     try:
         # Fetch initial dataset from BigQuery 
@@ -2095,7 +2089,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         df[['Peer Trend', 'Performance']] = df.apply(calculate_custom_metrics, axis=1)
         now_local = pd.Timestamp.now(tz=display_tz)
         
-        # Chronological sorting layer
+        # Process structural latency values
         def age_processor(x):
             if pd.isnull(x):
                 return float('inf')
@@ -2103,7 +2097,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         df['hours_hidden'] = df['last_ping'].apply(age_processor)
         df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
-        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
         def generate_status_text(hours):
             if hours == float('inf'):
@@ -2118,14 +2111,14 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         df['Status'] = df['hours_hidden'].apply(generate_status_text)
 
-        # Vectorized calculation for the lifetime project telemetry tracking metric
+        # Calculate reporting efficiency values
         exp_h = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
         act_p = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
-        raw_eff = np.where(exp_h <= 0, 0.0, np.minimum(100.0, np.round((act_p / exp_h) * 100, 1)))
-        df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_eff]
+        df['raw_eff'] = np.where(exp_h <= 0, 0.0, np.minimum(100.0, np.round((act_p / exp_h) * 100, 1)))
+        df['Reporting Efficiency'] = [f"{x:.1f}%" for x in df['raw_eff']]
 
         # =============================================================================
-        # 📋 LIVE LOCATION FILTER CONTROLS
+        # 📋 LIVE SEGMENTATION AND FILTER CONTROLS (PROJECT LEVEL LOCATION MANIFEST)
         # =============================================================================
         st.subheader("📋 Segment Allocation View")
         available_locations = sorted(df['Location'].dropna().unique().tolist())
@@ -2135,9 +2128,41 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         if selected_view_location != "All Locations":
             filtered_df = filtered_df[filtered_df['Location'] == selected_view_location]
 
+        # =============================================================================
+        # 🔃 DYNAMIC CORES SORTING MANIFEST (MATCHING NODE MANAGER ENGINE)
+        # =============================================================================
+        st.markdown("##### 🔃 Adjust Grid Sequence Ordering")
+        sort_col1, sort_col2 = st.columns(2)
+        
+        sort_metric = sort_col1.selectbox(
+            "Primary Sort Category", 
+            ["Hours Since Last Seen (Default)", "Node ID", "Location Area", "Uptime Efficiency Yield"], 
+            key="sensor_status_primary_sort_metric"
+        )
+        
+        sort_order = sort_col2.selectbox(
+            "Sequence Direction", 
+            ["Ascending / Smallest First", "Descending / Largest First"], 
+            key="sensor_status_sort_direction"
+        )
+        
+        is_asc = (sort_order == "Ascending / Smallest First")
+
+        # Execute dataframe sorting sequences dynamically
+        if not filtered_df.empty:
+            if "Hours Since Last Seen" in sort_metric:
+                filtered_df = filtered_df.sort_values(by="hours_hidden", ascending=is_asc).reset_index(drop=True)
+            elif "Node ID" in sort_metric:
+                filtered_df['sort_key'] = filtered_df['NodeNum'].apply(natural_sort_key)
+                filtered_df = filtered_df.sort_values(by="sort_key", ascending=is_asc).drop(columns=['sort_key']).reset_index(drop=True)
+            elif "Location Area" in sort_metric:
+                filtered_df = filtered_df.sort_values(by=["Location", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
+            elif "Uptime Efficiency Yield" in sort_metric:
+                filtered_df = filtered_df.sort_values(by="raw_eff", ascending=is_asc).reset_index(drop=True)
+
         st.subheader("🔍 Detailed Sensor Audit")
         
-        # Map our safe payload dataframe including the new tracking metric
+        # Prepare presentation dataframe blueprint
         display_df = filtered_df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "Reporting Efficiency", "coverage_24h", "hours_hidden"]].copy()
         display_df.insert(0, "Select", False)
 
@@ -2163,6 +2188,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                             canvas.loc[i, col] = color_style
                 return canvas
 
+            # FIXED: Uses your exact local page function styler signature here
             styled_audit_df = data_source_df.style.apply(sensor_status_styler, axis=None)
 
             edited_df = st.data_editor(
@@ -2188,7 +2214,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             else:
                 st.info("💡 **Tip:** Use the checkbox in the audit table above to instantly pull up a comparative analysis graph for any sensor.")
 
-        # Execute our isolated dashboard view fragment
+        # Run our newly isolated fragment render cycle passing the pre-fetched data
         render_interactive_audit_grid(display_df)
 
     except Exception as e:
