@@ -173,27 +173,27 @@ def load_registry_data(target_table):
             df['Last Seen'] = "❌ Never"
             
         # =============================================================================
-        # CALCULATE REPORTING EFFICIENCY PERCENTAGE COLUMN
+        # SAFE CALCULATION FOR REPORTING EFFICIENCY PERCENTAGE COLUMN
         # =============================================================================
         if not df.empty and 'Expected_Hours' in df.columns:
-            # Prevent DivisionByZero errors, cap at 100.0% max, and round to 1 decimal place
-            df['Reporting Efficiency'] = np.where(
-                df['Expected_Hours'] <= 0, 
+            # Enforce clean numerical typing and fill any missing values with 0
+            exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
+            act_pings = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
+            
+            # Run vector calculation safely without ambiguous NA evaluations
+            raw_eff = np.where(
+                exp_hours <= 0, 
                 0.0, 
-                np.minimum(100.0, np.round((df['Actual_Pings_Logged'] / df['Expected_Hours']) * 100, 1))
+                np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1))
             )
             
-            # Formats the raw floats into a clean string view (e.g., "98.4%")
-            df['Reporting Efficiency'] = df['Reporting Efficiency'].apply(lambda x: f"{x:.1f}%")
+            df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_eff]
         else:
             df['Reporting Efficiency'] = "0.0%"
 
         # Absolute force-scrub of legacy tracking keys and query metrics from final table
         cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
-        
-        # Pre-sort the dataframe immediately by age so it returns cleanly ordered by time
-        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
         
         return df
     except Exception as e:
@@ -2118,7 +2118,47 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 return canvas
 
             styled_audit_df = data_source_df.style.apply(sensor_status_styler, axis=None)
+            
+        # Fetch the clean base dataframe from our updated database data pipeline
+        df = load_registry_data(target_registry)
 
+        # =============================================================================
+        # INTERACTIVE DATAFRAME SORTING HUB
+        # =============================================================================
+        st.markdown("##### 🔃 Adjust Registry View Sequence")
+        sort_col1, sort_col2 = st.columns(2)
+        
+        sort_metric = sort_col1.selectbox(
+            "Primary Sort Category", 
+            ["Hours Since Last Seen (Default)", "Node ID", "Project Space", "Location Location"], 
+            key="registry_primary_sort_metric"
+        )
+        
+        sort_order = sort_col2.selectbox(
+            "Sequence Direction", 
+            ["Ascending / Active First", "Descending / Missing First"], 
+            key="registry_sort_direction"
+        )
+        
+        is_asc = (sort_order == "Ascending / Active First")
+
+        # Execute dataframe sorting permutations dynamically before table rendering
+        if not df.empty:
+            if "Hours Since Last Seen" in sort_metric:
+                df = df.sort_values(by="hours_hidden", ascending=is_asc).reset_index(drop=True)
+            elif "Node ID" in sort_metric:
+                # Uses natural sorting key matching your project layouts
+                df['sort_key'] = df['NodeNum'].apply(natural_sort_key)
+                df = df.sort_values(by="sort_key", ascending=is_asc).drop(columns=['sort_key']).reset_index(drop=True)
+            elif "Project Space" in sort_metric:
+                df = df.sort_values(by=["Project", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
+            elif "Location Location" in sort_metric:
+                df = df.sort_values(by=["Location", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
+
+        # Inject our interactive single-selection checkbox row control flag
+        df.insert(0, "Select", False)
+        
+        # [The rest of your persistent row manager and st.data_editor rendering logic runs below...]
             edited_df = st.data_editor(
                 styled_audit_df,
                 hide_index=True,
