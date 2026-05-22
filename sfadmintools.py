@@ -165,6 +165,7 @@ def load_registry_data(target_table):
             df['hours_hidden'] = float('inf')
             df['Last Seen'] = "❌ Never"
             
+        # Calculate the direct project uptime percentage ratio
         if not df.empty and 'Expected_Hours' in df.columns:
             exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
             act_pings = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
@@ -178,6 +179,7 @@ def load_registry_data(target_table):
         else:
             df['Reporting Efficiency'] = "0.0%"
             
+        # Dropping legacy and raw calculated counters, but PRESERVING the target display column
         cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
         
