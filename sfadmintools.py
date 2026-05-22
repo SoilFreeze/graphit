@@ -915,43 +915,58 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             )
 
         if st.form_submit_button("💾 Save Changes"):
-            if edit_bank.strip() != "":
-                sql_depth = "NULL"
-            else:
-                sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
-                
-            sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
-            sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
-            
-            if is_target_lord and apply_all_channels:
-                # =============================================================================
-                # FIXED BULK UPDATE: PRESERVES INDIVIDUAL DEPTHS/BANKS
-                # =============================================================================
-                # Instead of a blind insert loop, we update active records for the base logger ID.
-                # This leaves pre-existing distinct Depths and Banks untouched.
-                update_sql = f"""
-                    BEGIN TRANSACTION;
+                    if edit_bank.strip() != "":
+                        sql_depth = "NULL"
+                    else:
+                        sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+                        
+                    sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
+                    sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
                     
-                    UPDATE `{target_registry}`
-                    SET 
-                        Project = '{edit_proj.strip()}',
-                        Location = '{edit_loc.strip()}',
-                        SensorStatus = '{edit_status}',
-                        Start_Date = DATE('{edit_start.isoformat()}'),
-                        End_Date = {sql_end}
-                    WHERE NodeNum LIKE '{base_logger_id}-ch%' 
-                      AND End_Date IS NULL;
-                    
-                    COMMIT;
-                """
-            else:
-                # Standard single-row isolation rule
+                    # =============================================================================
+                    # APPLICATION-LAYER AUTOMATION FOR "DEAD" STATUS ROUTING
+                    # =============================================================================
+                    # Intercepts and overrides the target project/location parameters automatically
+                    # if the sensor status dropdown is set to "Dead".
+                    if edit_status == "Dead":
+                        final_project = "Dead"
+                        final_location = "Dead Stock"
+                    else:
+                        final_project = edit_proj.strip()
+                        final_location = edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc
+        
+                    if is_target_lord and apply_all_channels:
+                        # =============================================================================
+                        # BULK LORD LOGGER UPDATE (PRESERVES DEPTH/BANK + ENFORCES 'DEAD' ROUTING)
+                        # =============================================================================
+                        # Mass updates active records matching the base ID while leaving pre-existing
+                        # distinct depths and banks completely untouched in the registry.
+                        update_sql = f"""
+                            BEGIN TRANSACTION;
+                            
+                            UPDATE `{target_registry}`
+                            SET 
+                                Project = '{final_project}',
+                                Location = '{final_location}',
+                                SensorStatus = '{edit_status}',
+                                Start_Date = DATE('{edit_start.isoformat()}'),
+                                End_Date = {sql_end}
+                            WHERE NodeNum LIKE '{base_logger_id}-ch%' 
+                              AND End_Date IS NULL;
+                            
+                            COMMIT;
+                        """
+                    else:
+                # =============================================================================
+                # STANDARD SINGLE-ROW ISOLATION UPDATE RULES
+                # =============================================================================
                 where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
                 where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
                 where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
                 update_sql = f"""
                     BEGIN TRANSACTION;
+                    
                     DELETE FROM `{target_registry}`
                     WHERE NodeNum = '{target_record['NodeNum']}'
                       AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
@@ -964,19 +979,20 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
                     VALUES (
                       '{edit_nodenum.strip()}',
-                      '{edit_proj.strip()}',
-                      '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
+                      '{final_project}',
+                      '{final_location}',
                       {sql_bank},
                       {sql_depth},
                       '{edit_status}',
                       DATE('{edit_start.isoformat()}'),
                       {sql_end}
                     );
+                    
                     COMMIT;
                 """
             try:
                 client.query(update_sql).result()
-                st.success("✅ Changes committed successfully. Registry schema modified.")
+                st.success(f"✅ Changes committed successfully. Status assigned to '{edit_status}' and routed to Project '{final_project}'.")
                 st.cache_data.clear()
                 time.sleep(1)
                 st.rerun()
