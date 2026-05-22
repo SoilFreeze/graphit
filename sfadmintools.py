@@ -2119,74 +2119,36 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 return canvas
 
             styled_audit_df = data_source_df.style.apply(sensor_status_styler, axis=None)
+
+            edited_df = st.data_editor(
+                styled_audit_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+                    "NodeNum": "Node ID",
+                    "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
+                },
+                disabled=[col for col in data_source_df.columns if col != "Select"],
+                column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"],
+                key="sensor_status_editor"
+            )
+
+            # Resolve interactive row checkbox choice to generate comparative charts
+            selected_rows = edited_df[edited_df["Select"] == True]
             
-        # Fetch the clean base dataframe from our updated database data pipeline
-        df = load_registry_data(target_registry)
+            if not selected_rows.empty:
+                st.divider()
+                target_node = selected_rows.iloc[0]["NodeNum"]
+                render_sensor_status_charts(client, target_node, selected_project)
+            else:
+                st.info("💡 **Tip:** Use the checkbox in the audit table above to instantly pull up a comparative analysis graph for any sensor.")
 
-        # =============================================================================
-        # INTERACTIVE DATAFRAME SORTING HUB
-        # =============================================================================
-        st.markdown("##### 🔃 Adjust Registry View Sequence")
-        sort_col1, sort_col2 = st.columns(2)
-        
-        sort_metric = sort_col1.selectbox(
-            "Primary Sort Category", 
-            ["Hours Since Last Seen (Default)", "Node ID", "Project Space", "Location Location"], 
-            key="registry_primary_sort_metric"
-        )
-        
-        sort_order = sort_col2.selectbox(
-            "Sequence Direction", 
-            ["Ascending / Active First", "Descending / Missing First"], 
-            key="registry_sort_direction"
-        )
-        
-        is_asc = (sort_order == "Ascending / Active First")
+        # Run our newly isolated fragment render cycle passing the pre-fetched data
+        render_interactive_audit_grid(display_df)
 
-        # Execute dataframe sorting permutations dynamically before table rendering
-        if not df.empty:
-            if "Hours Since Last Seen" in sort_metric:
-                df = df.sort_values(by="hours_hidden", ascending=is_asc).reset_index(drop=True)
-            elif "Node ID" in sort_metric:
-                df['sort_key'] = df['NodeNum'].apply(natural_sort_key)
-                df = df.sort_values(by="sort_key", ascending=is_asc).drop(columns=['sort_key']).reset_index(drop=True)
-            elif "Project Space" in sort_metric:
-                df = df.sort_values(by=["Project", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
-            elif "Location Location" in sort_metric:
-                df = df.sort_values(by=["Location", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
-
-        # Inject our interactive single-selection checkbox row control flag
-        df.insert(0, "Select", False)
-
-        # =============================================================================
-        # DATA EDITOR VIEW LAYOUT
-        # =============================================================================
-        if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(df):
-            df["Select"] = False
-            df.loc[st.session_state["last_selected_node"], "Select"] = True
-
-        edited_df = st.data_editor(
-            df.style.apply(node_selector_styler, axis=None),
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
-                "NodeNum": "Node ID",
-                "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping"),
-                "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Telemetry reporting yield percentage")
-            },
-            disabled=[col for col in df.columns if col != "Select"],
-            column_order=[c for c in df.columns if c != "hours_hidden"], 
-            key=ed_key
-        )
-        # Absolute force-scrub of legacy tracking keys and query metrics from final table
-        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
-        df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
-        
-        return df
     except Exception as e:
-        st.error(f"Error loading registry: {e}")
-        return pd.DataFrame()
+        st.error(f"Sensor Status Error: {e}")
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
 # ===============================================================
