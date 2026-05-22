@@ -2178,7 +2178,14 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             column_order=[c for c in df.columns if c != "hours_hidden"], 
             key=ed_key
         )
-
+        # Absolute force-scrub of legacy tracking keys and query metrics from final table
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
+        df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+        
+        return df
+    except Exception as e:
+        st.error(f"Error loading registry: {e}")
+        return pd.DataFrame()
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
 # ===============================================================
