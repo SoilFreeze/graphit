@@ -560,8 +560,32 @@ def render_node_selector(reg_df, proj_list):
         styled_df = df.style.apply(node_selector_styler, axis=None)
 
         # =============================================================================
-        # INTERACTIVE DATA EDITOR UI COMPONENT
+        # INTERACTIVE DATA EDITOR UI COMPONENT (ENFORCED SINGLE SELECTION)
         # =============================================================================
+        # Initialize a dedicated state tracking key for tracking selection drift
+        if "last_selected_node" not in st.session_state:
+            st.session_state["last_selected_node"] = None
+
+        # Determine if the user has changed selections since the last render cycle
+        ed_key = "node_registry_editor"
+        if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
+            changed_rows = st.session_state[ed_key]["edited_rows"]
+            
+            # Isolate rows where the 'Select' checkbox was explicitly set to True
+            newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
+            
+            if newly_checked:
+                latest_idx = newly_checked[-1]
+                # If the selection changed, reset all others by altering the key suffix to force a re-render
+                if latest_idx != st.session_state["last_selected_node"]:
+                    st.session_state["last_selected_node"] = latest_idx
+                    # Uncheck all rows except the latest choice inside the underlying dataframe snapshot
+                    df["Select"] = False
+                    df.loc[latest_idx, "Select"] = True
+                    # Reset the widget state to clear stale interaction buffers
+                    st.session_state[ed_key]["edited_rows"] = {}
+                    st.rerun()
+
         edited_df = st.data_editor(
             styled_df,
             hide_index=True,
@@ -572,8 +596,8 @@ def render_node_selector(reg_df, proj_list):
                 "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping")
             },
             disabled=[col for col in df.columns if col != "Select"],
-            column_order=[c for c in df.columns if c != "hours_hidden"], # Suppresses raw layout decimals
-            key="node_registry_editor"
+            column_order=[c for c in df.columns if c != "hours_hidden"], 
+            key=ed_key
         )
 
         selected_rows = edited_df[edited_df["Select"] == True]
