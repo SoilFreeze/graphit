@@ -560,38 +560,40 @@ def render_node_selector(reg_df, proj_list):
         styled_df = df.style.apply(node_selector_styler, axis=None)
 
         # =============================================================================
-        # ASSET FLEET SUMMARY METRICS PIPELINE (SIMPLE TABLE VIEW)
+        # ASSET FLEET SUMMARY METRICS PIPELINE (EXACT 4-ROW SPECIFICATION)
         # =============================================================================
         st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
         
         def classify_hardware_family(node):
             node_str = str(node).upper()
-            if "-ch" in node_str:
-                return "Lord Loggers (Boxes)"
+            if "-CH" in node_str:
+                return "Lord"
             elif node_str.startswith("SP"):
-                return "SensorPush SP"
+                return "SP"
             elif node_str.startswith("TP"):
-                return "SensorPush TP"
+                return "TP"
             else:
-                return "Other Legacy"
+                return "None of the Above"
 
         summary_df = reg_df.copy()
         
         # Deduplicate Lord Channels to count distinct physical box units instead of split channels
         summary_df['Parent ID'] = summary_df['NodeNum'].apply(
-            lambda x: str(x).split("-ch")[0] if "-ch" in str(x) else x
+            lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x
         )
         deduped_df = summary_df.drop_duplicates(subset=['Parent ID', 'SensorStatus']).copy()
         deduped_df['Hardware Family'] = deduped_df['Parent ID'].apply(classify_hardware_family)
         
         # Build the status matrix pivot table
         try:
-            fleet_pivot = deduped_df.groupby(['Type', 'SensorStatus']).size().unstack(fill_value=0)
+            fleet_pivot = deduped_df.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
             
-            # Ensure rows are sorted logically with TP at the top context
-            desired_order = ["TP", "SP", "Lord", "None of the above"]
+            # Enforce your exact precise row ordering and categories
+            desired_order = ["TP", "SP", "Lord", "None of the Above"]
             existing_order = [r for r in desired_order if r in fleet_pivot.index]
-            fleet_pivot = fleet_pivot.reindex(existing_order)
+            
+            # Reindex to force rows to exist in your custom requested layout structure
+            fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
             
             # Inject a Total column for quick asset group auditing
             fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
@@ -599,10 +601,7 @@ def render_node_selector(reg_df, proj_list):
             # Render cleanly to the container grid layout view
             st.dataframe(
                 fleet_pivot,
-                use_container_width=True,
-                column_config={
-                    "Hardware Family": st.column_config.TextColumn("Hardware Family", help="Device engineering family lineage")
-                }
+                use_container_width=True
             )
         except Exception as pivot_err:
             st.info("💡 Inventory matrix is populating. Assign statuses to your hardware to generate totals.")
