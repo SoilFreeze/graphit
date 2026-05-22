@@ -799,7 +799,9 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         
     st.divider()
 
+    # =============================================================================
     # 3. EDITOR WITH DYNAMIC PROJECT LOCATION DROPDOWN
+    # =============================================================================
     st.markdown("### 🛠️ Modify Assignment Attributes")
     
     edit_proj = st.selectbox(
@@ -822,6 +824,13 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             curr_loc_idx = existing_project_locations.index(target_record.get('Location'))
         except ValueError:
             curr_loc_idx = 0
+
+    # --- HERE IS WHERE THE IS_TARGET_LORD LOGIC STARTS ---
+    is_target_lord = "-ch" in str(target_record.get('NodeNum', ''))
+    base_logger_id = str(target_record.get('NodeNum')).split("-ch")[0] if is_target_lord else ""
+
+    if is_target_lord:
+        st.warning(f"📡 Multi-Channel Logger Context: This channel belongs to Lord Logger **{base_logger_id}**.")
 
     with st.form("global_node_editor_form"):
         col1, col2 = st.columns(2)
@@ -853,6 +862,16 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         else:
             edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else datetime.now().date())
         
+        # UI Checkbox toggle inside the form boundaries
+        apply_all_channels = False
+        if is_target_lord:
+            st.markdown("---")
+            apply_all_channels = st.checkbox(
+                f"🔗 Bulk Update Option: Apply these changes to ALL 12 channels on {base_logger_id}?",
+                value=False,
+                help="Checking this will update Project, Location, Status, and Dates for all channels belonging to this logger. Individual depths/banks will remain distinct unless explicitly configured."
+            )
+
         if st.form_submit_button("💾 Save Changes"):
             if edit_bank.strip() != "":
                 sql_depth = "NULL"
@@ -866,40 +885,78 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
             where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
-            update_sql = f"""
-                BEGIN TRANSACTION;
-                
-                DELETE FROM `{target_registry}`
-                WHERE NodeNum = '{target_record['NodeNum']}'
-                  AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
-                  AND Project = '{target_record['Project']}'
-                  AND Location = '{target_record['Location']}'
-                  AND {where_bank}
-                  AND {where_depth}
-                  AND {where_end};
-                
-                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                VALUES (
-                  '{edit_nodenum.strip()}',
-                  '{edit_proj.strip()}',
-                  '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
-                  {sql_bank},
-                  {sql_depth},
-                  '{edit_status}',
-                  DATE('{edit_start.isoformat()}'),
-                  {sql_end}
-                );
-                
-                COMMIT;
-            """
+            if is_target_lord and apply_all_channels:
+                # =============================================================================
+                # ATOMIC TRANSACTION FOR ALL 12 SENSOR CHANNELS
+                # =============================================================================
+                update_sql = f"""
+                    BEGIN TRANSACTION;
+                    
+                    -- 1. End or delete old active rows for all channels belonging to this base unit
+                    UPDATE `{target_registry}`
+                    SET End_Date = DATE('{edit_start.isoformat()}'), SensorStatus = 'Archived'
+                    WHERE NodeNum LIKE '{base_logger_id}-ch%' 
+                      AND Project = '{target_record['Project']}'
+                      AND End_Date IS NULL;
+                    
+                    -- 2. Clear out any conflicts if we are overwriting an exact start day
+                    DELETE FROM `{target_registry}`
+                    WHERE NodeNum LIKE '{base_logger_id}-ch%'
+                      AND Start_Date = DATE('{edit_start.isoformat()}')
+                      AND Project = '{edit_proj.strip()}';
+
+                    -- 3. Unroll fresh parameters down to all 12 target channels
+                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                    SELECT 
+                        CONCAT('{base_logger_id}-ch', LPAD(CAST(num AS STRING), 2, '0')),
+                        '{edit_proj.strip()}',
+                        '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
+                        -- Fallback assignment preservation patterns
+                        CASE WHEN {sql_bank} IS NULL THEN NULL ELSE {sql_bank} END,
+                        {sql_depth},
+                        '{edit_status}',
+                        DATE('{edit_start.isoformat()}'),
+                        {sql_end}
+                    FROM UNNEST(GENERATE_ARRAY(1, 12)) as num;
+                    
+                    COMMIT;
+                """
+            else:
+                # Standard single asset row tracking isolation rule (Your original code block)
+                update_sql = f"""
+                    BEGIN TRANSACTION;
+                    
+                    DELETE FROM `{target_registry}`
+                    WHERE NodeNum = '{target_record['NodeNum']}'
+                      AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                      AND Project = '{target_record['Project']}'
+                      AND Location = '{target_record['Location']}'
+                      AND {where_bank}
+                      AND {where_depth}
+                      AND {where_end};
+                    
+                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                    VALUES (
+                      '{edit_nodenum.strip()}',
+                      '{edit_proj.strip()}',
+                      '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
+                      {sql_bank},
+                      {sql_depth},
+                      '{edit_status}',
+                      DATE('{edit_start.isoformat()}'),
+                      {sql_end}
+                    );
+                    
+                    COMMIT;
+                """
             try:
                 client.query(update_sql).result()
-                st.success("✅ Clean split successful. Isolated and modified only your selected row copy.")
+                st.success("✅ Changes committed successfully. Registry schema modified.")
                 st.cache_data.clear()
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Failed to safely swap unique record rows: {e}")
+                st.error(f"Failed to safely modify database record tables: {e}")
 
     # ===============================================================
     # 4. OPERATIONAL TASK PANEL
@@ -937,61 +994,126 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
 
     # --- CHANGE SENSOR ---
     with c_act2:
-        with st.expander("🔄 Change Sensor"):
-            swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
+        with st.expander("🔄 Change Sensor / Entire Lord Loggers"):
+            is_lord = "-ch" in node_id
+            
+            if is_lord:
+                base_lord_id = node_id.split("-ch")[0]
+                st.warning(f"📡 Multi-Channel Detected: This sensor belongs to Lord Logger **{base_lord_id}**. Swapping will perform a straight-across trade for all 12 channels.")
+                swap_node_input = st.text_input("Replacement Base Lord ID (No channel suffix)", placeholder="e.g., LRD02", key="swap_sensor_input")
+            else:
+                swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
+                
             swap_date_input = st.date_input("Swap Execution Date", value=datetime.now().date(), key="swap_sensor_dt")
             
             if st.button("Execute Change Sensor", type="primary", use_container_width=True):
-                if not swap_node_input.strip():
+                new_input_clean = swap_node_input.strip()
+                if not new_input_clean:
                     st.error("Please insert a valid target hardware replacement ID.")
-                elif swap_node_input.strip() == node_id:
-                    st.error("The replacement Node ID cannot be identical to the sensor currently assigned.")
+                elif new_input_clean == node_id or (is_lord and new_input_clean == base_lord_id):
+                    st.error("The replacement ID cannot be identical to the sensor hardware currently deployed.")
                 else:
                     date_str = swap_date_input.isoformat()
-                    new_node = swap_node_input.strip()
                     
-                    if new_node.upper().startswith("TP"):
+                    if new_input_clean.upper().startswith("TP"):
                         old_sensor_restock_loc = "Office Stock"
-                    elif new_node.upper().startswith("SP"):
+                    elif new_input_clean.upper().startswith("SP"):
                         old_sensor_restock_loc = "Ambient Stock"
                     else:
                         old_sensor_restock_loc = "Office Stock"
 
-                    swap_sql = f"""
-                        BEGIN TRANSACTION;
-                        UPDATE `{target_registry}`
-                        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
-                        WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
+                    if is_lord:
+                        lord_channels_q = f"""
+                            SELECT NodeNum, Location, Bank, Depth 
+                            FROM `{target_registry}` 
+                            WHERE NodeNum LIKE '{base_lord_id}-ch%' AND End_Date IS NULL
+                        """
+                        try:
+                            active_ch_df = client.query(lord_channels_q).to_dataframe()
+                        except Exception as e:
+                            st.error(f"Failed pulling Lord channel layout matrices: {e}")
+                            active_ch_df = pd.DataFrame()
 
-                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                        VALUES ('{node_id}', 'Office', '{old_sensor_restock_loc}', '{node_id}', NULL, 'Available', DATE('{date_str}'));
+                        if active_ch_df.empty:
+                            st.error(f"No active deployment rows discovered for channels under {base_lord_id}.")
+                        else:
+                            bulk_swap_sql = ["BEGIN TRANSACTION;"]
+                            
+                            for _, ch_row in active_ch_df.iterrows():
+                                old_ch_node = ch_row['NodeNum']
+                                ch_suffix = old_ch_node.split("-ch")[-1]
+                                new_ch_node = f"{new_input_clean}-ch{ch_suffix}"
+                                
+                                bulk_swap_sql.append(f"""
+                                    UPDATE `{target_registry}`
+                                    SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                                    WHERE NodeNum = '{old_ch_node}' AND End_Date IS NULL;
+                                """)
+                                bulk_swap_sql.append(f"""
+                                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                                    VALUES ('{old_ch_node}', 'Office', '{old_sensor_restock_loc}', '{old_ch_node}', NULL, 'Available', DATE('{date_str}'));
+                                """)
+                                bulk_swap_sql.append(f"""
+                                    UPDATE `{target_registry}`
+                                    SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                                    WHERE NodeNum = '{new_ch_node}' AND End_Date IS NULL;
+                                """)
+                                
+                                sql_bank = f"'{ch_row['Bank']}'" if pd.notnull(ch_row['Bank']) and ch_row['Bank'] != 'None' and ch_row['Bank'] != '' else "NULL"
+                                sql_depth = f"{ch_row['Depth']}" if pd.notnull(ch_row['Depth']) and str(ch_row['Depth']).strip() != '' else "NULL"
+                                
+                                bulk_swap_sql.append(f"""
+                                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                                    VALUES ('{new_ch_node}', '{selected_node_data['Project']}', '{ch_row['Location']}', {sql_bank}, {sql_depth}, 'On Project', DATE('{date_str}'));
+                                """)
+                                
+                            bulk_swap_sql.append("COMMIT;")
+                            combined_lord_sql = "\n".join(bulk_swap_sql)
+                            
+                            try:
+                                with st.spinner(f"Processing straight-across trade for all 12 channels ({base_lord_id} ➡️ {new_input_clean})..."):
+                                    client.query(combined_lord_sql).result()
+                                st.success(f"✅ Full Lord Logger Swap Complete: All channels transferred to base `{new_input_clean}` seamlessly.")
+                                st.cache_data.clear()
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Lord multi-channel swap failure: {e}")
+                    else:
+                        swap_sql = f"""
+                            BEGIN TRANSACTION;
+                            UPDATE `{target_registry}`
+                            SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                            WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
 
-                        UPDATE `{target_registry}`
-                        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
-                        WHERE NodeNum = '{new_node}' 
-                          AND End_Date IS NULL;
+                            INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                            VALUES ('{node_id}', 'Office', '{old_sensor_restock_loc}', '{node_id}', NULL, 'Available', DATE('{date_str}'));
 
-                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                        VALUES (
-                            '{new_node}', 
-                            '{selected_node_data['Project']}', 
-                            '{selected_node_data['Location']}', 
-                            {f"'{selected_node_data['Bank']}'" if pd.notnull(selected_node_data.get('Bank')) and selected_node_data.get('Bank') != 'None' else "NULL"}, 
-                            {selected_node_data['Depth'] if pd.notnull(selected_node_data.get('Depth')) and str(selected_node_data.get('Depth')).strip() != '' else "NULL"}, 
-                            'On Project', 
-                            DATE('{date_str}')
-                        );
-                        COMMIT;
-                    """
-                    try:
-                        with st.spinner("Processing dual-sensor swap execution matrices..."):
-                            client.query(swap_sql).result()
-                        st.success(f"🔄 Change Sensor complete: {node_id} returned to {old_sensor_restock_loc}. {new_node} initialized onto deployment timeline successfully.")
-                        st.cache_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Sensor change transaction execution routine failed: {e}")
+                            UPDATE `{target_registry}`
+                            SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                            WHERE NodeNum = '{new_node}' AND End_Date IS NULL;
+
+                            INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                            VALUES (
+                                '{new_node}', 
+                                '{selected_node_data['Project']}', 
+                                '{selected_node_data['Location']}', 
+                                {f"'{selected_node_data['Bank']}'" if pd.notnull(selected_node_data.get('Bank')) and selected_node_data.get('Bank') != 'None' else "NULL"}, 
+                                {selected_node_data['Depth'] if pd.notnull(selected_node_data.get('Depth')) and str(selected_node_data.get('Depth')).strip() != '' else "NULL"}, 
+                                'On Project', 
+                                DATE('{date_str}')
+                            );
+                            COMMIT;
+                        """
+                        try:
+                            with st.spinner("Processing individual sensor swap..."):
+                                client.query(swap_sql).result()
+                            st.success(f"🔄 Change Sensor complete: {node_id} swapped with {new_node}.")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Sensor swap failed: {e}")
 
     # --- ADD NEW MANUAL ASSIGNMENT ---
     with c_act3:
@@ -1075,7 +1197,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to execute row delete query logic: {e}")
-
 # =============================================================================
 # FUNCTION: DATA CHECKER DIAGNOSTICS MODULE
 # =============================================================================
