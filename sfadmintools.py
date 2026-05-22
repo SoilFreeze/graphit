@@ -560,14 +560,14 @@ def render_node_selector(reg_df, proj_list):
         styled_df = df.style.apply(node_selector_styler, axis=None)
 
         # =============================================================================
-        # ASSET FLEET SUMMARY METRICS PIPELINE (UPGRADED FOR DISTINCT LOGGERS)
+        # ASSET FLEET SUMMARY METRICS PIPELINE (SIMPLE TABLE VIEW)
         # =============================================================================
         st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
         
         def classify_hardware_family(node):
             node_str = str(node).upper()
             if "-CH" in node_str:
-                return "Lord Channel"
+                return "Lord Loggers (Boxes)"
             elif node_str.startswith("SP"):
                 return "SensorPush SP"
             elif node_str.startswith("TP"):
@@ -576,59 +576,37 @@ def render_node_selector(reg_df, proj_list):
                 return "Other Legacy"
 
         summary_df = reg_df.copy()
-        summary_df['Hardware Family'] = summary_df['NodeNum'].apply(classify_hardware_family)
         
-        # Isolate parent Logger box IDs for distinct box counts
-        summary_df['Parent Logger ID'] = summary_df['NodeNum'].apply(
+        # Deduplicate Lord Channels to count distinct physical box units instead of split channels
+        summary_df['Parent ID'] = summary_df['NodeNum'].apply(
             lambda x: str(x).split("-ch")[0] if "-ch" in str(x) else x
         )
+        deduped_df = summary_df.drop_duplicates(subset=['Parent ID', 'SensorStatus']).copy()
+        deduped_df['Hardware Family'] = deduped_df['Parent ID'].apply(classify_hardware_family)
         
-        c_m1, c_m2, c_m3 = st.columns(3)
-        
-        with c_m1:
-            st.markdown("#### ☁️ SensorPush: SP Family")
-            sp_family = summary_df[summary_df['Hardware Family'] == "SensorPush SP"]
-            if not sp_family.empty:
-                # Count distinct nodes and their respective statuses
-                pivot_sp = sp_family.groupby('SensorStatus').size()
-                st.write(f"🔢 Total Unique Sensors: `{sp_family['NodeNum'].nunique()}`")
-                st.markdown("---")
-                for status, count in pivot_sp.items():
-                    st.write(f"  * **{status}**: `{count}` units")
-            else:
-                st.caption("No active SP family tracking units logged.")
-                
-        with c_m2:
-            st.markdown("#### 📡 SensorPush: TP Family")
-            tp_family = summary_df[summary_df['Hardware Family'] == "SensorPush TP"]
-            if not tp_family.empty:
-                pivot_tp = tp_family.groupby('SensorStatus').size()
-                st.write(f"🔢 Total Unique Sensors: `{tp_family['NodeNum'].nunique()}`")
-                st.markdown("---")
-                for status, count in pivot_tp.items():
-                    st.write(f"  * **{status}**: `{count}` units")
-            else:
-                st.caption("No active TP family tracking units logged.")
-                
-        with c_m3:
-            st.markdown("#### 🛠️ Lord Dataloggers (Distinct Boxes)")
-            lord_family = summary_df[summary_df['Hardware Family'] == "Lord Channel"]
-            if not lord_family.empty:
-                # Calculate unique physical loggers based on parent string transformations
-                unique_loggers_count = lord_family['Parent Logger ID'].nunique()
-                st.write(f"🔢 Total Unique Logger Boxes: `{unique_loggers_count}` (`{len(lord_family)}` active channels)")
-                st.markdown("---")
-                
-                # Deduplicate channels per parent to group box statuses accurately
-                # If a logger has channels across multiple statuses, it maps to the active one or splits cleanly
-                lord_boxes = lord_family.drop_duplicates(subset=['Parent Logger ID', 'SensorStatus'])
-                pivot_lord = lord_boxes.groupby('SensorStatus')['Parent Logger ID'].nunique()
-                
-                for status, count in pivot_lord.items():
-                    st.write(f"  * **{status}**: `{count}` physical loggers")
-            else:
-                st.caption("No active Lord logger channels discovered in current schema loops.")
-                
+        # Build the status matrix pivot table
+        try:
+            fleet_pivot = deduped_df.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
+            
+            # Ensure rows are sorted logically with TP at the top context
+            desired_order = ["SensorPush TP", "SensorPush SP", "Lord Loggers (Boxes)", "Other Legacy"]
+            existing_order = [r for r in desired_order if r in fleet_pivot.index]
+            fleet_pivot = fleet_pivot.reindex(existing_order)
+            
+            # Inject a Total column for quick asset group auditing
+            fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
+            
+            # Render cleanly to the container grid layout view
+            st.dataframe(
+                fleet_pivot,
+                use_container_width=True,
+                column_config={
+                    "Hardware Family": st.column_config.TextColumn("Hardware Family", help="Device engineering family lineage")
+                }
+            )
+        except Exception as pivot_err:
+            st.info("💡 Inventory matrix is populating. Assign statuses to your hardware to generate totals.")
+            
         st.markdown("---")
         
         # =============================================================================
