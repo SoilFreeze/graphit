@@ -199,6 +199,7 @@ def load_registry_data(target_table):
     except Exception as e:
         st.error(f"Error loading registry: {e}")
         return pd.DataFrame()
+        
 # =============================================================================
 # 1. Helper functions & Styling Engine
 # =============================================================================
