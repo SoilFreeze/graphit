@@ -566,7 +566,7 @@ def render_node_selector(reg_df, proj_list):
         
         def classify_hardware_family(node):
             node_str = str(node).upper()
-            if "-CH" in node_str:
+            if "-ch" in node_str:
                 return "Lord"
             elif node_str.startswith("SP"):
                 return "SP"
