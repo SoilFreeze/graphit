@@ -497,7 +497,7 @@ def render_node_selector(reg_df, proj_list):
         if f_proj == "All":
             loc_opts = df['Location'].dropna().unique().tolist()
         elif f_proj == "Unassigned":
-            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office") | (df['Location'] == "Office Stock")]['Location'].dropna().unique().tolist()
+            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office") | (df['Location'] == "Office")]['Location'].dropna().unique().tolist()
         else:
             loc_opts = df[df['Project'] == f_proj]['Location'].dropna().unique().tolist()
             
@@ -855,7 +855,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     
     if edit_proj == "Office":
         location_input_type = "text"
-        default_loc_val = str(target_record.get('Location', 'Office Stock'))
+        default_loc_val = str(target_record.get('Location', 'Office'))
     else:
         location_input_type = "dropdown"
         existing_project_locations = sorted(reg_df[reg_df['Project'] == edit_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
@@ -1005,12 +1005,12 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
                     
                     INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                    VALUES ('{node_id}', 'Office', 'Office Stock', '{node_id}', NULL, '{end_status_input}', DATE('{date_iso}'));
+                    VALUES ('{node_id}', 'Office', 'Office', '{node_id}', NULL, '{end_status_input}', DATE('{date_iso}'));
                     COMMIT;
                 """
                 try:
                     client.query(bulk_sql).result()
-                    st.success(f"✅ Node {node_id} ended and transferred to Office stock records.")
+                    st.success(f"✅ Node {node_id} ended and transferred to Office records.")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
@@ -1041,11 +1041,11 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     date_str = swap_date_input.isoformat()
                     
                     if new_input_clean.upper().startswith("TP"):
-                        old_sensor_restock_loc = "Office Stock"
+                        old_sensor_restock_loc = "Office"
                     elif new_input_clean.upper().startswith("SP"):
                         old_sensor_restock_loc = "Ambient Stock"
                     else:
-                        old_sensor_restock_loc = "Office Stock"
+                        old_sensor_restock_loc = "Office"
 
                     if is_lord:
                         lord_channels_q = f"""
@@ -1148,7 +1148,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             add_proj = st.selectbox("Manual Target Project", proj_list, key="manual_add_proj")
             
             if add_proj == "Office":
-                add_loc = st.text_input("Manual Office Sub-Location", value="Office Stock", key="manual_add_loc_text")
+                add_loc = st.text_input("Manual Office Sub-Location", value="Office", key="manual_add_loc_text")
             else:
                 add_loc_opts = sorted(reg_df[reg_df['Project'] == add_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
                 if not add_loc_opts:
@@ -1372,7 +1372,7 @@ def render_data_checker(client, reg_df):
     # TAB 2: Orphaned Nodes
     # ===============================================================
     with c2:
-        st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
+        st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office")
         if orphaned_nodes:
             orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
             last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
@@ -1385,7 +1385,7 @@ def render_data_checker(client, reg_df):
                 column_config={"NodeNum": "Node ID"}
             )
         else:
-            st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
+            st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office rows.")
 
     # ===============================================================
     # TAB 3: MULTIPLE / DUPLICATE ASSIGNMENTS
@@ -2291,12 +2291,12 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
         WHERE Project = '{project_id}' 
           AND End_Date IS NULL;
 
-        -- 2. Insert the hardware back into Office Stock
+        -- 2. Insert the hardware back into Office
         INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
         SELECT 
             NodeNum, 
             'Office' as Project, 
-            'Office Stock' as Location, 
+            'Office' as Location, 
             NodeNum as Bank, -- Reset Bank to NodeNum for stock
             NULL as Depth,   -- Clear Depth for stock
             '{return_status}' as SensorStatus,
@@ -2312,7 +2312,7 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
             query_job = client.query(bulk_sql)
             query_job.result()
             
-        st.success(f"Project {project_id} decommissioned. Hardware moved to Office Stock as '{return_status}'.")
+        st.success(f"Project {project_id} decommissioned. Hardware moved to Office as '{return_status}'.")
         st.cache_data.clear()
     except Exception as e:
         st.error(f"Bulk Decommission Failed: {e}")
