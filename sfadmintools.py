@@ -560,6 +560,78 @@ def render_node_selector(reg_df, proj_list):
         styled_df = df.style.apply(node_selector_styler, axis=None)
 
         # =============================================================================
+        # ASSET FLEET SUMMARY METRICS PIPELINE (UPGRADED FOR DISTINCT LOGGERS)
+        # =============================================================================
+        st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
+        
+        def classify_hardware_family(node):
+            node_str = str(node).upper()
+            if "-CH" in node_str:
+                return "Lord Channel"
+            elif node_str.startswith("SP"):
+                return "SensorPush SP"
+            elif node_str.startswith("TP"):
+                return "SensorPush TP"
+            else:
+                return "Other Legacy"
+
+        summary_df = reg_df.copy()
+        summary_df['Hardware Family'] = summary_df['NodeNum'].apply(classify_hardware_family)
+        
+        # Isolate parent Logger box IDs for distinct box counts
+        summary_df['Parent Logger ID'] = summary_df['NodeNum'].apply(
+            lambda x: str(x).split("-ch")[0] if "-ch" in str(x) else x
+        )
+        
+        c_m1, c_m2, c_m3 = st.columns(3)
+        
+        with c_m1:
+            st.markdown("#### ☁️ SensorPush: SP Family")
+            sp_family = summary_df[summary_df['Hardware Family'] == "SensorPush SP"]
+            if not sp_family.empty:
+                # Count distinct nodes and their respective statuses
+                pivot_sp = sp_family.groupby('SensorStatus').size()
+                st.write(f"🔢 Total Unique Sensors: `{sp_family['NodeNum'].nunique()}`")
+                st.markdown("---")
+                for status, count in pivot_sp.items():
+                    st.write(f"  * **{status}**: `{count}` units")
+            else:
+                st.caption("No active SP family tracking units logged.")
+                
+        with c_m2:
+            st.markdown("#### 📡 SensorPush: TP Family")
+            tp_family = summary_df[summary_df['Hardware Family'] == "SensorPush TP"]
+            if not tp_family.empty:
+                pivot_tp = tp_family.groupby('SensorStatus').size()
+                st.write(f"🔢 Total Unique Sensors: `{tp_family['NodeNum'].nunique()}`")
+                st.markdown("---")
+                for status, count in pivot_tp.items():
+                    st.write(f"  * **{status}**: `{count}` units")
+            else:
+                st.caption("No active TP family tracking units logged.")
+                
+        with c_m3:
+            st.markdown("#### 🛠️ Lord Dataloggers (Distinct Boxes)")
+            lord_family = summary_df[summary_df['Hardware Family'] == "Lord Channel"]
+            if not lord_family.empty:
+                # Calculate unique physical loggers based on parent string transformations
+                unique_loggers_count = lord_family['Parent Logger ID'].nunique()
+                st.write(f"🔢 Total Unique Logger Boxes: `{unique_loggers_count}` (`{len(lord_family)}` active channels)")
+                st.markdown("---")
+                
+                # Deduplicate channels per parent to group box statuses accurately
+                # If a logger has channels across multiple statuses, it maps to the active one or splits cleanly
+                lord_boxes = lord_family.drop_duplicates(subset=['Parent Logger ID', 'SensorStatus'])
+                pivot_lord = lord_boxes.groupby('SensorStatus')['Parent Logger ID'].nunique()
+                
+                for status, count in pivot_lord.items():
+                    st.write(f"  * **{status}**: `{count}` physical loggers")
+            else:
+                st.caption("No active Lord logger channels discovered in current schema loops.")
+                
+        st.markdown("---")
+        
+        # =============================================================================
         # INTERACTIVE DATA EDITOR UI COMPONENT (PERSISTENT SINGLE SELECTION)
         # =============================================================================
         if "last_selected_node" not in st.session_state:
@@ -924,80 +996,92 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
                     
                     # =============================================================================
-                    # APPLICATION-LAYER AUTOMATION FOR "DEAD" STATUS ROUTING
-                    # =============================================================================
-                    # Intercepts and overrides the target project/location parameters automatically
-                    # if the sensor status dropdown is set to "Dead".
-                    if edit_status == "Dead":
-                        final_project = "Dead"
-                        final_location = "Dead Stock"
-                    else:
-                        final_project = edit_proj.strip()
-                        final_location = edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc
-        
-                    if is_target_lord and apply_all_channels:
-                        # =============================================================================
-                        # BULK LORD LOGGER UPDATE (PRESERVES DEPTH/BANK + ENFORCES 'DEAD' ROUTING)
-                        # =============================================================================
-                        # Mass updates active records matching the base ID while leaving pre-existing
-                        # distinct depths and banks completely untouched in the registry.
-                        update_sql = f"""
-                            BEGIN TRANSACTION;
-                            
-                            UPDATE `{target_registry}`
-                            SET 
-                                Project = '{final_project}',
-                                Location = '{final_location}',
-                                SensorStatus = '{edit_status}',
-                                Start_Date = DATE('{edit_start.isoformat()}'),
-                                End_Date = {sql_end}
-                            WHERE NodeNum LIKE '{base_logger_id}-ch%' 
-                              AND End_Date IS NULL;
-                            
-                            COMMIT;
-                        """
-                    else:
-                        # =============================================================================
-                        # STANDARD SINGLE-ROW ISOLATION UPDATE RULES
-                        # =============================================================================
-                        where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
-                        where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
-                        where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
-        
-                        update_sql = f"""
-                            BEGIN TRANSACTION;
-                            
-                            DELETE FROM `{target_registry}`
-                            WHERE NodeNum = '{target_record['NodeNum']}'
-                              AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
-                              AND Project = '{target_record['Project']}'
-                              AND Location = '{target_record['Location']}'
-                              AND {where_bank}
-                              AND {where_depth}
-                              AND {where_end};
-                            
-                            INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                            VALUES (
-                              '{edit_nodenum.strip()}',
-                              '{final_project}',
-                              '{final_location}',
-                              {sql_bank},
-                              {sql_depth},
-                              '{edit_status}',
-                              DATE('{edit_start.isoformat()}'),
-                              {sql_end}
-                            );
-                            
-                            COMMIT;
-                        """
-                    try:
-                        client.query(update_sql).result()
-                        st.success(f"✅ Changes committed successfully. Status assigned to '{edit_status}' and routed to Project '{final_project}'.")
-                        st.cache_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to safely modify database record tables: {e}")
+        # APPLICATION-LAYER AUTOMATION FOR "DEAD" & "OFFICE" ROUTING
+        # =============================================================================
+        if edit_status == "Dead":
+            final_project = "Dead"
+            final_location = "Dead"  # Stripped "Stock"
+        else:
+            final_project = edit_proj.strip()
+            final_location = edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc
+            if final_location == "Office Stock":
+                final_location = "Office"  # Stripped "Stock"
+
+        if st.form_submit_button("💾 Save Changes"):
+            if edit_bank.strip() != "":
+                sql_depth = "NULL"
+            else:
+                sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+                
+            # If marked dead, force the end date to be the exact date it was marked dead
+            if edit_status == "Dead":
+                sql_end = f"DATE('{edit_start.isoformat()}')"
+            else:
+                sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
+                
+            sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
+            
+            if is_target_lord and apply_all_channels:
+                # =============================================================================
+                # BULK LORD LOGGER UPDATE (PRESERVES DEPTH/BANK + ENFORCES 'DEAD' END_DATE)
+                # =============================================================================
+                update_sql = f"""
+                    BEGIN TRANSACTION;
+                    
+                    UPDATE `{target_registry}`
+                    SET 
+                        Project = '{final_project}',
+                        Location = '{final_location}',
+                        SensorStatus = '{edit_status}',
+                        Start_Date = DATE('{edit_start.isoformat()}'),
+                        End_Date = {sql_end}
+                    WHERE NodeNum LIKE '{base_logger_id}-ch%' 
+                      AND End_Date IS NULL;
+                    
+                    COMMIT;
+                """
+            else:
+                # =============================================================================
+                # STANDARD SINGLE-ROW ISOLATION UPDATE RULES
+                # =============================================================================
+                where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+                where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+                where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
+
+                update_sql = f"""
+                    BEGIN TRANSACTION;
+                    
+                    DELETE FROM `{target_registry}`
+                    WHERE NodeNum = '{target_record['NodeNum']}'
+                      AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                      AND Project = '{target_record['Project']}'
+                      AND Location = '{target_record['Location']}'
+                      AND {where_bank}
+                      AND {where_depth}
+                      AND {where_end};
+                    
+                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                    VALUES (
+                      '{edit_nodenum.strip()}',
+                      '{final_project}',
+                      '{final_location}',
+                      {sql_bank},
+                      {sql_depth},
+                      '{edit_status}',
+                      DATE('{edit_start.isoformat()}'),
+                      {sql_end}
+                    );
+                    
+                    COMMIT;
+                """
+            try:
+                client.query(update_sql).result()
+                st.success(f"✅ Changes committed. Status: '{edit_status}' | Project: '{final_project}' | End Date: {edit_start.isoformat() if edit_status == 'Dead' else 'Open'}")
+                st.cache_data.clear()
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to safely modify database record tables: {e}")
 
     # ===============================================================
     # 4. OPERATIONAL TASK PANEL
@@ -1385,24 +1469,35 @@ def render_data_checker(client, reg_df):
             st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
 
     # ===============================================================
-    # TAB 2: Orphaned Nodes
+    # TAB 2: Orphaned Nodes (MODIFIED TO IGNORE DEAD SENSORS)
     # ===============================================================
     with c2:
-        st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office")
+        st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
         if orphaned_nodes:
             orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
-            last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
-            styled_orphans = apply_diagnostic_row_colors(last_entries)
-            st.dataframe(
-                styled_orphans, 
-                use_container_width=True, 
-                hide_index=True,
-                column_order=['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'],
-                column_config={"NodeNum": "Node ID"}
-            )
+            
+            # CRITICAL FILTER LAYER: Strip out any entry containing Dead parameters explicitly
+            if not orphan_display_df.empty:
+                orphan_display_df = orphan_display_df[
+                    (orphan_display_df['SensorStatus'].str.upper() != 'DEAD') &
+                    (orphan_display_df['Project'].str.upper() != 'DEAD') &
+                    (orphan_display_df['Location'].str.upper() != 'DEAD')
+                ]
+                
+            if not orphan_display_df.empty:
+                last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
+                styled_orphans = apply_diagnostic_row_colors(last_entries)
+                st.dataframe(
+                    styled_orphans, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_order=['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'],
+                    column_config={"NodeNum": "Node ID"}
+                )
+            else:
+                st.success("✅ Clean terminations verified. No active field nodes currently stand orphaned.")
         else:
-            st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office rows.")
-
+            st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
     # ===============================================================
     # TAB 3: MULTIPLE / DUPLICATE ASSIGNMENTS
     # ===============================================================
