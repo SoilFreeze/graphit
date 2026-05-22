@@ -2448,7 +2448,7 @@ def render_active_node_registry_page(client, target_registry=None, **kwargs):
             target_node_record = st.session_state["active_selected_node_record"].copy()
             proj_list = sorted(reg_df['Project'].dropna().unique().tolist())
             
-            render_node_action_manager(client, target_node_record, reg_df, proj_list, target_registry)
+            render_node_action_manager(client, target_node_record, reg_df, proj_list, table_path)
             
     except Exception as e:
         st.error(f"Failed to compile master node registry view grid: {e}")
