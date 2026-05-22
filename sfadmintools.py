@@ -3602,7 +3602,8 @@ def main():
         render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry)
 
     elif admin_page == "🔍 Sensor Status":
-        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+        # FIXED ROUTE: Runs the interactive sorting and performance audit table view
+        render_active_node_registry_page(client, target_registry)
         
     elif admin_page == "📦 Bulk Registry Manager":
         render_bulk_registry_page(client, proj_list)
