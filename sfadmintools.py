@@ -92,11 +92,10 @@ def render_sidebar():
 def load_registry_data(target_table):
     """
     Queries active schema inventory data safely, merging real-time 'Last Seen' 
-    lag hours, computing lifetime project reporting efficiency, and scrubbing 
-    legacy PhysicalID markers.
+    lag hours and scrubbing legacy PhysicalID markers.
     """
     try:
-        # High-performance query that tracks latest ping AND counts actual project pings
+        # High-performance single-pass join tracking the latest ping across all assets
         master_query = f"""
             WITH LatestTelemetry AS (
                 SELECT 
@@ -104,43 +103,13 @@ def load_registry_data(target_table):
                     MAX(timestamp) as last_ping
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
                 GROUP BY NodeNum
-            ),
-            
-            AssignmentWindows AS (
-                SELECT 
-                    NodeNum,
-                    Start_Date,
-                    -- Calculate expected hours from start up to end date (or right now if still active)
-                    COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
-                    DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
-                FROM `{target_table}`
-                WHERE Project != 'Dead'
-            ),
-            
-            ActualProjectPings AS (
-                SELECT 
-                    m.NodeNum,
-                    a.Start_Date,
-                    COUNT(m.timestamp) AS Actual_Pings_Logged
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                INNER JOIN AssignmentWindows a 
-                  ON m.NodeNum = a.NodeNum 
-                  -- Count pings that occurred strictly within the project timeline window
-                  AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
-                GROUP BY m.NodeNum, a.Start_Date
             )
-            
             SELECT 
                 R.*,
-                T.last_ping,
-                A.Expected_Hours,
-                COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
+                T.last_ping
             FROM `{target_table}` R
-            LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
-            LEFT JOIN AssignmentWindows A 
-              ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
-            LEFT JOIN ActualProjectPings P 
-              ON R.NodeNum = P.NodeNum AND R.Start_Date = P.Start_Date
+            LEFT JOIN LatestTelemetry T 
+              ON R.NodeNum = T.NodeNum
         """
         df = client.query(master_query).to_dataframe()
         
@@ -172,34 +141,17 @@ def load_registry_data(target_table):
             df['hours_hidden'] = float('inf')
             df['Last Seen'] = "❌ Never"
             
-        # =============================================================================
-        # SAFE VECTOR CALCULATION FOR REPORTING EFFICIENCY PERCENTAGE COLUMN
-        # =============================================================================
-        if not df.empty and 'Expected_Hours' in df.columns:
-            # Enforce clean numerical typing and fill any missing values with 0
-            exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
-            act_pings = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
-            
-            # Run vector calculation safely without ambiguous NA evaluations
-            raw_eff = np.where(
-                exp_hours <= 0, 
-                0.0, 
-                np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1))
-            )
-            
-            df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_eff]
-        else:
-            df['Reporting Efficiency'] = "0.0%"
-
-        # Absolute force-scrub of legacy tracking keys and query metrics from final table
-        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
+        # Absolute force-scrub of legacy tracking keys, but KEEP hours_hidden for table layout steps
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+        
+        # Pre-sort the dataframe immediately by age so it returns cleanly ordered by time
+        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
         
         return df
     except Exception as e:
         st.error(f"Error loading registry: {e}")
         return pd.DataFrame()
-        
 # =============================================================================
 # 1. Helper functions & Styling Engine
 # =============================================================================
@@ -380,6 +332,10 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
 # Function: Hardware integrity table
 # ===============================================================
 def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
+    """
+    Renders a detailed table showing connectivity, coverage, and recent activity.
+    Sorted chronologically by data latency (minutes first, then hours).
+    """
     st.subheader("📋 Hardware Integrity & Connectivity")
     
     query = f"""
@@ -416,50 +372,60 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 
     now_utc = pd.Timestamp.now(tz='UTC')
 
+    # =============================================================================
+    # 1. PROCESS ROW METRICS & INJECT COLOR PROFILES
+    # =============================================================================
     def row_processor(row):
         ping = row['last_ping']
         
         if pd.isnull(ping):
             hours_hidden = float('inf')
             txt = "❌ Never"
-            style = "background-color: #d1d5db; color: #1f2937;"
+            style = "background-color: #d1d5db; color: #1f2937;" # Gray
         else:
             ts = ping if ping.tzinfo else ping.tz_localize('UTC')
             diff_mins = (now_utc - ts).total_seconds() / 60.0
             hours_hidden = diff_mins / 60.0
             
+            # Absolute matching for requested color boundaries
             if hours_hidden < 1.0:
                 txt = f"{int(diff_mins)}m ago" if diff_mins >= 1.0 else "Just now"
-                style = "background-color: #d1fae5; color: #065f46;"
+                style = "background-color: #d1fae5; color: #065f46;" # Green (<1 hr)
             elif 1.0 <= hours_hidden <= 6.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fef08a; color: #854d0e;"
+                style = "background-color: #fef08a; color: #854d0e;" # Yellow (1-6 hrs)
             elif 6.0 < hours_hidden <= 12.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fed7aa; color: #9a3412;"
+                style = "background-color: #fed7aa; color: #9a3412;" # Orange (6-12 hrs)
             elif 12.0 < hours_hidden <= 24.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fca5a5; color: #991b1b;"
+                style = "background-color: #fca5a5; color: #991b1b;" # Red (12-24 hrs)
             else:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #d1d5db; color: #1f2937;"
+                style = "background-color: #d1d5db; color: #1f2937;" # Gray (>24 hrs)
         
         pos = f"{row['Depth']}ft" if (pd.notnull(row['Depth']) and row['Depth'] != 0) else f"Bank {row['Bank']}"
         trend = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
         
         return pd.Series([txt, style, pos, trend, hours_hidden])
 
+    # Map processors down into structural data frames
     df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend', 'hours_hidden']] = df.apply(row_processor, axis=1)
 
+    # =============================================================================
+    # 2. ENFORCE CHRONOLOGICAL SORT SEQUENCE
+    # =============================================================================
+    # Force data field formats to floats, sorting true active pings ahead of infinity states
     df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
     df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
+    # Build optimized rendering dictionary structure 
     display_df = pd.DataFrame({
         "Node ID": df['NodeNum'],
         "Location": df['Location'],
         "Position": df['Pos_Label'],
         "Last Seen": df['Seen_Text'],
-        "24h Coverage": df['coverage_24h'],
+        "24h Coverage": df['coverage_24h'], # Kept numeric float value for native Progress Column mapping
         "1h Change": df['Trend'],
         "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label)),
         "1h Pings": df['pings_1h'],
@@ -467,17 +433,24 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         "24h Pings": df['pings_24h']
     })
 
+    # =============================================================================
+    # 3. UNIFIED MATRIX STYLER (Row and Cell overrides)
+    # =============================================================================
     def diagnostic_styler(data):
+        # Establish blank style canvas matching target configuration
         style_df = pd.DataFrame('', index=data.index, columns=data.columns)
         
         for i in data.index:
+            # Inject uniform background status tracking color explicitly to the cell index
             style_df.loc[i, 'Last Seen'] = df.loc[i, 'Seen_Style']
             
+            # Apply distinctive alert override if device status flags diagnostics
             if df.loc[i, 'SensorStatus'] == 'Diagnostic':
                 style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
                 
         return style_df
 
+    # Lock properties inside view states and render to grid
     st.dataframe(
         display_df.style.apply(diagnostic_styler, axis=None), 
         use_container_width=True, 
@@ -500,6 +473,11 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 # =============================================================================
 
 def render_node_selector(reg_df, proj_list):
+    """
+    Renders an active inventory node selection engine with integrated 
+    Last Seen reporting and administrative playground overwrite utilities.
+    Now supports real-time chronological sorting and row-level alert colors.
+    """
     st.subheader("🎯 Active Node Registry")
     
     hide_archived = st.checkbox("Hide Archived Records", value=True, key="ns_hide_archived_toggle")
@@ -511,6 +489,7 @@ def render_node_selector(reg_df, proj_list):
             (df['Location'].str.contains("Archive", case=False, na=False) == False)
         ]
 
+    # Layout Filter Row
     c1, c2, c3 = st.columns(3)
     with c1:
         f_proj = st.selectbox("Filter by Project Space", ["All", "Unassigned"] + proj_list, key="ns_proj_f")
@@ -518,7 +497,7 @@ def render_node_selector(reg_df, proj_list):
         if f_proj == "All":
             loc_opts = df['Location'].dropna().unique().tolist()
         elif f_proj == "Unassigned":
-            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office") | (df['Location'] == "Office")]['Location'].dropna().unique().tolist()
+            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office") | (df['Location'] == "Office Stock")]['Location'].dropna().unique().tolist()
         else:
             loc_opts = df[df['Project'] == f_proj]['Location'].dropna().unique().tolist()
             
@@ -526,6 +505,7 @@ def render_node_selector(reg_df, proj_list):
     with c3:
         search_term = st.text_input("Global Search (Node ID)", "", key="ns_search_f")
 
+    # Execute Cascading Filters
     if f_proj == "Unassigned":
         df = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office")]
     elif f_proj != "All":
@@ -539,133 +519,72 @@ def render_node_selector(reg_df, proj_list):
 
     if df.empty:
         st.info("No matching nodes located under current filter parameters.")
-        return None
-
-    if 'hours_hidden' in df.columns:
-        df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
-        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
-    else:
-        df['hours_hidden'] = float('inf')
-
-    st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
-    
-    def classify_hardware_family(node):
-        node_str = str(node).lower()
-        if "-ch" in node_str:
-            return "Lord"
-        elif node_str.startswith("sp"):
-            return "SP"
-        elif node_str.startswith("tp"):
-            return "TP"
-        else:
-            return "None of the Above"
-
-    summary_df = reg_df.copy()
-    summary_df['Hardware Family'] = summary_df['NodeNum'].apply(classify_hardware_family)
-    
-    summary_df['Parent ID'] = summary_df['NodeNum'].apply(
-        lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x
-    )
-    
-    if 'End_Date' in summary_df.columns:
-        summary_df['is_active'] = summary_df['End_Date'].isna()
-    else:
-        summary_df['is_active'] = True
-        
-    sort_keys = ['Parent ID', 'is_active']
-    sort_asc = [True, False]
-    
-    if 'Start_Date' in summary_df.columns:
-        sort_keys.append('Start_Date')
-        sort_asc.append(False)
-        
-    summary_df = summary_df.sort_values(by=sort_keys, ascending=sort_asc)
-    
-    deduped_units = summary_df.drop_duplicates(subset=['Parent ID']).copy()
-    
-    try:
-        fleet_pivot = deduped_units.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
-        desired_order = ["TP", "SP", "Lord", "None of the Above"]
-        fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
-        fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
-        
-        st.dataframe(fleet_pivot, use_container_width=True)
-    except Exception as pivot_err:
-        st.info("💡 Inventory matrix is populating. Assign statuses to your hardware to generate totals.")
-        
-    st.markdown("---")
-
-    st.markdown("### 📋 Current Asset Allocation Matrix")
-
-    if "last_selected_node" not in st.session_state:
-        st.session_state["last_selected_node"] = None
-    if "active_selected_node_record" not in st.session_state:
-        st.session_state["active_selected_node_record"] = None
-
-    ed_key = "node_registry_editor"
-    if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
-        changed_rows = st.session_state[ed_key]["edited_rows"]
-        newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
-        
-        if newly_checked and not df.empty:
-            latest_idx = newly_checked[-1]
-            if latest_idx != st.session_state["last_selected_node"]:
-                st.session_state["last_selected_node"] = latest_idx
-                
-                rec_dict = df.loc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
-                rec_dict["Select"] = True
-                st.session_state["active_selected_node_record"] = rec_dict
-                st.session_state[ed_key]["edited_rows"] = {}
-                st.rerun()
-        
-        elif any(changes.get("Select") == False for idx, changes in changed_rows.items()):
-            st.session_state["last_selected_node"] = None
-            st.session_state["active_selected_node_record"] = None
-            st.session_state[ed_key]["edited_rows"] = {}
-            st.rerun()
-
-    df.insert(0, "Select", False)
-    if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(df):
-        df.loc[st.session_state["last_selected_node"], "Select"] = True
-
-    def node_manager_styler(data):
-        style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
-        for i in data.index:
-            try:
-                val = data.loc[i, 'hours_hidden']
-                hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
-                color_style = assign_row_color(hours_val)
-            except Exception:
-                color_style = "background-color: transparent;"
-            
-            for col in data.columns:
-                if col != "Select":
-                    style_canvas.loc[i, col] = color_style
-        return style_canvas
-
-    edited_df = st.data_editor(
-        df.style.apply(node_manager_styler, axis=None) if not df.empty else df,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
-            "NodeNum": "Node ID",
-            "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping"),
-            "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Telemetry reporting yield percentage"),
-            "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
-        },
-        disabled=[col for col in df.columns if col != "Select"],
-        column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "Reporting Efficiency", "coverage_24h"], 
-        key=ed_key
-    )
-
-    if st.session_state["active_selected_node_record"] is not None:
-        selected_returned_row = st.session_state["active_selected_node_record"].copy()
-        if "Select" in selected_returned_row:
-            del selected_returned_row["Select"]
-    else:
         selected_returned_row = None
+    else:
+        # =============================================================================
+        # CHRONOLOGICAL SORTING LAYER
+        # =============================================================================
+        # Safely treat missing metrics as float('inf') so unpinged tokens sit at the bottom
+        if 'hours_hidden' in df.columns:
+            df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+            df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+        else:
+            df['hours_hidden'] = float('inf')
+
+        # Insert active checkbox interaction array
+        df.insert(0, "Select", False)
+        
+        # =============================================================================
+        # STYLING ENGINE OVERLAY
+        # =============================================================================
+        def node_selector_styler(data):
+            """
+            Applies standard alert color backgrounds to every row within the editor layout.
+            """
+            style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
+            for i in data.index:
+                try:
+                    val = data.loc[i, 'hours_hidden']
+                    hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                    color_style = assign_row_color(hours_val)
+                except Exception:
+                    color_style = "background-color: transparent;"
+                
+                # Apply background hex color rules across the row cells
+                for col in data.columns:
+                    if col != "Select": # Leave checkbox background neutral for UX clarity
+                        style_canvas.loc[i, col] = color_style
+            return style_canvas
+
+        # Freeze the colors directly onto the pandas dataframe structure
+        styled_df = df.style.apply(node_selector_styler, axis=None)
+
+        # =============================================================================
+        # INTERACTIVE DATA EDITOR UI COMPONENT
+        # =============================================================================
+        edited_df = st.data_editor(
+            styled_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+                "NodeNum": "Node ID",
+                "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping")
+            },
+            disabled=[col for col in df.columns if col != "Select"],
+            column_order=[c for c in df.columns if c != "hours_hidden"], # Suppresses raw layout decimals
+            key="node_registry_editor"
+        )
+
+        selected_rows = edited_df[edited_df["Select"] == True]
+        if not selected_rows.empty:
+            selected_returned_row = selected_rows.iloc[0].drop(["Select", "hours_hidden"]).to_dict()
+        else:
+            selected_returned_row = None
             
+    # =============================================================================
+    # NEW ADMINISTRATIVE TOOL: FORCE OVERWRITE FROM PLAYGROUND DUMMY
+    # =============================================================================
     st.markdown("---")
     with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
         st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact snapshot copy of your `node_registry_dummy` table.")
@@ -683,6 +602,7 @@ def render_node_selector(reg_df, proj_list):
                 prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
                 dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
                 
+                # Configure query to execute an atomic rewrite snapshot truncate
                 job_config = bigquery.QueryJobConfig(
                     write_disposition="WRITE_TRUNCATE",
                     destination=prod_table
@@ -879,9 +799,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         
     st.divider()
 
-    # =============================================================================
     # 3. EDITOR WITH DYNAMIC PROJECT LOCATION DROPDOWN
-    # =============================================================================
     st.markdown("### 🛠️ Modify Assignment Attributes")
     
     edit_proj = st.selectbox(
@@ -893,7 +811,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     
     if edit_proj == "Office":
         location_input_type = "text"
-        default_loc_val = str(target_record.get('Location', 'Office'))
+        default_loc_val = str(target_record.get('Location', 'Office Stock'))
     else:
         location_input_type = "dropdown"
         existing_project_locations = sorted(reg_df[reg_df['Project'] == edit_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
@@ -904,13 +822,6 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             curr_loc_idx = existing_project_locations.index(target_record.get('Location'))
         except ValueError:
             curr_loc_idx = 0
-
-    # --- HERE IS WHERE THE IS_TARGET_LORD LOGIC STARTS ---
-    is_target_lord = "-ch" in str(target_record.get('NodeNum', ''))
-    base_logger_id = str(target_record.get('NodeNum')).split("-ch")[0] if is_target_lord else ""
-
-    if is_target_lord:
-        st.warning(f"📡 Multi-Channel Logger Context: This channel belongs to Lord Logger **{base_logger_id}**.")
 
     with st.form("global_node_editor_form"):
         col1, col2 = st.columns(2)
@@ -942,109 +853,53 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         else:
             edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else datetime.now().date())
         
-        # UI Checkbox toggle inside the form boundaries
-        apply_all_channels = False
-        if is_target_lord:
-            st.markdown("---")
-            apply_all_channels = st.checkbox(
-                f"🔗 Bulk Update Option: Apply these changes to ALL 12 channels on {base_logger_id}?",
-                value=False,
-                help="Checking this will update Project, Location, Status, and Dates for all channels belonging to this logger. Individual depths/banks will remain distinct unless explicitly configured."
-            )
-
-        # Generate a distinct runtime key for the submit button to eliminate duplicate ID collisions
-        clean_start_str = pd.to_datetime(target_record.get('Start_Date')).strftime('%Y%m%d') if pd.notnull(target_record.get('Start_Date')) else "new"
-        submit_btn_key = f"submit_changes_{node_id}_{clean_start_str}"
-
-        # SINGLE SUBMISSION POINT WITH UNIQUE KEY
-        if st.form_submit_button("💾 Save Changes", key=submit_btn_key):
+        if st.form_submit_button("💾 Save Changes"):
             if edit_bank.strip() != "":
                 sql_depth = "NULL"
             else:
                 sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
                 
-            # If marked dead, force the end date to be the exact execution start date
-            if edit_status == "Dead":
-                sql_end = f"DATE('{edit_start.isoformat()}')"
-            else:
-                sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
-                
+            sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            # =============================================================================
-            # APPLICATION-LAYER AUTOMATION FOR "DEAD" & "OFFICE" ROUTING
-            # =============================================================================
-            # Intercepts and overrides target project/location parameters cleanly
-            if edit_status == "Dead":
-                final_project = "Dead"
-                final_location = "Dead"  # Stripped "Stock"
-            else:
-                final_project = edit_proj.strip()
-                final_location = edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc
-                if final_location == "Office Stock":
-                    final_location = "Office"  # Stripped "Stock"
+            where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+            where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+            where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
-            if is_target_lord and apply_all_channels:
-                # =============================================================================
-                # BULK LORD LOGGER UPDATE (PRESERVES DEPTH/BANK + ENFORCES 'DEAD' END_DATE)
-                # =============================================================================
-                update_sql = f"""
-                    BEGIN TRANSACTION;
-                    
-                    UPDATE `{target_registry}`
-                    SET 
-                        Project = '{final_project}',
-                        Location = '{final_location}',
-                        SensorStatus = '{edit_status}',
-                        Start_Date = DATE('{edit_start.isoformat()}'),
-                        End_Date = {sql_end}
-                    WHERE NodeNum LIKE '{base_logger_id}-ch%' 
-                      AND End_Date IS NULL;
-                    
-                    COMMIT;
-                """
-            else:
-                # =============================================================================
-                # STANDARD SINGLE-ROW ISOLATION UPDATE RULES
-                # =============================================================================
-                where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
-                where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
-                where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
-
-                update_sql = f"""
-                    BEGIN TRANSACTION;
-                    
-                    DELETE FROM `{target_registry}`
-                    WHERE NodeNum = '{target_record['NodeNum']}'
-                      AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
-                      AND Project = '{target_record['Project']}'
-                      AND Location = '{target_record['Location']}'
-                      AND {where_bank}
-                      AND {where_depth}
-                      AND {where_end};
-                    
-                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                    VALUES (
-                      '{edit_nodenum.strip()}',
-                      '{final_project}',
-                      '{final_location}',
-                      {sql_bank},
-                      {sql_depth},
-                      '{edit_status}',
-                      DATE('{edit_start.isoformat()}'),
-                      {sql_end}
-                    );
-                    
-                    COMMIT;
-                """
+            update_sql = f"""
+                BEGIN TRANSACTION;
+                
+                DELETE FROM `{target_registry}`
+                WHERE NodeNum = '{target_record['NodeNum']}'
+                  AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                  AND Project = '{target_record['Project']}'
+                  AND Location = '{target_record['Location']}'
+                  AND {where_bank}
+                  AND {where_depth}
+                  AND {where_end};
+                
+                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                VALUES (
+                  '{edit_nodenum.strip()}',
+                  '{edit_proj.strip()}',
+                  '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
+                  {sql_bank},
+                  {sql_depth},
+                  '{edit_status}',
+                  DATE('{edit_start.isoformat()}'),
+                  {sql_end}
+                );
+                
+                COMMIT;
+            """
             try:
                 client.query(update_sql).result()
-                st.success(f"✅ Changes committed successfully. Status: '{edit_status}' | Project: '{final_project}'")
+                st.success("✅ Clean split successful. Isolated and modified only your selected row copy.")
                 st.cache_data.clear()
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Failed to safely modify database record tables: {e}")
+                st.error(f"Failed to safely swap unique record rows: {e}")
 
     # ===============================================================
     # 4. OPERATIONAL TASK PANEL
@@ -1068,12 +923,12 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                     WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
                     
                     INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                    VALUES ('{node_id}', 'Office', 'Office', '{node_id}', NULL, '{end_status_input}', DATE('{date_iso}'));
+                    VALUES ('{node_id}', 'Office', 'Office Stock', '{node_id}', NULL, '{end_status_input}', DATE('{date_iso}'));
                     COMMIT;
                 """
                 try:
                     client.query(bulk_sql).result()
-                    st.success(f"✅ Node {node_id} ended and transferred to Office records.")
+                    st.success(f"✅ Node {node_id} ended and transferred to Office stock records.")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
@@ -1082,126 +937,61 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
 
     # --- CHANGE SENSOR ---
     with c_act2:
-        with st.expander("🔄 Change Sensor / Entire Lord Loggers"):
-            is_lord = "-ch" in node_id
-            
-            if is_lord:
-                base_lord_id = node_id.split("-ch")[0]
-                st.warning(f"📡 Multi-Channel Detected: This sensor belongs to Lord Logger **{base_lord_id}**. Swapping will perform a straight-across trade for all 12 channels.")
-                swap_node_input = st.text_input("Replacement Base Lord ID (No channel suffix)", placeholder="e.g., LRD02", key="swap_sensor_input")
-            else:
-                swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
-                
+        with st.expander("🔄 Change Sensor"):
+            swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
             swap_date_input = st.date_input("Swap Execution Date", value=datetime.now().date(), key="swap_sensor_dt")
             
             if st.button("Execute Change Sensor", type="primary", use_container_width=True):
-                new_input_clean = swap_node_input.strip()
-                if not new_input_clean:
+                if not swap_node_input.strip():
                     st.error("Please insert a valid target hardware replacement ID.")
-                elif new_input_clean == node_id or (is_lord and new_input_clean == base_lord_id):
-                    st.error("The replacement ID cannot be identical to the sensor hardware currently deployed.")
+                elif swap_node_input.strip() == node_id:
+                    st.error("The replacement Node ID cannot be identical to the sensor currently assigned.")
                 else:
                     date_str = swap_date_input.isoformat()
+                    new_node = swap_node_input.strip()
                     
-                    if new_input_clean.upper().startswith("TP"):
-                        old_sensor_restock_loc = "Office"
-                    elif new_input_clean.upper().startswith("SP"):
+                    if new_node.upper().startswith("TP"):
+                        old_sensor_restock_loc = "Office Stock"
+                    elif new_node.upper().startswith("SP"):
                         old_sensor_restock_loc = "Ambient Stock"
                     else:
-                        old_sensor_restock_loc = "Office"
+                        old_sensor_restock_loc = "Office Stock"
 
-                    if is_lord:
-                        lord_channels_q = f"""
-                            SELECT NodeNum, Location, Bank, Depth 
-                            FROM `{target_registry}` 
-                            WHERE NodeNum LIKE '{base_lord_id}-ch%' AND End_Date IS NULL
-                        """
-                        try:
-                            active_ch_df = client.query(lord_channels_q).to_dataframe()
-                        except Exception as e:
-                            st.error(f"Failed pulling Lord channel layout matrices: {e}")
-                            active_ch_df = pd.DataFrame()
+                    swap_sql = f"""
+                        BEGIN TRANSACTION;
+                        UPDATE `{target_registry}`
+                        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                        WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
 
-                        if active_ch_df.empty:
-                            st.error(f"No active deployment rows discovered for channels under {base_lord_id}.")
-                        else:
-                            bulk_swap_sql = ["BEGIN TRANSACTION;"]
-                            
-                            for _, ch_row in active_ch_df.iterrows():
-                                old_ch_node = ch_row['NodeNum']
-                                ch_suffix = old_ch_node.split("-ch")[-1]
-                                new_ch_node = f"{new_input_clean}-ch{ch_suffix}"
-                                
-                                bulk_swap_sql.append(f"""
-                                    UPDATE `{target_registry}`
-                                    SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
-                                    WHERE NodeNum = '{old_ch_node}' AND End_Date IS NULL;
-                                """)
-                                bulk_swap_sql.append(f"""
-                                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                                    VALUES ('{old_ch_node}', 'Office', '{old_sensor_restock_loc}', '{old_ch_node}', NULL, 'Available', DATE('{date_str}'));
-                                """)
-                                bulk_swap_sql.append(f"""
-                                    UPDATE `{target_registry}`
-                                    SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
-                                    WHERE NodeNum = '{new_ch_node}' AND End_Date IS NULL;
-                                """)
-                                
-                                sql_bank = f"'{ch_row['Bank']}'" if pd.notnull(ch_row['Bank']) and ch_row['Bank'] != 'None' and ch_row['Bank'] != '' else "NULL"
-                                sql_depth = f"{ch_row['Depth']}" if pd.notnull(ch_row['Depth']) and str(ch_row['Depth']).strip() != '' else "NULL"
-                                
-                                bulk_swap_sql.append(f"""
-                                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                                    VALUES ('{new_ch_node}', '{selected_node_data['Project']}', '{ch_row['Location']}', {sql_bank}, {sql_depth}, 'On Project', DATE('{date_str}'));
-                                """)
-                                
-                            bulk_swap_sql.append("COMMIT;")
-                            combined_lord_sql = "\n".join(bulk_swap_sql)
-                            
-                            try:
-                                with st.spinner(f"Processing straight-across trade for all 12 channels ({base_lord_id} ➡️ {new_input_clean})..."):
-                                    client.query(combined_lord_sql).result()
-                                st.success(f"✅ Full Lord Logger Swap Complete: All channels transferred to base `{new_input_clean}` seamlessly.")
-                                st.cache_data.clear()
-                                time.sleep(1)
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Lord multi-channel swap failure: {e}")
-                    else:
-                        swap_sql = f"""
-                            BEGIN TRANSACTION;
-                            UPDATE `{target_registry}`
-                            SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
-                            WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
+                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                        VALUES ('{node_id}', 'Office', '{old_sensor_restock_loc}', '{node_id}', NULL, 'Available', DATE('{date_str}'));
 
-                            INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                            VALUES ('{node_id}', 'Office', '{old_sensor_restock_loc}', '{node_id}', NULL, 'Available', DATE('{date_str}'));
+                        UPDATE `{target_registry}`
+                        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                        WHERE NodeNum = '{new_node}' 
+                          AND End_Date IS NULL;
 
-                            UPDATE `{target_registry}`
-                            SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
-                            WHERE NodeNum = '{new_node}' AND End_Date IS NULL;
-
-                            INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                            VALUES (
-                                '{new_node}', 
-                                '{selected_node_data['Project']}', 
-                                '{selected_node_data['Location']}', 
-                                {f"'{selected_node_data['Bank']}'" if pd.notnull(selected_node_data.get('Bank')) and selected_node_data.get('Bank') != 'None' else "NULL"}, 
-                                {selected_node_data['Depth'] if pd.notnull(selected_node_data.get('Depth')) and str(selected_node_data.get('Depth')).strip() != '' else "NULL"}, 
-                                'On Project', 
-                                DATE('{date_str}')
-                            );
-                            COMMIT;
-                        """
-                        try:
-                            with st.spinner("Processing individual sensor swap..."):
-                                client.query(swap_sql).result()
-                            st.success(f"🔄 Change Sensor complete: {node_id} swapped with {new_node}.")
-                            st.cache_data.clear()
-                            time.sleep(1)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Sensor swap failed: {e}")
+                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                        VALUES (
+                            '{new_node}', 
+                            '{selected_node_data['Project']}', 
+                            '{selected_node_data['Location']}', 
+                            {f"'{selected_node_data['Bank']}'" if pd.notnull(selected_node_data.get('Bank')) and selected_node_data.get('Bank') != 'None' else "NULL"}, 
+                            {selected_node_data['Depth'] if pd.notnull(selected_node_data.get('Depth')) and str(selected_node_data.get('Depth')).strip() != '' else "NULL"}, 
+                            'On Project', 
+                            DATE('{date_str}')
+                        );
+                        COMMIT;
+                    """
+                    try:
+                        with st.spinner("Processing dual-sensor swap execution matrices..."):
+                            client.query(swap_sql).result()
+                        st.success(f"🔄 Change Sensor complete: {node_id} returned to {old_sensor_restock_loc}. {new_node} initialized onto deployment timeline successfully.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Sensor change transaction execution routine failed: {e}")
 
     # --- ADD NEW MANUAL ASSIGNMENT ---
     with c_act3:
@@ -1211,7 +1001,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             add_proj = st.selectbox("Manual Target Project", proj_list, key="manual_add_proj")
             
             if add_proj == "Office":
-                add_loc = st.text_input("Manual Office Sub-Location", value="Office", key="manual_add_loc_text")
+                add_loc = st.text_input("Manual Office Sub-Location", value="Office Stock", key="manual_add_loc_text")
             else:
                 add_loc_opts = sorted(reg_df[reg_df['Project'] == add_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
                 if not add_loc_opts:
@@ -1285,6 +1075,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to execute row delete query logic: {e}")
+
 # =============================================================================
 # FUNCTION: DATA CHECKER DIAGNOSTICS MODULE
 # =============================================================================
@@ -1432,35 +1223,24 @@ def render_data_checker(client, reg_df):
             st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
 
     # ===============================================================
-    # TAB 2: Orphaned Nodes (MODIFIED TO IGNORE DEAD SENSORS)
+    # TAB 2: Orphaned Nodes
     # ===============================================================
     with c2:
         st.markdown("##### Nodes that have an end date on their last assignment but did not get transferred into a new project or Office stock")
         if orphaned_nodes:
             orphan_display_df = df[df['NodeNum'].isin(orphaned_nodes)].sort_values(['NodeNum', 'Start_Date'])
-            
-            # CRITICAL FILTER LAYER: Strip out any entry containing Dead parameters explicitly
-            if not orphan_display_df.empty:
-                orphan_display_df = orphan_display_df[
-                    (orphan_display_df['SensorStatus'].str.upper() != 'DEAD') &
-                    (orphan_display_df['Project'].str.upper() != 'DEAD') &
-                    (orphan_display_df['Location'].str.upper() != 'DEAD')
-                ]
-                
-            if not orphan_display_df.empty:
-                last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
-                styled_orphans = apply_diagnostic_row_colors(last_entries)
-                st.dataframe(
-                    styled_orphans, 
-                    use_container_width=True, 
-                    hide_index=True,
-                    column_order=['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'],
-                    column_config={"NodeNum": "Node ID"}
-                )
-            else:
-                st.success("✅ Clean terminations verified. No active field nodes currently stand orphaned.")
+            last_entries = orphan_display_df.groupby('NodeNum').last().reset_index()
+            styled_orphans = apply_diagnostic_row_colors(last_entries)
+            st.dataframe(
+                styled_orphans, 
+                use_container_width=True, 
+                hide_index=True,
+                column_order=['NodeNum', 'Project', 'Location', 'Start_Date', 'End_Date', 'SensorStatus'],
+                column_config={"NodeNum": "Node ID"}
+            )
         else:
             st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
+
     # ===============================================================
     # TAB 3: MULTIPLE / DUPLICATE ASSIGNMENTS
     # ===============================================================
@@ -1682,6 +1462,10 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
 # FUNCTION: HARDWARE INTEGRITY TABLE
 # =============================================================================
 def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
+    """
+    Renders a detailed table showing connectivity, coverage, and recent activity.
+    Chronologically sorted by telemetry latency (most recent pings up top).
+    """
     st.subheader("📋 Hardware Integrity & Connectivity")
     
     query = f"""
@@ -1718,33 +1502,37 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 
     now_utc = pd.Timestamp.now(tz='UTC')
 
+    # =============================================================================
+    # 1. LOOP PROCESSOR: TIME CALCULATION & ALIGNED COLOR PROFILING
+    # =============================================================================
     def row_processor(row):
         ping = row['last_ping']
         
         if pd.isnull(ping):
             hours_hidden = float('inf')
             txt = "❌ Never"
-            style = "background-color: #d1d5db; color: #1f2937;" 
+            style = "background-color: #d1d5db; color: #1f2937;" # Gray for Never Seen
         else:
             ts = ping if ping.tzinfo else ping.tz_localize('UTC')
             diff_mins = (now_utc - ts).total_seconds() / 60.0
             hours_hidden = diff_mins / 60.0
             
+            # Match your precise threshold alert requests
             if hours_hidden < 1.0:
                 txt = f"{int(diff_mins)}m ago" if diff_mins >= 1.0 else "Just now"
-                style = "background-color: #d1fae5; color: #065f46;" 
+                style = "background-color: #d1fae5; color: #065f46;" # Green (<1h)
             elif 1.0 <= hours_hidden <= 6.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fef08a; color: #854d0e;" 
+                style = "background-color: #fef08a; color: #854d0e;" # Yellow (1-6h)
             elif 6.0 < hours_hidden <= 12.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fed7aa; color: #9a3412;" 
+                style = "background-color: #fed7aa; color: #9a3412;" # Orange (6-12h)
             elif 12.0 < hours_hidden <= 24.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fca5a5; color: #991b1b;" 
+                style = "background-color: #fca5a5; color: #991b1b;" # Red (12-24h)
             else:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #d1d5db; color: #1f2937;" 
+                style = "background-color: #d1d5db; color: #1f2937;" # Gray (>24h)
         
         pos = f"{row['Depth']}ft" if (pd.notnull(row['Depth']) and row['Depth'] != 0) else f"Bank {row['Bank']}"
         trend = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
@@ -1753,15 +1541,19 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 
     df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend', 'hours_hidden']] = df.apply(row_processor, axis=1)
 
+    # =============================================================================
+    # 2. RUN LATENCY CHRONOLOGICAL SORT SEQUENCE
+    # =============================================================================
     df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
     df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
+    # Reassemble presentation frame context
     display_df = pd.DataFrame({
         "Node ID": df['NodeNum'],
         "Location": df['Location'],
         "Position": df['Pos_Label'],
         "Last Seen": df['Seen_Text'],
-        "24h Coverage": df['coverage_24h'], 
+        "24h Coverage": df['coverage_24h'], # Floats preserved for native progress column mapping
         "1h Change": df['Trend'],
         "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label)),
         "1h Pings": df['pings_1h'],
@@ -1769,11 +1561,16 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         "24h Pings": df['pings_24h']
     })
 
+    # =============================================================================
+    # 3. DIRECT STREAMLIT GRAPHICS CELL OVERLAY
+    # =============================================================================
     def diagnostic_styler(data):
         style_df = pd.DataFrame('', index=data.index, columns=data.columns)
         for i in data.index:
+            # Inject row-level status background explicitly to the cell index
             style_df.loc[i, 'Last Seen'] = df.loc[i, 'Seen_Style']
             
+            # Apply distinctive alert override if device status flags diagnostics
             if df.loc[i, 'SensorStatus'] == 'Diagnostic':
                 style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
                 
@@ -1869,12 +1666,14 @@ def render_sensor_status_charts(client, node_id, project_id):
         if not data_df.empty:
             loc_label = data_df['Location'].iloc[0]
             
+            # Dynamically convert temperature metrics if Celsius scale is selected
             if unit_mode == "Celsius":
                 data_df['temperature'] = (data_df['temperature'] - 32) * 5/9
                 data_df['peer_avg'] = (data_df['peer_avg'] - 32) * 5/9
             
             fig = go.Figure()
             
+            # Trace 1: The Selected Node
             fig.add_trace(go.Scatter(
                 x=data_df['timestamp'],
                 y=data_df['temperature'],
@@ -1883,6 +1682,7 @@ def render_sensor_status_charts(client, node_id, project_id):
                 line=dict(color='#00d4ff', width=2.5)
             ))
             
+            # Trace 2: The Location Baseline Peer Average
             fig.add_trace(go.Scatter(
                 x=data_df['timestamp'],
                 y=data_df['peer_avg'],
@@ -1906,10 +1706,10 @@ def render_sensor_status_charts(client, node_id, project_id):
         st.error(f"Failed to build visual deep-dive chart: {e}")
 
 
-def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz, target_registry):
+def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
-    Queries historical windows to analyze peer drift trends, stability performance scoring,
-    and reporting efficiencies across project scopes filtered dynamically by Project and Location.
+    Queries historical windows to analyze peer drift trends and 
+    stability performance scoring across active project deployments.
     """
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
@@ -1925,77 +1725,47 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # Enhanced Single-Pass BigQuery Extraction checking actual uptime pings vs expected hours
     query = f"""
         WITH BaseReporting AS (
             SELECT 
-                m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth, m.Project,
+                m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth,
                 AVG(m.temperature) OVER (PARTITION BY m.Location, m.timestamp) as peer_avg
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             WHERE m.Project = @proj_id
         ),
-        
-        AssignmentWindows AS (
-            SELECT 
-                NodeNum,
-                Start_Date,
-                COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
-                DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
-            FROM `{target_registry}`
-            WHERE Project = @proj_id AND Project != 'Dead'
-        ),
-        
-        ActualProjectPings AS (
-            SELECT 
-                m.NodeNum,
-                a.Start_Date,
-                COUNT(m.timestamp) AS Actual_Pings_Logged
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            INNER JOIN AssignmentWindows a 
-              ON m.NodeNum = a.NodeNum 
-              AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
-            WHERE m.Project = @proj_id
-            GROUP BY m.NodeNum, a.Start_Date
-        ),
-
         HistoricalStats AS (
             SELECT 
-                b.NodeNum, b.Location, b.Bank, b.Depth,
-                MAX(b.timestamp) AS last_ping,
-                ARRAY_AGG(b.temperature ORDER BY b.timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
-                ARRAY_AGG(b.peer_avg ORDER BY b.timestamp DESC LIMIT 1)[OFFSET(0)] AS current_peer_avg,
-                MAX(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN b.temperature END) - 
-                MIN(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN b.temperature END) as swing_2h,
-                MAX(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN b.temperature END) - 
-                MIN(CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN b.temperature END) as swing_24h,
-                (COUNT(DISTINCT CASE WHEN b.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(b.timestamp, HOUR) END) / 24.0) * 100 as coverage_24h
-            FROM BaseReporting b
-            GROUP BY b.NodeNum, b.Location, b.Bank, b.Depth
+                NodeNum, Location, Bank, Depth,
+                MAX(timestamp) AS last_ping,
+                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
+                ARRAY_AGG(peer_avg ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_peer_avg,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) - 
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) as swing_2h,
+                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) - 
+                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as swing_24h,
+                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h
+            FROM BaseReporting 
+            GROUP BY NodeNum, Location, Bank, Depth
         )
-        
-        SELECT 
-            h.*,
-            a.Expected_Hours,
-            COALESCE(p.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
-        FROM HistoricalStats h
-        LEFT JOIN AssignmentWindows a ON h.NodeNum = a.NodeNum
-        LEFT JOIN ActualProjectPings p ON h.NodeNum = p.NodeNum AND a.Start_Date = p.Start_Date
+        SELECT * FROM HistoricalStats
     """
     try:
-        # Fetch initial dataset from BigQuery 
+        # Fetch the initial data from BigQuery safely
         df = client.query(query, job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
         )).to_dataframe()
 
         if df.empty:
-            st.warning("No sensor profiles found matching this project sequence.")
+            st.warning("No data found for this project.")
             return
 
-        # Map metric evaluation classifications
+        # Map clean metric evaluation classifications
         df[['Peer Trend', 'Performance']] = df.apply(calculate_custom_metrics, axis=1)
         now_local = pd.Timestamp.now(tz=display_tz)
         
-        # Chronological sorting layer processing
+        # =============================================================================
+        # CHRONOLOGICAL AGE SORT SEQUENCE
+        # =============================================================================
         def age_processor(x):
             if pd.isnull(x):
                 return float('inf')
@@ -2003,7 +1773,9 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         df['hours_hidden'] = df['last_ping'].apply(age_processor)
         df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
+        # Form user-readable Status text strings
         def generate_status_text(hours):
             if hours == float('inf'):
                 return "❌ Never"
@@ -2017,59 +1789,10 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         df['Status'] = df['hours_hidden'].apply(generate_status_text)
 
-        # Vectorized calculation for the lifetime project telemetry tracking efficiency metric
-        exp_h = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
-        act_p = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
-        df['raw_eff'] = np.where(exp_h <= 0, 0.0, np.minimum(100.0, np.round((act_p / exp_h) * 100, 1)))
-        df['Reporting Efficiency'] = [f"{x:.1f}%" for x in df['raw_eff']]
-
-        # =============================================================================
-        # 📋 LIVE LOCATION FILTER DROPDOWN
-        # =============================================================================
-        st.subheader("📋 Segment Allocation View")
-        available_locations = sorted(df['Location'].dropna().unique().tolist())
-        selected_view_location = st.selectbox("Filter Data Table by Location", ["All Locations"] + available_locations, key="sensor_status_loc_filter")
-        
-        filtered_df = df.copy()
-        if selected_view_location != "All Locations":
-            filtered_df = filtered_df[filtered_df['Location'] == selected_view_location]
-
-        # =============================================================================
-        # 🔃 DYNAMIC CORES SORTING MANIFEST (MATCHING NODE MANAGER ENGINE)
-        # =============================================================================
-        st.markdown("##### 🔃 Adjust Grid Sequence Ordering")
-        sort_col1, sort_col2 = st.columns(2)
-        
-        sort_metric = sort_col1.selectbox(
-            "Primary Sort Category", 
-            ["Hours Since Last Seen (Default)", "Node ID", "Location Area", "Uptime Efficiency Yield"], 
-            key="sensor_status_primary_sort_metric"
-        )
-        
-        sort_order = sort_col2.selectbox(
-            "Sequence Direction", 
-            ["Ascending / Smallest First", "Descending / Largest First"], 
-            key="sensor_status_sort_direction"
-        )
-        
-        is_asc = (sort_order == "Ascending / Smallest First")
-
-        # Execute dataframe sorting sequences dynamically before canvas assembly
-        if not filtered_df.empty:
-            if "Hours Since Last Seen" in sort_metric:
-                filtered_df = filtered_df.sort_values(by="hours_hidden", ascending=is_asc).reset_index(drop=True)
-            elif "Node ID" in sort_metric:
-                filtered_df['sort_key'] = filtered_df['NodeNum'].apply(natural_sort_key)
-                filtered_df = filtered_df.sort_values(by="sort_key", ascending=is_asc).drop(columns=['sort_key']).reset_index(drop=True)
-            elif "Location Area" in sort_metric:
-                filtered_df = filtered_df.sort_values(by=["Location", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
-            elif "Uptime Efficiency Yield" in sort_metric:
-                filtered_df = filtered_df.sort_values(by="raw_eff", ascending=is_asc).reset_index(drop=True)
-
         st.subheader("🔍 Detailed Sensor Audit")
         
         # Prepare presentation dataframe blueprint
-        display_df = filtered_df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "Reporting Efficiency", "coverage_24h", "hours_hidden"]].copy()
+        display_df = df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h", "hours_hidden"]].copy()
         display_df.insert(0, "Select", False)
 
         # -----------------------------------------------------------
@@ -2079,6 +1802,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         def render_interactive_audit_grid(data_source_df):
             """Isolates the interactive data editor state from resetting page loops."""
             
+            # Build inline canvas styling mapper
             def sensor_status_styler(data):
                 canvas = pd.DataFrame('', index=data.index, columns=data.columns)
                 for i in data.index:
@@ -2094,7 +1818,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                             canvas.loc[i, col] = color_style
                 return canvas
 
-            # FIXED: Canvas now safely maps locally defined styler function signature
             styled_audit_df = data_source_df.style.apply(sensor_status_styler, axis=None)
 
             edited_df = st.data_editor(
@@ -2104,15 +1827,16 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
                     "NodeNum": "Node ID",
-                    "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Lifetime percentage of expected hourly pings received while on project"),
                     "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
                 },
                 disabled=[col for col in data_source_df.columns if col != "Select"],
-                column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "Reporting Efficiency", "coverage_24h"],
+                column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"],
                 key="sensor_status_editor"
             )
 
+            # Resolve interactive row checkbox choice to generate comparative charts
             selected_rows = edited_df[edited_df["Select"] == True]
+            
             if not selected_rows.empty:
                 st.divider()
                 target_node = selected_rows.iloc[0]["NodeNum"]
@@ -2125,32 +1849,24 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
     except Exception as e:
         st.error(f"Sensor Status Error: {e}")
+
 # ===============================================================
 # PAGE: BULK REGISTRY MANAGER
 # ===============================================================
-def render_active_node_registry_page(client, target_registry=None, **kwargs):
+def render_active_node_registry_page(client, target_registry):
     """
-    Renders the master Active Node Registry inventory data grid, calculating
-    real-time 'Last Seen' telemetry latencies, distinct hardware fleet breakdowns,
-    interactive multi-column sorting, and project reporting efficiencies.
+    Renders the master Active Node Registry inventory data grid, replacing 
+    the legacy PhysicalID column with real-time calculated 'Last Seen' telemetry hours.
     """
-    # SAFETY LAYER: Safely capture the table path regardless of parameter naming mismatches
-    table_path = target_registry if target_registry is not None else kwargs.get('target_table')
-    if table_path is None:
-        st.error("❌ Critical Application Error: No active database target table identifier was provided.")
-        return
-
     st.header("🎯 Active Node Registry")
     
     # 1. READ CONFIGURATION FILTER PARAMETERS
     hide_archived = st.checkbox("Hide Archived Records", value=True, key="registry_hide_archived_toggle")
     
     # -----------------------------------------------------------------
-    # ENHANCED SINGLE-PASS TELEMETRY & EFFICIENCY PIPELINE
+    # OPTIMIZED SINGLE-PASS TELEMETRY JOIN QUERY
     # -----------------------------------------------------------------
-    # -----------------------------------------------------------------
-    # ENHANCED SINGLE-PASS TELEMETRY & EFFICIENCY PIPELINE
-    # -----------------------------------------------------------------
+    # Pulls the deployment registration data and joins it with the most recent ping timestamp
     master_query = f"""
         WITH LatestTelemetry AS (
             SELECT 
@@ -2158,41 +1874,14 @@ def render_active_node_registry_page(client, target_registry=None, **kwargs):
                 MAX(timestamp) as last_ping
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             GROUP BY NodeNum
-        ),
-        
-        AssignmentWindows AS (
-            SELECT 
-                NodeNum,
-                Start_Date,
-                COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
-                DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
-            FROM `{table_path}`
-            WHERE Project != 'Dead'
-        ),
-        
-        ActualProjectPings AS (
-            SELECT 
-                m.NodeNum,
-                a.Start_Date,
-                COUNT(m.timestamp) AS Actual_Pings_Logged
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            INNER JOIN AssignmentWindows a 
-              ON m.NodeNum = a.NodeNum 
-              AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
-            GROUP BY m.NodeNum, a.Start_Date
         )
-        
         SELECT 
             R.*,
-            T.last_ping,
-            A.Expected_Hours,
-            COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
-        FROM `{table_path}` R
-        LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
-        LEFT JOIN AssignmentWindows A 
-          ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
-        LEFT JOIN ActualProjectPings P 
-          ON R.NodeNum = P.NodeNum AND R.Start_Date = P.Start_Date
+            T.last_ping
+        FROM `{target_registry}` R
+        LEFT JOIN LatestTelemetry T 
+          ON R.NodeNum = T.NodeNum
+        ORDER BY R.Project ASC, R.Location ASC, R.NodeNum ASC
     """
     
     try:
@@ -2203,193 +1892,52 @@ def render_active_node_registry_page(client, target_registry=None, **kwargs):
             st.info("The node registry directory is currently empty.")
             return
             
-        # =============================================================================
-        # ASSET FLEET SUMMARY METRICS PIPELINE (EXACT 4-ROW SPECIFICATION)
-        # =============================================================================
-        st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
-        
-        def classify_hardware_family(node):
-            node_str = str(node).lower()
-            if "-ch" in node_str:
-                return "Lord"
-            elif node_str.startswith("sp"):
-                return "SP"
-            elif node_str.startswith("tp"):
-                return "TP"
-            else:
-                return "None of the Above"
-
-        summary_df = reg_df.copy()
-        
-        # Deduplicate Lord Channels to count distinct physical box units instead of split channels
-        summary_df['Parent ID'] = summary_df['NodeNum'].apply(
-            lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x
-        )
-        
-        # Chronological Sorting Layer to prioritize active rows over history
-        if 'End_Date' in summary_df.columns:
-            summary_df['is_active'] = summary_df['End_Date'].isna()
-        else:
-            summary_df['is_active'] = True
-            
-        sort_keys = ['Parent ID', 'is_active']
-        sort_asc = [True, False]
-        if 'Start_Date' in summary_df.columns:
-            sort_keys.append('Start_Date')
-            sort_asc.append(False)
-            
-        summary_df = summary_df.sort_values(by=sort_keys, ascending=sort_asc)
-        deduped_df = summary_df.drop_duplicates(subset=['Parent ID']).copy()
-        deduped_df['Hardware Family'] = deduped_df['Parent ID'].apply(classify_hardware_family)
-        
-        try:
-            fleet_pivot = deduped_df.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
-            desired_order = ["TP", "SP", "Lord", "None of the Above"]
-            fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
-            fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
-            
-            st.dataframe(fleet_pivot, use_container_width=True)
-        except Exception as pivot_err:
-            st.info("💡 Inventory matrix is populating. Assign statuses to your hardware to generate totals.")
-            
-        st.markdown("---")
-            
-        # 2. RUN REAL-TIME DURATION LAG CALCULATION & EFFICIENCY VECTOR PROCESSING
+        # 2. RUN REAL-TIME DURATION LAG CALCULATION
         now_utc = pd.Timestamp.now(tz='UTC')
-        
-        # Step A: Latency processing values
-        reg_df['hours_hidden'] = reg_df['last_ping'].apply(
-            lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
-            if pd.notnull(x) else np.nan
+        reg_df['Last Seen'] = reg_df['last_ping'].apply(
+            lambda x: f"{max(0.0, (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600):.1f}h" 
+            if pd.notnull(x) else "No Pings"
         )
-        reg_df['hours_hidden'] = pd.to_numeric(reg_df['hours_hidden'], errors='coerce').fillna(float('inf'))
-        
-        def format_last_seen(hours):
-            if pd.isna(hours) or hours == float('inf'):
-                return "❌ Never"
-            elif hours < 1.0:
-                mins = int(hours * 60)
-                return f"{mins}m ago" if mins > 0 else "Just now"
-            else:
-                return f"{hours:.1f}h ago"
-        
-        reg_df['Last Seen'] = reg_df['hours_hidden'].apply(format_last_seen)
-        
-        # Step B: Telemetry yield processing values
-        if 'Expected_Hours' in reg_df.columns:
-            exp_hours = pd.to_numeric(reg_df['Expected_Hours'], errors='coerce').fillna(0)
-            act_pings = pd.to_numeric(reg_df['Actual_Pings_Logged'], errors='coerce').fillna(0)
-            
-            raw_eff = np.where(
-                exp_hours <= 0, 
-                0.0, 
-                np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1))
-            )
-            reg_df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_eff]
-        else:
-            reg_df['Reporting Efficiency'] = "0.0%"
         
         # 3. SCRUB PHYSICAL ID AND INTERNAL COLUMNS FROM THE INTERFACE
-        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
         reg_df = reg_df.drop(columns=[c for c in cols_to_drop if c in reg_df.columns], errors='ignore')
         
         # 4. APPLY ON-SCREEN FILTERS (e.g., Hide Archived Records)
         if hide_archived and 'SensorStatus' in reg_df.columns:
             reg_df = reg_df[reg_df['SensorStatus'] != 'Archived']
             
-        # =============================================================================
-        # INTERACTIVE DATAFRAME SORTING HUB
-        # =============================================================================
-        st.markdown("##### 🔃 Adjust Registry View Sequence")
-        sort_col1, sort_col2 = st.columns(2)
-        
-        sort_metric = sort_col1.selectbox(
-            "Primary Sort Category", 
-            ["Hours Since Last Seen (Default)", "Node ID", "Project Space", "Location Location"], 
-            key="registry_primary_sort_metric"
-        )
-        
-        sort_order = sort_col2.selectbox(
-            "Sequence Direction", 
-            ["Ascending / Active First", "Descending / Missing First"], 
-            key="registry_sort_direction"
-        )
-        
-        is_asc = (sort_order == "Ascending / Active First")
-
-        # Execute dataframe sorting permutations dynamically before table rendering
-        if not reg_df.empty:
-            if "Hours Since Last Seen" in sort_metric:
-                reg_df = reg_df.sort_values(by="hours_hidden", ascending=is_asc).reset_index(drop=True)
-            elif "Node ID" in sort_metric:
-                reg_df['sort_key'] = reg_df['NodeNum'].apply(natural_sort_key)
-                reg_df = reg_df.sort_values(by="sort_key", ascending=is_asc).drop(columns=['sort_key']).reset_index(drop=True)
-            elif "Project Space" in sort_metric:
-                reg_df = reg_df.sort_values(by=["Project", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
-            elif "Location Location" in sort_metric:
-                reg_df = reg_df.sort_values(by=["Location", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
-
         # 5. RENDER THE INTERACTIVE SELECTION GRID (Matching your layout)
         st.markdown("### 📋 Current Asset Allocation Matrix")
         
         display_df = reg_df.copy()
-        
-        # Persistent selection synchronization management block
-        if "last_selected_node" not in st.session_state:
-            st.session_state["last_selected_node"] = None
-        if "active_selected_node_record" not in st.session_state:
-            st.session_state["active_selected_node_record"] = None
-
-        ed_key = "master_node_registry_interactive_grid"
-        if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
-            changed_rows = st.session_state[ed_key]["edited_rows"]
-            newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
-            
-            if newly_checked and not display_df.empty:
-                latest_idx = newly_checked[-1]
-                if latest_idx != st.session_state["last_selected_node"]:
-                    st.session_state["last_selected_node"] = latest_idx
-                    
-                    rec_dict = display_df.loc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
-                    st.session_state["active_selected_node_record"] = rec_dict
-                    st.session_state[ed_key]["edited_rows"] = {}
-                    st.rerun()
-            
-            elif any(changes.get("Select") == False for idx, changes in changed_rows.items()):
-                st.session_state["last_selected_node"] = None
-                st.session_state["active_selected_node_record"] = None
-                st.session_state[ed_key]["edited_rows"] = {}
-                st.rerun()
-
         display_df.insert(0, "Select", False)
-        if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(display_df):
-            display_df.loc[st.session_state["last_selected_node"], "Select"] = True
-
+        
         edited_registry_df = st.data_editor(
-            display_df.style.apply(node_selector_styler, axis=None) if not display_df.empty else display_df,
+            display_df,
             hide_index=True,
             use_container_width=True,
-            column_config={
-                "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
-                "NodeNum": "Node ID",
-                "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping"),
-                "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Telemetry reporting yield percentage")
-            },
+            column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
             disabled=[col for col in display_df.columns if col != "Select"],
-            column_order=[c for c in display_df.columns if c != "hours_hidden"],
-            key=ed_key
+            key="master_node_registry_interactive_grid"
         )
         
-        # Route checked rows into the detailed editor panel via persistent session memory
-        if st.session_state["active_selected_node_record"] is not None:
+        # Route checked rows into the detailed editor panel
+        chosen_nodes = edited_registry_df[edited_registry_df["Select"] == True]
+        if not chosen_nodes.empty:
             st.divider()
-            target_node_record = st.session_state["active_selected_node_record"].copy()
+            # Isolate the original row dict structure to pass down to your render_node_action_manager
+            target_node_record = chosen_nodes.iloc[0].drop("Select").to_dict()
+            
+            # Extract clean unique projects for layout selectors
             proj_list = sorted(reg_df['Project'].dropna().unique().tolist())
             
-            render_node_action_manager(client, target_node_record, reg_df, proj_list, table_path)
+            # Pass our updated data into your custom action component manager
+            render_node_action_manager(client, target_node_record, reg_df, proj_list, target_registry)
             
     except Exception as e:
         st.error(f"Failed to compile master node registry view grid: {e}")
+
 
 def render_playground_staging_tab(client, target_registry, table_playground):
     """Provides a safe space to view staging configurations and push to production."""
@@ -2597,12 +2145,12 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
         WHERE Project = '{project_id}' 
           AND End_Date IS NULL;
 
-        -- 2. Insert the hardware back into Office
+        -- 2. Insert the hardware back into Office Stock
         INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
         SELECT 
             NodeNum, 
             'Office' as Project, 
-            'Office' as Location, 
+            'Office Stock' as Location, 
             NodeNum as Bank, -- Reset Bank to NodeNum for stock
             NULL as Depth,   -- Clear Depth for stock
             '{return_status}' as SensorStatus,
@@ -2618,7 +2166,7 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
             query_job = client.query(bulk_sql)
             query_job.result()
             
-        st.success(f"Project {project_id} decommissioned. Hardware moved to Office as '{return_status}'.")
+        st.success(f"Project {project_id} decommissioned. Hardware moved to Office Stock as '{return_status}'.")
         st.cache_data.clear()
     except Exception as e:
         st.error(f"Bulk Decommission Failed: {e}")
@@ -3540,8 +3088,7 @@ def main():
         render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry)
 
     elif admin_page == "🔍 Sensor Status":
-        # FIXED ROUTE: Runs the interactive sorting and performance audit table view
-        render_active_node_registry_page(client, target_registry)
+        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
         
     elif admin_page == "📦 Bulk Registry Manager":
         render_bulk_registry_page(client, proj_list)
