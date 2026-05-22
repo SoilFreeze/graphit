@@ -2192,8 +2192,9 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 # ===============================================================
 def render_active_node_registry_page(client, target_registry):
     """
-    Renders the master Active Node Registry inventory data grid, replacing 
-    the legacy PhysicalID column with real-time calculated 'Last Seen' telemetry hours.
+    Renders the master Active Node Registry inventory data grid, calculating
+    real-time 'Last Seen' telemetry latencies, distinct hardware fleet breakdowns,
+    interactive multi-column sorting, and project reporting efficiencies.
     """
     st.header("🎯 Active Node Registry")
     
@@ -2201,9 +2202,8 @@ def render_active_node_registry_page(client, target_registry):
     hide_archived = st.checkbox("Hide Archived Records", value=True, key="registry_hide_archived_toggle")
     
     # -----------------------------------------------------------------
-    # OPTIMIZED SINGLE-PASS TELEMETRY JOIN QUERY
+    # ENHANCED SINGLE-PASS TELEMETRY & EFFICIENCY PIPELINE
     # -----------------------------------------------------------------
-    # Pulls the deployment registration data and joins it with the most recent ping timestamp
     master_query = f"""
         WITH LatestTelemetry AS (
             SELECT 
@@ -2211,14 +2211,41 @@ def render_active_node_registry_page(client, target_registry):
                 MAX(timestamp) as last_ping
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             GROUP BY NodeNum
+        ),
+        
+        AssignmentWindows AS (
+            SELECT 
+                NodeNum,
+                Start_Date,
+                COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
+                DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
+            FROM `{target_registry}`
+            WHERE Project != 'Dead'
+        ),
+        
+        ActualProjectPings AS (
+            SELECT 
+                m.NodeNum,
+                a.Start_Date,
+                COUNT(m.timestamp) AS Actual_Pings_Logged
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            INNER JOIN AssignmentWindows a 
+              ON m.NodeNum = a.NodeNum 
+              AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
+            GROUP BY m.NodeNum, a.Start_Date
         )
+        
         SELECT 
             R.*,
-            T.last_ping
+            T.last_ping,
+            A.Expected_Hours,
+            COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
         FROM `{target_registry}` R
-        LEFT JOIN LatestTelemetry T 
-          ON R.NodeNum = T.NodeNum
-        ORDER BY R.Project ASC, R.Location ASC, R.NodeNum ASC
+        LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
+        LEFT JOIN AssignmentWindows A 
+          ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
+        LEFT JOIN ActualProjectPings P 
+          ON R.NodeNum = P.NodeNum AND R.Start_Date = P.Start_Date
     """
     
     try:
@@ -2229,53 +2256,193 @@ def render_active_node_registry_page(client, target_registry):
             st.info("The node registry directory is currently empty.")
             return
             
-        # 2. RUN REAL-TIME DURATION LAG CALCULATION
-        now_utc = pd.Timestamp.now(tz='UTC')
-        reg_df['Last Seen'] = reg_df['last_ping'].apply(
-            lambda x: f"{max(0.0, (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600):.1f}h" 
-            if pd.notnull(x) else "No Pings"
+        # =============================================================================
+        # ASSET FLEET SUMMARY METRICS PIPELINE (EXACT 4-ROW SPECIFICATION)
+        # =============================================================================
+        st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
+        
+        def classify_hardware_family(node):
+            node_str = str(node).lower()
+            if "-ch" in node_str:
+                return "Lord"
+            elif node_str.startswith("sp"):
+                return "SP"
+            elif node_str.startswith("tp"):
+                return "TP"
+            else:
+                return "None of the Above"
+
+        summary_df = reg_df.copy()
+        
+        # Deduplicate Lord Channels to count distinct physical box units instead of split channels
+        summary_df['Parent ID'] = summary_df['NodeNum'].apply(
+            lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x
         )
         
+        # Chronological Sorting Layer to prioritize active rows over history
+        if 'End_Date' in summary_df.columns:
+            summary_df['is_active'] = summary_df['End_Date'].isna()
+        else:
+            summary_df['is_active'] = True
+            
+        sort_keys = ['Parent ID', 'is_active']
+        sort_asc = [True, False]
+        if 'Start_Date' in summary_df.columns:
+            sort_keys.append('Start_Date')
+            sort_asc.append(False)
+            
+        summary_df = summary_df.sort_values(by=sort_keys, ascending=sort_asc)
+        deduped_df = summary_df.drop_duplicates(subset=['Parent ID']).copy()
+        deduped_df['Hardware Family'] = deduped_df['Parent ID'].apply(classify_hardware_family)
+        
+        try:
+            fleet_pivot = deduped_df.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
+            desired_order = ["TP", "SP", "Lord", "None of the Above"]
+            fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
+            fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
+            
+            st.dataframe(fleet_pivot, use_container_width=True)
+        except Exception as pivot_err:
+            st.info("💡 Inventory matrix is populating. Assign statuses to your hardware to generate totals.")
+            
+        st.markdown("---")
+            
+        # 2. RUN REAL-TIME DURATION LAG CALCULATION & EFFICIENCY VECTOR PROCESSING
+        now_utc = pd.Timestamp.now(tz='UTC')
+        
+        # Step A: Latency processing values
+        reg_df['hours_hidden'] = reg_df['last_ping'].apply(
+            lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
+            if pd.notnull(x) else np.nan
+        )
+        reg_df['hours_hidden'] = pd.to_numeric(reg_df['hours_hidden'], errors='coerce').fillna(float('inf'))
+        
+        def format_last_seen(hours):
+            if pd.isna(hours) or hours == float('inf'):
+                return "❌ Never"
+            elif hours < 1.0:
+                mins = int(hours * 60)
+                return f"{mins}m ago" if mins > 0 else "Just now"
+            else:
+                return f"{hours:.1f}h ago"
+        
+        reg_df['Last Seen'] = reg_df['hours_hidden'].apply(format_last_seen)
+        
+        # Step B: Telemetry yield processing values
+        if 'Expected_Hours' in reg_df.columns:
+            exp_hours = pd.to_numeric(reg_df['Expected_Hours'], errors='coerce').fillna(0)
+            act_pings = pd.to_numeric(reg_df['Actual_Pings_Logged'], errors='coerce').fillna(0)
+            
+            raw_eff = np.where(
+                exp_hours <= 0, 
+                0.0, 
+                np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1))
+            )
+            reg_df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_eff]
+        else:
+            reg_df['Reporting Efficiency'] = "0.0%"
+        
         # 3. SCRUB PHYSICAL ID AND INTERNAL COLUMNS FROM THE INTERFACE
-        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping']
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
         reg_df = reg_df.drop(columns=[c for c in cols_to_drop if c in reg_df.columns], errors='ignore')
         
         # 4. APPLY ON-SCREEN FILTERS (e.g., Hide Archived Records)
         if hide_archived and 'SensorStatus' in reg_df.columns:
             reg_df = reg_df[reg_df['SensorStatus'] != 'Archived']
             
+        # =============================================================================
+        # INTERACTIVE DATAFRAME SORTING HUB
+        # =============================================================================
+        st.markdown("##### 🔃 Adjust Registry View Sequence")
+        sort_col1, sort_col2 = st.columns(2)
+        
+        sort_metric = sort_col1.selectbox(
+            "Primary Sort Category", 
+            ["Hours Since Last Seen (Default)", "Node ID", "Project Space", "Location Location"], 
+            key="registry_primary_sort_metric"
+        )
+        
+        sort_order = sort_col2.selectbox(
+            "Sequence Direction", 
+            ["Ascending / Active First", "Descending / Missing First"], 
+            key="registry_sort_direction"
+        )
+        
+        is_asc = (sort_order == "Ascending / Active First")
+
+        # Execute dataframe sorting permutations dynamically before table rendering
+        if not reg_df.empty:
+            if "Hours Since Last Seen" in sort_metric:
+                reg_df = reg_df.sort_values(by="hours_hidden", ascending=is_asc).reset_index(drop=True)
+            elif "Node ID" in sort_metric:
+                reg_df['sort_key'] = reg_df['NodeNum'].apply(natural_sort_key)
+                reg_df = reg_df.sort_values(by="sort_key", ascending=is_asc).drop(columns=['sort_key']).reset_index(drop=True)
+            elif "Project Space" in sort_metric:
+                reg_df = reg_df.sort_values(by=["Project", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
+            elif "Location Location" in sort_metric:
+                reg_df = reg_df.sort_values(by=["Location", "hours_hidden"], ascending=[is_asc, True]).reset_index(drop=True)
+
         # 5. RENDER THE INTERACTIVE SELECTION GRID (Matching your layout)
         st.markdown("### 📋 Current Asset Allocation Matrix")
         
         display_df = reg_df.copy()
-        display_df.insert(0, "Select", False)
         
+        # Persistent selection synchronization management block
+        if "last_selected_node" not in st.session_state:
+            st.session_state["last_selected_node"] = None
+        if "active_selected_node_record" not in st.session_state:
+            st.session_state["active_selected_node_record"] = None
+
+        ed_key = "master_node_registry_interactive_grid"
+        if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
+            changed_rows = st.session_state[ed_key]["edited_rows"]
+            newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
+            
+            if newly_checked and not display_df.empty:
+                latest_idx = newly_checked[-1]
+                if latest_idx != st.session_state["last_selected_node"]:
+                    st.session_state["last_selected_node"] = latest_idx
+                    
+                    rec_dict = display_df.loc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
+                    st.session_state["active_selected_node_record"] = rec_dict
+                    st.session_state[ed_key]["edited_rows"] = {}
+                    st.rerun()
+            
+            elif any(changes.get("Select") == False for idx, changes in changed_rows.items()):
+                st.session_state["last_selected_node"] = None
+                st.session_state["active_selected_node_record"] = None
+                st.session_state[ed_key]["edited_rows"] = {}
+                st.rerun()
+
+        display_df.insert(0, "Select", False)
+        if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(display_df):
+            display_df.loc[st.session_state["last_selected_node"], "Select"] = True
+
         edited_registry_df = st.data_editor(
-            display_df,
+            display_df.style.apply(node_selector_styler, axis=None) if not display_df.empty else display_df,
             hide_index=True,
             use_container_width=True,
-            column_config={"Select": st.column_config.CheckboxColumn("Select", default=False, required=True)},
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+                "NodeNum": "Node ID",
+                "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping"),
+                "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Telemetry reporting yield percentage")
+            },
             disabled=[col for col in display_df.columns if col != "Select"],
-            key="master_node_registry_interactive_grid"
+            column_order=[c for c in display_df.columns if c != "hours_hidden"],
+            key=ed_key
         )
         
-        # Route checked rows into the detailed editor panel
-        chosen_nodes = edited_registry_df[edited_registry_df["Select"] == True]
-        if not chosen_nodes.empty:
+        # Route checked rows into the detailed editor panel via persistent session memory
+        if st.session_state["active_selected_node_record"] is not None:
             st.divider()
-            # Isolate the original row dict structure to pass down to your render_node_action_manager
-            target_node_record = chosen_nodes.iloc[0].drop("Select").to_dict()
-            
-            # Extract clean unique projects for layout selectors
+            target_node_record = st.session_state["active_selected_node_record"].copy()
             proj_list = sorted(reg_df['Project'].dropna().unique().tolist())
             
-            # Pass our updated data into your custom action component manager
             render_node_action_manager(client, target_node_record, reg_df, proj_list, target_registry)
             
     except Exception as e:
         st.error(f"Failed to compile master node registry view grid: {e}")
-
-
 def render_playground_staging_tab(client, target_registry, table_playground):
     """Provides a safe space to view staging configurations and push to production."""
     st.subheader("🎮 Playground Pre-Update Staging Workspace")
