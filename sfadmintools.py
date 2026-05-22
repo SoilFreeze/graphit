@@ -173,7 +173,7 @@ def load_registry_data(target_table):
             df['Last Seen'] = "❌ Never"
             
         # =============================================================================
-        # SAFE CALCULATION FOR REPORTING EFFICIENCY PERCENTAGE COLUMN
+        # SAFE VECTOR CALCULATION FOR REPORTING EFFICIENCY PERCENTAGE COLUMN
         # =============================================================================
         if not df.empty and 'Expected_Hours' in df.columns:
             # Enforce clean numerical typing and fill any missing values with 0
