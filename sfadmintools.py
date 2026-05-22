@@ -566,7 +566,7 @@ def render_node_selector(reg_df, proj_list):
         
         def classify_hardware_family(node):
             node_str = str(node).upper()
-            if "-CH" in node_str:
+            if "-ch" in node_str:
                 return "Lord Loggers (Boxes)"
             elif node_str.startswith("SP"):
                 return "SensorPush SP"
@@ -586,10 +586,10 @@ def render_node_selector(reg_df, proj_list):
         
         # Build the status matrix pivot table
         try:
-            fleet_pivot = deduped_df.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
+            fleet_pivot = deduped_df.groupby(['Type', 'SensorStatus']).size().unstack(fill_value=0)
             
             # Ensure rows are sorted logically with TP at the top context
-            desired_order = ["SensorPush TP", "SensorPush SP", "Lord Loggers (Boxes)", "Other Legacy"]
+            desired_order = ["TP", "SP", "Lord", "None of the above"]
             existing_order = [r for r in desired_order if r in fleet_pivot.index]
             fleet_pivot = fleet_pivot.reindex(existing_order)
             
