@@ -380,10 +380,6 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
 # Function: Hardware integrity table
 # ===============================================================
 def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
-    """
-    Renders a detailed table showing connectivity, coverage, and recent activity.
-    Sorted chronologically by data latency (minutes first, then hours).
-    """
     st.subheader("📋 Hardware Integrity & Connectivity")
     
     query = f"""
@@ -420,60 +416,50 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
 
     now_utc = pd.Timestamp.now(tz='UTC')
 
-    # =============================================================================
-    # 1. PROCESS ROW METRICS & INJECT COLOR PROFILES
-    # =============================================================================
     def row_processor(row):
         ping = row['last_ping']
         
         if pd.isnull(ping):
             hours_hidden = float('inf')
             txt = "❌ Never"
-            style = "background-color: #d1d5db; color: #1f2937;" # Gray
+            style = "background-color: #d1d5db; color: #1f2937;"
         else:
             ts = ping if ping.tzinfo else ping.tz_localize('UTC')
             diff_mins = (now_utc - ts).total_seconds() / 60.0
             hours_hidden = diff_mins / 60.0
             
-            # Absolute matching for requested color boundaries
             if hours_hidden < 1.0:
                 txt = f"{int(diff_mins)}m ago" if diff_mins >= 1.0 else "Just now"
-                style = "background-color: #d1fae5; color: #065f46;" # Green (<1 hr)
+                style = "background-color: #d1fae5; color: #065f46;"
             elif 1.0 <= hours_hidden <= 6.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fef08a; color: #854d0e;" # Yellow (1-6 hrs)
+                style = "background-color: #fef08a; color: #854d0e;"
             elif 6.0 < hours_hidden <= 12.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fed7aa; color: #9a3412;" # Orange (6-12 hrs)
+                style = "background-color: #fed7aa; color: #9a3412;"
             elif 12.0 < hours_hidden <= 24.0:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fca5a5; color: #991b1b;" # Red (12-24 hrs)
+                style = "background-color: #fca5a5; color: #991b1b;"
             else:
                 txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #d1d5db; color: #1f2937;" # Gray (>24 hrs)
+                style = "background-color: #d1d5db; color: #1f2937;"
         
         pos = f"{row['Depth']}ft" if (pd.notnull(row['Depth']) and row['Depth'] != 0) else f"Bank {row['Bank']}"
         trend = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
         
         return pd.Series([txt, style, pos, trend, hours_hidden])
 
-    # Map processors down into structural data frames
     df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend', 'hours_hidden']] = df.apply(row_processor, axis=1)
 
-    # =============================================================================
-    # 2. ENFORCE CHRONOLOGICAL SORT SEQUENCE
-    # =============================================================================
-    # Force data field formats to floats, sorting true active pings ahead of infinity states
     df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
     df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
-    # Build optimized rendering dictionary structure 
     display_df = pd.DataFrame({
         "Node ID": df['NodeNum'],
         "Location": df['Location'],
         "Position": df['Pos_Label'],
         "Last Seen": df['Seen_Text'],
-        "24h Coverage": df['coverage_24h'], # Kept numeric float value for native Progress Column mapping
+        "24h Coverage": df['coverage_24h'],
         "1h Change": df['Trend'],
         "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label)),
         "1h Pings": df['pings_1h'],
@@ -481,24 +467,17 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         "24h Pings": df['pings_24h']
     })
 
-    # =============================================================================
-    # 3. UNIFIED MATRIX STYLER (Row and Cell overrides)
-    # =============================================================================
     def diagnostic_styler(data):
-        # Establish blank style canvas matching target configuration
         style_df = pd.DataFrame('', index=data.index, columns=data.columns)
         
         for i in data.index:
-            # Inject uniform background status tracking color explicitly to the cell index
             style_df.loc[i, 'Last Seen'] = df.loc[i, 'Seen_Style']
             
-            # Apply distinctive alert override if device status flags diagnostics
             if df.loc[i, 'SensorStatus'] == 'Diagnostic':
                 style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
                 
         return style_df
 
-    # Lock properties inside view states and render to grid
     st.dataframe(
         display_df.style.apply(diagnostic_styler, axis=None), 
         use_container_width=True, 
