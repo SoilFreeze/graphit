@@ -201,7 +201,7 @@ selected_weeks = st.sidebar.slider(
     "Select History Window (Weeks)",
     min_value=1,
     max_value=12,
-    value=2,  # Sets your default view to a 2-week window
+    value=5,  # Sets your default view to a 2-week window
     step=1,
     key="global_lookback_weeks_slider",
     help="Slide the point to change how many weeks of history pull into your charts."
@@ -346,14 +346,41 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             """
             target_df = client.query(target_q).to_dataframe()
             if not target_df.empty:
-                for cid, c_df in target_df.groupby('CurveID'):
+                
+                # --- NEW: DESIGN VARIATION MATRICES ---
+                # Unique dash styles to separate layouts visually
+                dash_styles = ['dashdot', 'dash', 'dot']
+                
+                # Progressive shades of gray (Dark Charcoal to Medium Muted Gray)
+                gray_shades = [
+                    'rgba(30, 30, 30, 0.8)',   # Curve 1: Darkest Charcoal
+                    'rgba(70, 70, 70, 0.75)',  # Curve 2: Medium Dark Gray
+                    'rgba(110, 110, 110, 0.7)' # Curve 3: Slate Gray
+                ]
+                
+                # Use enumerate on the groupby to get an index pointer (c_idx)
+                for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     soil_label = str(cid).split('-')[-1].strip()
+                    
+                    # Pick style and shade based on the current loop index
+                    selected_dash = dash_styles[c_idx % len(dash_styles)]
+                    selected_gray = gray_shades[c_idx % len(gray_shades)]
+                    
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
-                        line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
+                        x=c_df['timestamp'], 
+                        y=ref_y, 
+                        name=f"<b>Goal: {soil_label}</b>", 
+                        mode='lines',
+                        line=dict(
+                            color=selected_gray, 
+                            width=3.5, 
+                            dash=selected_dash, 
+                            shape='spline', 
+                            smoothing=1.3
+                        ),
                         legendrank=1 
                     ))
         except: pass
