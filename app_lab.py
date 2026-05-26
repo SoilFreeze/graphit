@@ -2000,8 +2000,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # SQL QUERY: Surgically removed the Office project constraints
-    # SQL QUERY: Filtered to only pull true, approved data
+    # SQL QUERY: Balanced approach showing active field data while purging bad data
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -2015,8 +2014,8 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              -- HARD RULE: Only pull explicitly verified/true engineering data
-              AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
+              -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
+              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
               -- Outlier Shield: Ignore hardware spikes above boiling point
               AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
         ),
