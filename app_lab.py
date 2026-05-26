@@ -549,10 +549,9 @@ def apply_sanity_filter(df):
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Updated: Strict status filtering (TRUE, NULL, MASKED only).
+    Updated: Connected to global red lookback slider state.
     """
     # 1. INITIALIZE UI STATE VARIABLES FROM SIDEBAR KEYS
-    # Ensure these keys match the ones defined in your sidebar exactly
     show_ref = st.session_state.get("global_show_ref", True)
     show_masked = st.session_state.get("global_show_masked", False)
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
@@ -585,7 +584,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     with st.spinner(f"Syncing {p_name} telemetry..."):
-        # The data engine now handles the strict 'BadData' exclusion
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if p_df.empty:
@@ -593,25 +591,21 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     # 5. DYNAMIC UI FILTERING
-    # This logic ensures MASKED data only shows if the toggle is ON.
-    # BadData and False are already removed by the SQL engine.
     mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
     
     if not show_masked and mask_col in p_df.columns:
-        # Filter out MASKED points if the toggle is OFF
         p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
 
-    # 6. TIMELINE CONFIG
-    st.sidebar.subheader("📅 Timeline Controls")
-    lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
+    # --- 6. TIMELINE CONFIG (CONNECTED TO GLOBAL RED SLIDER) ---
+    # Read lookback parameters directly out of the global sidebar slider key
+    # Defaulting to 2 weeks if the state map is loading
+    lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 2)
     
     now_local = pd.Timestamp.now(tz=display_tz)
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     
-    if lookback == 0:
-        start_view = p_df['timestamp'].min()
-    else:
-        start_view = end_view - pd.Timedelta(weeks=lookback)
+    # Calculate start view dynamically based on the slider value
+    start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
     # 7. LOCATION-BASED PLOTTING LOOP
     locations = sorted(
@@ -639,12 +633,10 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_label=unit_label, 
                 display_tz=display_tz,
                 f_start_date=f_start_date,
-                # Toggle theoretical curves based on sidebar state
                 curve_id=search_id if (show_ref and is_temp_pipe) else None
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
-
 ###########
 # - 6. PAGE: SENSOR STATUS - #
 ###########
