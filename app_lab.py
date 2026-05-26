@@ -833,18 +833,23 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
-            # --- A. CALCULATE BASELINE (First Monday after system start) ---
-            abs_start = loc_data['timestamp'].min()
-            first_monday = abs_start + pd.offsets.Week(weekday=0) 
-            baseline_ts = first_monday.replace(hour=6, minute=0, second=0)
+            # --- A. CALCULATE BASELINE (True First Week Data - No hardcoded offset shift) ---
+            # Automatically grab the exact first timestamp available for this location
+            baseline_ts = loc_data['timestamp'].min()
             
+            # Create an exact 24-hour window around that first timestamp to grab the profile
             b_window = loc_data[
                 (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
                 (loc_data['timestamp'] <= baseline_ts + pd.Timedelta(hours=12))
             ]
             
+            # Store the exact baseline date string so we can block it from the weekly loop
+            baseline_date_str = ""
+            
             if not b_window.empty:
-                b_date_label = baseline_ts.strftime('%Y-%m-%d')
+                # Standardize to a date string (e.g., '2026-04-20')
+                baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
+                
                 snap = (
                     b_window.assign(diff=(b_window['timestamp'] - baseline_ts).abs())
                     .sort_values(['NodeNum', 'diff'])
@@ -855,18 +860,25 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 b_temps = snap['temperature']
                 if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
                 
-                # UPDATED: Pure black dashed line configuration
+                # Plot the clean, single Black Dashed Baseline
                 fig.add_trace(go.Scatter(
                     x=b_temps, y=snap['Depth_Num'], 
-                    mode='lines',  # Removed markers
-                    name=f'Baseline ({b_date_label})',
-                    line=dict(color='black', width=2.5, dash='dash'), # Hardcoded black dashed line
-                    hovertemplate=f"Baseline: {b_date_label}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                    mode='lines', 
+                    name=f'Baseline ({baseline_date_str})',
+                    line=dict(color='black', width=2.5, dash='dash'),
+                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
             
-            # --- B. PLOT WEEKLY SNAPSHOTS ---
+            # --- B. PLOT WEEKLY SNAPSHOTS (Deduplicated) ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
+                current_loop_date = target_ts.strftime('%Y-%m-%d')
+                
+                # CRITICAL CRITERIA: If this week matches the baseline date, SKIP IT 
+                # so it doesn't create a overlapping double line on your chart!
+                if current_loop_date == baseline_date_str:
+                    continue
+                    
                 window = loc_data[
                     (loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                     (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))
@@ -886,10 +898,10 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     fig.add_trace(go.Scatter(
                         x=temps, y=snap['Depth_Num'], 
                         mode='lines+markers', 
-                        name=target_ts.strftime('%Y-%m-%d'),
+                        name=current_loop_date,
                         line=dict(shape='spline', smoothing=1.1, width=1.5),
                         marker=dict(size=4),
-                        hovertemplate=f"Date: {target_ts.strftime('%Y-%m-%d')}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                        hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
             # --- C. FREEZING REFERENCE LINE ---
