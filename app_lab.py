@@ -789,7 +789,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
     - Empirical data only (no theoretical lines).
-    - Baseline: First Monday at 06:00 AM.
+    - Baseline: First Monday at 06:00 AM (Black Dashed Line).
+    - Freezing Line: Light Blue (Hex #ADD8E6).
     - Scale: Fixed -20 to 80.
     - Frame: Full 4-sided black box.
     """
@@ -854,12 +855,12 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 b_temps = snap['temperature']
                 if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
                 
+                # UPDATED: Pure black dashed line configuration
                 fig.add_trace(go.Scatter(
                     x=b_temps, y=snap['Depth_Num'], 
-                    mode='lines+markers', 
+                    mode='lines',  # Removed markers
                     name=f'Baseline ({b_date_label})',
-                    line=dict(color='black', width=3),
-                    marker=dict(size=8, symbol='diamond'),
+                    line=dict(color='black', width=2.5, dash='dash'), # Hardcoded black dashed line
                     hovertemplate=f"Baseline: {b_date_label}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
             
@@ -892,7 +893,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     ))
 
             # --- C. FREEZING REFERENCE LINE ---
-            fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="cyan")
+            # UPDATED: Light blue solid reference vertical line
+            fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
             # --- D. STANDARDIZED SCALING & BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
@@ -904,7 +906,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 height=800,
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
-                    range=[-20, 80], # Constant Project Scale
+                    range=[-20, 80], 
                     dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
                     gridcolor='Gainsboro', 
@@ -912,7 +914,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
-                    range=[y_limit, 0], # Surface at top
+                    range=[y_limit, 0], 
                     dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
                     gridcolor='Silver', 
@@ -922,6 +924,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
+
+
 ##############################            
 # - 7. PAGE: CLIENT PORTAL - #
 ##############################
