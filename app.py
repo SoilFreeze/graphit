@@ -167,7 +167,9 @@ if sidebar_client is not None:
         
 st.sidebar.divider()
 
-# 3. GLOBAL VIEW TOGGLES
+# --- SIDEBAR NAVIGATION (Updated Section 3) ---
+
+# 3. GLOBAL VIEW TOGGLES & INTERACTIVE LOOKBACK
 st.sidebar.subheader("👁️ Visibility Controls")
 
 st.sidebar.toggle(
@@ -191,6 +193,42 @@ st.sidebar.toggle(
 )
 
 st.sidebar.divider()
+
+# --- REPLACED: Interactive Slider styled to act as your lookback driver ---
+st.sidebar.subheader("⏳ Timeline Navigation")
+
+selected_weeks = st.sidebar.slider(
+    "Select History Window (Weeks)",
+    min_value=1,
+    max_value=12,
+    value=2,  # Sets your default view to a 2-week window
+    step=1,
+    key="global_lookback_weeks_slider",
+    help="Slide the point to change how many weeks of history pull into your charts."
+)
+
+# Convert the slider's week selection directly into total days for your SQL/Data frames
+lookback_days = selected_weeks * 7
+st.session_state["global_lookback_days"] = lookback_days
+
+# --- CSS INJECTION TO FORCE THE SLIDER TRACK & DOT RED ---
+st.sidebar.markdown(
+    """
+    <style>
+        /* Target the slider track line */
+        div[data-baseweb="slider"] > div > div {
+            background: linear-gradient(to right, rgb(214, 39, 40) 0%, rgb(214, 39, 40) var(--slider-progress, 100%), rgb(230, 230, 230) var(--slider-progress, 100%)) !important;
+        }
+        /* Target the interactive thumb dot handle */
+        div[role="slider"] {
+            background-color: rgb(214, 39, 40) !important;
+            border: 2px solid rgb(214, 39, 40) !important;
+            box-shadow: 0px 0px 4px rgba(214, 39, 40, 0.5) !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # 4. MEASUREMENT & UNITS
 st.sidebar.subheader("🌡️ Units")
@@ -511,10 +549,9 @@ def apply_sanity_filter(df):
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Updated: Strict status filtering (TRUE, NULL, MASKED only).
+    Updated: Connected to global red lookback slider state.
     """
     # 1. INITIALIZE UI STATE VARIABLES FROM SIDEBAR KEYS
-    # Ensure these keys match the ones defined in your sidebar exactly
     show_ref = st.session_state.get("global_show_ref", True)
     show_masked = st.session_state.get("global_show_masked", False)
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
@@ -547,7 +584,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     with st.spinner(f"Syncing {p_name} telemetry..."):
-        # The data engine now handles the strict 'BadData' exclusion
         p_df = get_universal_portal_data(selected_project, view_mode="engineering")
 
     if p_df.empty:
@@ -555,25 +591,21 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     # 5. DYNAMIC UI FILTERING
-    # This logic ensures MASKED data only shows if the toggle is ON.
-    # BadData and False are already removed by the SQL engine.
     mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
     
     if not show_masked and mask_col in p_df.columns:
-        # Filter out MASKED points if the toggle is OFF
         p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
 
-    # 6. TIMELINE CONFIG
-    st.sidebar.subheader("📅 Timeline Controls")
-    lookback = st.sidebar.slider("Lookback (Weeks)", 0, 52, 4, key="global_lookback_slider")
+    # --- 6. TIMELINE CONFIG (CONNECTED TO GLOBAL RED SLIDER) ---
+    # Read lookback parameters directly out of the global sidebar slider key
+    # Defaulting to 2 weeks if the state map is loading
+    lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 2)
     
     now_local = pd.Timestamp.now(tz=display_tz)
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     
-    if lookback == 0:
-        start_view = p_df['timestamp'].min()
-    else:
-        start_view = end_view - pd.Timedelta(weeks=lookback)
+    # Calculate start view dynamically based on the slider value
+    start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
     # 7. LOCATION-BASED PLOTTING LOOP
     locations = sorted(
@@ -601,12 +633,10 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 unit_label=unit_label, 
                 display_tz=display_tz,
                 f_start_date=f_start_date,
-                # Toggle theoretical curves based on sidebar state
                 curve_id=search_id if (show_ref and is_temp_pipe) else None
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
-
 ###########
 # - 6. PAGE: SENSOR STATUS - #
 ###########
@@ -759,7 +789,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
     - Empirical data only (no theoretical lines).
-    - Baseline: First Monday at 06:00 AM.
+    - Baseline: First Monday at 06:00 AM (Black Dashed Line).
+    - Freezing Line: Light Blue (Hex #ADD8E6).
     - Scale: Fixed -20 to 80.
     - Frame: Full 4-sided black box.
     """
@@ -802,18 +833,23 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
-            # --- A. CALCULATE BASELINE (First Monday after system start) ---
-            abs_start = loc_data['timestamp'].min()
-            first_monday = abs_start + pd.offsets.Week(weekday=0) 
-            baseline_ts = first_monday.replace(hour=6, minute=0, second=0)
+            # --- A. CALCULATE BASELINE (True First Week Data - No hardcoded offset shift) ---
+            # Automatically grab the exact first timestamp available for this location
+            baseline_ts = loc_data['timestamp'].min()
             
+            # Create an exact 24-hour window around that first timestamp to grab the profile
             b_window = loc_data[
                 (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
                 (loc_data['timestamp'] <= baseline_ts + pd.Timedelta(hours=12))
             ]
             
+            # Store the exact baseline date string so we can block it from the weekly loop
+            baseline_date_str = ""
+            
             if not b_window.empty:
-                b_date_label = baseline_ts.strftime('%Y-%m-%d')
+                # Standardize to a date string (e.g., '2026-04-20')
+                baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
+                
                 snap = (
                     b_window.assign(diff=(b_window['timestamp'] - baseline_ts).abs())
                     .sort_values(['NodeNum', 'diff'])
@@ -824,18 +860,25 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 b_temps = snap['temperature']
                 if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
                 
+                # Plot the clean, single Black Dashed Baseline
                 fig.add_trace(go.Scatter(
                     x=b_temps, y=snap['Depth_Num'], 
-                    mode='lines+markers', 
-                    name=f'Baseline ({b_date_label})',
-                    line=dict(color='black', width=3),
-                    marker=dict(size=8, symbol='diamond'),
-                    hovertemplate=f"Baseline: {b_date_label}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                    mode='lines', 
+                    name=f'Baseline ({baseline_date_str})',
+                    line=dict(color='black', width=2.5, dash='dash'),
+                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
             
-            # --- B. PLOT WEEKLY SNAPSHOTS ---
+            # --- B. PLOT WEEKLY SNAPSHOTS (Deduplicated) ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
+                current_loop_date = target_ts.strftime('%Y-%m-%d')
+                
+                # CRITICAL CRITERIA: If this week matches the baseline date, SKIP IT 
+                # so it doesn't create a overlapping double line on your chart!
+                if current_loop_date == baseline_date_str:
+                    continue
+                    
                 window = loc_data[
                     (loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                     (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))
@@ -855,14 +898,15 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     fig.add_trace(go.Scatter(
                         x=temps, y=snap['Depth_Num'], 
                         mode='lines+markers', 
-                        name=target_ts.strftime('%Y-%m-%d'),
+                        name=current_loop_date,
                         line=dict(shape='spline', smoothing=1.1, width=1.5),
                         marker=dict(size=4),
-                        hovertemplate=f"Date: {target_ts.strftime('%Y-%m-%d')}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                        hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
             # --- C. FREEZING REFERENCE LINE ---
-            fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="cyan")
+            # UPDATED: Light blue solid reference vertical line
+            fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
             # --- D. STANDARDIZED SCALING & BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
@@ -874,7 +918,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 height=800,
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
-                    range=[-20, 80], # Constant Project Scale
+                    range=[-20, 80], 
                     dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
                     gridcolor='Gainsboro', 
@@ -882,7 +926,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
-                    range=[y_limit, 0], # Surface at top
+                    range=[y_limit, 0], 
                     dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
                     gridcolor='Silver', 
@@ -892,6 +936,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
+
+
 ##############################            
 # - 7. PAGE: CLIENT PORTAL - #
 ##############################
@@ -2000,12 +2046,11 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # SQL QUERY: Surgically removed the Office project constraints
+    # SQL QUERY: Balanced approach showing active field data while purging bad data
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
-            -- Restriced strictly to true field operational states
             WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
               AND UPPER(Project) NOT LIKE '%OFFICE%'
         ),
@@ -2015,7 +2060,10 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-            AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
+              -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
+              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
+              -- Outlier Shield: Ignore hardware spikes above boiling point
+              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
