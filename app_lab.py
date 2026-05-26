@@ -169,7 +169,7 @@ st.sidebar.divider()
 
 # --- SIDEBAR NAVIGATION (Updated Section 3) ---
 
-# 3. GLOBAL VIEW TOGGLES & TIME WINDOWS
+# 3. GLOBAL VIEW TOGGLES & INTERACTIVE LOOKBACK
 st.sidebar.subheader("👁️ Visibility Controls")
 
 st.sidebar.toggle(
@@ -192,27 +192,43 @@ st.sidebar.toggle(
     key="mobile_optimized_toggle"
 )
 
-# MOVED FROM MAIN PAGE: Lookback window controller inside the sidebar matrix
-lookback_options = {
-    "Last 24 Hours": 1,
-    "Last 3 Days": 3,
-    "Last 7 Days": 7,
-    "Last 14 Days": 14,
-    "Last 30 Days": 30,
-    "All Operational History": 365
-}
+st.sidebar.divider()
 
-selected_lookback_label = st.sidebar.selectbox(
-    "⏳ Data Lookback Window",
-    options=list(lookback_options.keys()),
-    index=2, # Default to 'Last 7 Days'
-    key="global_lookback_picker",
-    help="Select how many days of historical data to pull into your active trend charts."
+# --- REPLACED: Interactive Slider styled to act as your lookback driver ---
+st.sidebar.subheader("⏳ Timeline Navigation")
+
+selected_weeks = st.sidebar.slider(
+    "Select History Window (Weeks)",
+    min_value=1,
+    max_value=12,
+    value=2,  # Sets your default view to a 2-week window
+    step=1,
+    key="global_lookback_weeks_slider",
+    help="Slide the point to change how many weeks of history pull into your charts."
 )
 
-# Convert the selected label string into its underlying integer day value
-lookback_days = lookback_options[selected_lookback_label]
+# Convert the slider's week selection directly into total days for your SQL/Data frames
+lookback_days = selected_weeks * 7
 st.session_state["global_lookback_days"] = lookback_days
+
+# --- CSS INJECTION TO FORCE THE SLIDER TRACK & DOT RED ---
+st.sidebar.markdown(
+    """
+    <style>
+        /* Target the slider track line */
+        div[data-baseweb="slider"] > div > div {
+            background: linear-gradient(to right, rgb(214, 39, 40) 0%, rgb(214, 39, 40) var(--slider-progress, 100%), rgb(230, 230, 230) var(--slider-progress, 100%)) !important;
+        }
+        /* Target the interactive thumb dot handle */
+        div[role="slider"] {
+            background-color: rgb(214, 39, 40) !important;
+            border: 2px solid rgb(214, 39, 40) !important;
+            box-shadow: 0px 0px 4px rgba(214, 39, 40, 0.5) !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # 4. MEASUREMENT & UNITS
 st.sidebar.subheader("🌡️ Units")
