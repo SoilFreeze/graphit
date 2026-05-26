@@ -201,7 +201,7 @@ selected_weeks = st.sidebar.slider(
     "Select History Window (Weeks)",
     min_value=1,
     max_value=12,
-    value=2,  # Sets your default view to a 2-week window
+    value=5,  # Sets your default view to a 2-week window
     step=1,
     key="global_lookback_weeks_slider",
     help="Slide the point to change how many weeks of history pull into your charts."
