@@ -167,7 +167,9 @@ if sidebar_client is not None:
         
 st.sidebar.divider()
 
-# 3. GLOBAL VIEW TOGGLES
+# --- SIDEBAR NAVIGATION (Updated Section 3) ---
+
+# 3. GLOBAL VIEW TOGGLES & TIME WINDOWS
 st.sidebar.subheader("👁️ Visibility Controls")
 
 st.sidebar.toggle(
@@ -190,7 +192,27 @@ st.sidebar.toggle(
     key="mobile_optimized_toggle"
 )
 
-st.sidebar.divider()
+# MOVED FROM MAIN PAGE: Lookback window controller inside the sidebar matrix
+lookback_options = {
+    "Last 24 Hours": 1,
+    "Last 3 Days": 3,
+    "Last 7 Days": 7,
+    "Last 14 Days": 14,
+    "Last 30 Days": 30,
+    "All Operational History": 365
+}
+
+selected_lookback_label = st.sidebar.selectbox(
+    "⏳ Data Lookback Window",
+    options=list(lookback_options.keys()),
+    index=2, # Default to 'Last 7 Days'
+    key="global_lookback_picker",
+    help="Select how many days of historical data to pull into your active trend charts."
+)
+
+# Convert the selected label string into its underlying integer day value
+lookback_days = lookback_options[selected_lookback_label]
+st.session_state["global_lookback_days"] = lookback_days
 
 # 4. MEASUREMENT & UNITS
 st.sidebar.subheader("🌡️ Units")
