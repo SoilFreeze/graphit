@@ -2001,11 +2001,11 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
     # SQL QUERY: Surgically removed the Office project constraints
+    # SQL QUERY: Filtered to only pull true, approved data
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
-            -- Restriced strictly to true field operational states
             WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
               AND UPPER(Project) NOT LIKE '%OFFICE%'
         ),
@@ -2015,7 +2015,10 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-            AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
+              -- HARD RULE: Only pull explicitly verified/true engineering data
+              AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
+              -- Outlier Shield: Ignore hardware spikes above boiling point
+              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
