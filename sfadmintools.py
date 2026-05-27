@@ -675,7 +675,7 @@ def render_node_selector(reg_df, proj_list):
             "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
         },
         disabled=[col for col in df.columns if col != "Select"],
-        column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "Reporting Efficiency", "coverage_24h"], 
+        column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"], 
         key=ed_key
     )
 
@@ -1805,10 +1805,10 @@ def render_sensor_status_charts(client, node_id, project_id):
         st.error(f"Failed to build visual deep-dive chart: {e}")
 
 
-def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
+def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz, target_registry):
     """
-    Queries historical windows to analyze peer drift trends and 
-    stability performance scoring across active project deployments.
+    Queries historical windows to analyze peer drift trends, stability performance scoring,
+    and signal strength (RSSI) metrics across active project deployments.
     """
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
@@ -1827,7 +1827,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     query = f"""
         WITH BaseReporting AS (
             SELECT 
-                m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth,
+                m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth, m.rssi,
                 AVG(m.temperature) OVER (PARTITION BY m.Location, m.timestamp) as peer_avg
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             WHERE m.Project = @proj_id
@@ -1838,15 +1838,26 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
                 ARRAY_AGG(peer_avg ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_peer_avg,
+                
+                -- RSSI Aggregations
+                ARRAY_AGG(rssi ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS latest_rssi,
+                AVG(rssi) AS avg_rssi,
+                
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) - 
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) THEN temperature END) as swing_2h,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) - 
                 MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as swing_24h,
+                COUNT(DISTINCT TIMESTAMP_TRUNC(timestamp, HOUR)) as total_pings_logged,
                 (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h
             FROM BaseReporting 
             GROUP BY NodeNum, Location, Bank, Depth
         )
-        SELECT * FROM HistoricalStats
+        SELECT 
+            H.*,
+            -- Pull in calculation rules for matching assignment windows directly
+            DATE_DIFF(COALESCE(N.End_Date, CURRENT_DATE()), N.Start_Date, DAY) * 24 AS Expected_Hours
+        FROM HistoricalStats H
+        INNER JOIN `{target_registry}` N ON H.NodeNum = N.NodeNum AND N.End_Date IS NULL
     """
     try:
         # Fetch the initial data from BigQuery safely
@@ -1874,6 +1885,16 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
         df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
+        # Calculate Reporting Efficiency inline
+        exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
+        act_pings = pd.to_numeric(df['total_pings_logged'], errors='coerce').fillna(0)
+        raw_efficiency = np.where(
+            exp_hours <= 0, 
+            0.0, 
+            np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1))
+        )
+        df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_efficiency]
+
         # Form user-readable Status text strings
         def generate_status_text(hours):
             if hours == float('inf'):
@@ -1888,10 +1909,18 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         df['Status'] = df['hours_hidden'].apply(generate_status_text)
 
+        # Format RSSI values cleanly for display
+        df['Latest RSSI'] = df['latest_rssi'].apply(lambda x: f"{int(x)} dBm" if pd.notnull(x) else "N/A")
+        df['Avg RSSI'] = df['avg_rssi'].apply(lambda x: f"{x:.1f} dBm" if pd.notnull(x) else "N/A")
+
         st.subheader("🔍 Detailed Sensor Audit")
         
-        # Prepare presentation dataframe blueprint
-        display_df = df[["Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h", "hours_hidden"]].copy()
+        # Prepare presentation dataframe blueprint with the new columns
+        display_df = df[[
+            "Location", "NodeNum", "Peer Trend", "Performance", 
+            "Latest RSSI", "Avg RSSI", "Status", "Reporting Efficiency", 
+            "coverage_24h", "hours_hidden"
+        ]].copy()
         display_df.insert(0, "Select", False)
 
         # -----------------------------------------------------------
@@ -1926,10 +1955,16 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
                     "NodeNum": "Node ID",
+                    "Latest RSSI": st.column_config.TextColumn("Latest RSSI", help="Most recent signal strength measurement"),
+                    "Avg RSSI": st.column_config.TextColumn("Avg RSSI", help="Historical average signal strength"),
+                    "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Percentage of expected logs written"),
                     "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
                 },
                 disabled=[col for col in data_source_df.columns if col != "Select"],
-                column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"],
+                column_order=[
+                    "Select", "Location", "NodeNum", "Peer Trend", "Performance", 
+                    "Latest RSSI", "Avg RSSI", "Status", "Reporting Efficiency", "coverage_24h"
+                ],
                 key="sensor_status_editor"
             )
 
@@ -3187,7 +3222,7 @@ def main():
         render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry)
 
     elif admin_page == "🔍 Sensor Status":
-        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+        render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz, target_registry)
         
     elif admin_page == "📦 Bulk Registry Manager":
         render_bulk_registry_page(client, proj_list)
