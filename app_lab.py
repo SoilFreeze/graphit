@@ -3,81 +3,81 @@ import requests
 import pandas as pd
 import json
 
-st.title("🔍 SensorPush API Inspector")
-st.info("Querying the live API to see exactly what names are stored on the SensorPush cloud.")
+st.title("⚙️ SensorPush API Gateway Alignment")
+st.info("Testing corrected authorization header syntax to bypass AWS Gateway blocks.")
 
 c_api1, c_api2 = st.columns(2)
 with c_api1:
-    email = st.text_input("SensorPush Account Email", value="soilfreeze98072@gmail.com")
+    email = st.text_input("Account Email", value="soilfreeze98072@gmail.com")
 with c_api2:
-    password = st.text_input("SensorPush Account Password", type="password")
+    password = st.text_input("Account Password", type="password")
 
 st.divider()
 
-if st.button("📡 Fetch Live Sensor Registry From API", type="primary"):
+if st.button("📡 Execute Signed API Request", type="primary"):
     if not email or not password:
-        st.error("Please enter both your SensorPush email and password to connect.")
+        st.error("Please enter credentials.")
     else:
         auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
-        gate_url = "https://api.sensorpush.com/api/v1/sensors"
+        
+        # We are going to hit the specific GATEWAY samples endpoint
+        sensors_url = "https://api.sensorpush.com/api/v1/sensors"
         
         try:
-            with st.status("Connecting to SensorPush API...", expanded=True) as status:
-                st.write("1. Requesting security token from SensorPush cloud...")
-                auth_res = requests.post(auth_url, json={"email": email, "password": password}, timeout=15)
-                auth_data = auth_res.json()
+            with st.status("Executing Pipeline test...", expanded=True) as status:
+                # Step 1: Request OAuth Token
+                st.write("🔒 Requesting gateway access token...")
+                auth_payload = {"email": email, "password": password}
+                auth_res = requests.post(auth_url, json=auth_payload, timeout=15)
+                auth_json = auth_res.json()
                 
-                if "authorization" not in auth_data:
-                    st.error(f"Authentication failed: {auth_data}")
-                    status.update(label="Authentication Failed", state="error")
-                else:
-                    token = auth_data["authorization"]
-                    headers = {"accept": "application/json", "Authorization": token}
+                token = auth_json.get("authorization")
+                
+                if not token:
+                    st.error(f"OAuth failed: {auth_json}")
+                    status.update(label="OAuth Failure", state="error")
+                    return
+                
+                st.write("🔑 Token retrieved successfully.")
+                
+                # Step 2: Build EXACT request headers required by SensorPush API Specification
+                # Often, SensorPush requires headers to accept application/json with explicit token casing
+                headers = {
+                    "accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": token  # Verify if your system architecture maps this as a string literal
+                }
+                
+                st.write("📡 Submitting payload to /v1/sensors...")
+                # Note: The SensorPush API requires an empty JSON object '{}' as the body for a blank query
+                res = requests.post(sensors_url, headers=headers, json={}, timeout=15)
+                res_data = res.json()
+                
+                # Check if we got hit with the same AWS gateway error message
+                if isinstance(res_data, dict) and "statusCode" in res_data:
+                    st.error(f"❌ Gateway Rejected Request: {res_data.get('message')}")
                     
-                    st.write("2. Pulling live cloud hardware configuration array...")
-                    sample_res = requests.post(gate_url, headers=headers, json={}, timeout=15)
-                    sensor_data = sample_res.json()
+                    st.write("### 🛠️ Alternative Attempt: Retrying with Bearer format...")
+                    headers["Authorization"] = f"Bearer {token}"
+                    res = requests.post(sensors_url, headers=headers, json={}, timeout=15)
+                    res_data = res.json()
+                
+                st.write("### 📦 Response Received from SensorPush:")
+                st.json(res_data)
+                
+                if isinstance(res_data, dict) and "statusCode" not in res_data:
+                    status.update(label="Success! Bypassed Gateway Error.", state="complete")
                     
-                    status.update(label=f"Data retrieved successfully!", state="complete")
-                    
-                    st.write("### 📜 Raw Structural Type Received")
-                    st.write(f"Data is type: `{type(sensor_data)}` with length: `{len(sensor_data)}`")
-                    
+                    # Output data to dataframe
                     rows = []
-                    
-                    # SYSTEM A: If the API returned a dictionary mapping ID -> Detail Dict
-                    if isinstance(sensor_data, dict):
-                        for k, v in sensor_data.items():
-                            if isinstance(v, dict):
-                                rows.append({
-                                    "Extracted_ID": k,
-                                    "Stored_Name": v.get("name", "N/A"),
-                                    "Raw_Payload_Object": str(v)
-                                })
-                            else:
-                                rows.append({
-                                    "Extracted_ID": k,
-                                    "Stored_Name": str(v),
-                                    "Raw_Payload_Object": "Plain String Element"
-                                })
-                                
-                    # SYSTEM B: If the API returned a flat list of items/strings
-                    elif isinstance(sensor_data, list):
-                        for idx, item in enumerate(sensor_data):
+                    for s_id, details in res_data.items():
+                        if isinstance(details, dict):
                             rows.append({
-                                "Extracted_ID": f"Index_{idx}",
-                                "Stored_Name": str(item),
-                                "Raw_Payload_Object": "Flat List Element"
+                                "Sensor_ID": s_id,
+                                "Name_On_SensorPush_Cloud": details.get("name", "N/A"),
+                                "Active": details.get("active", "N/A")
                             })
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
                     
-                    df = pd.DataFrame(rows)
-                    
-                    st.write("### 📊 Decoded API Names Table")
-                    st.dataframe(df, use_container_width=True)
-                    
-                    # Show the absolute raw payload text so we can read it directly
-                    st.write("### 📦 Exact JSON Payload String From Server:")
-                    st.json(sensor_data)
-                        
         except Exception as e:
-            st.error(f"API Network Connection error: {e}")
+            st.error(f"Pipeline crashed: {e}")
