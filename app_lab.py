@@ -7,7 +7,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 st.title("⚡ Smart Delta Ingestion Engine")
-st.info("Cross-references BigQuery live to isolate and count genuinely new telemetry packets.")
+st.info("Cross-references BigQuery live with enhanced root-ID cleaning to eliminate UNMAPPED tags.")
 
 PROJECT_ID = "sensorpush-export" 
 DATASET_ID = "Temperature"      
@@ -23,7 +23,7 @@ if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
     db_max_timestamps = {}  # Tracks the latest date BigQuery knows about per node
     node_stats = {}         # Tracks total vs new counts per node
     
-    with st.status("Executing Delta Pass...", expanded=True) as status:
+    with st.status("Executing Enhanced Delta Pass...", expanded=True) as status:
         try:
             if "gcp_service_account" in st.secrets:
                 info = st.secrets["gcp_service_account"]
@@ -32,11 +32,13 @@ if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
             else:
                 client = bigquery.Client(project=PROJECT_ID)
             
-            # --- STEP 1: MAP SENSORS ---
+            # --- STEP 1: MAP SENSORS USING CLEAN ROOT KEY ---
             st.write("🔍 Loading Translation Maps...")
             query = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` WHERE RawID IS NOT NULL"
             for row in client.query(query):
-                hardware_map[str(row.RawID).strip()] = str(row.NodeNum).strip()
+                # Extract the 8-digit base serial number from your inventory table
+                clean_db_id = str(row.RawID).split('.')[0].strip()
+                hardware_map[clean_db_id] = str(row.NodeNum).strip()
                 
             # --- STEP 2: LOOKUP LATEST DATABASE TIMESTAMPS ---
             st.write("📅 Querying current database bookmarks...")
@@ -47,14 +49,13 @@ if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
             """
             for row in client.query(time_query):
                 if row.max_time:
-                    # Convert BigQuery datetime to an ISO-formatted string line for direct comparison
                     db_max_timestamps[str(row.NodeNum)] = row.max_time.isoformat()
 
         except Exception as e:
             st.error(f"Database sync check failed: {e}")
             st.stop()
 
-        # Bounding window setup
+        # Bounding window setup (Current Date)
         start_time_iso = "2026-05-28T00:00:00Z"
         end_time_iso = "2026-05-28T23:59:59Z"
 
@@ -74,18 +75,16 @@ if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
                 st.stop()
                 
             for s_id, samples in sensors_data.items():
-                raw_api_key = str(s_id).strip()
+                # Extract the 8-digit base root number from the live API broadcast string
+                api_root_id = str(s_id).split('.')[0].strip()
                 
-                friendly_name = hardware_map.get(raw_api_key)
-                if not friendly_name:
-                    for db_raw, db_node in hardware_map.items():
-                        if db_raw in raw_api_key or raw_api_key in db_raw:
-                            friendly_name = db_node
-                            break
-                if not friendly_name:
-                    friendly_name = f"UNMAPPED-{raw_api_key.split('.')[0]}"
+                # Match them together at the root level!
+                friendly_name = hardware_map.get(api_root_id)
                 
-                # Initialize node tracker if not seen yet (Syntax fixed here)
+                if not friendly_name:
+                    friendly_name = f"UNMAPPED-{api_root_id}"
+                
+                # Initialize node tracker if not seen yet
                 if friendly_name not in node_stats:
                     node_stats[friendly_name] = {"Downloaded": 0, "New Unique Appends": 0}
 
@@ -93,7 +92,7 @@ if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
                 latest_db_time = db_max_timestamps.get(friendly_name, "")
 
                 for s in samples:
-                    observed_time = s['observed']  # Format: "2026-05-28T10:00:00.000Z"
+                    observed_time = s['observed']
                     temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                     
                     if temp is not None:
