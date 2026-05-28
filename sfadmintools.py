@@ -2314,24 +2314,27 @@ def render_data_recovery_page(reg_df):
     st.header("📡 Data Recovery")
     st.info("Triggers the Cloud Run service to backfill missing telemetry from the SensorPush API.")
 
-    # Gate for SensorPush hardware, ensuring we pull inventory mappings
+    # 1. GATEWAY: Filter for active SensorPush hardware only (TP-Prefix)
     sp_reg = reg_df[
         (reg_df['NodeNum'].str.startswith('TP', na=False)) & 
         (reg_df['End_Date'].isna())
     ].copy()
 
-    # Query your hardware inventory to match text IDs to raw numeric API tokens
+    # 2. DYNAMIC TRANSLATION ENGINE
+    # Reads your hardware inventory table to look up raw numeric API IDs dynamically
     try:
         inv_q = "SELECT RawID, NodeNum FROM `sensorpush-export.Temperature.hardware_inventory`"
         inv_df = client.query(inv_q).to_dataframe()
-        inv_map = dict(zip(inv_df['NodeNum'], inv_df['RawID'].astype(str)))
+        # Create a dictionary matching text ID strings to raw numeric strings
+        inv_map = dict(zip(inv_df['NodeNum'].astype(str).str.strip(), inv_df['RawID'].astype(str).str.strip()))
     except Exception as e:
-        st.error(f"Failed to load hardware API mapping tokens: {e}")
+        st.error(f"Failed to load hardware inventory mapping tokens: {e}")
         inv_map = {}
 
-    # Pass the mapping dictionary into the filter renderer
+    # 3. FILTERING UI
     selected_nodes = render_recovery_filters(sp_reg)
 
+    # 4. DATE RANGE & TRIGGER
     st.divider()
     c_d1, c_d2 = st.columns(2)
     with c_d1:
@@ -2342,15 +2345,29 @@ def render_data_recovery_page(reg_df):
     if st.button("🚀 Run Recovery Service", type="primary"):
         if not selected_nodes:
             st.error("Please select at least one node.")
+        elif not inv_map:
+            st.error("Cannot execute recovery: Hardware translation catalog is offline.")
         else:
-            # Map selected human-readable labels back to raw API integers
-            raw_api_ids = [inv_map[node] for node in selected_nodes if node in inv_map]
+            mapped_api_ids = []
+            missing_mappings = []
             
-            if not raw_api_ids:
-                st.error("Could not resolve selected nodes to their physical raw SensorPush Gateway IDs.")
+            for node in selected_nodes:
+                clean_node = str(node).strip()
+                if clean_node in inv_map:
+                    mapped_api_ids.append(inv_map[clean_node])
+                else:
+                    missing_mappings.append(clean_node)
+            
+            if missing_mappings:
+                st.warning(f"⚠️ Skipping {len(missing_mappings)} nodes missing from hardware_inventory: {', '.join(missing_mappings)}")
+            
+            if not mapped_api_ids:
+                st.error("Execution halted: None of the selected nodes could be resolved to a raw numeric ID.")
             else:
-                handle_recovery_trigger(raw_api_ids, start_date, end_date)
+                # Packs the true numbers (e.g. "17049873,17050037") instead of the "TP-" strings
+                handle_recovery_trigger(mapped_api_ids, start_date, end_date)
 
+    # 5. SYSTEM LOGIC FOOTER
     render_recovery_logic_footer()
 
 def render_recovery_filters(sp_reg):
