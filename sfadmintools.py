@@ -2405,7 +2405,7 @@ def render_recovery_logic_footer():
         st.markdown("""
         1. **Filtered Registry**: Accesses active `TP` (SensorPush) sensors only.
         2. **API Handshake**: Sends date parameters and a comma-separated node list to the Cloud Run endpoint.
-        3. **Background Processing**: Cloud Run fetches data from SensorPush and pushes to `raw_sensorpush` in BigQuery.
+        3. **Background Processing**: Cloud Run matches friendly names to physical device IDs, polls active metadata for current RSSI strength levels, maps them to historical data packets, and inserts everything cleanly to `raw_sensorpush` in BigQuery.
         4. **Propagation**: Data updates the `master_data_view` automatically via the existing SQL view logic.
         """)
         
