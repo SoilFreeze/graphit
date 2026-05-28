@@ -25,6 +25,11 @@ def initialize_app():
 DATASET_ID, PROJECT_ID = initialize_app()
 display_tz = "America/Los_Angeles"
 
+# Global target references for API tools to prevent variable drift
+TABLE_ID = "raw_sensorpush"
+INVENTORY_TABLE = "hardware_inventory"
+BASE_URL = "https://api.sensorpush.com/api/v1"
+
 # ===============================================================
 # 2. DATABASE CLIENT
 # ===============================================================
@@ -185,8 +190,9 @@ def load_registry_data(target_table):
     except Exception as e:
         st.error(f"Error loading registry: {e}")
         return pd.DataFrame()
+
 # =============================================================================
-# 1. Helper functions & Styling Engine
+# Helper functions & Styling Engine
 # =============================================================================
 def get_trend_arrow(current, previous):
     if pd.isnull(current) or pd.isnull(previous): 
@@ -215,7 +221,7 @@ def assign_row_color(hours):
     """
     Returns the CSS background color based on the age of the data in hours.
     """
-    if hours is None or pd.isna(hours) or hours == float('inf'):  # Handles "Never" seen / offline nodes safely
+    if hours is None or pd.isna(hours) or hours == float('inf'):  
         return "background-color: #d1d5db; color: #1f2937;"  # Gray
     elif hours < 1:
         return "background-color: #d1fae5; color: #065f46;"  # Green (<1 hr)
@@ -234,11 +240,10 @@ def style_dataframe(row):
     """
     try:
         val = row['hours_hidden']
-        # Convert explicit infinity or null structures to None for our color rules function
         hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
         color_style = assign_row_color(hours_val)
     except Exception:
-        color_style = "background-color: transparent;" # Safe backup overlay
+        color_style = "background-color: transparent;" 
         
     return [color_style] * len(row)
 
@@ -501,6 +506,7 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
         }
     )
 
+
 # =============================================================================
 # PAGE MODULE: 🛠️ NODE MANAGER
 # =============================================================================
@@ -662,7 +668,6 @@ def render_node_selector(reg_df, proj_list):
                     style_canvas.loc[i, col] = color_style
         return style_canvas
 
-    # FIXED: "Reporting Efficiency" added to column_config and column_order map constraints
     edited_df = st.data_editor(
         df.style.apply(node_selector_styler, axis=None) if not df.empty else df,
         hide_index=True,
@@ -724,6 +729,7 @@ def render_node_selector(reg_df, proj_list):
                     st.code(sql, language="sql")
                     
     return selected_returned_row
+
 # =============================================================================
 # 1. HISTORICAL TELEMETRY GRAPH COMPONENT
 # =============================================================================
@@ -761,7 +767,6 @@ def render_node_historical_graph(client, node_id):
             st.caption("ℹ️ No historical telemetric data markers discovered for this hardware footprint.")
     except Exception as e:
         st.error(f"Failed generating historical context graph: {e}")
-
 # =============================================================================
 # 2. BULK ORCHESTRATOR TABS
 # =============================================================================
@@ -824,7 +829,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         try:
             ping_q = f"SELECT MAX(timestamp) as lp FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{node_id}'"
             lp_res = client.query(ping_q).to_dataframe()
-            if not lp_res.empty and pd.notnull(lp_res['lp'].iloc[0]):
+            if not lp_res.empty && pd.notnull(lp_res['lp'].iloc[0]):
                 history_df['hours_hidden'] = (now_utc - pd.to_datetime(lp_res['lp'].iloc[0]).tz_convert('UTC')).total_seconds() / 3600.0
             else:
                 history_df['hours_hidden'] = np.nan
@@ -833,7 +838,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
 
     # Generate the readable text display from our calculated float
     def format_history_lag(hours):
-        if pd.isna(hours) or hours == float('inf'):
+        if pd.isna(hours) || hours == float('inf'):
             return "No Pings"
         elif hours < 1.0:
             mins = int(hours * 60)
@@ -862,7 +867,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         for i in data.index:
             try:
                 val = data.loc[i, 'hours_hidden']
-                hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                hours_val = None if (val == float('inf') || pd.isnull(val)) else float(val)
                 color_style = assign_row_color(hours_val)
             except Exception:
                 color_style = "background-color: transparent;"
@@ -935,7 +940,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
         edit_bank = col4.text_input("Bank", value=str(target_record.get('Bank', '')) if pd.notnull(target_record.get('Bank')) else "", help="Writing a bank value automatically wipes Depth to NULL.")
         
         raw_depth = target_record.get('Depth')
-        edit_depth = col5.number_input("Depth (ft)", value=float(raw_depth) if (pd.notnull(raw_depth) and str(raw_depth).strip() != '') else 0.0)
+        edit_depth = col5.number_input("Depth (ft)", value=float(raw_depth) if (pd.notnull(raw_depth) && str(raw_depth).strip() != '') else 0.0)
         
         status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
         curr_stat = target_record.get('SensorStatus', 'On Project')
@@ -961,8 +966,8 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
             sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             
-            where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
-            where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+            where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) && str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+            where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) && str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
             where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
 
             update_sql = f"""
@@ -1400,7 +1405,6 @@ def render_data_checker(client, reg_df):
             )
         else:
             st.success("✅ Perfect grid alignment. Every active physical installation coordinate holds exactly one distinct hardware sensor entity.")
-
 # =============================================================================
 # PAGE MODULE: 📡 PROJECT OVERVIEW
 # =============================================================================
@@ -2230,7 +2234,8 @@ def process_bulk_upload(client, df, target_registry):
                 df = df.drop(columns=['PhysicalID'])
             
             # 4. BigQuery Load
-            job_config = bigquery.LoadTableConfig(write_disposition="WRITE_APPEND")
+            from google.cloud import bigquery
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
             client.load_table_from_dataframe(df, target_registry, job_config=job_config).result()
             
         st.success(f"Successfully registered {len(df)} nodes.")
@@ -2312,7 +2317,7 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
 def render_data_recovery_page(reg_df):
     """Main entry point for the Data Recovery page."""
     st.header("📡 Data Recovery")
-    st.info("Triggers the Cloud Run service to backfill missing telemetry from the SensorPush API.")
+    st.info("Directly queries the SensorPush Cloud API using raw tokens, strips trailing decimals on-the-fly, and filters duplicate packets against BigQuery bookmarks.")
 
     # 1. GATEWAY: Filter for SensorPush hardware only (TP-Prefix) 
     # Use only active sensors to keep the selection list manageable
@@ -2333,14 +2338,8 @@ def render_data_recovery_page(reg_df):
     with c_d2:
         end_date = st.date_input("Recovery End Date", value=datetime.now())
 
-    if st.button("🚀 Run Recovery Service", type="primary"):
-        if not selected_nodes:
-            st.error("Please select at least one node.")
-        else:
-            handle_recovery_trigger(selected_nodes, start_date, end_date)
-
-    # 4. SYSTEM LOGIC FOOTER
-    render_recovery_logic_footer()
+    if st.button("🚀 Run Recovery Service", type="primary", use_container_width=True):
+        handle_recovery_trigger(selected_nodes, start_date, end_date)
 
 
 def render_recovery_filters(sp_reg):
@@ -2349,53 +2348,178 @@ def render_recovery_filters(sp_reg):
     col_f1, col_f2, col_f3 = st.columns(3)
     
     with col_f1:
-        u_projects = ["All"] + sorted(sp_reg['Project'].unique().tolist())
+        u_projects = ["All"] + sorted(sp_reg['Project'].dropna().unique().tolist())
         rec_proj = st.selectbox("Filter by Project", u_projects, key="rec_proj_sel")
     
     proj_filtered = sp_reg if rec_proj == "All" else sp_reg[sp_reg['Project'] == rec_proj]
     
     with col_f2:
-        u_locs = ["All"] + sorted(proj_filtered['Location'].unique().tolist(), key=lambda x: tuple(natural_sort_key(x)))
+        u_locs = ["All"] + sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
         rec_loc = st.selectbox("Filter by Location", u_locs, key="rec_loc_sel")
         
     with col_f3:
         loc_filtered = proj_filtered if rec_loc == "All" else proj_filtered[proj_filtered['Location'] == rec_loc]
-        available_nodes = sorted(loc_filtered['NodeNum'].unique().tolist(), key=natural_sort_key)
+        available_nodes = sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
         
         selected_nodes = st.multiselect(
             "Select Node Numbers", 
             available_nodes, 
             # Default to None to prevent accidental massive API requests
             default=None,
-            help="Choose the specific sensors to backfill."
+            help="Choose the specific sensors to backfill. Leave empty to pull all filtered assets."
         )
     return selected_nodes
 
 
 def handle_recovery_trigger(selected_nodes, start_date, end_date):
-    """Manages the API request to the Cloud Run recovery service."""
-    cloud_run_url = "https://sensorpushtobigquery-1013288934882.us-west1.run.app/recover_data"
-    
-    payload = {
-        "start": start_date.strftime("%Y-%m-%d"),
-        "end": end_date.strftime("%Y-%m-%d"),
-        "nodes": ",".join(selected_nodes)
-    }
+    """Manages the native connection pipeline to execute the smart delta recovery engine."""
+    all_rows = []
+    hardware_map = {}
+    db_max_timestamps = {}
+    node_stats = {}
 
-    with st.spinner(f"Triggering backfill for {len(selected_nodes)} sensors..."):
+    # Define API account matrix matching client footprints
+    ACCOUNTS = [
+        {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
+        {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
+        {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
+    ]
+
+    # Convert frontend inputs cleanly into required ISO strings
+    start_time_iso = datetime.combine(start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
+    end_time_iso = datetime.combine(end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    with st.status("Executing Backfill Pipeline Run...", expanded=True) as status:
+        if not client:
+            st.error("BigQuery Database Client is Offline.")
+            st.stop()
+
+        # --- STEP A: LOAD INVENTORY ROOT MAPPINGS ---
+        st.write("🔍 Extracting Translation Mappings from Hardware Inventory...")
         try:
-            # Note: 300s timeout is good for larger batches
-            response = requests.get(cloud_run_url, params=payload, timeout=300)
-            
-            if response.status_code == 200:
-                st.success("✅ Recovery Triggered Successfully")
-                st.info("The service is processing. Data will appear in BigQuery shortly.")
-                if response.text:
-                    st.code(response.text)
-            else:
-                st.error(f"Cloud Service Error ({response.status_code}): {response.text}")
+            inv_q = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` WHERE RawID IS NOT NULL"
+            for row in client.query(inv_q):
+                # Handle decimals on inventory loading to match root numbers cleanly
+                clean_db_id = str(row.RawID).split('.')[0].strip()
+                hardware_map[clean_db_id] = str(row.NodeNum).strip()
         except Exception as e:
-            st.error(f"Connectivity Failure: {e}")
+            st.error(f"Failed to query map tables: {e}")
+            st.stop()
+
+        # --- STEP B: CHECK TIMELINE BOOKMARKS ---
+        st.write("📅 Checking existing database bookmarks...")
+        try:
+            time_q = f"SELECT NodeNum, MAX(timestamp) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}` GROUP BY NodeNum"
+            for row in client.query(time_q):
+                if row.max_time:
+                    db_max_timestamps[str(row.NodeNum)] = row.max_time.isoformat()
+        except Exception as e:
+            st.warning(f"Could not calculate maximum timelines, appending without filters: {e}")
+
+        # --- STEP C: PULL TELEMETRY ACROSS ACCOUNT HOUSES ---
+        for acc in ACCOUNTS:
+            st.write(f"🔐 Authenticating token profile for `{acc['email']}`...")
+            try:
+                auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
+                token = requests.post(f"{BASE_URL}/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
+                
+                # Fetch live connection strength telemetry properties (RSSI)
+                s_resp = requests.post(f"{BASE_URL}/devices/sensors", headers={"Authorization": token}, json={}, timeout=20).json()
+                device_rssi_map = {}
+                if isinstance(s_resp, dict):
+                    for s_id, s_meta in s_resp.items():
+                        if isinstance(s_meta, dict) and 'rssi' in s_meta:
+                            device_rssi_map[str(s_id).strip()] = s_meta.get('rssi')
+
+                st.write(f"📥 Pulling raw cloud payload matrix for `{acc['email']}`...")
+                samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso}
+                r_samples = requests.post(f"{BASE_URL}/samples", headers={"Authorization": token}, json=samples_payload, timeout=60).json()
+                
+                sensors_data = r_samples.get('sensors', {})
+                if not sensors_data:
+                    continue
+
+                # --- STEP D: MATCH, DEDUPLICATE AND TALLY ---
+                for s_id, samples in sensors_data.items():
+                    # Strip long trailing decimal suffixes on API side to prevent mapping drops
+                    api_root_id = str(s_id).split('.')[0].strip()
+                    friendly_name = hardware_map.get(api_root_id)
+                    
+                    if not friendly_name:
+                        friendly_name = f"UNMAPPED-{api_root_id}"
+                        
+                    # Filter step: If specific node choices are picked, skip rows not selected
+                    if selected_nodes and friendly_name not in selected_nodes:
+                        continue
+                        
+                    if friendly_name not in node_stats:
+                        node_stats[friendly_name] = {"Downloaded": 0, "New Unique Appends": 0}
+                        
+                    latest_db_bookmark = db_max_timestamps.get(friendly_name, "")
+                    
+                    current_device_rssi = device_rssi_map.get(str(s_id).strip())
+                    if current_device_rssi is None:
+                        for rssi_key, rssi_val in device_rssi_map.items():
+                            if api_root_id in rssi_key or rssi_key in api_root_id:
+                                current_device_rssi = rssi_val
+                                break
+                                
+                    for s in samples:
+                        temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                        if temp is not None:
+                            node_stats[friendly_name]["Downloaded"] += 1
+                            
+                            observed_time = s['observed']
+                            clean_observed = observed_time.replace('Z', '+00:00')
+                            
+                            if not latest_db_bookmark or clean_observed > latest_db_bookmark:
+                                node_stats[friendly_name]["New Unique Appends"] += 1
+                                all_rows.append({
+                                    "timestamp": observed_time,
+                                    "NodeNum": str(friendly_name),
+                                    "temperature": float(temp),
+                                    "rssi": int(current_device_rssi) if current_device_rssi is not None else None
+                                })
+            except Exception as e:
+                print(f"Skipping or error parsing profile data loop parameters: {e}")
+
+        # --- STEP E: COMMIT INDEPENDENT SAMPLES TO PRIMARY TABLE ---
+        total_recovered_appends = len(all_rows)
+        if total_recovered_appends == 0:
+            st.info("🔒 Production table perfectly synchronized. 0 duplicates written.")
+            status.update(label="Database Up To Date", state="complete")
+        else:
+            st.write(f"📥 Injecting {total_recovered_appends} unique rows directly into `{TABLE_ID}`...")
+            try:
+                real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+                errors = client.insert_rows_json(real_table_ref, all_rows)
+                if not errors:
+                    st.success(f"🎉 Success! Appended {total_recovered_appends} unique rows directly to production storage.")
+                    status.update(label="Recovery Complete!", state="complete")
+                else:
+                    st.error(f"BigQuery insertion rejected rows: {errors[:3]}")
+                    status.update(state="error")
+            except Exception as bq_err:
+                st.error(f"Direct stream submission pipeline failure: {bq_err}")
+                status.update(state="error")
+
+    # --- STEP F: RENDER STATISTICAL BREAKDOWN GRID ---
+    if node_stats:
+        st.write("### 📊 Smart Data Delta Tally Distribution:")
+        summary_records = []
+        for node, counts in node_stats.items():
+            summary_records.append({
+                "Node Number": node,
+                "Total Points in Cloud Window": counts["Downloaded"],
+                "Genuinely New Points Appended": counts["New Unique Appends"]
+            })
+        summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        if total_recovered_appends > 0:
+            st.balloons()
+
+    # 4. SYSTEM LOGIC FOOTER
+    render_recovery_logic_footer()
 
 
 def render_recovery_logic_footer():
@@ -2404,9 +2528,9 @@ def render_recovery_logic_footer():
     with st.expander("🛠️ How the Recovery Engine Works"):
         st.markdown("""
         1. **Filtered Registry**: Accesses active `TP` (SensorPush) sensors only.
-        2. **API Handshake**: Sends date parameters and a comma-separated node list to the Cloud Run endpoint.
-        3. **Background Processing**: Cloud Run fetches data from SensorPush and pushes to `raw_sensorpush` in BigQuery.
-        4. **Propagation**: Data updates the `master_data_view` automatically via the existing SQL view logic.
+        2. **API Handshake**: Automatically queries multiple target engineer accounts using exact decimal root matches.
+        3. **Live Antenna Scan**: Pulls gateway metrics to attach current live RSSI values alongside temperature logs.
+        4. **Delta Deduplication**: Compares incoming cloud time signatures against BigQuery bookmarks to prevent table duplicate rows.
         """)
         
 # ===============================================================
@@ -2614,7 +2738,8 @@ def render_update_project_form(client, selected_project, table_projects):
             if confirm_token.strip() == selected_project:
                 delete_q = f"DELETE FROM `{table_projects}` WHERE Project = '{selected_project}'"
                 try:
-                    client.query(delete_q).result()
+                    query_job = client.query(delete_q)
+                    query_job.result()
                     st.warning(f"Registry mapping target dropped safely: **{selected_project}** is no longer tracked.")
                     st.cache_data.clear()
                     time.sleep(1)
@@ -2640,6 +2765,7 @@ def render_ref_curve_library_page(client):
     inventory_df = pd.DataFrame()
     
     # Extract live curve records with built-in 404 missing table safety
+    from google.api_core.exceptions import NotFound
     try:
         inventory_df = client.query(f"SELECT * FROM `{table_curves}` ORDER BY 1 ASC").to_dataframe()
     except NotFound:
@@ -2947,7 +3073,7 @@ def process_curve_uploads(client, u_files, table_curves):
             df = df.dropna(subset=['Day', 'Temp'])
 
             if not df.empty:
-                job_config = bigquery.LoadTableConfig(
+                job_config = bigquery.LoadJobConfig(
                     schema=[
                         bigquery.SchemaField("Day", "FLOAT"),
                         bigquery.SchemaField("Temp", "FLOAT"),
@@ -2972,8 +3098,8 @@ def process_curve_uploads(client, u_files, table_curves):
 # ===============================================================
 
 def render_management_controls():
-    """Renders the top-level scope selection and target flag status inputs."""
-    c1, c2 = st.columns(2)
+    """Renders the top-level scope selection, filter parameters, and target flag status inputs."""
+    c1, c2, c3 = st.columns(3)
     with c1:
         target_scope = st.radio(
             "Target Scope", 
@@ -2982,12 +3108,20 @@ def render_management_controls():
             key="mgmt_target_scope"
         )
     with c2:
+        # NEW CONTEXT: Filter criteria parameter targeting specific current status sets
+        current_status_filter = st.selectbox(
+            "Filter Current Designation Status:",
+            ["All Records", "TRUE", "BadData", "Masked", "Office"],
+            key="mgmt_current_status_filter",
+            help="Limits modifications only to data points that currently match this selected classification."
+        )
+    with c3:
         new_status = st.selectbox(
             "Set Approval Status To:", 
             ["TRUE", "BadData", "Masked", "Office"], 
             key="mgmt_new_status"
         )
-    return target_scope, new_status
+    return target_scope, current_status_filter, new_status
 
 def render_management_filters(reg_df, selected_project, target_scope):
     """
@@ -3039,7 +3173,7 @@ def render_management_filters(reg_df, selected_project, target_scope):
     }
 
 
-def build_management_where_clause(reg_df, selected_project, target_scope, f):
+def build_management_where_clause(reg_df, selected_project, target_scope, current_status_filter, f):
     """
     Constructs a WHERE clause using custom-built hour timestamp syntax mapping matching BigQuery schemas.
     """
@@ -3075,6 +3209,14 @@ def build_management_where_clause(reg_df, selected_project, target_scope, f):
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"temperature < {f['threshold']}")
 
+    # 4. NEW CONDITION: Enforce target status filter constraints
+    if current_status_filter != "All Records":
+        if current_status_filter == "TRUE":
+            # Points marked as default 'TRUE' lack an override entry inside the manual rejections table
+            where_clauses.append("r.approve IS NULL")
+        else:
+            where_clauses.append(f"r.approve = '{current_status_filter}'")
+
     return " AND ".join(where_clauses)
 
 
@@ -3086,11 +3228,13 @@ def render_data_management_page(client, reg_df, selected_project):
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
-    target_scope, new_status = render_management_controls()
+    target_scope, current_status_filter, new_status = render_management_controls()
     st.divider()
 
     filters = render_management_filters(reg_df, selected_project, target_scope)
-    where_str = build_management_where_clause(reg_df, selected_project, target_scope, filters)
+    
+    # Generate complete where strings including our status filter overrides
+    where_str = build_management_where_clause(reg_df, selected_project, target_scope, current_status_filter, filters)
     
     # 1. Step 1: Verification & Current Status Breakdown Matrix
     render_verification_step(client, where_str, telemetry_table, target_table)
@@ -3153,16 +3297,26 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
             aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
             
             if new_status == "TRUE":
-                # Moving points back to TRUE means dropping their override row so they fall back to default
-                sql = f"DELETE FROM `{target_table}` WHERE {where_str}"
+                # Moving points back to TRUE means dropping their override rows out of the rejections dictionary table
+                # We fetch the valid unique composite index keys from the view layer to execute a clean removal pass
+                sql = f"""
+                    DELETE FROM `{target_table}`
+                    WHERE (NodeNum, timestamp) IN (
+                        SELECT DISTINCT t.NodeNum, t.timestamp 
+                        FROM `{telemetry_table}` t
+                        LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+                        WHERE {aliased_where}
+                    )
+                """
             else:
                 # HARDENED COLLISION DEFENSE: DISTINCT filters out redundant telemetry timestamps
-                # directly inside the source block 'S' to prevent the 400 error.
+                # directly inside the source block 'S' to pull exact composite rows seamlessly
                 sql = f"""
                     MERGE `{target_table}` T
                     USING (
-                        SELECT DISTINCT NodeNum, timestamp 
+                        SELECT DISTINCT t.NodeNum, t.timestamp 
                         FROM `{telemetry_table}` t 
+                        LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
                         WHERE {aliased_where}
                     ) S
                     ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
