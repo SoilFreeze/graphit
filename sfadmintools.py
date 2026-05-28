@@ -2310,64 +2310,84 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
 # ===============================================================
 
 def render_data_recovery_page(reg_df):
-    """Main entry point for the Data Recovery page."""
+    """Main entry point for the Data Recovery page.
+    
+    Translates human-readable TP labels to raw numeric hardware IDs
+    before firing the Cloud Run API recovery webhook payload.
+    """
     st.header("📡 Data Recovery")
     st.info("Triggers the Cloud Run service to backfill missing telemetry from the SensorPush API.")
 
-    # 1. GATEWAY: Filter for active SensorPush hardware only (TP-Prefix)
-    sp_reg = reg_df[
-        (reg_df['NodeNum'].str.startswith('TP', na=False)) & 
+    # 1. Isolate active project records
+    active_reg = reg_df[
+        (reg_df['Project'] == '2541-Blackjack Phase2') & 
         (reg_df['End_Date'].isna())
     ].copy()
 
-    # 2. DYNAMIC TRANSLATION ENGINE
-    # Reads your hardware inventory table to look up raw numeric API IDs dynamically
+    if active_reg.empty:
+        st.warning("No active sensors found in the production node registry.")
+        return
+
+    # 2. Pull the master hardware inventory table to build a mapping dictionary
     try:
-        inv_q = "SELECT RawID, NodeNum FROM `sensorpush-export.Temperature.hardware_inventory`"
-        inv_df = client.query(inv_q).to_dataframe()
-        # Create a dictionary matching text ID strings to raw numeric strings
-        inv_map = dict(zip(inv_df['NodeNum'].astype(str).str.strip(), inv_df['RawID'].astype(str).str.strip()))
+        query = "SELECT RawID, NodeNum FROM `sensorpush-export.Temperature.hardware_inventory` WHERE RawID IS NOT NULL"
+        inv_df = run_query(query)
+        # Create a dictionary mapping clean labels back to raw numeric IDs: {'TP-0353': '17050030'}
+        label_to_raw = dict(zip(inv_df['NodeNum'], inv_df['RawID']))
     except Exception as e:
-        st.error(f"Failed to load hardware inventory mapping tokens: {e}")
-        inv_map = {}
+        st.error(f"Failed to load hardware inventory mapping index: {e}")
+        label_to_raw = {}
 
-    # 3. FILTERING UI
-    selected_nodes = render_recovery_filters(sp_reg)
+    # 3. Format selection labels so they are easy to read in the dropdown multi-select box
+    active_reg['DisplayLabel'] = active_reg.apply(
+        lambda r: f"{r['NodeNum']} ({r['Location']})" if pd.notna(r['Location']) else r['NodeNum'], 
+        axis=1
+    )
 
-    # 4. DATE RANGE & TRIGGER
+    # 4. Display the multi-select selection filter UI
+    selected_displays = st.multiselect(
+        "Select Target Freeze Wall Nodes for Recovery",
+        options=sorted(active_reg['DisplayLabel'].tolist()),
+        help="Select the specific engineering points to pull missing telemetry streams."
+    )
+
+    # 5. Extract the raw NodeNum string from the user selection
+    selected_labels = []
+    for disp in selected_displays:
+        base_label = disp.split(" (")[0]
+        selected_labels.append(base_label)
+
     st.divider()
     c_d1, c_d2 = st.columns(2)
     with c_d1:
-        start_date = st.date_input("Recovery Start Date", value=datetime.now() - timedelta(days=3))
+        start_date = st.date_input("Recovery Start Date", value=datetime.now() - timedelta(days=10))
     with c_d2:
         end_date = st.date_input("Recovery End Date", value=datetime.now())
 
     if st.button("🚀 Run Recovery Service", type="primary"):
-        if not selected_nodes:
-            st.error("Please select at least one node.")
-        elif not inv_map:
-            st.error("Cannot execute recovery: Hardware translation catalog is offline.")
+        if not selected_labels:
+            st.error("Please select at least one node to trigger recovery.")
         else:
-            mapped_api_ids = []
-            missing_mappings = []
-            
-            for node in selected_nodes:
-                clean_node = str(node).strip()
-                if clean_node in inv_map:
-                    mapped_api_ids.append(inv_map[clean_node])
+            # 6. TRANSLATION LAYER: Map clean TP- labels back to raw numbers for the API
+            api_target_payload_ids = []
+            for label in selected_labels:
+                if label in label_to_raw:
+                    api_target_payload_ids.append(label_to_raw[label])
                 else:
-                    missing_mappings.append(clean_node)
-            
-            if missing_mappings:
-                st.warning(f"⚠️ Skipping {len(missing_mappings)} nodes missing from hardware_inventory: {', '.join(missing_mappings)}")
-            
-            if not mapped_api_ids:
-                st.error("Execution halted: None of the selected nodes could be resolved to a raw numeric ID.")
-            else:
-                # Packs the true numbers (e.g. "17049873,17050037") instead of the "TP-" strings
-                handle_recovery_trigger(mapped_api_ids, start_date, end_date)
+                    # Fallback case if the entry is already a numeric string
+                    api_target_payload_ids.append(label)
 
-    # 5. SYSTEM LOGIC FOOTER
+            # Safeguard against unmapped inputs
+            api_target_payload_ids = [x for x in api_target_payload_ids if x and x != 'nan']
+
+            if not api_target_payload_ids:
+                st.error("Could not resolve selections back to physical hardware tokens. Check inventory.")
+                return
+
+            with st.spinner("Pushing hardware query array to Cloud Run API..."):
+                # Pass the raw numeric IDs to the existing execution routing script
+                handle_recovery_trigger(api_target_payload_ids, start_date, end_date)
+
     render_recovery_logic_footer()
 
 def render_recovery_filters(sp_reg):
