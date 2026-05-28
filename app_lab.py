@@ -6,8 +6,8 @@ import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-st.title("⚡ Direct Sandbox Telemetry Backfill Ingestion")
-st.info("Using literal exact string matching with live node-by-node update tallies.")
+st.title("⚡ Smart Delta Ingestion Engine")
+st.info("Cross-references BigQuery live to isolate and count genuinely new telemetry packets.")
 
 PROJECT_ID = "sensorpush-export" 
 DATASET_ID = "Temperature"      
@@ -17,13 +17,13 @@ INVENTORY_TABLE = "hardware_inventory"
 TARGET_ACCOUNT = {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'}
 BASE_URL = "https://api.sensorpush.com/api/v1"
 
-if st.button("🚀 Run Exact-String Production Ingestion", type="primary"):
+if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
     all_rows = []
     hardware_map = {}
-    node_counts = {}  # Dictionary to track updates per node
+    db_max_timestamps = {}  # Tracks the latest date BigQuery knows about per node
+    node_stats = {}         # Tracks total vs new counts per node
     
-    with st.status("Executing Exact-String Pass...", expanded=True) as status:
-        st.write("🔍 Loading Exact Registration Keys from Database...")
+    with st.status("Executing Delta Pass...", expanded=True) as status:
         try:
             if "gcp_service_account" in st.secrets:
                 info = st.secrets["gcp_service_account"]
@@ -32,18 +32,33 @@ if st.button("🚀 Run Exact-String Production Ingestion", type="primary"):
             else:
                 client = bigquery.Client(project=PROJECT_ID)
             
+            # --- STEP 1: MAP SENSORS ---
+            st.write("🔍 Loading Translation Maps...")
             query = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` WHERE RawID IS NOT NULL"
             for row in client.query(query):
-                r_id = str(row.RawID).strip()
-                hardware_map[r_id] = str(row.NodeNum).strip()
+                hardware_map[str(row.RawID).strip()] = str(row.NodeNum).strip()
+                
+            # --- STEP 2: LOOKUP LATEST DATABASE TIMESTAMPS ---
+            st.write("📅 Querying current database bookmarks...")
+            time_query = f"""
+                SELECT NodeNum, MAX(timestamp) as max_time 
+                FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}` 
+                GROUP BY NodeNum
+            """
+            for row in client.query(time_query):
+                if row.max_time:
+                    # Convert BigQuery datetime to an ISO-formatted string line for direct comparison
+                    db_max_timestamps[str(row.NodeNum)] = row.max_time.isoformat()
+
         except Exception as e:
-            st.error(f"Database lookup initialization failed: {e}")
+            st.error(f"Database sync check failed: {e}")
             st.stop()
 
-        # Bounding window (Adjust dates here if you need to pull further back)
+        # Bounding window setup
         start_time_iso = "2026-05-28T00:00:00Z"
         end_time_iso = "2026-05-28T23:59:59Z"
 
+        # --- STEP 3: FETCH FROM CLOUD ---
         st.write("🔐 Authenticating session token...")
         try:
             auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=TARGET_ACCOUNT, timeout=15).json()
@@ -67,46 +82,69 @@ if st.button("🚀 Run Exact-String Production Ingestion", type="primary"):
                         if db_raw in raw_api_key or raw_api_key in db_raw:
                             friendly_name = db_node
                             break
-                
                 if not friendly_name:
                     friendly_name = f"UNMAPPED-{raw_api_key.split('.')[0]}"
                 
+                # Initialize node tracker if not seen yet
+                if friendly_name not def in node_stats:
+                    node_stats[friendly_name] = {"Downloaded": 0, "New Unique Appends": 0}
+
+                # Get latest timestamp this node has inside BigQuery
+                latest_db_time = db_max_timestamps.get(friendly_name, "")
+
                 for s in samples:
+                    observed_time = s['observed']  # Format: "2026-05-28T10:00:00.000Z"
                     temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                    
                     if temp is not None:
-                        all_rows.append({
-                            "timestamp": s['observed'],   
-                            "NodeNum": str(friendly_name),
-                            "temperature": float(temp),
-                            "rssi": None
-                        })
-                        # Tally the point to this specific node name
-                        node_counts[friendly_name] = node_counts.get(friendly_name, 0) + 1
+                        node_stats[friendly_name]["Downloaded"] += 1
+                        
+                        # DELTA CHECK: Is this specific data packet newer than what BigQuery has?
+                        # Replacing 'Z' with '+00:00' to standardise format match layouts
+                        clean_observed = observed_time.replace('Z', '+00:00')
+                        
+                        if not latest_db_time or clean_observed > latest_db_time:
+                            node_stats[friendly_name]["New Unique Appends"] += 1
+                            all_rows.append({
+                                "timestamp": observed_time,   
+                                "NodeNum": str(friendly_name),
+                                "temperature": float(temp),
+                                "rssi": None
+                            })
 
         except Exception as api_err:
             st.error(f"API pipeline failed: {api_err}")
             st.stop()
 
-        total_collected = len(all_rows)
-        if total_collected == 0:
-            st.warning("⚠️ No valid temperature samples matched.")
-            status.update(state="error")
+        # --- STEP 4: COMMIT ONLY TRUE NEW DATA ---
+        total_new_rows = len(all_rows)
+        if total_new_rows == 0:
+            st.info("shm Safe! BigQuery is completely caught up. 0 duplicate rows written.")
+            status.update(label="Database Already Current", state="complete")
         else:
-            st.write(f"📥 Injecting {total_collected} live records straight into `{TABLE_ID}`...")
+            st.write(f"📥 Injecting {total_new_rows} genuinely new records straight into `{TABLE_ID}`...")
             real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
             errors = client.insert_rows_json(real_table_ref, all_rows)
             
             if not errors:
-                st.success(f"🎉 Backfill Complete! Successfully committed {total_collected} records.")
-                status.update(label="Backfill Complete!", state="complete")
-                
-                # --- NEW FEATURE: RENDER DISTRIBUTION TALLY ---
-                st.write("### 📊 Ingestion Breakdown Per Node:")
-                # Convert the counter dictionary into a clean, sortable Streamlit dataframe
-                summary_df = pd.DataFrame(list(node_counts.items()), columns=["Node Number", "Points Updated"]).sort_values(by="Node Number")
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
-                
-                st.balloons()
+                st.success(f"🎉 Delta Recovery Complete! Committed {total_new_rows} brand new rows.")
+                status.update(label="Ingestion Successful!", state="complete")
             else:
                 st.error(f"Database insertion errors: {errors[:3]}")
                 status.update(state="error")
+
+        # --- STEP 5: DISPLAY DETAILED DF SUMMARY MANIFEST ---
+        if node_stats:
+            st.write("### 📊 Smart Data Delta Tally:")
+            summary_records = []
+            for node, counts in node_stats.items():
+                summary_records.append({
+                    "Node Number": node,
+                    "Total Points in Cloud Window": counts["Downloaded"],
+                    "Genuinely New Points Appended": counts["New Unique Appends"]
+                })
+            
+            summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            if total_new_rows > 0:
+                st.balloons()
