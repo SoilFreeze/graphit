@@ -2313,7 +2313,7 @@ def render_data_recovery_page(reg_df):
     """Main entry point for the Data Recovery page.
     
     Restores multi-level location filters while translating clean labels 
-    to raw numeric IDs before hitting the Cloud Run execution webhook.
+    to raw numeric IDs using the global authenticated BigQuery client wrapper.
     """
     st.header("📡 Data Recovery")
     st.info("Triggers the Cloud Run service to backfill missing telemetry from the SensorPush API.")
@@ -2331,14 +2331,12 @@ def render_data_recovery_page(reg_df):
     # 2. RESTORE LOCATION FILTERS: Call your native selection layout matrix
     selected_nodes = render_recovery_filters(sp_reg)
 
-    # 3. Pull the master hardware inventory table with EXPLICIT project ID configuration
+    # 3. Pull the master hardware inventory table using your globally authenticated client
     try:
-        from google.cloud import bigquery
-        # Hardcoding your project name here bypasses environmental variable lookup failures
-        bq_client = bigquery.Client(project='sensorpush-export')
-        query = "SELECT RawID, NodeNum FROM `sensorpush-export.Temperature.hardware_inventory` WHERE RawID IS NOT NULL"
+        query = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` WHERE RawID IS NOT NULL"
         
-        inv_df = bq_client.query(query).to_dataframe()
+        # Piggybacks off the client variable initialized on line 35
+        inv_df = client.query(query).to_dataframe()
         # Create mapping dictionary: {'TP-0353': '17050030'}
         label_to_raw = dict(zip(inv_df['NodeNum'], inv_df['RawID']))
     except Exception as e:
@@ -2365,7 +2363,7 @@ def render_data_recovery_page(reg_df):
                     # Fallback if the selection is already a numeric string
                     api_target_payload_ids.append(label)
 
-            # Clean up empty artifacts
+            # Clean up empty or corrupted artifacts
             api_target_payload_ids = [x for x in api_target_payload_ids if x and x != 'nan']
 
             if not api_target_payload_ids:
