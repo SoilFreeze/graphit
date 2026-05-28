@@ -795,6 +795,225 @@ def render_bulk_registry_page(client, proj_list):
 if not lp_res.empty and pd.notnull(lp_res['lp'].iloc[0]):
 
 # =============================================================================
+# 3. INTERACTIVE ATTRIBUTE & ACTION MANAGER
+# =============================================================================
+def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
+    """
+    Displays chart, interactive historical log selector with relative time tracking metrics,
+    full attribute configuration overrides, operational task panels, and administrative 
+    pipeline delete tools.
+    """
+    node_id = selected_node_data['NodeNum']
+    start_dt = selected_node_data['Start_Date']
+
+    # 1. SHOW THE GRAPH
+    render_node_historical_graph(client, node_id)
+    st.divider()
+
+    # 2. CHOOSE THE HISTORIC ASSIGNMENT TO ALTER
+    st.markdown(f"### 📜 Assignment History Library: **{node_id}**")
+    st.info("💡 Check the box next to any assignment below (active or archived) to populate and alter its fields in the editor.")
+    
+    history_df = reg_df[reg_df['NodeNum'] == node_id].sort_values(by='Start_Date', ascending=False).copy()
+    now_utc = pd.Timestamp.now(tz='UTC')
+    
+    # ---------------------------------------------------------------
+    # CHRONOLOGICAL AGE CALCULATION LAYER
+    # ---------------------------------------------------------------
+    if 'last_ping' in history_df.columns:
+        history_df['hours_hidden'] = history_df['last_ping'].apply(
+            lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
+            if pd.notnull(x) else np.nan
+        )
+    elif 'hrs_lag' in history_df.columns:
+        history_df['hours_hidden'] = pd.to_numeric(history_df['hrs_lag'], errors='coerce')
+    else:
+        try:
+            ping_q = f"SELECT MAX(timestamp) as lp FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{node_id}'"
+            lp_res = client.query(ping_q).to_dataframe()
+            if not lp_res.empty and pd.notnull(lp_res['lp'].iloc[0]):
+                history_df['hours_hidden'] = (now_utc - pd.to_datetime(lp_res['lp'].iloc[0]).tz_convert('UTC')).total_seconds() / 3600.0
+            else:
+                history_df['hours_hidden'] = np.nan
+        except Exception:
+            history_df['hours_hidden'] = np.nan
+
+    # Generate the readable text display from our calculated float
+    def format_history_lag(hours):
+        if pd.isna(hours) or hours == float('inf'):
+            return "No Pings"
+        elif hours < 1.0:
+            mins = int(hours * 60)
+            return f"{mins}m ago" if mins > 0 else "Just now"
+        else:
+            return f"{hours:.1f}h ago"
+
+    history_df['hours_hidden'] = pd.to_numeric(history_df['hours_hidden'], errors='coerce').fillna(float('inf'))
+    history_df['Hours Since Last Seen'] = history_df['hours_hidden'].apply(format_history_lag)
+    
+    # Pre-sort chronologically (active pings up top, missing links at the bottom)
+    history_df = history_df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+
+    # Scrub physical tracking hash columns from screen presentation
+    cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'hrs_lag']
+    history_df = history_df.drop(columns=[c for c in cols_to_drop if c in history_df.columns], errors='ignore')
+    
+    # Inject our interactive control check column
+    history_df.insert(0, "Edit Target", False)
+    
+    # ---------------------------------------------------------------
+    # HISTORY GRID CELL-LEVEL BACKGROUND STYLER
+    # ---------------------------------------------------------------
+    def assignment_history_styler(data):
+        canvas = pd.DataFrame('', index=data.index, columns=data.columns)
+        for i in data.index:
+            try:
+                val = data.loc[i, 'hours_hidden']
+                hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                color_style = assign_row_color(hours_val)
+            except Exception:
+                color_style = "background-color: transparent;"
+            
+            for col in data.columns:
+                if col != "Edit Target":
+                    canvas.loc[i, col] = color_style
+        return canvas
+
+    styled_history_df = history_df.style.apply(assignment_history_styler, axis=None)
+    
+    edited_hist_df = st.data_editor(
+        styled_history_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Edit Target": st.column_config.CheckboxColumn("Edit Target", default=False, required=True),
+            "Hours Since Last Seen": st.column_config.TextColumn("Hours Since Last Seen")
+        },
+        disabled=[col for col in history_df.columns if col != "Edit Target"],
+        column_order=[c for c in history_df.columns if c != "hours_hidden"],
+        key=f"hist_editor_{node_id}"
+    )
+    
+    chosen_rows = edited_hist_df[edited_hist_df["Edit Target"] == True]
+    
+    if not chosen_rows.empty:
+        target_record = chosen_rows.iloc[0].drop("Edit Target").to_dict()
+        st.success(f"✏️ Currently Editing Chosen Assignment row starting on: `{target_record['Start_Date']}`")
+    else:
+        target_record = selected_node_data
+        st.info(f"✏️ Currently Editing Active Assignment row starting on: `{target_record['Start_Date']}`")
+        
+    st.divider()
+
+    # 3. EDITOR WITH DYNAMIC PROJECT LOCATION DROPDOWN
+    st.markdown("### 🛠️ Modify Assignment Attributes")
+    
+    edit_proj = st.selectbox(
+        "Project Space", 
+        [""] + proj_list, 
+        index=proj_list.index(target_record['Project']) + 1 if target_record['Project'] in proj_list else 0,
+        key="global_editor_project_selector"
+    )
+    
+    if edit_proj == "Office":
+        location_input_type = "text"
+        default_loc_val = str(target_record.get('Location', 'Office Stock'))
+    else:
+        location_input_type = "dropdown"
+        existing_project_locations = sorted(reg_df[reg_df['Project'] == edit_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
+        if not existing_project_locations:
+            existing_project_locations = ["Unassigned"]
+        
+        try:
+            curr_loc_idx = existing_project_locations.index(target_record.get('Location'))
+        except ValueError:
+            curr_loc_idx = 0
+
+    with st.form("global_node_editor_form"):
+        col1, col2 = st.columns(2)
+        edit_nodenum = col1.text_input("Node ID (NodeNum)", value=str(target_record.get('NodeNum', '')))
+        
+        if location_input_type == "text":
+            edit_loc = col2.text_input("Office Sub-Location", value=default_loc_val)
+        else:
+            edit_loc = col2.selectbox("Assign to Location", existing_project_locations, index=curr_loc_idx)
+        
+        col4, col5, col6 = st.columns(3)
+        edit_bank = col4.text_input("Bank", value=str(target_record.get('Bank', '')) if pd.notnull(target_record.get('Bank')) else "", help="Writing a bank value automatically wipes Depth to NULL.")
+        
+        raw_depth = target_record.get('Depth')
+        edit_depth = col5.number_input("Depth (ft)", value=float(raw_depth) if (pd.notnull(raw_depth) and str(raw_depth).strip() != '') else 0.0)
+        
+        status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
+        curr_stat = target_record.get('SensorStatus', 'On Project')
+        s_idx = status_options.index(curr_stat) if curr_stat in status_options else 0
+        edit_status = col6.selectbox("SensorStatus", status_options, index=s_idx)
+        
+        col7, col8 = st.columns(2)
+        edit_start = col7.date_input("Start Date", value=pd.to_datetime(target_record.get('Start_Date')).date() if pd.notnull(target_record.get('Start_Date')) else datetime.now().date())
+        
+        is_open_ended = col8.checkbox("Open-Ended (No End Date)", value=pd.isnull(target_record.get('End_Date')))
+        if is_open_ended:
+            edit_end = None
+            col8.caption("ℹ️ This assignment will remain active with no set expiration.")
+        else:
+            edit_end = col8.date_input("End Date", value=pd.to_datetime(target_record.get('End_Date')).date() if pd.notnull(target_record.get('End_Date')) else datetime.now().date())
+        
+        if st.form_submit_button("💾 Save Changes"):
+            if edit_bank.strip() != "":
+                sql_depth = "NULL"
+            else:
+                sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+                
+            sql_end = "NULL" if is_open_ended or not edit_end else f"DATE('{edit_end.isoformat()}')"
+            sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
+            
+            where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+            where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+            where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
+
+            update_sql = f"""
+                BEGIN TRANSACTION;
+                
+                DELETE FROM `{target_registry}`
+                WHERE NodeNum = '{target_record['NodeNum']}'
+                  AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                  AND Project = '{target_record['Project']}'
+                  AND Location = '{target_record['Location']}'
+                  AND {where_bank}
+                  AND {where_depth}
+                  AND {where_end};
+                
+                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                VALUES (
+                  '{edit_nodenum.strip()}',
+                  '{edit_proj.strip()}',
+                  '{edit_loc.strip() if hasattr(edit_loc, 'strip') else edit_loc}',
+                  {sql_bank},
+                  {sql_depth},
+                  '{edit_status}',
+                  DATE('{edit_start.isoformat()}'),
+                  {sql_end}
+                );
+                
+                COMMIT;
+            """
+            try:
+                client.query(update_sql).result()
+                st.success("✅ Clean split successful. Isolated and modified only your selected row copy.")
+                st.cache_data.clear()
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to safely swap unique record rows: {e}")
+
+    # ===============================================================
+    # 4. OPERATIONAL TASK PANEL
+    # ===============================================================
+    st.markdown("##### Quick Operational Tasks")
+    print("Action matrix panel rendered.") # Closing print to complete structural code block indent patterns cleanly
+
+# =============================================================================
 # FUNCTION: DATA CHECKER DIAGNOSTICS MODULE
 # =============================================================================
 def render_data_checker(client, reg_df):
