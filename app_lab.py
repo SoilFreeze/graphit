@@ -1,81 +1,45 @@
 import streamlit as st
 import requests
-import pandas as pd
-import json
 
-st.title("⚙️ SensorPush API Gateway Alignment")
-st.info("Testing corrected authorization header syntax to bypass AWS Gateway blocks.")
+st.title("🚀 Remote Service Synchronization Gateway")
+st.info("Triggers a manual configuration sync loop on your background Cloud Run ingress container.")
 
-c_api1, c_api2 = st.columns(2)
-with c_api1:
-    email = st.text_input("Account Email", value="soilfreeze98072@gmail.com")
-with c_api2:
-    password = st.text_input("Account Password", type="password")
+# Enter your background container execution service link
+# (Look at your handle_recovery_trigger function to copy your actual Cloud Run URL domain)
+cloud_run_url = st.text_input("Cloud Run Ingress Base URL", value="https://sensorpush-ingress-service-execution-link")
 
 st.divider()
 
-if st.button("📡 Execute Signed API Request", type="primary"):
-    if not email or not password:
-        st.error("Please enter credentials.")
-    else:
-        auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
-        sensors_url = "https://api.sensorpush.com/api/v1/sensors"
-        
-        try:
-            with st.status("Executing Pipeline test...", expanded=True) as status:
-                # Step 1: Request OAuth Token
-                st.write("1. 🔒 Requesting gateway access token...")
-                auth_payload = {"email": email, "password": password}
-                auth_res = requests.post(auth_url, json=auth_payload, timeout=15)
-                auth_json = auth_res.json()
+if st.button("⚡ Force Remote Cluster Resync", type="primary"):
+    if "sensorpush-ingress-service" in cloud_run_url or "link" in cloud_run_url:
+        st.warning("⚠️ Make sure to paste your actual Cloud Run URL from your handle_recovery_trigger function above!")
+    
+    sync_endpoint = f"{cloud_run_url.strip('/')}/sync" # or /refresh depending on your architecture
+    
+    payload = {
+        "action": "reload_inventory_cache",
+        "target_project": "2541-Blackjack Phase2",
+        "force_flush": True
+    }
+    
+    try:
+        with st.spinner("Waking up Cloud Run microservice and forcing internal registry sync..."):
+            # Call your container safely over standard HTTPS webhook paths
+            response = requests.post(sync_endpoint, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                st.success("✅ Cloud Run container successfully reloaded!")
+                st.write("### 📦 Server Execution Response Details:")
+                st.json(response.json())
+                st.info("The background collector has pulled your clean TP- labels. Live streaming will resume on the next hour interval.")
+            else:
+                st.error(f"❌ Server returned status {response.status_code}: {response.text}")
+                st.write("Retrying flat trigger at root domain level...")
                 
-                token = auth_json.get("authorization")
+                # Fallback to hitting the primary gateway endpoint to kickstart the container routine
+                root_res = requests.post(cloud_run_url, json={"command": "sync"}, timeout=30)
+                st.write("Root endpoint ping results:")
+                st.write(root_res.text)
                 
-                if not token:
-                    st.error(f"OAuth failed: {auth_json}")
-                    status.update(label="OAuth Failure", state="error")
-                else:
-                    st.write("2. 🔑 Token retrieved successfully.")
-                    
-                    # Step 2: Build EXACT request headers required by SensorPush API Specification
-                    headers = {
-                        "accept": "application/json",
-                        "Content-Type": "application/json",
-                        "Authorization": token 
-                    }
-                    
-                    st.write("3. 📡 Submitting payload to /v1/sensors...")
-                    # Note: The SensorPush API requires an empty JSON object '{}' as the body
-                    res = requests.post(sensors_url, headers=headers, json={}, timeout=15)
-                    res_data = res.json()
-                    
-                    # Check if we got hit with the same AWS gateway error message
-                    if isinstance(res_data, dict) and "statusCode" in res_data:
-                        st.error(f"❌ Gateway Rejected Standard Layout: {res_data.get('message')}")
-                        
-                        st.write("🔄 Alternative Attempt: Retrying with 'Bearer ' prefix format...")
-                        headers["Authorization"] = f"Bearer {token}"
-                        res = requests.post(sensors_url, headers=headers, json={}, timeout=15)
-                        res_data = res.json()
-                    
-                    st.write("### 📦 Response Received from SensorPush:")
-                    st.json(res_data)
-                    
-                    if isinstance(res_data, dict) and "statusCode" not in res_data:
-                        status.update(label="Success! Bypassed Gateway Error.", state="complete")
-                        
-                        # Output data to dataframe
-                        rows = []
-                        for s_id, details in res_data.items():
-                            if isinstance(details, dict):
-                                rows.append({
-                                    "Sensor_ID": s_id,
-                                    "Name_On_SensorPush_Cloud": details.get("name", "N/A"),
-                                    "Active": details.get("active", "N/A")
-                                })
-                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-                    else:
-                        status.update(label="Gateway Blocked Both Options", state="error")
-                        
-        except Exception as e:
-            st.error(f"Pipeline crashed: {e}")
+    except Exception as e:
+        st.error(f"Failed to communicate with remote container: {e}")
