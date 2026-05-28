@@ -1,45 +1,58 @@
 import streamlit as st
 import requests
+from datetime import datetime, timedelta
 
-st.title("🚀 Remote Service Synchronization Gateway")
-st.info("Triggers a manual configuration sync loop on your background Cloud Run ingress container.")
+st.title("🚀 Targeted History Backfill Gateway")
+st.info("Bypasses standard sync routines to directly force a heavy historical telemetry pull.")
 
-# Enter your background container execution service link
-# (Look at your handle_recovery_trigger function to copy your actual Cloud Run URL domain)
-cloud_run_url = st.text_input("Cloud Run Ingress Base URL", value="https://sensorpush-ingress-service-execution-link")
+# Target your specific Cloud Run deployment
+base_url = "https://sensorpush-hourly-sync-seattle-1013288934882.us-west1.run.app"
 
-st.divider()
+st.write("### 📅 Select Recovery Parameters")
+c1, c2 = st.columns(2)
+with c1:
+    start_dt = st.date_input("Start Date", value=datetime(2026, 5, 14))
+with c2:
+    end_dt = st.date_input("End Date", value=datetime(2026, 5, 28))
 
-if st.button("⚡ Force Remote Cluster Resync", type="primary"):
-    if "sensorpush-ingress-service" in cloud_run_url or "link" in cloud_run_url:
-        st.warning("⚠️ Make sure to paste your actual Cloud Run URL from your handle_recovery_trigger function above!")
+if st.button("⚡ Fire Deep Historical Recovery Pipeline", type="primary"):
+    # Target the dedicated recovery route built into your container schema
+    recovery_endpoint = f"{base_url.rstrip('/')}/recovery"
     
-    sync_endpoint = f"{cloud_run_url.strip('/')}/sync" # or /refresh depending on your architecture
+    # We pass the clean names directly because your container knows how to look them up!
+    target_nodes = [
+        "TP-0320", "TP-0321", "TP-0322", "TP-0323", "TP-0324",
+        "TP-0325", "TP-0326", "TP-0327", "TP-0328", "TP-0329"
+    ]
     
     payload = {
-        "action": "reload_inventory_cache",
-        "target_project": "2541-Blackjack Phase2",
-        "force_flush": True
+        "nodes": target_nodes,
+        "startTime": f"{start_dt}T00:00:00Z",
+        "endTime": f"{end_dt}T23:59:59Z",
+        "async_processing": True  # Tells the container to return immediate success while processing in the background
     }
     
     try:
-        with st.spinner("Waking up Cloud Run microservice and forcing internal registry sync..."):
-            # Call your container safely over standard HTTPS webhook paths
-            response = requests.post(sync_endpoint, json=payload, timeout=30)
+        with st.spinner("Submitting historical request array to container gateway..."):
+            response = requests.post(recovery_endpoint, json=payload, timeout=15)
             
             if response.status_code == 200:
-                st.success("✅ Cloud Run container successfully reloaded!")
-                st.write("### 📦 Server Execution Response Details:")
+                st.success("✅ Backfill Accepted by Cloud Run!")
+                st.write("The container has initialized a background processing thread. Data will stream into BigQuery over the next few minutes.")
                 st.json(response.json())
-                st.info("The background collector has pulled your clean TP- labels. Live streaming will resume on the next hour interval.")
             else:
-                st.error(f"❌ Server returned status {response.status_code}: {response.text}")
-                st.write("Retrying flat trigger at root domain level...")
+                st.error(f"Endpoint returned status {response.status_code}: {response.text}")
+                st.info("Retrying with fallback alternative payload layout...")
                 
-                # Fallback to hitting the primary gateway endpoint to kickstart the container routine
-                root_res = requests.post(cloud_run_url, json={"command": "sync"}, timeout=30)
-                st.write("Root endpoint ping results:")
-                st.write(root_res.text)
+                # Alternate key matching if your container expects 'sensors' instead of 'nodes'
+                payload_alt = {
+                    "sensors": target_nodes,
+                    "startTime": f"{start_dt}T00:00:00Z",
+                    "endTime": f"{end_dt}T23:59:59Z"
+                }
+                alt_res = requests.post(base_url.rstrip('/'), json=payload_alt, timeout=15)
+                st.write("Fallback Execution Response:")
+                st.write(alt_res.text)
                 
     except Exception as e:
-        st.error(f"Failed to communicate with remote container: {e}")
+        st.error(f"Connection failed: {e}")
