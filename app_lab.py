@@ -2,8 +2,8 @@ import streamlit as st
 import requests
 import datetime
 import time
-import google.auth
 from google.cloud import bigquery
+from google.oauth2 import service_account
 
 st.title("⚡ Direct Sandbox Telemetry Backfill Ingestion")
 st.info("Uses your production multi-account and RSSI logic to directly backfill the missing data.")
@@ -26,16 +26,16 @@ if st.button("🚀 Run Direct History Injection Pass", type="primary"):
     name_map = {}
     
     with st.status("Executing Backfill Pipeline...", expanded=True) as status:
-        # Step 1: Initialize BigQuery Client
+        # Step 1: Initialize BigQuery Client using app credentials fallback
         st.write("🔍 Booting BigQuery Client & Loading Mappings...")
         try:
-            scopes = [
-                "https://www.googleapis.com/auth/drive",
-                "https://www.googleapis.com/auth/bigquery",
-                "https://www.googleapis.com/auth/cloud-platform"
-            ]
-            credentials, project = google.auth.default(scopes=scopes)
-            client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
+            if "gcp_service_account" in st.secrets:
+                info = st.secrets["gcp_service_account"]
+                credentials = service_account.Credentials.from_service_account_info(info)
+                client = bigquery.Client(credentials=credentials, project=info["project_id"])
+            else:
+                # Fallback to local authentication configuration if using local terminal environment
+                client = bigquery.Client(project=PROJECT_ID)
             
             # Load your current clean metadata labels
             query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{METADATA_TABLE}` WHERE PhysicalID IS NOT NULL"
@@ -43,15 +43,12 @@ if st.button("🚀 Run Direct History Injection Pass", type="primary"):
                 p_id = str(row.PhysicalID).split('.')[0].strip()
                 name_map[p_id] = str(row.NodeNum).strip()
         except Exception as e:
-            st.error(f"Mapping load failed: {e}")
+            st.error(f"Database client initialization failed: {e}")
             status.update(label="Failed Initialization", state="error")
             st.stop()
 
         # Step 2: Set Backfill Time Range (May 14 to May 28)
-        # Using the exact date formatting format your function uses
         start_time_str = "2026-05-14T00:00:00+0000"
-        
-        # Hardcoding a larger limits package since we are pulling two weeks of entries
         api_limit = 5000 
 
         # Step 3: Run the Account Processing Loop
@@ -113,9 +110,9 @@ if st.button("🚀 Run Direct History Injection Pass", type="primary"):
             st.error("❌ Process finished, but 0 historical records were found matching 'TP-032' prefix mappings.")
             status.update(label="No Data Found", state="error")
         else:
-            st.write(f"📥 Streaming {total_collected} records into `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`...")
+            st.write(f"📥 Streaming {total_collected} records into your database table...")
             
-            # Note the variable fix here to target your real table variable cleanly
+            # Using the exact configuration string variable to target the raw_sensorpush table cleanly
             real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
             errors = client.insert_rows_json(real_table_ref, all_rows)
             
