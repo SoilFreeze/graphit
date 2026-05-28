@@ -1011,7 +1011,177 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     # 4. OPERATIONAL TASK PANEL
     # ===============================================================
     st.markdown("##### Quick Operational Tasks")
-    print("Action matrix panel rendered.") # Closing print to complete structural code block indent patterns cleanly
+    c_act1, c_act2, c_act3, c_act4 = st.columns(4)
+    
+    # --- END ASSIGNMENT ---
+    with c_act1:
+        with st.expander("🔚 End Assignment"):
+            end_date_input = st.date_input("Decommission Date Selection", value=datetime.now().date(), key="end_assign_dt")
+            end_status_input = st.selectbox("Return Stock Status Parameter", ["Available", "Diagnostic", "Dead"], key="end_assign_st")
+            
+            if st.button("Execute End Assignment", type="primary", use_container_width=True):
+                date_iso = end_date_input.isoformat()
+                
+                bulk_sql = f"""
+                    BEGIN TRANSACTION;
+                    UPDATE `{target_registry}` 
+                    SET End_Date = DATE('{date_iso}'), SensorStatus = 'Archived' 
+                    WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
+                    
+                    INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                    VALUES ('{node_id}', 'Office', 'Office Stock', '{node_id}', NULL, '{end_status_input}', DATE('{date_iso}'));
+                    COMMIT;
+                """
+                try:
+                    client.query(bulk_sql).result()
+                    st.success(f"✅ Node {node_id} ended and transferred to Office stock records.")
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Transaction execution failed: {e}")
+
+    # --- CHANGE SENSOR ---
+    with c_act2:
+        with st.expander("🔄 Change Sensor"):
+            swap_node_input = st.text_input("Replacement Node ID (NodeNum)", placeholder="e.g., TP-0105", key="swap_sensor_input")
+            swap_date_input = st.date_input("Swap Execution Date", value=datetime.now().date(), key="swap_sensor_dt")
+            
+            if st.button("Execute Change Sensor", type="primary", use_container_width=True):
+                if not swap_node_input.strip():
+                    st.error("Please insert a valid target hardware replacement ID.")
+                elif swap_node_input.strip() == node_id:
+                    st.error("The replacement Node ID cannot be identical to the sensor currently assigned.")
+                else:
+                    date_str = swap_date_input.isoformat()
+                    new_node = swap_node_input.strip()
+                    
+                    if new_node.upper().startswith("TP"):
+                        old_sensor_restock_loc = "Office Stock"
+                    elif new_node.upper().startswith("SP"):
+                        old_sensor_restock_loc = "Ambient Stock"
+                    else:
+                        old_sensor_restock_loc = "Office Stock"
+
+                    swap_sql = f"""
+                        BEGIN TRANSACTION;
+                        UPDATE `{target_registry}`
+                        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                        WHERE NodeNum = '{node_id}' AND End_Date IS NULL;
+
+                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                        VALUES ('{node_id}', 'Office', '{old_sensor_restock_loc}', '{node_id}', NULL, 'Available', DATE('{date_str}'));
+
+                        UPDATE `{target_registry}`
+                        SET End_Date = DATE('{date_str}'), SensorStatus = 'Archived'
+                        WHERE NodeNum = '{new_node}' 
+                          AND End_Date IS NULL;
+
+                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                        VALUES (
+                            '{new_node}', 
+                            '{selected_node_data['Project']}', 
+                            '{selected_node_data['Location']}', 
+                            {f"'{selected_node_data['Bank']}'" if pd.notnull(selected_node_data.get('Bank')) and selected_node_data.get('Bank') != 'None' else "NULL"}, 
+                            {selected_node_data['Depth'] if pd.notnull(selected_node_data.get('Depth')) and str(selected_node_data.get('Depth')).strip() != '' else "NULL"}, 
+                            'On Project', 
+                            DATE('{date_str}')
+                        );
+                        COMMIT;
+                    """
+                    try:
+                        with st.spinner("Processing dual-sensor swap execution matrices..."):
+                            client.query(swap_sql).result()
+                        st.success(f"🔄 Change Sensor complete: {node_id} returned to {old_sensor_restock_loc}. {new_node} initialized onto deployment timeline successfully.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Sensor change transaction execution routine failed: {e}")
+
+    # --- ADD NEW MANUAL ASSIGNMENT ---
+    with c_act3:
+        with st.expander("➕ Add New Manual Assignment"):
+            st.markdown("##### Force-Insert a Fresh Assignment Record Lineage")
+            
+            add_proj = st.selectbox("Manual Target Project", proj_list, key="manual_add_proj")
+            
+            if add_proj == "Office":
+                add_loc = st.text_input("Manual Office Sub-Location", value="Office Stock", key="manual_add_loc_text")
+            else:
+                add_loc_opts = sorted(reg_df[reg_df['Project'] == add_proj]['Location'].dropna().unique().tolist(), key=natural_sort_key)
+                if not add_loc_opts:
+                    add_loc_opts = ["Unassigned"]
+                add_loc = st.selectbox("Manual Target Location", add_loc_opts, key="manual_add_loc_drop")
+                
+            with st.form("manual_assignment_sub_form"):
+                c_add1, c_add2 = st.columns(2)
+                add_bank = c_add1.text_input("Manual Bank Field", value="")
+                add_depth = c_add2.number_input("Manual Depth (ft)", value=0.0)
+                add_start = st.date_input("Manual Start Date", value=datetime.now().date())
+                
+                if st.form_submit_button("Commit Manual Assignment Row", use_container_width=True):
+                    if add_bank.strip() != "":
+                        sql_manual_depth = "NULL"
+                    else:
+                        sql_manual_depth = "NULL" if add_depth == 0.0 else f"{add_depth}"
+                        
+                    sql_manual_bank = f"'{add_bank.strip()}'" if add_bank.strip() != "" else "NULL"
+                    
+                    insert_manual_sql = f"""
+                        INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                        VALUES (
+                            '{node_id}', 
+                            '{add_proj}', 
+                            '{add_loc.strip() if hasattr(add_loc, 'strip') else add_loc}', 
+                            {sql_manual_bank}, 
+                            {sql_manual_depth}, 
+                            'On Project', 
+                            DATE('{add_start.isoformat()}')
+                        )
+                    """
+                    try:
+                        client.query(insert_manual_sql).result()
+                        st.success(f"✅ Clean assignment forced entry added for Node {node_id} on project {add_proj}.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Manual override insert statement failed: {e}")
+
+    # --- DELETE ENTRY ---
+    with c_act4:
+        with st.expander("🗑️ Delete Entry"):
+            st.warning("⚠️ Danger Zone: This drops the targeted assignment entry row completely out of your BigQuery system logs.")
+            confirm_check = st.checkbox("Confirm permanent deletion of this row", key=f"del_confirm_{target_record['Start_Date']}")
+            
+            if st.button("Delete Selected Assignment Record", type="primary", use_container_width=True):
+                if not confirm_check:
+                    st.error("Please click the confirmation checkbox to authorize the database removal transaction.")
+                else:
+                    where_bank = f"Bank = '{target_record['Bank']}'" if pd.notnull(target_record.get('Bank')) and str(target_record.get('Bank')).strip() != '' else "Bank IS NULL"
+                    where_depth = f"Depth = {target_record['Depth']}" if pd.notnull(target_record.get('Depth')) and str(target_record.get('Depth')).strip() != '' else "Depth IS NULL"
+                    where_end = f"End_Date = DATE('{pd.to_datetime(target_record['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(target_record.get('End_Date')) else "End_Date IS NULL"
+
+                    delete_sql = f"""
+                        DELETE FROM `{target_registry}`
+                        WHERE NodeNum = '{target_record['NodeNum']}'
+                          AND Start_Date = DATE('{pd.to_datetime(target_record['Start_Date']).strftime('%Y-%m-%d')}')
+                          AND Project = '{target_record['Project']}'
+                          AND Location = '{target_record['Location']}'
+                          AND {where_bank}
+                          AND {where_depth}
+                          AND {where_end}
+                    """
+                    try:
+                        client.query(delete_sql).result()
+                        st.warning(f"🗑️ Assignment row deleted for Node {target_record['NodeNum']} on {target_record['Project']}.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to execute row delete query logic: {e}")
+
 
 # =============================================================================
 # FUNCTION: DATA CHECKER DIAGNOSTICS MODULE
