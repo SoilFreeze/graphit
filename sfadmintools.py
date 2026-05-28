@@ -2361,24 +2361,27 @@ def render_data_recovery_page(reg_df):
         if not selected_nodes:
             st.error("Please select at least one node to trigger recovery.")
         else:
-            # 4. TRANSLATION LAYER: Map your selected locations/labels back to raw numbers for the API
+            # 1. TRANSLATION LAYER: Safely convert selected nodes back to raw IDs using our dictionary
             api_target_payload_ids = []
             for label in selected_nodes:
                 if label in label_to_raw:
                     api_target_payload_ids.append(label_to_raw[label])
                 else:
-                    # Fallback if the selection is already a numeric string
+                    # Fallback if it is already a numeric string string
                     api_target_payload_ids.append(label)
 
-            # Clean up empty or corrupted artifacts
+            # Clean out any empty artifacts or bad text matches
             api_target_payload_ids = [x for x in api_target_payload_ids if x and x != 'nan']
+
+            # 2. THE VISUAL PROOF: Show exactly what text is being pushed over the network
+            st.warning(f"🔍 DEBUG: Sending these tokens to Cloud Run API: {api_target_payload_ids}")
 
             if not api_target_payload_ids:
                 st.error("Could not resolve selected nodes back to physical hardware tokens.")
                 return
 
+            # 3. FIRE WEBHOOK
             with st.spinner("Pushing hardware query array to Cloud Run API..."):
-                # Pass the raw numeric hardware IDs to the background container routing
                 handle_recovery_trigger(api_target_payload_ids, start_date, end_date)
 
     render_recovery_logic_footer()
