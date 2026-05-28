@@ -1,47 +1,106 @@
 import streamlit as st
 import requests
+import datetime
+import time
+from google.cloud import bigquery
+from google.oauth2 import service_account
 
-st.title("🎯 Raw API Payload Mirror")
-st.info("Bypasses all internal database logic to display the exact strings the SensorPush API is sending right now.")
+st.title("⚡ Direct Sandbox Telemetry Backfill Ingestion")
+st.info("Using literal exact string matching to catch the new sensor arrays.")
+
+PROJECT_ID = "sensorpush-export" 
+DATASET_ID = "Temperature"      
+TABLE_ID = "raw_sensorpush"
+INVENTORY_TABLE = "hardware_inventory"
 
 TARGET_ACCOUNT = {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'}
 BASE_URL = "https://api.sensorpush.com/api/v1"
 
-if st.button("🔍 Inspect Raw Cloud Stream", type="primary"):
-    with st.status("Fetching Raw JSON Payload...", expanded=True) as status:
+if st.button("🚀 Run Exact-String Production Ingestion", type="primary"):
+    all_rows = []
+    hardware_map = {}
+    
+    with st.status("Executing Exact-String Pass...", expanded=True) as status:
+        st.write("🔍 Loading Exact Registration Keys from Database...")
         try:
-            # 1. Authenticate
+            if "gcp_service_account" in st.secrets:
+                info = st.secrets["gcp_service_account"]
+                credentials = service_account.Credentials.from_service_account_info(info)
+                client = bigquery.Client(credentials=credentials, project=info["project_id"])
+            else:
+                client = bigquery.Client(project=PROJECT_ID)
+            
+            # NO MORE SPLITTING: Read the exact RawID string from your inventory asset list
+            query = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` WHERE RawID IS NOT NULL"
+            for row in client.query(query):
+                # Standardize to clean, trimmed strings without dropping decimals
+                r_id = str(row.RawID).strip()
+                hardware_map[r_id] = str(row.NodeNum).strip()
+        except Exception as e:
+            st.error(f"Database lookup initialization failed: {e}")
+            st.stop()
+
+        # Bounding to today window to grab the active hotspot stream data
+        start_time_iso = "2026-05-28T00:00:00Z"
+        end_time_iso = "2026-05-28T23:59:59Z"
+
+        st.write("🔐 Authenticating session token...")
+        try:
             auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=TARGET_ACCOUNT, timeout=15).json()
             token = requests.post(f"{BASE_URL}/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
 
-            # 2. Grab today's raw samples window
-            start_time_iso = "2026-05-28T00:00:00Z"
-            payload = {"startTime": start_time_iso}
+            st.write("📡 Pulling unfiltered live payload matrix...")
+            payload = {"startTime": start_time_iso, "endTime": end_time_iso}
+            r_samples = requests.post(f"{BASE_URL}/samples", headers={"Authorization": token}, json=payload, timeout=60).json()
             
-            st.write("📡 Polling `/samples` endpoint...")
-            r_samples = requests.post(f"{BASE_URL}/samples", headers={"Authorization": token}, json=payload, timeout=45).json()
-            
-            sensors_dict = r_samples.get('sensors', {})
-            
-            if not sensors_dict:
-                st.error("❌ The cloud server literally returned an empty sensors dictionary for today's date.")
-                status.update(state="error")
-            else:
-                st.success(f"📊 Connected! Found {len(sensors_dict.keys())} raw sensor keys transmitting today.")
+            sensors_data = r_samples.get('sensors', {})
+            if not sensors_data:
+                st.error("❌ Cloud Gateway returned no rows for this frame.")
+                st.stop()
                 
-                # Build a display layout of the literal keys and sample counts
-                raw_manifest = []
-                for sample_key, sample_list in sensors_dict.items():
-                    raw_manifest.append({
-                        "Literal API Sensor ID Key": str(sample_key),
-                        "Samples Recorded Today": len(sample_list),
-                        "First Sample Raw Data": sample_list[0] if len(sample_list) > 0 else "None"
-                    })
+            for s_id, samples in sensors_data.items():
+                raw_api_key = str(s_id).strip()
                 
-                st.write("### 📦 Literal API Response Manifest:")
-                st.dataframe(raw_manifest)
-                status.update(label="Inspection Complete", state="complete")
+                # Check 1: Try exact match against the long database ID string
+                friendly_name = hardware_map.get(raw_api_key)
                 
-        except Exception as e:
-            st.error(f"API Connection Failed: {e}")
+                # Check 2: Fallback to partial matching if there is a minor suffix trailing difference
+                if not friendly_name:
+                    for db_raw, db_node in hardware_map.items():
+                        if db_raw in raw_api_key or raw_api_key in db_raw:
+                            friendly_name = db_node
+                            break
+                
+                # If it still can't find a map, flag it so we can spot it
+                if not friendly_name:
+                    friendly_name = f"UNMAPPED-{raw_api_key.split('.')[0]}"
+                
+                for s in samples:
+                    temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                    if temp is not None:
+                        all_rows.append({
+                            "timestamp": s['observed'],   
+                            "NodeNum": str(friendly_name),
+                            "temperature": float(temp),
+                            "rssi": None
+                        })
+        except Exception as api_err:
+            st.error(f"API pipeline failed: {api_err}")
+            st.stop()
+
+        total_collected = len(all_rows)
+        if total_collected == 0:
+            st.warning("⚠️ No valid temperature samples matched.")
             status.update(state="error")
+        else:
+            st.write(f"📥 Injecting {total_collected} live records straight into `{TABLE_ID}`...")
+            real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+            errors = client.insert_rows_json(real_table_ref, all_rows)
+            
+            if not errors:
+                st.success(f"🎉 Backfill Complete! Injected {total_collected} records into production under their clean engineering names!")
+                status.update(state="complete")
+                st.balloons()
+            else:
+                st.error(f"Database insertion errors: {errors[:3]}")
+                status.update(state="error")
