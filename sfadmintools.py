@@ -2230,7 +2230,7 @@ def process_bulk_upload(client, df, target_registry):
                 df = df.drop(columns=['PhysicalID'])
             
             # 4. BigQuery Load
-            job_config = bigquery.LoadTableConfig(write_disposition="WRITE_APPEND")
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
             client.load_table_from_dataframe(df, target_registry, job_config=job_config).result()
             
         st.success(f"Successfully registered {len(df)} nodes.")
@@ -2947,7 +2947,7 @@ def process_curve_uploads(client, u_files, table_curves):
             df = df.dropna(subset=['Day', 'Temp'])
 
             if not df.empty:
-                job_config = bigquery.LoadTableConfig(
+                job_config = bigquery.LoadJobConfig(
                     schema=[
                         bigquery.SchemaField("Day", "FLOAT"),
                         bigquery.SchemaField("Temp", "FLOAT"),
