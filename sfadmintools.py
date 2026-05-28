@@ -792,8 +792,6 @@ def render_bulk_registry_page(client, proj_list):
     with tab_retire:
         render_bulk_decommission_tab(client, proj_list, target_registry)
 
-if not lp_res.empty and pd.notnull(lp_res['lp'].iloc[0]):
-
 # =============================================================================
 # 3. INTERACTIVE ATTRIBUTE & ACTION MANAGER
 # =============================================================================
