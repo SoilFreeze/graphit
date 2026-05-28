@@ -2334,15 +2334,22 @@ def render_data_recovery_page(reg_df):
     # 3. Pull the master hardware inventory table using your globally authenticated client
     try:
         query = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` WHERE RawID IS NOT NULL"
-        
-        # Piggybacks off the client variable initialized on line 35
         inv_df = client.query(query).to_dataframe()
-        # Create mapping dictionary: {'TP-0353': '17050030'}
-        label_to_raw = dict(zip(inv_df['NodeNum'], inv_df['RawID']))
+        
+        # CLEANUP CONVERSION LAYER: Ensure text and numeric formatting match perfectly
+        label_to_raw = {}
+        for _, row in inv_df.iterrows():
+            clean_label = str(row['NodeNum']).strip()
+            
+            # Extract only the base integer sequence before any decimal point artifact
+            raw_id_str = str(row['RawID']).strip().split('.')[0]
+            
+            if clean_label and raw_id_str:
+                label_to_raw[clean_label] = raw_id_str
+                
     except Exception as e:
         st.error(f"Failed to load hardware inventory mapping index: {e}")
         label_to_raw = {}
-
     st.divider()
     c_d1, c_d2 = st.columns(2)
     with c_d1:
