@@ -6,13 +6,13 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 st.title("⚡ Direct Sandbox Telemetry Backfill Ingestion")
-st.info("Targeting verified operational temperature string nodes to test the pipeline link.")
+st.info("Targeting verified operational nodes using direct hardware inventory asset tables.")
 
-# Configuration matches your working script exactly
+# Configuration matches your exact database layout
 PROJECT_ID = "sensorpush-export" 
 DATASET_ID = "Temperature"      
 TABLE_ID = "raw_sensorpush"
-METADATA_TABLE = "metadata_snapshot" 
+INVENTORY_TABLE = "hardware_inventory"
 
 ACCOUNTS = [
     {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
@@ -24,13 +24,12 @@ BASE_URL = "https://api.sensorpush.com/api/v1"
 # The specific operational nodes you requested to test
 test_nodes = ["TP-0373", "TP-0259", "TP-0260"]
 
-if st.button("🚀 Run Targeted History Pass", type="primary"):
+if st.button("🚀 Run Targeted Inventory Pass", type="primary"):
     all_rows = []
-    name_map = {}
     reverse_map = {}
     
-    with st.status("Executing Pipeline pass...", expanded=True) as status:
-        st.write("🔍 Initializing BigQuery Client & Loading Mappings...")
+    with st.status("Executing Inventory Pipeline pass...", expanded=True) as status:
+        st.write("🔍 Initializing BigQuery Client & Loading Inventory Mappings...")
         try:
             if "gcp_service_account" in st.secrets:
                 info = st.secrets["gcp_service_account"]
@@ -39,21 +38,28 @@ if st.button("🚀 Run Targeted History Pass", type="primary"):
             else:
                 client = bigquery.Client(project=PROJECT_ID)
             
-            # Load mapping array from your snapshot metadata table
-            query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{METADATA_TABLE}` WHERE PhysicalID IS NOT NULL"
+            # Using your clean verified layout columns: RawID and NodeNum
+            query = f"""
+                SELECT DISTINCT RawID, NodeNum 
+                FROM `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` 
+                WHERE RawID IS NOT NULL
+            """
             for row in client.query(query):
-                p_id = str(row.PhysicalID).split('.')[0].strip()
+                # Clean up any trailing decimals or registration artifacts
+                r_id = str(row.RawID).split('.')[0].strip()
                 n_num = str(row.NodeNum).strip()
-                name_map[p_id] = n_num
+                
                 if n_num in test_nodes:
-                    reverse_map[p_id] = n_num
+                    reverse_map[r_id] = n_num
         except Exception as e:
             st.error(f"Database client initialization failed: {e}")
             st.stop()
 
         if not reverse_map:
-            st.error(f"❌ Could not find matching physical IDs for nodes {test_nodes} in your metadata registry table.")
+            st.error(f"❌ Could not find matching RawID fields for nodes {test_nodes} inside your `{INVENTORY_TABLE}` table.")
             st.stop()
+
+        st.info(f"🔗 Mappings Found! Mapped Node Names to Raw hardware tokens: {reverse_map}")
 
         # Target range: Backfill May 14 to May 28, 2026
         start_time_str = "2026-05-14T00:00:00+0000"
