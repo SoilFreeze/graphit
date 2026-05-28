@@ -2329,13 +2329,13 @@ def render_data_recovery_page(reg_df):
         return
 
     # 2. RESTORE LOCATION FILTERS: Call your native selection layout matrix
-    # This brings back your ability to choose by location and "Select All"
     selected_nodes = render_recovery_filters(sp_reg)
 
-    # 3. Pull the master hardware inventory table using direct BigQuery Client for translation
+    # 3. Pull the master hardware inventory table with EXPLICIT project ID configuration
     try:
         from google.cloud import bigquery
-        bq_client = bigquery.Client()
+        # Hardcoding your project name here bypasses environmental variable lookup failures
+        bq_client = bigquery.Client(project='sensorpush-export')
         query = "SELECT RawID, NodeNum FROM `sensorpush-export.Temperature.hardware_inventory` WHERE RawID IS NOT NULL"
         
         inv_df = bq_client.query(query).to_dataframe()
