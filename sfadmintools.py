@@ -2331,7 +2331,7 @@ def render_data_recovery_page(reg_df):
     # 2. Pull the master hardware inventory table to build a mapping dictionary
     try:
         query = "SELECT RawID, NodeNum FROM `sensorpush-export.Temperature.hardware_inventory` WHERE RawID IS NOT NULL"
-        inv_df = conn.query(query)
+        inv_df = client.query(query).to_dataframe()
         # Create a dictionary mapping clean labels back to raw numeric IDs: {'TP-0353': '17050030'}
         label_to_raw = dict(zip(inv_df['NodeNum'], inv_df['RawID']))
     except Exception as e:
