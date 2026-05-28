@@ -85,8 +85,8 @@ if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
                 if not friendly_name:
                     friendly_name = f"UNMAPPED-{raw_api_key.split('.')[0]}"
                 
-                # Initialize node tracker if not seen yet
-                if friendly_name not def in node_stats:
+                # Initialize node tracker if not seen yet (Syntax fixed here)
+                if friendly_name not in node_stats:
                     node_stats[friendly_name] = {"Downloaded": 0, "New Unique Appends": 0}
 
                 # Get latest timestamp this node has inside BigQuery
@@ -100,7 +100,6 @@ if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
                         node_stats[friendly_name]["Downloaded"] += 1
                         
                         # DELTA CHECK: Is this specific data packet newer than what BigQuery has?
-                        # Replacing 'Z' with '+00:00' to standardise format match layouts
                         clean_observed = observed_time.replace('Z', '+00:00')
                         
                         if not latest_db_time or clean_observed > latest_db_time:
@@ -119,7 +118,7 @@ if st.button("🚀 Run Smart Delta Ingestion", type="primary"):
         # --- STEP 4: COMMIT ONLY TRUE NEW DATA ---
         total_new_rows = len(all_rows)
         if total_new_rows == 0:
-            st.info("shm Safe! BigQuery is completely caught up. 0 duplicate rows written.")
+            st.info("🔒 Safe! BigQuery is completely caught up. 0 duplicate rows written.")
             status.update(label="Database Already Current", state="complete")
         else:
             st.write(f"📥 Injecting {total_new_rows} genuinely new records straight into `{TABLE_ID}`...")
