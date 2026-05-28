@@ -1,58 +1,45 @@
 import streamlit as st
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
-st.title("🚀 Targeted History Backfill Gateway")
-st.info("Bypasses standard sync routines to directly force a heavy historical telemetry pull.")
+st.title("📦 Historical Data Backfill Gateway")
+st.info("Routes heavy multi-day telemetry requests directly to your dedicated historical Cloud Run service instance.")
 
-# Target your specific Cloud Run deployment
-base_url = "https://sensorpush-hourly-sync-seattle-1013288934882.us-west1.run.app"
+# Paste your historical Cloud Run URL endpoint here
+historical_url = st.text_input(
+    "Historical Cloud Run URL", 
+    value="https://sensorpush-historical-pull-seattle-1013288934882.us-west1.run.app"  # Update with your actual historical endpoint string
+)
 
-st.write("### 📅 Select Recovery Parameters")
-c1, c2 = st.columns(2)
-with c1:
-    start_dt = st.date_input("Start Date", value=datetime(2026, 5, 14))
-with c2:
-    end_dt = st.date_input("End Date", value=datetime(2026, 5, 28))
+st.divider()
 
-if st.button("⚡ Fire Deep Historical Recovery Pipeline", type="primary"):
-    # Target the dedicated recovery route built into your container schema
-    recovery_endpoint = f"{base_url.rstrip('/')}/recovery"
-    
-    # We pass the clean names directly because your container knows how to look them up!
+if st.button("🚀 Fire Deep History Backfill", type="primary"):
+    if "historical" not in historical_url and "pull" not in historical_url:
+        st.warning("⚠️ Double check that you've pasted your historical Cloud Run URL above, not the hourly one!")
+        
+    # Build the historical payload using your clean engineering tags
     target_nodes = [
         "TP-0320", "TP-0321", "TP-0322", "TP-0323", "TP-0324",
         "TP-0325", "TP-0326", "TP-0327", "TP-0328", "TP-0329"
     ]
     
     payload = {
-        "nodes": target_nodes,
-        "startTime": f"{start_dt}T00:00:00Z",
-        "endTime": f"{end_dt}T23:59:59Z",
-        "async_processing": True  # Tells the container to return immediate success while processing in the background
+        "sensors": target_nodes,
+        "startTime": "2026-05-14T00:00:00Z",
+        "endTime": "2026-05-28T23:59:59Z"
     }
     
     try:
-        with st.spinner("Submitting historical request array to container gateway..."):
-            response = requests.post(recovery_endpoint, json=payload, timeout=15)
+        with st.spinner("Streaming data block to historical container... This may take up to a minute."):
+            # We give this a long 120-second local read timeout to allow the historical function to finish its work
+            response = requests.post(historical_url.strip(), json=payload, timeout=120)
             
             if response.status_code == 200:
-                st.success("✅ Backfill Accepted by Cloud Run!")
-                st.write("The container has initialized a background processing thread. Data will stream into BigQuery over the next few minutes.")
-                st.json(response.json())
+                st.success("🎉 Historical backfill completed successfully!")
+                st.write("### 📦 Server Execution Response Details:")
+                st.write(response.text)
             else:
-                st.error(f"Endpoint returned status {response.status_code}: {response.text}")
-                st.info("Retrying with fallback alternative payload layout...")
-                
-                # Alternate key matching if your container expects 'sensors' instead of 'nodes'
-                payload_alt = {
-                    "sensors": target_nodes,
-                    "startTime": f"{start_dt}T00:00:00Z",
-                    "endTime": f"{end_dt}T23:59:59Z"
-                }
-                alt_res = requests.post(base_url.rstrip('/'), json=payload_alt, timeout=15)
-                st.write("Fallback Execution Response:")
-                st.write(alt_res.text)
+                st.error(f"❌ Historical Container returned status {response.status_code}: {response.text}")
                 
     except Exception as e:
-        st.error(f"Connection failed: {e}")
+        st.error(f"Failed to connect to historical service container: {e}")
