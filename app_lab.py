@@ -19,14 +19,12 @@ if st.button("📡 Execute Signed API Request", type="primary"):
         st.error("Please enter credentials.")
     else:
         auth_url = "https://api.sensorpush.com/api/v1/oauth/authorize"
-        
-        # We are going to hit the specific GATEWAY samples endpoint
         sensors_url = "https://api.sensorpush.com/api/v1/sensors"
         
         try:
             with st.status("Executing Pipeline test...", expanded=True) as status:
                 # Step 1: Request OAuth Token
-                st.write("🔒 Requesting gateway access token...")
+                st.write("1. 🔒 Requesting gateway access token...")
                 auth_payload = {"email": email, "password": password}
                 auth_res = requests.post(auth_url, json=auth_payload, timeout=15)
                 auth_json = auth_res.json()
@@ -36,48 +34,48 @@ if st.button("📡 Execute Signed API Request", type="primary"):
                 if not token:
                     st.error(f"OAuth failed: {auth_json}")
                     status.update(label="OAuth Failure", state="error")
-                    return
-                
-                st.write("🔑 Token retrieved successfully.")
-                
-                # Step 2: Build EXACT request headers required by SensorPush API Specification
-                # Often, SensorPush requires headers to accept application/json with explicit token casing
-                headers = {
-                    "accept": "application/json",
-                    "Content-Type": "application/json",
-                    "Authorization": token  # Verify if your system architecture maps this as a string literal
-                }
-                
-                st.write("📡 Submitting payload to /v1/sensors...")
-                # Note: The SensorPush API requires an empty JSON object '{}' as the body for a blank query
-                res = requests.post(sensors_url, headers=headers, json={}, timeout=15)
-                res_data = res.json()
-                
-                # Check if we got hit with the same AWS gateway error message
-                if isinstance(res_data, dict) and "statusCode" in res_data:
-                    st.error(f"❌ Gateway Rejected Request: {res_data.get('message')}")
+                else:
+                    st.write("2. 🔑 Token retrieved successfully.")
                     
-                    st.write("### 🛠️ Alternative Attempt: Retrying with Bearer format...")
-                    headers["Authorization"] = f"Bearer {token}"
+                    # Step 2: Build EXACT request headers required by SensorPush API Specification
+                    headers = {
+                        "accept": "application/json",
+                        "Content-Type": "application/json",
+                        "Authorization": token 
+                    }
+                    
+                    st.write("3. 📡 Submitting payload to /v1/sensors...")
+                    # Note: The SensorPush API requires an empty JSON object '{}' as the body
                     res = requests.post(sensors_url, headers=headers, json={}, timeout=15)
                     res_data = res.json()
-                
-                st.write("### 📦 Response Received from SensorPush:")
-                st.json(res_data)
-                
-                if isinstance(res_data, dict) and "statusCode" not in res_data:
-                    status.update(label="Success! Bypassed Gateway Error.", state="complete")
                     
-                    # Output data to dataframe
-                    rows = []
-                    for s_id, details in res_data.items():
-                        if isinstance(details, dict):
-                            rows.append({
-                                "Sensor_ID": s_id,
-                                "Name_On_SensorPush_Cloud": details.get("name", "N/A"),
-                                "Active": details.get("active", "N/A")
-                            })
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    # Check if we got hit with the same AWS gateway error message
+                    if isinstance(res_data, dict) and "statusCode" in res_data:
+                        st.error(f"❌ Gateway Rejected Standard Layout: {res_data.get('message')}")
+                        
+                        st.write("🔄 Alternative Attempt: Retrying with 'Bearer ' prefix format...")
+                        headers["Authorization"] = f"Bearer {token}"
+                        res = requests.post(sensors_url, headers=headers, json={}, timeout=15)
+                        res_data = res.json()
                     
+                    st.write("### 📦 Response Received from SensorPush:")
+                    st.json(res_data)
+                    
+                    if isinstance(res_data, dict) and "statusCode" not in res_data:
+                        status.update(label="Success! Bypassed Gateway Error.", state="complete")
+                        
+                        # Output data to dataframe
+                        rows = []
+                        for s_id, details in res_data.items():
+                            if isinstance(details, dict):
+                                rows.append({
+                                    "Sensor_ID": s_id,
+                                    "Name_On_SensorPush_Cloud": details.get("name", "N/A"),
+                                    "Active": details.get("active", "N/A")
+                                })
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    else:
+                        status.update(label="Gateway Blocked Both Options", state="error")
+                        
         except Exception as e:
             st.error(f"Pipeline crashed: {e}")
