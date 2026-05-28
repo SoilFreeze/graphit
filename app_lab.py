@@ -1,64 +1,128 @@
 import streamlit as st
 import requests
+import datetime
 import time
-from datetime import datetime, timedelta
+import google.auth
+from google.cloud import bigquery
 
-st.title("🧩 Automated Chronological History Backfill")
-st.info("Streams historical telemetry day-by-day to guarantee successful container ingestion without timeouts.")
+st.title("⚡ Direct Sandbox Telemetry Backfill Ingestion")
+st.info("Uses your production multi-account and RSSI logic to directly backfill the missing data.")
 
-# Target your historical Cloud Run endpoint
-historical_url = st.text_input(
-    "Historical Cloud Run URL", 
-    value="https://sensorpush-historical-recovery-1013288934882.us-west1.run.app"
-)
+# Configuration matches your working script exactly
+PROJECT_ID = "sensorpush-export" 
+DATASET_ID = "Temperature"      
+TABLE_ID = "raw_sensorpush"
+METADATA_TABLE = "metadata_snapshot" 
 
-st.divider()
+ACCOUNTS = [
+    {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
+    {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
+    {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
+]
+BASE_URL = "https://api.sensorpush.com/api/v1"
 
-if st.button("⚡ Start Day-by-Day Processing Loop", type="primary"):
-    base_endpoint = historical_url.strip().split('?')[0]
+if st.button("🚀 Run Direct History Injection Pass", type="primary"):
+    all_rows = []
+    name_map = {}
     
-    # Define your missing timeframe range precisely
-    start_date = datetime(2026, 5, 14)
-    total_days = 15  # Spans from May 14th to May 28th
-    
-    # Explicit raw hardware IDs to match your API profiles perfectly
-    raw_hardware_tokens = [
-        "17050089", "17050116", "17049872", "17049943", "17049918", 
-        "17050051", "17050090", "17049836", "17049889", "17049841"
-    ]
-    
-    payload = {
-        "sensors": raw_hardware_tokens
-    }
-    
-    # Progress visualization for your sandbox UI
-    progress_bar = st.progress(0)
-    
-    for i in range(total_days):
-        current_day = start_date + timedelta(days=i)
-        day_str = current_day.strftime("%Y-%m-%d")
-        
-        # Structure the target endpoint for ONE specific day loop
-        parameterized_url = f"{base_endpoint}?start={day_str}&end={day_str}"
-        
-        st.write(f"📡 Processing date: `{day_str}`...")
-        
+    with st.status("Executing Backfill Pipeline...", expanded=True) as status:
+        # Step 1: Initialize BigQuery Client
+        st.write("🔍 Booting BigQuery Client & Loading Mappings...")
         try:
-            # Short 15-second timeout since single days process instantly
-            response = requests.post(parameterized_url, json=payload, timeout=15)
+            scopes = [
+                "https://www.googleapis.com/auth/drive",
+                "https://www.googleapis.com/auth/bigquery",
+                "https://www.googleapis.com/auth/cloud-platform"
+            ]
+            credentials, project = google.auth.default(scopes=scopes)
+            client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
             
-            if response.status_code == 200:
-                st.success(f"✅ Date {day_str} successfully processed and committed!")
-            else:
-                st.warning(f"⚠️ Date {day_str} returned code {response.status_code}: {response.text}")
-                
+            # Load your current clean metadata labels
+            query = f"SELECT PhysicalID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{METADATA_TABLE}` WHERE PhysicalID IS NOT NULL"
+            for row in client.query(query):
+                p_id = str(row.PhysicalID).split('.')[0].strip()
+                name_map[p_id] = str(row.NodeNum).strip()
         except Exception as e:
-            st.error(f"❌ Connection dropped on date {day_str}: {e}")
+            st.error(f"Mapping load failed: {e}")
+            status.update(label="Failed Initialization", state="error")
+            st.stop()
+
+        # Step 2: Set Backfill Time Range (May 14 to May 28)
+        # Using the exact date formatting format your function uses
+        start_time_str = "2026-05-14T00:00:00+0000"
+        
+        # Hardcoding a larger limits package since we are pulling two weeks of entries
+        api_limit = 5000 
+
+        # Step 3: Run the Account Processing Loop
+        for acc in ACCOUNTS:
+            st.write(f"🔐 Authenticating account: `{acc['email']}`...")
+            try:
+                auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
+                token = requests.post(f"{BASE_URL}/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
+
+                # Fetch active sensor profiles for RSSI values
+                s_resp = requests.post(f"{BASE_URL}/devices/sensors", headers={"Authorization": token}, json={}, timeout=20).json()
+                
+                device_rssi_map = {}
+                if isinstance(s_resp, dict):
+                    sensor_ids = list(s_resp.keys())
+                    for s_id, s_meta in s_resp.items():
+                        if isinstance(s_meta, dict) and 'rssi' in s_meta:
+                            device_rssi_map[str(s_id)] = s_meta.get('rssi')
+                else:
+                    sensor_ids = [s['id'] for s in s_resp]
+                    for s in s_resp:
+                        if isinstance(s, dict) and 'id' in s and 'rssi' in s:
+                            device_rssi_map[str(s['id'])] = s.get('rssi')
+                
+                st.write(f"📥 Extracting historical sample arrays for `{len(sensor_ids)}` sensors...")
+                
+                # Chunk through sensors 10 at a time
+                for i in range(0, len(sensor_ids), 10):
+                    chunk = sensor_ids[i:i+10]
+                    payload = {"limit": api_limit, "startTime": start_time_str, "sensors": chunk}
+                    r_samples = requests.post(f"{BASE_URL}/samples", headers={"Authorization": token}, json=payload, timeout=45).json()
+                    
+                    sensors_data = r_samples.get('sensors', {})
+                    for s_id, samples in sensors_data.items():
+                        clean_id = str(s_id).split('.')[0]
+                        friendly_name = name_map.get(clean_id, s_id)
+                        
+                        current_device_rssi = device_rssi_map.get(str(s_id))
+                        
+                        # Only target your missing T21 nodes to keep processing fast and efficient
+                        if "TP-032" in str(friendly_name):
+                            for s in samples:
+                                temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                                
+                                if temp is not None:
+                                    all_rows.append({
+                                        "timestamp": s['observed'],   
+                                        "NodeNum": str(friendly_name),
+                                        "temperature": float(temp),
+                                        "rssi": int(current_device_rssi) if current_device_rssi is not None else None
+                                    })
+                    time.sleep(0.5)
+            except Exception as e:
+                st.warning(f"Error processing account {acc['email']}: {e}")
+
+        # Step 4: Stream Collected Data straight into BigQuery
+        total_collected = len(all_rows)
+        if total_collected == 0:
+            st.error("❌ Process finished, but 0 historical records were found matching 'TP-032' prefix mappings.")
+            status.update(label="No Data Found", state="error")
+        else:
+            st.write(f"📥 Streaming {total_collected} records into `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`...")
             
-        # Update progress tracking
-        progress_bar.progress((i + 1) / total_days)
-        
-        # Small breathing room gap to keep API connections smooth
-        time.sleep(1)
-        
-    st.success("🎉 Chronological backfill loop completed entirely!")
+            # Note the variable fix here to target your real table variable cleanly
+            real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+            errors = client.insert_rows_json(real_table_ref, all_rows)
+            
+            if not errors:
+                st.success(f"🎉 Successfully backfilled {total_collected} history records directly into your table!")
+                status.update(label="Backfill Ingestion Successful!", state="complete")
+                st.balloons()
+            else:
+                st.error(f"BigQuery Entry Rejections: {errors[:3]}")
+                status.update(label="Database Rejection", state="error")
