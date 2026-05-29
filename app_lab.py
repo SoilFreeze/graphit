@@ -99,6 +99,29 @@ else:
             query_job_digits.result()  # Wait for BigQuery execution to complete
             
             st.success("🎉 All pure 8-digit hardware strings have been matched and updated to clean physical asset tags!")
+
+            # --- STEP E: TRUNCATE TRAILING NOTES FROM NODENUMS ---
+            st.info("⏳ Step E: Truncating trailing technician notes from NodeNums...")
+            
+            truncate_notes_sql = f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
+            SELECT 
+                r.timestamp,
+                -- If it matches our asset pattern, extract ONLY the first 7 characters (e.g., 'TP-0169')
+                CASE 
+                    WHEN REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[A-Za-z]{{2}}-[0-9]{{4}}') 
+                    THEN REGEXP_EXTRACT(TRIM(r.NodeNum), r'^[A-Za-z]{{2}}-[0-9]{{4}}')
+                    ELSE r.NodeNum 
+                END AS NodeNum,
+                r.temperature,
+                r.rssi
+            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r;
+            """
+            
+            query_job_truncate = client.query(truncate_notes_sql)
+            query_job_truncate.result()  # Wait for BigQuery to execute the table swap
+            
+            st.success("✂️ Successfully truncated all trailing technician notes! NodeNums are restricted to their clean asset format.")
             
             # Create or replace table bypasses the streaming buffer restriction completely
             repair_sql = f"""
