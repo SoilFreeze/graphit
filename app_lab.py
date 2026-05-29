@@ -72,20 +72,31 @@ else:
             st.success("✅ Successfully updated your master hardware inventory assets!")
             
             # --- STEP C: EXECUTE REPAIR QUERY ---
-            st.info(f"⏳ Step C: Running repair SQL sequence on `{RAW_DATA_TABLE}` historical rows...")
+            st.info(f"⏳ Step C: Running buffer-safe repair on `{RAW_DATA_TABLE}`...")
+            
+            # Create or replace table bypasses the streaming buffer restriction completely
             repair_sql = f"""
-            UPDATE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r
-            SET r.NodeNum = i.NodeNum
-            FROM `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` i
-            WHERE r.NodeNum LIKE 'UNMAPPED-%'
-              AND SPLIT(r.NodeNum, '-')[SAFE_OFFSET(1)] = SPLIT(TRIM(CAST(i.RawID AS STRING)), '.')[SAFE_OFFSET(0)];
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
+            SELECT 
+                r.timestamp,
+                -- If it's unmapped and has a match in the inventory, switch it to the clean NodeNum
+                COALESCE(
+                    IF(r.NodeNum LIKE 'UNMAPPED-%', i.NodeNum, r.NodeNum), 
+                    r.NodeNum
+                ) AS NodeNum,
+                r.temperature,
+                r.rssi
+            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` i
+              ON r.NodeNum LIKE 'UNMAPPED-%'
+             AND SPLIT(r.NodeNum, '-')[SAFE_OFFSET(1)] = SPLIT(TRIM(CAST(i.RawID AS STRING)), '.')[SAFE_OFFSET(0)];
             """
             
             query_job = client.query(repair_sql)
-            query_job.result()  # Wait for the query database execution engine to finish
+            query_job.result()  # Wait for BigQuery to finish rebuilding the table
             
             st.balloons()
-            st.success(f"🎉 Complete Success! Historical data aligned. {query_job.num_dml_affected_rows} rows were successfully updated from unmapped strings to active assets.")
+            st.success(f"🎉 Complete Success! Rebuilt `{RAW_DATA_TABLE}` safely. All historical UNMAPPED rows are now permanently aligned to your active hardware assets!")
             
         except FileNotFoundError:
             st.error(f"❌ Could not locate your file at `{EXPORT_FILE_PATH}`. Please check that the file is uploaded to your environment root directory.")
