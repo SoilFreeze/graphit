@@ -73,6 +73,32 @@ else:
             
             # --- STEP C: EXECUTE REPAIR QUERY ---
             st.info(f"⏳ Step C: Running buffer-safe repair on `{RAW_DATA_TABLE}`...")
+
+            # --- STEP D: PURGE NAKED INT STRINGS ---
+            st.info("⏳ Step D: Aligning remaining raw numeric NodeNums to active asset names...")
+            
+            repair_numbers_sql = f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
+            SELECT 
+                r.timestamp,
+                -- If NodeNum is a pure 8-digit number string and matches an inventory entry, swap it
+                COALESCE(
+                    IF(REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[0-9]{{8}}$'), i.NodeNum, r.NodeNum), 
+                    r.NodeNum
+                ) AS NodeNum,
+                r.temperature,
+                r.rssi
+            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` i
+              -- Strip decimals on inventory matching to catch matching 8-digit IDs
+              ON REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[0-9]{{8}}$')
+             AND TRIM(r.NodeNum) = SPLIT(TRIM(CAST(i.RawID AS STRING)), '.')[SAFE_OFFSET(0)];
+            """
+            
+            query_job_digits = client.query(repair_numbers_sql)
+            query_job_digits.result()  # Wait for BigQuery execution to complete
+            
+            st.success("🎉 All pure 8-digit hardware strings have been matched and updated to clean physical asset tags!")
             
             # Create or replace table bypasses the streaming buffer restriction completely
             repair_sql = f"""
