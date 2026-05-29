@@ -1,56 +1,49 @@
-import streamlit as st
-import requests
 import pandas as pd
+from google.cloud import bigquery
+import google.auth
 
-st.title("🧪 SensorPush API Sandbox Extractor")
-st.write("Click the button below to pull a raw mapping straight from the SensorPush API endpoints.")
+# 1. Configuration
+PROJECT_ID = "sensorpush-export"
+DATASET_ID = "Temperature"
+INVENTORY_TABLE = "hardware_inventory"
+RAW_DATA_TABLE = "raw_sensorpush"
+EXPORT_FILE_PATH = "2026-05-29T20-25_export.csv"
 
-ACCOUNTS = [
-    {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
-    {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
-    {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
-]
-BASE_URL = "https://api.sensorpush.com/api/v1"
+# 2. Authenticate
+scopes = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/cloud-platform"]
+credentials, project = google.auth.default(scopes=scopes)
+client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
 
-if st.button("🚀 Fetch Live API Map"):
-    api_records = []
-    
-    with st.spinner("Pinging API Gateways..."):
-        for acc in ACCOUNTS:
-            try:
-                auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
-                token = requests.post(f"{BASE_URL}/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
-                
-                # Pull raw active sensor data
-                s_resp = requests.post(f"{BASE_URL}/devices/sensors", headers={"Authorization": token}, json={}, timeout=20).json()
-                
-                if isinstance(s_resp, dict):
-                    for s_id, s_meta in s_resp.items():
-                        clean_id = str(s_id).strip().split('.')[0]
-                        app_name = s_meta.get('name', 'Unknown') if isinstance(s_meta, dict) else 'Unknown'
-                        api_records.append({
-                            "Account Owner": acc['email'], 
-                            "Sensor ID (RawID)": clean_id, 
-                            "App Name (NodeNum)": app_name
-                        })
-                else:
-                    for s in s_resp:
-                        if isinstance(s, dict) and 'id' in s:
-                            clean_id = str(s['id']).strip().split('.')[0]
-                            app_name = s.get('name', 'Unknown')
-                            api_records.append({
-                                "Account Owner": acc['email'], 
-                                "Sensor ID (RawID)": clean_id, 
-                                "App Name (NodeNum)": app_name
-                            })
-            except Exception as e:
-                st.error(f"Error accessing profiles for {acc['email']}: {e}")
+print("⏳ Step 1: Processing and cleaning exported mapping data...")
+# Read and clean the export file
+df = pd.read_csv(EXPORT_FILE_PATH)
+df_clean = df.drop_duplicates(subset=['Sensor ID (RawID)']).copy()
 
-    if api_records:
-        st.success(f"Successfully retrieved {len(api_records)} sensor profiles!")
-        
-        # Turn it into a clean dataframe for Streamlit to display
-        df = pd.DataFrame(api_records)
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.warning("No data returned from the API.")
+# Format columns to match your BigQuery table schema exactly
+upload_df = pd.DataFrame({
+    'RawID': df_clean['Sensor ID (RawID)'].astype(str).str.strip(),
+    'NodeNum': df_clean['App Name (NodeNum)'].astype(str).str.strip()
+})
+
+print(f"✅ Found {len(upload_df)} unique, clean sensor profiles to sync.")
+
+print(f"⏳ Step 2: Appending clean maps into BigQuery table: {INVENTORY_TABLE}...")
+# Append records into your hardware inventory
+table_ref = f"{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}"
+job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+client.load_table_from_dataframe(upload_df, table_ref, job_config=job_config).result()
+print("✅ Successfully updated hardware inventory table!")
+
+print(f"⏳ Step 3: Executing database repair query on {RAW_DATA_TABLE}...")
+# Update historical data matching the new hardware mapping entries
+repair_sql = f"""
+UPDATE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r
+SET r.NodeNum = i.NodeNum
+FROM `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` i
+WHERE r.NodeNum LIKE 'UNMAPPED-%'
+  AND SPLIT(r.NodeNum, '-')[SAFE_OFFSET(1)] = SPLIT(TRIM(CAST(i.RawID AS STRING)), '.')[SAFE_OFFSET(0)];
+"""
+
+query_job = client.query(repair_sql)
+query_job.result()
+print(f"🎉 Success! Repaired historical entries. {query_job.num_dml_affected_rows} rows updated successfully.")
