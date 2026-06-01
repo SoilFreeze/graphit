@@ -97,15 +97,16 @@ def render_sidebar():
 def load_registry_data(target_table):
     """
     Queries active schema inventory data safely, merging real-time 'Last Seen' 
-    lag hours, scrubbing legacy PhysicalID markers, and calculating historical 
-    project tracking uptime metrics.
+    lag hours, current temperature context values, scrubbing legacy PhysicalID markers, 
+    and calculating historical project tracking uptime metrics.
     """
     try:
         master_query = f"""
             WITH LatestTelemetry AS (
                 SELECT 
                     NodeNum, 
-                    MAX(timestamp) as last_ping
+                    MAX(timestamp) as last_ping,
+                    ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
                 GROUP BY NodeNum
             ),
@@ -135,6 +136,7 @@ def load_registry_data(target_table):
             SELECT 
                 R.*,
                 T.last_ping,
+                T.last_temp,
                 A.Expected_Hours,
                 COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
             FROM `{target_table}` R
@@ -190,7 +192,6 @@ def load_registry_data(target_table):
     except Exception as e:
         st.error(f"Error loading registry: {e}")
         return pd.DataFrame()
-
 # =============================================================================
 # Helper functions & Styling Engine
 # =============================================================================
@@ -250,7 +251,7 @@ def style_dataframe(row):
 
 
 # ===============================================================
-# Function: Status Dashboard
+# Function: Status Dashboard (Setup Node Tool) - Left Unchanged
 # ===============================================================
 def render_project_status_dashboard(client, selected_project, unit_label, target_registry):
     st.subheader("📊 Project Status Summary")
@@ -366,9 +367,9 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
             except Exception:
                 t_row[1].caption("6h\n➡️ N/A")
             
-# ===============================================================
-# Function: Hardware integrity table
-# ===============================================================
+# =============================================================================
+# Function: Hardware integrity table (Setup Node Tool - Left Unchanged)
+# =============================================================================
 def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
     """
     Renders a detailed table showing connectivity, coverage, and recent activity.
@@ -668,19 +669,32 @@ def render_node_selector(reg_df, proj_list):
                     style_canvas.loc[i, col] = color_style
         return style_canvas
 
+    # Generate custom strings for combined depth/bank labels and unit-aware temperatures
+    unit_mode, unit_label = get_unit_labels()
+    
+    def get_pos_label(row):
+        if pd.notnull(row.get('Depth')) and row.get('Depth') != 0:
+            return f"{row['Depth']}ft"
+        return f"Bank {row['Bank']}" if pd.notnull(row.get('Bank')) and str(row.get('Bank')).strip() != "" else "-"
+
+    df['Position'] = df.apply(get_pos_label, axis=1)
+    df['Current Temp'] = df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label))
+
     edited_df = st.data_editor(
         df.style.apply(node_selector_styler, axis=None) if not df.empty else df,
         hide_index=True,
         use_container_width=True,
         column_config={
             "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+            "Project": "Project",
+            "Location": "Location",
             "NodeNum": "Node ID",
+            "Position": "Depth/Bank",
             "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping"),
-            "Reporting Efficiency": st.column_config.TextColumn("Reporting Efficiency", help="Percentage of expected hourly logs written while on job"),
-            "coverage_24h": st.column_config.ProgressColumn("24h Coverage", format="%.1f%%", min_value=0, max_value=100)
+            "Current Temp": "Current Temp",
         },
         disabled=[col for col in df.columns if col != "Select"],
-        column_order=["Select", "Location", "NodeNum", "Peer Trend", "Performance", "Status", "coverage_24h"], 
+        column_order=["Select", "Project", "Location", "NodeNum", "Position", "Last Seen", "Current Temp"], 
         key=ed_key
     )
 
@@ -729,7 +743,6 @@ def render_node_selector(reg_df, proj_list):
                     st.code(sql, language="sql")
                     
     return selected_returned_row
-
 # =============================================================================
 # 1. HISTORICAL TELEMETRY GRAPH COMPONENT
 # =============================================================================
@@ -767,8 +780,9 @@ def render_node_historical_graph(client, node_id):
             st.caption("ℹ️ No historical telemetric data markers discovered for this hardware footprint.")
     except Exception as e:
         st.error(f"Failed generating historical context graph: {e}")
+
 # =============================================================================
-# 2. BULK ORCHESTRATOR TABS
+# 2. BULK ORCHESTRATOR TABS - Left Unchanged
 # =============================================================================
 def render_bulk_registry_page(client, proj_list):
     """
@@ -1179,10 +1193,8 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to execute row delete query logic: {e}")
-
-
 # =============================================================================
-# FUNCTION: DATA CHECKER DIAGNOSTICS MODULE
+# FUNCTION: DATA CHECKER DIAGNOSTICS MODULE - Left Unchanged
 # =============================================================================
 def render_data_checker(client, reg_df):
     """
@@ -1406,8 +1418,9 @@ def render_data_checker(client, reg_df):
             )
         else:
             st.success("✅ Perfect grid alignment. Every active physical installation coordinate holds exactly one distinct hardware sensor entity.")
+
 # =============================================================================
-# PAGE MODULE: 📡 PROJECT OVERVIEW
+# PAGE MODULE: 📡 PROJECT OVERVIEW - Left Unchanged
 # =============================================================================
 
 def render_project_status_dashboard(client, selected_project, unit_label, target_registry):
@@ -1563,7 +1576,7 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
                 st.markdown(f"🥶 **Below 0°F / -17.8°C:** `{sub_0}/{total_sensors}`")
 
 # =============================================================================
-# FUNCTION: HARDWARE INTEGRITY TABLE
+# FUNCTION: HARDWARE INTEGRITY TABLE - Left Unchanged
 # =============================================================================
 def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
     """
@@ -1829,6 +1842,19 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
+    # Document Metric Meanings for Operators
+    with st.expander("ℹ️ Engineering Metric Diagnostics Explanations"):
+        st.markdown("""
+        * **Peer Trend**: Evaluates how closely an individual sensor's reading maps against the average baseline calculation of all nodes assigned to that exact same site location.
+          * 🎯 *In-Line*: Temperature sits within 2° of its location baseline.
+          * ⚠️ *Drifting*: Temperature variance ranges between 2° and 5°.
+          * 🚨 *Outlier*: Sensor has decoupled from local baseline behaviors by over 5°.
+        * **Performance**: Measures sensor volatility stability by evaluating the speed of temperature fluctuations over historical windows.
+          * 📦 *Supply/Return Piping*: Flagged as *Volatile* if readings shift > 5° over a rolling 2-hour window, or > 20° across a 24-hour cycle.
+          * 📏 *Soil/Ambient Footprints*: Flagged as *Unsteady* if readings shift > 1° in a 2-hour window, or > 2° across a 24-hour cycle.
+        * **Reporting Efficiency**: The mathematical percentage of expected hourly database records successfully written to BigQuery while deployed on the timeline.
+        """)
+
     query = f"""
         WITH BaseReporting AS (
             SELECT 
@@ -1865,7 +1891,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         INNER JOIN `{target_registry}` N ON H.NodeNum = N.NodeNum AND N.End_Date IS NULL
     """
     try:
-        # Fetch the initial data from BigQuery safely
         df = client.query(query, job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
         )).to_dataframe()
@@ -1874,13 +1899,9 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             st.warning("No data found for this project.")
             return
 
-        # Map clean metric evaluation classifications
         df[['Peer Trend', 'Performance']] = df.apply(calculate_custom_metrics, axis=1)
         now_local = pd.Timestamp.now(tz=display_tz)
         
-        # =============================================================================
-        # CHRONOLOGICAL AGE SORT SEQUENCE
-        # =============================================================================
         def age_processor(x):
             if pd.isnull(x):
                 return float('inf')
@@ -1890,7 +1911,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
         df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
-        # Calculate Reporting Efficiency inline
         exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
         act_pings = pd.to_numeric(df['total_pings_logged'], errors='coerce').fillna(0)
         raw_efficiency = np.where(
@@ -1900,7 +1920,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         )
         df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_efficiency]
 
-        # Form user-readable Status text strings
         def generate_status_text(hours):
             if hours == float('inf'):
                 return "❌ Never"
@@ -1913,29 +1932,31 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 return f"🔴 {hours:.1f}h ago"
 
         df['Status'] = df['hours_hidden'].apply(generate_status_text)
-
-        # Format RSSI values cleanly for display
         df['Latest RSSI'] = df['latest_rssi'].apply(lambda x: f"{int(x)} dBm" if pd.notnull(x) else "N/A")
         df['Avg RSSI'] = df['avg_rssi'].apply(lambda x: f"{x:.1f} dBm" if pd.notnull(x) else "N/A")
 
+        # Map combined position strings and format localized temperatures
+        def resolve_position(row):
+            if pd.notnull(row.get('Depth')) and row.get('Depth') != 0:
+                return f"{row['Depth']}ft"
+            return f"Bank {row['Bank']}" if pd.notnull(row.get('Bank')) and str(row.get('Bank')).strip() != "" else "-"
+
+        df['Depth/Bank'] = df.apply(resolve_position, axis=1)
+        df['Current Temp'] = df['current_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label))
+
         st.subheader("🔍 Detailed Sensor Audit")
         
-        # Prepare presentation dataframe blueprint with the new columns
         display_df = df[[
-            "Location", "NodeNum", "Peer Trend", "Performance", 
-            "Latest RSSI", "Avg RSSI", "Status", "Reporting Efficiency", 
+            "Location", "NodeNum", "Depth/Bank", "Current Temp", "Peer Trend", 
+            "Performance", "Latest RSSI", "Avg RSSI", "Status", "Reporting Efficiency", 
             "coverage_24h", "hours_hidden"
         ]].copy()
         display_df.insert(0, "Select", False)
 
-        # -----------------------------------------------------------
-        # ST.FRAGMENT INNER FUNCTION: CALL ISOLATION CONTAINER
-        # -----------------------------------------------------------
         @st.fragment
         def render_interactive_audit_grid(data_source_df):
             """Isolates the interactive data editor state from resetting page loops."""
             
-            # Build inline canvas styling mapper
             def sensor_status_styler(data):
                 canvas = pd.DataFrame('', index=data.index, columns=data.columns)
                 for i in data.index:
@@ -1967,13 +1988,12 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 },
                 disabled=[col for col in data_source_df.columns if col != "Select"],
                 column_order=[
-                    "Select", "Location", "NodeNum", "Peer Trend", "Performance", 
-                    "Latest RSSI", "Avg RSSI", "Status", "Reporting Efficiency", "coverage_24h"
+                    "Select", "Location", "NodeNum", "Depth/Bank", "Current Temp", 
+                    "Peer Trend", "Performance", "Latest RSSI", "Avg RSSI", "Status", "Reporting Efficiency"
                 ],
                 key="sensor_status_editor"
             )
 
-            # Resolve interactive row checkbox choice to generate comparative charts
             selected_rows = edited_df[edited_df["Select"] == True]
             
             if not selected_rows.empty:
@@ -1983,14 +2003,13 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             else:
                 st.info("💡 **Tip:** Use the checkbox in the audit table above to instantly pull up a comparative analysis graph for any sensor.")
 
-        # Run our newly isolated fragment render cycle passing the pre-fetched data
         render_interactive_audit_grid(display_df)
 
     except Exception as e:
         st.error(f"Sensor Status Error: {e}")
 
 # ===============================================================
-# PAGE: BULK REGISTRY MANAGER
+# PAGE: BULK REGISTRY MANAGER - Left Unchanged
 # ===============================================================
 def render_active_node_registry_page(client, target_registry):
     """
@@ -2005,7 +2024,6 @@ def render_active_node_registry_page(client, target_registry):
     # -----------------------------------------------------------------
     # OPTIMIZED SINGLE-PASS TELEMETRY JOIN QUERY
     # -----------------------------------------------------------------
-    # Pulls the deployment registration data and joins it with the most recent ping timestamp
     master_query = f"""
         WITH LatestTelemetry AS (
             SELECT 
@@ -2046,7 +2064,7 @@ def render_active_node_registry_page(client, target_registry):
         if hide_archived and 'SensorStatus' in reg_df.columns:
             reg_df = reg_df[reg_df['SensorStatus'] != 'Archived']
             
-        # 5. RENDER THE INTERACTIVE SELECTION GRID (Matching your layout)
+        # 5. RENDER THE INTERACTIVE SELECTION GRID
         st.markdown("### 📋 Current Asset Allocation Matrix")
         
         display_df = reg_df.copy()
@@ -2065,13 +2083,8 @@ def render_active_node_registry_page(client, target_registry):
         chosen_nodes = edited_registry_df[edited_registry_df["Select"] == True]
         if not chosen_nodes.empty:
             st.divider()
-            # Isolate the original row dict structure to pass down to your render_node_action_manager
             target_node_record = chosen_nodes.iloc[0].drop("Select").to_dict()
-            
-            # Extract clean unique projects for layout selectors
             proj_list = sorted(reg_df['Project'].dropna().unique().tolist())
-            
-            # Pass our updated data into your custom action component manager
             render_node_action_manager(client, target_node_record, reg_df, proj_list, target_registry)
             
     except Exception as e:
@@ -2088,7 +2101,6 @@ def render_playground_staging_tab(client, target_registry, table_playground):
         """
     )
     
-    # Pull staging data for instant on-screen audit
     try:
         play_df = client.query(f"SELECT * FROM `{table_playground}` ORDER BY NodeNum ASC, Start_Date DESC").to_dataframe()
         if not play_df.empty:
@@ -2109,7 +2121,6 @@ def render_playground_staging_tab(client, target_registry, table_playground):
         if st.checkbox("I verify that these staging configurations match my field criteria.", key="confirm_playground_push"):
             if st.button("🚀 Push Playground Data Live to Production", type="primary", use_container_width=True):
                 
-                # HARDENED COMPOSITE KEY MERGE: Incorporates Project to isolate multi-project concurrent assignments
                 sync_sql = f"""
                     MERGE `{target_registry}` T
                     USING (
@@ -2127,7 +2138,6 @@ def render_playground_staging_tab(client, target_registry, table_playground):
                        AND T.Start_Date = S.Start_Date
                        AND T.Project = S.Project
                     
-                    -- Update production fields if matching record exists
                     WHEN MATCHED THEN
                         UPDATE SET 
                             T.Location = S.Location,
@@ -2136,7 +2146,6 @@ def render_playground_staging_tab(client, target_registry, table_playground):
                             T.SensorStatus = S.SensorStatus,
                             T.End_Date = S.End_Date
                             
-                    -- Insert record if it doesn't exist in production yet
                     WHEN NOT MATCHED THEN
                         INSERT (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
                         VALUES (S.NodeNum, S.Project, S.Location, S.Bank, S.Depth, S.SensorStatus, S.Start_Date, S.End_Date);
@@ -2148,34 +2157,26 @@ def render_playground_staging_tab(client, target_registry, table_playground):
                         job.result()
                         
                     st.success(f"✅ Sync Successful! Processed and updated {job.num_dml_affected_rows:,} records inside production registry.")
-                    st.cache_data.clear()  # Drop active cache paradigms so page datasets refresh instantly
+                    st.cache_data.clear()
                     time.sleep(1.5)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Staging pipeline merge execution failure: {e}")
                     st.code(sync_sql, language="sql")
 
+
 def force_overwrite_production_with_playground(client):
-    """
-    Completely erases the live production node registry table and
-    replaces it with a perfect copy of the dummy playground state.
-    """
+    """Completely erases the live production node registry table."""
     prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
     dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
     
-    # Configure the load job to overwrite the destination table directly
     from google.cloud import bigquery
-    job_config = bigquery.QueryJobConfig(
-        write_disposition="WRITE_TRUNCATE"
-    )
-    
+    job_config = bigquery.QueryJobConfig(write_disposition="WRITE_TRUNCATE")
     sql = f"SELECT * FROM `{dummy_table}`"
     
     try:
         with st.spinner("💥 Wiping production and copying playground matrices..."):
-            # Direct the query results to overwrite production
             query_job = client.query(sql, job_config=job_config)
-            # Set the destination table explicitly
             query_job._properties['configuration']['query']['destinationTable'] = {
                 'projectId': PROJECT_ID,
                 'datasetId': DATASET_ID,
@@ -2189,6 +2190,7 @@ def force_overwrite_production_with_playground(client):
         st.rerun()
     except Exception as e:
         st.error(f"Failed to force clear and replace table profiles: {e}")
+
 
 def render_bulk_deployment_tab(client, target_registry):
     """Handles the UI for uploading new site configurations via CSV."""
@@ -2213,34 +2215,29 @@ def render_bulk_deployment_tab(client, target_registry):
 def process_bulk_upload(client, df, target_registry):
     """Validates and uploads the dataframe to BigQuery."""
     try:
-        # Strict validation of core columns
         required = {'NodeNum', 'Project', 'Location'}
         if not required.issubset(df.columns):
             st.error(f"Missing required columns: {required - set(df.columns)}")
             return
 
         with st.spinner("Uploading to BigQuery..."):
-            # 1. Ensure Start_Date is valid
             if 'Start_Date' in df.columns:
                 df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.date
             else:
                 df['Start_Date'] = datetime.now().date()
             
-            # 2. Force Status to 'On Project' if missing
             if 'SensorStatus' not in df.columns:
                 df['SensorStatus'] = 'On Project'
 
-            # 3. Clean up any PhysicalID columns if they were included by mistake
             if 'PhysicalID' in df.columns:
                 df = df.drop(columns=['PhysicalID'])
             
-            # 4. BigQuery Load
             from google.cloud import bigquery
             job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
             client.load_table_from_dataframe(df, target_registry, job_config=job_config).result()
             
         st.success(f"Successfully registered {len(df)} nodes.")
-        st.cache_data.clear() # Clear cache to update the Node Manager table
+        st.cache_data.clear()
         st.balloons()
     except Exception as e:
         st.error(f"Upload Failed: {e}")
@@ -2251,7 +2248,6 @@ def render_bulk_decommission_tab(client, proj_list, target_registry):
     st.subheader("Project-Wide Decommission")
     st.warning("Warning: This ends all active records for a project and moves hardware to 'Office' stock.")
     
-    # Filter out 'Office' from the retirement list
     active_field_projects = [p for p in proj_list if p != "Office"]
     ret_p = st.selectbox("Select Project to Retire", ["-- Select --"] + active_field_projects)
     
@@ -2267,32 +2263,24 @@ def render_bulk_decommission_tab(client, proj_list, target_registry):
 
 
 def execute_bulk_decommission(client, project_id, decommission_date, return_status, target_registry):
-    """
-    Executes a Multi-Step Transaction:
-    1. Ends all active records for the Project.
-    2. Inserts new 'Office' records for every sensor that was retired.
-    """
+    """Executes Multi-Step Transaction to retire project."""
     date_iso = decommission_date.isoformat()
     
-    # This SQL handles the entire transition in one transaction
     bulk_sql = f"""
         BEGIN TRANSACTION;
-        
-        -- 1. Archive the existing deployments
         UPDATE `{target_registry}` 
         SET End_Date = DATE('{date_iso}'), 
             SensorStatus = 'Archived' 
         WHERE Project = '{project_id}' 
           AND End_Date IS NULL;
 
-        -- 2. Insert the hardware back into Office Stock
         INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
         SELECT 
             NodeNum, 
             'Office' as Project, 
             'Office Stock' as Location, 
-            NodeNum as Bank, -- Reset Bank to NodeNum for stock
-            NULL as Depth,   -- Clear Depth for stock
+            NodeNum as Bank, 
+            NULL as Depth,   
             '{return_status}' as SensorStatus,
             DATE('{date_iso}') as Start_Date
         FROM `{target_registry}`
@@ -2311,6 +2299,8 @@ def execute_bulk_decommission(client, project_id, decommission_date, return_stat
     except Exception as e:
         st.error(f"Bulk Decommission Failed: {e}")
         st.code(bulk_sql)
+
+
 # ===============================================================
 # PAGE: DATA RECOVERY (SensorPush API Bridge)
 # ===============================================================
@@ -2320,21 +2310,16 @@ def render_data_recovery_page(reg_df):
     st.header("📡 Data Recovery")
     st.info("Directly queries the SensorPush Cloud API using raw tokens, strips trailing decimals on-the-fly, and filters duplicate packets against BigQuery bookmarks.")
 
-    # 1. GATEWAY: Filter for SensorPush hardware only (TP-Prefix) 
-    # Use only active sensors to keep the selection list manageable
     sp_reg = reg_df[
         (reg_df['NodeNum'].str.startswith('TP', na=False)) & 
         (reg_df['End_Date'].isna())
     ].copy()
 
-    # 2. FILTERING UI
     selected_nodes = render_recovery_filters(sp_reg)
 
-    # 3. DATE RANGE & TRIGGER
     st.divider()
     c_d1, c_d2 = st.columns(2)
     with c_d1:
-        # Default to last 3 days
         start_date = st.date_input("Recovery Start Date", value=datetime.now() - timedelta(days=3))
     with c_d2:
         end_date = st.date_input("Recovery End Date", value=datetime.now())
@@ -2365,7 +2350,6 @@ def render_recovery_filters(sp_reg):
         selected_nodes = st.multiselect(
             "Select Node Numbers", 
             available_nodes, 
-            # Default to None to prevent accidental massive API requests
             default=None,
             help="Choose the specific sensors to backfill. Leave empty to pull all filtered assets."
         )
@@ -2378,15 +2362,15 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
     hardware_map = {}
     db_max_timestamps = {}
     node_stats = {}
+    account_stats = {}  # Tracks points extracted account-by-account
 
-    # Define API account matrix matching client footprints
+    # API account matrix
     ACCOUNTS = [
         {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
         {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
         {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
     ]
 
-    # Convert frontend inputs cleanly into required ISO strings
     start_time_iso = datetime.combine(start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
     end_time_iso = datetime.combine(end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -2400,7 +2384,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
         try:
             inv_q = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` WHERE RawID IS NOT NULL"
             for row in client.query(inv_q):
-                # Handle decimals on inventory loading to match root numbers cleanly
                 clean_db_id = str(row.RawID).split('.')[0].strip()
                 hardware_map[clean_db_id] = str(row.NodeNum).strip()
         except Exception as e:
@@ -2420,11 +2403,12 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
         # --- STEP C: PULL TELEMETRY ACROSS ACCOUNT HOUSES ---
         for acc in ACCOUNTS:
             st.write(f"🔐 Authenticating token profile for `{acc['email']}`...")
+            account_stats[acc['email']] = 0  # Initialize tally counter
+            
             try:
                 auth_r = requests.post(f"{BASE_URL}/oauth/authorize", json=acc, timeout=15).json()
                 token = requests.post(f"{BASE_URL}/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
                 
-                # Fetch live connection strength telemetry properties (RSSI)
                 s_resp = requests.post(f"{BASE_URL}/devices/sensors", headers={"Authorization": token}, json={}, timeout=20).json()
                 device_rssi_map = {}
                 if isinstance(s_resp, dict):
@@ -2442,14 +2426,12 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
 
                 # --- STEP D: MATCH, DEDUPLICATE AND TALLY ---
                 for s_id, samples in sensors_data.items():
-                    # Strip long trailing decimal suffixes on API side to prevent mapping drops
                     api_root_id = str(s_id).split('.')[0].strip()
                     friendly_name = hardware_map.get(api_root_id)
                     
                     if not friendly_name:
                         friendly_name = f"UNMAPPED-{api_root_id}"
                         
-                    # Filter step: If specific node choices are picked, skip rows not selected
                     if selected_nodes and friendly_name not in selected_nodes:
                         continue
                         
@@ -2475,6 +2457,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                             
                             if not latest_db_bookmark or clean_observed > latest_db_bookmark:
                                 node_stats[friendly_name]["New Unique Appends"] += 1
+                                account_stats[acc['email']] += 1  # Add to the specific credentials bucket
                                 all_rows.append({
                                     "timestamp": observed_time,
                                     "NodeNum": str(friendly_name),
@@ -2482,7 +2465,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                                     "rssi": int(current_device_rssi) if current_device_rssi is not None else None
                                 })
             except Exception as e:
-                print(f"Skipping or error parsing profile data loop parameters: {e}")
+                print(f"Skipping profile data loop parameters: {e}")
 
         # --- STEP E: COMMIT INDEPENDENT SAMPLES TO PRIMARY TABLE ---
         total_recovered_appends = len(all_rows)
@@ -2490,12 +2473,17 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             st.info("🔒 Production table perfectly synchronized. 0 duplicates written.")
             status.update(label="Database Up To Date", state="complete")
         else:
-            st.write(f"📥 Injecting {total_recovered_appends} unique rows directly into `{TABLE_ID}`...")
+            st.write(f"📥 Injecting unique rows directly into `{TABLE_ID}`...")
             try:
                 real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
                 errors = client.insert_rows_json(real_table_ref, all_rows)
                 if not errors:
                     st.success(f"🎉 Success! Appended {total_recovered_appends} unique rows directly to production storage.")
+                    
+                    # Print full account summary details line directly below success status notification banner
+                    summary_line = " | ".join([f"**{email}**: {count:,} points" for email, count in account_stats.items()])
+                    st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
+                    
                     status.update(label="Recovery Complete!", state="complete")
                 else:
                     st.error(f"BigQuery insertion rejected rows: {errors[:3]}")
@@ -2504,7 +2492,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 st.error(f"Direct stream submission pipeline failure: {bq_err}")
                 status.update(state="error")
 
-    # --- STEP F: RENDER STATISTICAL BREAKDOWN GRID ---
+    # --- STEP F: RENDER STATISTICAL BREAKDOWN GRID (UN-CAPPED INVERSION DATASET VIEW) ---
     if node_stats:
         st.write("### 📊 Smart Data Delta Tally Distribution:")
         summary_records = []
@@ -2515,6 +2503,8 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 "Genuinely New Points Appended": counts["New Unique Appends"]
             })
         summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
+        
+        # Display the entire historical table completely without artificial .head(10) caps
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
         if total_recovered_appends > 0:
             st.balloons()
@@ -2535,7 +2525,7 @@ def render_recovery_logic_footer():
         """)
         
 # ===============================================================
-# PAGE: PROJECT MASTER
+# PAGE: PROJECT MASTER - Left Unchanged
 # ===============================================================
 
 def render_project_master_page(client, selected_project):
@@ -2575,7 +2565,6 @@ def render_project_overview(client, table_projects):
             df = client.query(query).to_dataframe()
             
         if not df.empty:
-            # FIXED: Calling the corrected local utility function cleanly instead of patching the pd module namespace
             for col in ['Date_Freezedown', 'Date_Completion']:
                 if col in df.columns:
                     df[col] = local_datetime_converter(df[col])
@@ -2657,9 +2646,7 @@ def render_new_project_form(client, table_projects):
 
 def render_update_project_form(client, selected_project, table_projects):
     """
-    Form for altering existing project profiles. Grants comprehensive variable coverage 
-    across fields like City, Timezone, UploadNote, and AsBuilt fields. Includes an execution sequence 
-    for deleting incorrectly set-up fields.
+    Form for altering existing project profiles.
     """
     st.subheader(f"🔧 Configuration Editor: {selected_project}")
     
@@ -2673,12 +2660,10 @@ def render_update_project_form(client, selected_project, table_projects):
     p_data = p_res.iloc[0].to_dict()
     
     with st.form("comprehensive_edit_project"):
-        # 1. Identity & Name Context Paths
         c1, c2 = st.columns(2)
         u_project_id = c1.text_input("Project ID (Internal Storage Primary Key)", value=p_data.get('Project', ''), disabled=True)
         u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
 
-        # 2. Geographic Parameters & Sync Schedule Attributes
         c3, c4 = st.columns(2)
         u_city = c3.text_input("City Deployment Field", value=p_data.get('City', ''))
         u_tz = c4.text_input("Operational Timezone Reference", value=p_data.get('Timezone', 'America/Los_Angeles'))
@@ -2686,27 +2671,22 @@ def render_update_project_form(client, selected_project, table_projects):
         u_up_notes = st.text_input("Automated Pipeline Sync Notes (UploadNote)", value=p_data.get('UploadNote', ''))
         u_as_built = st.text_input("Engineering Archive ID (AsBuiltFile)", value=p_data.get('AsBuiltFile', ''))
 
-        # 3. Status & Lifecycle Configuration
         c5, c6 = st.columns(2)
         status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
         curr_status = p_data.get('ProjectStatus', 'Initialized')
         s_idx = status_options.index(curr_status) if curr_status in status_options else 0
         u_status = c5.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
         
-        # 4. Critical Engineering Event Schedules
         def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) else None
         u_date_freeze = c5.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
         u_date_comp = c6.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
 
-        # 5. Text Notes Area
         u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
 
         if st.form_submit_button("💾 Overwrite Project Registry Information", type="primary"):
             freeze_val = f"DATE('{u_date_freeze}')" if u_date_freeze else "NULL"
             comp_val = f"DATE('{u_date_comp}')" if u_date_comp else "NULL"
             
-            # FIXED: Removed Date_Completion from the UPDATE string to prevent the 400 error.
-            # If you add this column to BigQuery later, you can add "Date_Completion = {comp_val}" back here.
             update_q = f"""
                 UPDATE `{table_projects}` 
                 SET 
@@ -2729,7 +2709,6 @@ def render_update_project_form(client, selected_project, table_projects):
             except Exception as e:
                 st.error(f"Database translation pipeline update failure: {e}")
                 
-    # Administrative Context Removal Tool (Separated from form updates to maintain safety scopes)
     st.markdown("---")
     with st.expander("🧨 Administrative Removal Tool Area"):
         st.warning(f"Danger Zone: Executing this function completely drops the project ID context for '{selected_project}' from the central database schema registry tracker.")
@@ -2750,6 +2729,7 @@ def render_update_project_form(client, selected_project, table_projects):
             else:
                 st.error("Authorization verification mismatch token error.")
 
+
 # ===============================================================
 # PAGE: REF CURVE LIBRARY
 # ===============================================================
@@ -2761,22 +2741,18 @@ def render_ref_curve_library_page(client):
     """
     st.subheader("📈 Reference Curve Library Matrix")
     
-    # Updated to point exactly to your table name
     table_curves = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
     inventory_df = pd.DataFrame()
     
-    # Extract live curve records with built-in 404 missing table safety
     from google.api_core.exceptions import NotFound
     try:
         inventory_df = client.query(f"SELECT * FROM `{table_curves}` ORDER BY 1 ASC").to_dataframe()
     except NotFound:
-        # Table doesn't exist yet - intercept error and display a clean setup message
         st.info("ℹ️ Reference curve library initialized. Ready for your first base profile import setup below.")
     except Exception as e:
         st.error(f"Failed to extract live reference curve database logs: {e}")
 
-    # Layout structural workspaces split between view pane and upload form
-    tab_view, tab_upload, tab_delete = st.tabs(["📊 View Active Curves", "📥 Upload / Overwrite Curve File", "🗑️ Remove Profile"])
+    tab_view, tab_upload, tab_delete = st.tabs(["📊 View Active Curves", "📥 Upload / Overwrite Curve File", "🗑️ Remove Profile & Bulk Delete"])
 
     with tab_view:
         if not inventory_df.empty:
@@ -2793,9 +2769,7 @@ def render_ref_curve_library_page(client):
 
 def render_curve_upload_form(client, table_curves):
     """
-    Handles parsing and automated overwriting routines for imported 
-    CSV/XLSX reference curve datasets. Automatically derives headers from 
-    shifted positions and handles unlabelled row index templates safely.
+    Handles parsing and automated overwriting routines for imported CSV/XLSX reference curve datasets.
     """
     st.markdown("##### 📥 Import Engineering Calibration Profile")
     st.info("💡 Overwrite rule active: Uploading a file with an identical curve identifier will wipe its old historical data blocks and replace them completely.")
@@ -2804,7 +2778,6 @@ def render_curve_upload_form(client, table_curves):
 
     if uploaded_file is not None:
         try:
-            # 1. ENCODING SAFE PARSING LAYER
             if uploaded_file.name.endswith('.csv'):
                 try:
                     uploaded_file.seek(0)
@@ -2820,28 +2793,19 @@ def render_curve_upload_form(client, table_curves):
                 st.error("Uploaded dataset structure contains no parsable rows. Stream pointer empty.")
                 return
 
-            # -----------------------------------------------------------------
-            # DYNAMIC ROW HEADER PROMOTER (Fixes the Empty Preview)
-            # -----------------------------------------------------------------
-            # If row 1 column headers are completely unlabelled/blank:
             if all(str(col).startswith("Unnamed:") for col in uploaded_df.columns):
-                # Check if row 2 contains the actual column names (like Time (d) or Temperature)
                 if not uploaded_df.empty and any(any(x in str(val) for x in ['Time', 'Temp', '°']) for val in uploaded_df.iloc[0].values):
-                    # Extract row 2 values to serve as the real headers
                     real_headers = [str(val).strip() for val in uploaded_df.iloc[0].values]
                     uploaded_df.columns = real_headers
                     uploaded_df = uploaded_df.iloc[1:].reset_index(drop=True)
                     st.caption("🧹 Detected and removed empty placeholder row at the top. Promoted text metrics to headers.")
 
-            # Drop any remaining unmapped junk columns safely without wiping the valid data
             unnamed_cols = [col for col in uploaded_df.columns if str(col).startswith("Unnamed:")]
             if unnamed_cols and len(unnamed_cols) < len(uploaded_df.columns):
                 uploaded_df = uploaded_df.drop(columns=unnamed_cols)
 
-            # Strip completely empty separator lines out of the frame
             uploaded_df = uploaded_df.dropna(how='all')
 
-            # Force standardized names for BigQuery schema alignment
             rename_dict = {}
             for col in uploaded_df.columns:
                 c_upper = str(col).upper()
@@ -2853,7 +2817,6 @@ def render_curve_upload_form(client, table_curves):
             if rename_dict:
                 uploaded_df = uploaded_df.rename(columns=rename_dict)
 
-            # Final check to guarantee data rows are ready for preview display
             if len(uploaded_df) == 0:
                 st.error("❌ File parsing yielded zero records. Check your column headers.")
                 return
@@ -2861,7 +2824,6 @@ def render_curve_upload_form(client, table_curves):
             st.caption(f"🔍 Previewing Verified Dataset Elements ({len(uploaded_df)} total data rows found):")
             st.dataframe(uploaded_df.head(5), use_container_width=True, hide_index=True)
 
-            # 2. IDENTIFIER RESOLUTION LOGIC (Filename Fallback Extraction)
             possible_id_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
             found_id_col = next((c for c in possible_id_cols if c in uploaded_df.columns), None)
 
@@ -2888,7 +2850,6 @@ def render_curve_upload_form(client, table_curves):
                         purge_sql = f"DELETE FROM `{table_curves}` WHERE {sql_id_match_col} = '{target_curve_identity}'"
                         client.query(purge_sql).result()
 
-                    # Clean data formatting variables to match decimal configurations
                     if 'Day' in uploaded_df.columns and 'Temp' in uploaded_df.columns:
                         uploaded_df['Day'] = pd.to_numeric(uploaded_df['Day'], errors='coerce')
                         uploaded_df['Temp'] = pd.to_numeric(uploaded_df['Temp'], errors='coerce')
@@ -2906,12 +2867,11 @@ def render_curve_upload_form(client, table_curves):
         except Exception as file_parse_err:
             st.error(f"Failed parsing file interface pipelines: {file_parse_err}")
             
+
 def fetch_curve_inventory(client, table_curves):
     """
     Fetches current library stats with robust column handling.
-    Includes an automatic fallback query to handle schema variance seamlessly.
     """
-    # Standard query attempting to include the upload_date string column
     inv_q = f"""
         SELECT 
             CurveID, 
@@ -2926,7 +2886,6 @@ def fetch_curve_inventory(client, table_curves):
     try:
         inventory_df = client.query(inv_q).to_dataframe()
     except Exception as primary_error:
-        # Fallback Query: If upload_date column doesn't exist yet, fetch standard core components
         fallback_q = f"""
             SELECT 
                 CurveID, 
@@ -2963,72 +2922,88 @@ def fetch_curve_inventory(client, table_curves):
 
 def render_curve_management_tools(client, inventory_df, table_curves):
     """
-    Administrative deletion panel toolset for stripping unwanted historical 
-    curve reference matrix strings out of the primary dataset registry.
+    Administrative tools for reference curves, supporting both single-line item updates 
+    and bulk project-wide or location-specific deletion routines.
     """
-    st.subheader("🗑️ Individual Curve Delete")
-    st.markdown("Select a baseline calibration profile curve map from the library to remove it from the system.")
+    st.subheader("🗑️ Curve Deletion Control Panel")
+    
+    c_del1, c_del2 = st.columns(2)
+    
+    with c_del1:
+        st.markdown("### Individual Curve Delete")
+        if inventory_df.empty:
+            st.info("No active curves available.")
+        else:
+            possible_identifier_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
+            target_id_col = next((col for col in possible_identifier_cols if col in inventory_df.columns), inventory_df.columns[0])
 
-    if inventory_df.empty:
-        st.info("No active curves available for configuration modifications.")
-        return
+            try:
+                curve_dropdown_options = sorted(inventory_df[target_id_col].dropna().unique().tolist())
+                if curve_dropdown_options:
+                    to_delete = st.selectbox("Select Curve to Remove", curve_dropdown_options, key="ind_curve_del_select")
+                    
+                    with st.expander("⚠️ Confirm Individual Deletion"):
+                        st.warning(f"This will permanently drop all calibration records linked to: **{to_delete}**")
+                        if st.checkbox("Verify individual curve removal authorization check.", key="ind_del_auth_check"):
+                            if st.button("Delete Selected Reference Curve", type="primary"):
+                                delete_sql = f"DELETE FROM `{table_curves}` WHERE {target_id_col} = '{to_delete}'"
+                                client.query(delete_sql).result()
+                                st.success(f"🗑️ Reference curve **{to_delete}** dropped successfully.")
+                                st.cache_data.clear()
+                                time.sleep(1)
+                                st.rerun()
+            except Exception as e:
+                st.error(f"Individual deletion interface failure: {e}")
 
-    # 1. HARDENED COLUMN DETECTOR MATCH METHOD
-    # Scans the dataframe to dynamically find the correct column string name variant
-    possible_identifier_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
-    target_id_col = None
-
-    for col in possible_identifier_cols:
-        if col in inventory_df.columns:
-            target_id_col = col
-            break
-
-    # Fallback to the very first dataframe column if none of our expected keys match perfectly
-    if not target_id_col:
-        target_id_col = inventory_df.columns[0]
-
-    # 2. SAFE DROPDOWN EXECUTOR LOGIC
-    try:
-        # Pull drop selector list values cleanly using our audited key locator string
-        curve_dropdown_options = sorted(inventory_df[target_id_col].dropna().unique().tolist())
+    with c_del2:
+        st.markdown("### Bulk Delete by Context")
+        st.markdown("Mass drop reference curves matching an engineering context.")
         
-        if not curve_dropdown_options:
-            st.warning("No unique curve mapping strings found inside the targeted data layer.")
-            return
+        # Pull reference lists dynamically from the active data view space
+        try:
+            context_q = f"SELECT DISTINCT Project, Location FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` WHERE Project != 'Dead'"
+            context_df = client.query(context_q).to_dataframe()
+            projects_list = sorted(context_df['Project'].dropna().unique().tolist())
+            locations_list = sorted(context_df['Location'].dropna().unique().tolist())
+        except Exception:
+            projects_list = ["None"]
+            locations_list = ["None"]
 
-        to_delete = st.selectbox(
-            "Select Curve to Remove", 
-            curve_dropdown_options,
-            key="individual_curve_deletion_selector"
-        )
+        bulk_mode = st.radio("Bulk Purge Filter Base:", ["By Target Project ID", "By Field Location Coordinate"], horizontal=True)
         
-    except Exception as parse_err:
-        st.error(f"Failed to assemble selection dropdown bounds list structure: {parse_err}")
-        return
-
-    # 3. SECURED DELETION FORM ACTION TRANSACTION
-    with st.expander("⚠️ Confirm Deletion Parameters"):
-        st.warning(f"This will permanently drop all calibration records linked to: **{to_delete}**")
-        confirm_check = st.checkbox("Verify permanent removal of this curve sequence.", key="curve_delete_auth_token_check")
-        
-        if st.button("Delete Selected Reference Curve", type="primary", use_container_width=True):
-            if not confirm_check:
-                st.error("Please acknowledge the warning checkbox before executing this database deletion workflow.")
-            else:
-                # Target the actual BigQuery column string key context dynamically
-                delete_sql = f"""
-                    DELETE FROM `{table_curves}`
-                    WHERE {target_id_col} = '{to_delete}'
-                """
-                try:
-                    with st.spinner("Processing structural catalog deletion index updates..."):
-                        client.query(delete_sql).result()
-                    st.success(f"🗑️ Reference curve **{to_delete}** has been successfully dropped from the database.")
-                    st.cache_data.clear()
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as query_err:
-                    st.error(f"Failed to drop target curve profile row instance from server storage: {query_err}")
+        if bulk_mode == "By Target Project ID":
+            selected_bulk_proj = st.selectbox("Choose Target Project", ["-- Select --"] + projects_list)
+            if selected_bulk_proj != "-- Select --":
+                with st.expander("🚨 CRITICAL WARNING: Bulk Project Wipe"):
+                    st.error(f"This deletes ALL curve records containing code references matching **{selected_bulk_proj}**.")
+                    confirm_proj_text = st.text_input("Type 'DELETE PROJECT' to authorize mass wipe:")
+                    if st.button("💥 Execute Bulk Project Curve Clear-Out", type="primary"):
+                        if confirm_proj_text.strip() == "DELETE PROJECT":
+                            bulk_proj_sql = f"DELETE FROM `{table_curves}` WHERE CurveID LIKE '%{selected_bulk_proj}%'"
+                            client.query(bulk_proj_sql).result()
+                            st.success(f"🔥 Cleared all curve lines associated with project metadata tags: {selected_bulk_proj}")
+                            st.cache_data.clear()
+                            time.sleep(1.2)
+                            st.rerun()
+                        else:
+                            st.error("Wipe verification token mismatched.")
+                            
+        else:
+            selected_bulk_loc = st.selectbox("Choose Field Location Coordinate", ["-- Select --"] + locations_list)
+            if selected_bulk_loc != "-- Select --":
+                with st.expander("🚨 CRITICAL WARNING: Bulk Location Wipe"):
+                    st.error(f"This deletes ALL curve tracking lines containing string markers matching coordinate **{selected_bulk_loc}**.")
+                    confirm_loc_text = st.text_input("Type 'DELETE LOCATION' to authorize mass wipe:")
+                    if st.button("💥 Execute Bulk Location Curve Clear-Out", type="primary"):
+                        if confirm_loc_text.strip() == "DELETE LOCATION":
+                            bulk_loc_sql = f"DELETE FROM `{table_curves}` WHERE CurveID LIKE '%{selected_bulk_loc}%'"
+                            client.query(bulk_loc_sql).result()
+                            st.success(f"🔥 Cleared all curve lines associated with location coordinate tags: {selected_bulk_loc}")
+                            st.cache_data.clear()
+                            time.sleep(1.2)
+                            st.rerun()
+                        else:
+                            st.error("Wipe verification token mismatched.")
 
 
 def render_curve_upload_engine(client, table_curves, inventory_df):
@@ -3043,8 +3018,6 @@ def render_curve_upload_engine(client, table_curves, inventory_df):
 
     if u_files:
         existing_ids = inventory_df['Curve Identifier'].tolist() if not inventory_df.empty else []
-        
-        # Filter out files that already exist to prevent duplicates
         valid_files = [f for f in u_files if f.name.rsplit('.', 1)[0] not in existing_ids]
         dupes = [f.name for f in u_files if f.name.rsplit('.', 1)[0] in existing_ids]
 
@@ -3063,12 +3036,10 @@ def process_curve_uploads(client, u_files, table_curves):
     
     for f in u_files:
         try:
-            # Day, Temp mapping
             df = pd.read_csv(f, skiprows=2, usecols=[0, 1], names=['Day', 'Temp'])
             df['CurveID'] = f.name.rsplit('.', 1)[0]
             df['upload_date'] = today_str
             
-            # Clean
             df['Day'] = pd.to_numeric(df['Day'], errors='coerce')
             df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
             df = df.dropna(subset=['Day', 'Temp'])
@@ -3126,20 +3097,27 @@ def render_management_controls():
 
 def render_management_filters(reg_df, selected_project, target_scope):
     """
-    Renders hierarchical filters. Includes hardened Hour Sliders to handle precise 
-    timestamp window tracking safely without timezone offset compilation leaks.
+    Renders hierarchical filters. Includes precise date and time input tools
+    to handle exact minute-level windows safely without timezone offset compilation leaks.
     """
     col_f1, col_f2, col_f3 = st.columns(3)
     
     with col_f1:
         temporal_dir = st.selectbox("Temporal Direction", ["Between Range", "Older Than", "Newer Than"])
         
-        # Split Date Input and Hour Sliders for safe isolation strings
-        s_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=7))
-        s_hour = st.slider("Start Hour Bracket", 0, 23, 0, help="0 = Midnight, 12 = Noon, 23 = 11 PM")
-        
-        e_date = st.date_input("End Date", value=datetime.now().date())
-        e_hour = st.slider("End Hour Bracket", 0, 23, 23)
+        # Continuous exact datetime parsing infrastructure to bypass rigid hourly brackets
+        if temporal_dir == "Between Range":
+            c_start, c_end = st.columns(2)
+            with c_start:
+                s_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=7), key="mgmt_s_date")
+                s_time = st.time_input("Start Time (Exact)", value=datetime.min.time(), key="mgmt_s_time")
+            with c_end:
+                e_date = st.date_input("End Date", value=datetime.now().date(), key="mgmt_e_date")
+                e_time = st.time_input("End Time (Exact)", value=datetime.max.time(), key="mgmt_e_time")
+        else:
+            s_date = st.date_input("Target Date", value=datetime.now().date() - timedelta(days=7), key="mgmt_single_date")
+            s_time = st.time_input("Target Time (Exact)", value=datetime.min.time(), key="mgmt_single_time")
+            e_date, e_time = None, None
 
     with col_f2:
         val_filter = st.selectbox("Value Filter", ["No Threshold", "Above Threshold", "Below Threshold"])
@@ -3168,15 +3146,15 @@ def render_management_filters(reg_df, selected_project, target_scope):
             
     return {
         "temporal_dir": temporal_dir, 
-        "s_date": s_date, "s_hour": s_hour,
-        "e_date": e_date, "e_hour": e_hour,
+        "s_date": s_date, "s_time": s_time,
+        "e_date": e_date, "e_time": e_time,
         "val_filter": val_filter, "threshold": threshold, "scope_val": scope_val
     }
 
 
 def build_management_where_clause(reg_df, selected_project, target_scope, current_status_filter, f):
     """
-    Constructs a WHERE clause using custom-built hour timestamp syntax mapping matching BigQuery schemas.
+    Constructs a WHERE clause using custom-built fine-grained timestamp string definitions.
     """
     proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].unique().tolist()
     if not proj_nodes:
@@ -3195,10 +3173,10 @@ def build_management_where_clause(reg_df, selected_project, target_scope, curren
         where_clauses = [f"NodeNum IN ({nodes_str})"]
 
     # 2. Hardened ISO Timestamp String Serialization (Bypasses local time parsing drift)
-    start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_hour']:02d}:00:00"
-    end_ts_str = f"{f['e_date'].strftime('%Y-%m-%d')} {f['e_hour']:02d}:59:59"
+    start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
 
     if f["temporal_dir"] == "Between Range":
+        end_ts_str = f"{f['e_date'].strftime('%Y-%m-%d')} {f['e_time'].strftime('%H:%M:%S')}"
         where_clauses.append(f"timestamp BETWEEN '{start_ts_str}' AND '{end_ts_str}'")
     elif f["temporal_dir"] == "Older Than" or f["temporal_dir"] == "Newer Than":
         op = "<" if f["temporal_dir"] == "Older Than" else ">"
@@ -3210,10 +3188,9 @@ def build_management_where_clause(reg_df, selected_project, target_scope, curren
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"temperature < {f['threshold']}")
 
-    # 4. NEW CONDITION: Enforce target status filter constraints
+    # 4. Enforce target status filter constraints
     if current_status_filter != "All Records":
         if current_status_filter == "TRUE":
-            # Points marked as default 'TRUE' lack an override entry inside the manual rejections table
             where_clauses.append("r.approve IS NULL")
         else:
             where_clauses.append(f"r.approve = '{current_status_filter}'")
@@ -3248,10 +3225,8 @@ def render_data_management_page(client, reg_df, selected_project):
 def render_verification_step(client, where_str, telemetry_table, rejections_table):
     """Queries BigQuery to show matching data metrics grouped by active flag states."""
     if st.button("🔍 Step 1: Verify Match Count & Current Status", key="mgmt_verify_btn"):
-        # Resolve potential field ambiguity by aliasing table pointers cleanly
         aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
         
-        # Pulls metrics and explicitly falls back to 'TRUE' for unflagged base records
         status_q = f"""
             SELECT 
                 COALESCE(r.approve, 'TRUE') as Designation,
@@ -3272,7 +3247,6 @@ def render_verification_step(client, where_str, telemetry_table, rejections_tabl
                 st.subheader("📊 Active Designation Profile Summary")
                 st.info("The table below displays the exact distribution of how your selected points are currently classified inside the library.")
                 
-                # Format presentation table for easy reading
                 st.dataframe(
                     res.rename(columns={"Designation": "Current Designation Status", "Point_Count": "Total Data Points"}), 
                     use_container_width=True, 
@@ -3298,8 +3272,6 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
             aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
             
             if new_status == "TRUE":
-                # Moving points back to TRUE means dropping their override rows out of the rejections dictionary table
-                # We fetch the valid unique composite index keys from the view layer to execute a clean removal pass
                 sql = f"""
                     DELETE FROM `{target_table}`
                     WHERE (NodeNum, timestamp) IN (
@@ -3310,8 +3282,6 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
                     )
                 """
             else:
-                # HARDENED COLLISION DEFENSE: DISTINCT filters out redundant telemetry timestamps
-                # directly inside the source block 'S' to pull exact composite rows seamlessly
                 sql = f"""
                     MERGE `{target_table}` T
                     USING (
@@ -3371,7 +3341,6 @@ def main():
         render_data_checker(client, reg_df)
 
     elif admin_page == "📡 Setup Node Tool":
-        # Core data dashboard renamed globally to Project Overview mapping
         render_project_status_dashboard(client, selected_project, unit_label, target_registry)
         st.divider()
         render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry)
