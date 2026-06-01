@@ -1791,7 +1791,30 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         target_tbl = st.radio("Target Source", ["SensorPush", "Lord"], horizontal=True)
         if st.button("🧨 Run Hourly Compression"):
             path = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_tbl.lower()}"
-            sql = f"CREATE OR REPLACE TABLE `{path}` AS SELECT TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, NodeNum, AVG(temperature) as temperature FROM `{path}` GROUP BY 1, 2"
+            
+            # Applying ROUND(..., 1) to force truncation to a single decimal place (.0)
+            if target_tbl.lower() == "sensorpush":
+                sql = f"""
+                    CREATE OR REPLACE TABLE `{path}` AS 
+                    SELECT 
+                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                        NodeNum, 
+                        ROUND(AVG(temperature), 1) as temperature,
+                        AVG(rssi) as rssi  -- Protects the view constraint
+                    FROM `{path}` 
+                    GROUP BY 1, 2
+                """
+            else:
+                sql = f"""
+                    CREATE OR REPLACE TABLE `{path}` AS 
+                    SELECT 
+                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                        NodeNum, 
+                        ROUND(AVG(temperature), 1) as temperature 
+                    FROM `{path}` 
+                    GROUP BY 1, 2
+                """
+                
             client.query(sql).result()
             st.success("Cleanup Complete.")
             st.cache_data.clear()
