@@ -2742,9 +2742,11 @@ def render_ref_curve_library_page(client):
     """
     st.subheader("📈 Reference Curve Library Matrix")
     
+    # Updated to point exactly to your table name
     table_curves = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
     inventory_df = pd.DataFrame()
     
+    # Extract live curve records with built-in 404 missing table safety
     from google.api_core.exceptions import NotFound
     try:
         inventory_df = client.query(f"SELECT * FROM `{table_curves}` ORDER BY 1 ASC").to_dataframe()
@@ -2753,11 +2755,15 @@ def render_ref_curve_library_page(client):
     except Exception as e:
         st.error(f"Failed to extract live reference curve database logs: {e}")
 
+    # Layout structural workspaces split between view pane and upload form
     tab_view, tab_upload, tab_delete = st.tabs(["📊 View Active Curves", "📥 Upload / Overwrite Curve File", "🗑️ Remove Profile & Bulk Delete"])
 
     with tab_view:
         if not inventory_df.empty:
-            st.dataframe(inventory_df, use_container_width=True, hide_index=True)
+            summary_df = fetch_curve_inventory(client, table_curves)
+            st.divider()
+            # Injects the new consolidated location layout view
+            render_location_summary_table(client, table_curves)
         else:
             st.info("The reference curve asset register is currently unpopulated.")
 
@@ -2766,7 +2772,6 @@ def render_ref_curve_library_page(client):
 
     with tab_delete:
         render_curve_management_tools(client, inventory_df, table_curves)
-
 
 def render_curve_upload_form(client, table_curves):
     """
@@ -2902,6 +2907,7 @@ def render_curve_upload_form(client, table_curves):
 def fetch_curve_inventory(client, table_curves):
     """
     Fetches current library stats with robust column handling.
+    Includes the upload_date field to present on the frontend summary dashboard.
     """
     inv_q = f"""
         SELECT 
@@ -2917,6 +2923,7 @@ def fetch_curve_inventory(client, table_curves):
     try:
         inventory_df = client.query(inv_q).to_dataframe()
     except Exception as primary_error:
+        # Fallback Query: If upload_date column doesn't exist yet, return an N/A placeholder column string cleanly
         fallback_q = f"""
             SELECT 
                 CurveID, 
@@ -2933,14 +2940,14 @@ def fetch_curve_inventory(client, table_curves):
             st.error(f"❌ Complete Database Schema Access Failure: {secondary_error}")
             return pd.DataFrame()
 
-    st.subheader("📚 Theoretical Library Inventory")
     if not inventory_df.empty:
+        # Present summarized metadata fields directly into clean column data mapping grids
         st.dataframe(
             inventory_df.rename(columns={
                 "CurveID": "Curve Identifier",
                 "Max_Day": "Duration (Days)",
                 "Total_Points": "Data Density",
-                "Last_Upload": "Upload Date"
+                "Last_Upload": "Date Uploaded"
             }),
             use_container_width=True,
             hide_index=True
@@ -2950,6 +2957,64 @@ def fetch_curve_inventory(client, table_curves):
         st.info("The library is currently empty. Upload curve CSVs below.")
         return pd.DataFrame()
 
+def render_location_summary_table(client, table_curves):
+    """
+    Queries the reference curve library and aggregates the data to display 
+    exactly one entry per physical location with key engineering parameters.
+    """
+    st.subheader("📍 Reference Curve Location Directory")
+    st.markdown("Consolidated summary mapping exactly one entry per distinct site location coordinate.")
+
+    # Optimized aggregation query parsing project and location flags out of the CurveID string
+    summary_q = f"""
+        WITH ParsedCurves AS (
+            SELECT 
+                CurveID,
+                Day,
+                upload_date,
+                -- Assumes standard naming format containing Project (e.g., '2541') and Location (e.g., 'S1')
+                -- Fallback to splitting by common delimiters if special characters exist
+                SPLIT(CurveID, '-')[SAFE_OFFSET(0)] as parsed_proj,
+                COALESCE(SPLIT(CurveID, '-')[SAFE_OFFSET(1)], 'General') as parsed_loc
+            FROM `{table_curves}`
+        )
+        SELECT 
+            MAX(parsed_proj) as Project,
+            parsed_loc as Location,
+            MAX(upload_date) as `Date Uploaded`,
+            COUNT(*) as `Num points`,
+            MIN(Day) as `Day Start`,
+            MAX(Day) as `Day end`
+        FROM ParsedCurves
+        GROUP BY parsed_loc
+        ORDER BY Project ASC, Location ASC
+    """
+
+    try:
+        with st.spinner("Compiling location directory matrices..."):
+            location_df = client.query(summary_q).to_dataframe()
+
+        if not location_df.empty:
+            # Enforce clean formatting types for presentation grid
+            location_df['Day Start'] = location_df['Day Start'].astype(float).round(1)
+            location_df['Day end'] = location_df['Day end'].astype(float).round(1)
+            
+            st.dataframe(
+                location_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Num points": st.column_config.NumberColumn("Num Points", format="%d"),
+                    "Day Start": st.column_config.NumberColumn("Day Start", format="%.1f d"),
+                    "Day end": st.column_config.NumberColumn("Day End", format="%.1f d")
+                }
+            )
+            st.caption(f"Total Unique Monitored Locations Configured: {len(location_df)}")
+        else:
+            st.info("No location profiles could be assembled. Ensure curve files are uploaded.")
+
+    except Exception as e:
+        st.error(f"Failed to generate consolidated location summary table: {e}")
 
 def render_curve_management_tools(client, inventory_df, table_curves):
     """
