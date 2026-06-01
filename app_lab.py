@@ -1,153 +1,72 @@
-import streamlit as st
+import requests
+import json
 import pandas as pd
-import google.auth
-from google.cloud import bigquery
-from google.oauth2 import service_account
+from datetime import datetime
 
-# =============================================================================
-# 1. CONFIGURATION
-# =============================================================================
-PROJECT_ID = "sensorpush-export"
-DATASET_ID = "Temperature"
-INVENTORY_TABLE = "hardware_inventory"
-RAW_DATA_TABLE = "raw_sensorpush"
-EXPORT_FILE_PATH = "2026-05-29T20-25_export.csv"
+# API Configuration
+API_BASE_URL = "https://api.sensorpush.com/api/v1"
+EMAIL = "your_sensorpush_email@example.com"
+PASSWORD = "your_sensorpush_password"
 
-st.title("🧪 SensorPush Data Asset Migration Lab")
-st.write("This tool processes your exported sensor layout maps, appends new records into your hardware inventory, and repairs historical database rows.")
+def audit_sensorpush_hardware():
+    session = requests.Session()
+    headers = {"accept": "application/json", "Content-Type": "application/json"}
+    
+    # 1. Authenticate & Retrieve Authorization Token
+    print("🔐 Authenticating with SensorPush Cloud...")
+    auth_payload = {"email": EMAIL, "password": PASSWORD}
+    auth_res = session.post(f"{API_BASE_URL}/oauth/authorize", json=auth_payload, headers=headers)
+    if auth_res.status_code != 200:
+        print(f"❌ Auth Failed: {auth_res.text}")
+        return
+    auth_code = auth_res.json().get("authorization")
 
-# =============================================================================
-# 2. ROBUST AUTHENTICATION ENGINE
-# =============================================================================
-SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/bigquery",
-    "https://www.googleapis.com/auth/cloud-platform"
-]
+    # 2. Exchange for Access Token
+    token_payload = {"authorization": auth_code}
+    token_res = session.post(f"{API_BASE_URL}/oauth/accesstoken", json=token_payload, headers=headers)
+    access_token = token_res.json().get("accesstoken")
+    
+    # Update session headers to utilize the new bearer authorization
+    session.headers.update({"Authorization": access_token})
+    
+    # 3. Pull Complete Sensor Inventory
+    print("📡 Pulling Master Sensor List...")
+    sensor_res = session.post(f"{API_BASE_URL}/devices/sensors", json={})
+    sensors_dict = sensor_res.json() # Keyed by string sensor IDs
+    
+    # 4. Pull Latest Samples to parse RSSI and Last Seen Time
+    print("📊 Pulling latest telemetry blocks...")
+    # Limiting payload to the single latest sample per sensor to verify link status
+    sample_payload = {"limit": 1} 
+    sample_res = session.post(f"{API_BASE_URL}/samples", json=sample_payload)
+    samples_dict = sample_res.json().get("sensors", {})
 
-@st.cache_resource
-def get_bigquery_client():
-    if "gcp_service_account" in st.secrets:
-        # Streamlit Cloud Authentication
-        info = st.secrets["gcp_service_account"]
-        credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-        return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
-    else:
-        # Local Desktop Fallback Authentication
-        try:
-            credentials, project = google.auth.default(scopes=SCOPES)
-            return bigquery.Client(credentials=credentials, project=PROJECT_ID)
-        except Exception as e:
-            st.error(f"Failed to load local GCP credentials: {e}")
-            return None
+    # 5. Compile Hardware Audit Matrix
+    audit_records = []
+    for s_id, s_meta in sensors_dict.items():
+        # SensorPush objects package specific sample info inside the global samples block
+        latest_samples = samples_dict.get(s_id, [])
+        
+        last_seen = "N/A"
+        rssi = "N/A"
+        
+        if latest_samples:
+            latest_point = latest_samples[0]
+            last_seen = latest_point.get("observed") # ISO Timestamp format
+            rssi = latest_point.get("rssi", "N/A")
 
-client = get_bigquery_client()
+        audit_records.append({
+            "Sensor ID (NodeNum)": s_id,
+            "Name": s_meta.get("name", "Unnamed Sensor"),
+            "Active Profile": s_meta.get("active", True),
+            "Last Cloud Ping": last_seen,
+            "Signal Strength (RSSI)": rssi
+        })
+        
+    df = pd.DataFrame(audit_records)
+    print("\n📦 --- SENSORPUSH HARDWARE METRIC AUDIT ---")
+    print(df.to_string(index=False))
+    return df
 
-# =============================================================================
-# 3. PIPELINE EXECUTION BLOCK
-# =============================================================================
-if client is None:
-    st.error("🔒 BigQuery client connection could not be established. Check your secrets configuration.")
-else:
-    if st.button("🚀 Run Sensor Mapping Migration & Database Repair", use_container_width=True):
-        try:
-            # --- STEP A: PROCESS AND CLEAN DATA ---
-            st.info("⏳ Step A: Reading and deduplicating exported file profiles...")
-            df = pd.read_csv(EXPORT_FILE_PATH)
-            df_clean = df.drop_duplicates(subset=['Sensor ID (RawID)']).copy()
-            
-            # Reformat to match BigQuery hardware_inventory expectations exactly
-            upload_df = pd.DataFrame({
-                'RawID': df_clean['Sensor ID (RawID)'].astype(str).str.strip(),
-                'NodeNum': df_clean['App Name (NodeNum)'].astype(str).str.strip()
-            })
-            st.success(f"✅ Found {len(upload_df)} unique, clean sensor mappings ready for push.")
-            
-            # --- STEP B: APPEND TO HARDWARE INVENTORY ---
-            st.info(f"⏳ Step B: Appending clean maps into BigQuery table: `{INVENTORY_TABLE}`...")
-            table_ref = f"{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}"
-            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-            
-            client.load_table_from_dataframe(upload_df, table_ref, job_config=job_config).result()
-            st.success("✅ Successfully updated your master hardware inventory assets!")
-            
-            # --- STEP C: EXECUTE REPAIR QUERY ---
-            st.info(f"⏳ Step C: Running buffer-safe repair on `{RAW_DATA_TABLE}`...")
-
-            # --- STEP D: PURGE NAKED INT STRINGS ---
-            st.info("⏳ Step D: Aligning remaining raw numeric NodeNums to active asset names...")
-            
-            repair_numbers_sql = f"""
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
-            SELECT 
-                r.timestamp,
-                -- If NodeNum is a pure 8-digit number string and matches an inventory entry, swap it
-                COALESCE(
-                    IF(REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[0-9]{{8}}$'), i.NodeNum, r.NodeNum), 
-                    r.NodeNum
-                ) AS NodeNum,
-                r.temperature,
-                r.rssi
-            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r
-            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` i
-              -- Strip decimals on inventory matching to catch matching 8-digit IDs
-              ON REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[0-9]{{8}}$')
-             AND TRIM(r.NodeNum) = SPLIT(TRIM(CAST(i.RawID AS STRING)), '.')[SAFE_OFFSET(0)];
-            """
-            
-            query_job_digits = client.query(repair_numbers_sql)
-            query_job_digits.result()  # Wait for BigQuery execution to complete
-            
-            st.success("🎉 All pure 8-digit hardware strings have been matched and updated to clean physical asset tags!")
-
-            # --- STEP E: TRUNCATE TRAILING NOTES FROM NODENUMS ---
-            st.info("⏳ Step E: Truncating trailing technician notes from NodeNums...")
-            
-            truncate_notes_sql = f"""
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
-            SELECT 
-                r.timestamp,
-                -- If it matches our asset pattern, extract ONLY the first 7 characters (e.g., 'TP-0169')
-                CASE 
-                    WHEN REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[A-Za-z]{{2}}-[0-9]{{4}}') 
-                    THEN REGEXP_EXTRACT(TRIM(r.NodeNum), r'^[A-Za-z]{{2}}-[0-9]{{4}}')
-                    ELSE r.NodeNum 
-                END AS NodeNum,
-                r.temperature,
-                r.rssi
-            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r;
-            """
-            
-            query_job_truncate = client.query(truncate_notes_sql)
-            query_job_truncate.result()  # Wait for BigQuery to execute the table swap
-            
-            st.success("✂️ Successfully truncated all trailing technician notes! NodeNums are restricted to their clean asset format.")
-            
-            # Create or replace table bypasses the streaming buffer restriction completely
-            repair_sql = f"""
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
-            SELECT 
-                r.timestamp,
-                -- If it's unmapped and has a match in the inventory, switch it to the clean NodeNum
-                COALESCE(
-                    IF(r.NodeNum LIKE 'UNMAPPED-%', i.NodeNum, r.NodeNum), 
-                    r.NodeNum
-                ) AS NodeNum,
-                r.temperature,
-                r.rssi
-            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r
-            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` i
-              ON r.NodeNum LIKE 'UNMAPPED-%'
-             AND SPLIT(r.NodeNum, '-')[SAFE_OFFSET(1)] = SPLIT(TRIM(CAST(i.RawID AS STRING)), '.')[SAFE_OFFSET(0)];
-            """
-            
-            query_job = client.query(repair_sql)
-            query_job.result()  # Wait for BigQuery to finish rebuilding the table
-            
-            st.balloons()
-            st.success(f"🎉 Complete Success! Rebuilt `{RAW_DATA_TABLE}` safely. All historical UNMAPPED rows are now permanently aligned to your active hardware assets!")
-            
-        except FileNotFoundError:
-            st.error(f"❌ Could not locate your file at `{EXPORT_FILE_PATH}`. Please check that the file is uploaded to your environment root directory.")
-        except Exception as e:
-            st.error(f"❌ Migration Error Encountered: {e}")
+if __name__ == "__main__":
+    audit_sensorpush_hardware()
