@@ -1320,7 +1320,8 @@ def render_data_intake_page(selected_project):
                             
                             df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], format='mixed')
                             df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
-                            df_processed['NodeNum'] = match.group(1).strip() if match else "Unknown"
+                            df_processed['NodeNum'] = match.group(1).strip() if match 
+                        else "Unknown"
 
                     # 3. DB COMMIT
                     if not df_processed.empty:
