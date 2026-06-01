@@ -66,6 +66,7 @@ def render_sidebar():
             "⚙️ Project Master", 
             "📈 Ref Curve Library", 
             "🧨 Data Management"
+            "🧪 Asset Migration Lab"
         ],
         key="main_admin_nav"
     )
@@ -3309,6 +3310,135 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
 
+# =============================================================================
+# PAGE MODULE: 🧪 DATA ASSET MIGRATION LAB
+# =============================================================================
+
+def render_data_asset_migration_lab(client):
+    """
+    Processes exported sensor layout maps, appends new records into your 
+    hardware inventory, and repairs historical database rows by stripping trailing 
+    decimals and truncating technician notes.
+    """
+    st.title("🧪 SensorPush Data Asset Migration Lab")
+    st.markdown(
+        """
+        Execute large-scale database repair and asset mapping transformations. 
+        This tool processes exported sensor layout maps, appends new records into your 
+        master hardware inventory, and cleanly aligns historical database rows.
+        """
+    )
+    
+    # Align local script table targets to application global constants
+    RAW_DATA_TABLE = TABLE_ID  # raw_sensorpush
+    EXPORT_FILE_PATH = "2026-05-29T20-25_export.csv"
+
+    st.info(f"📦 Active Data Target: `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}`")
+
+    if client is None:
+        st.error("🔒 Database Link Offline. Connection could not be established.")
+        return
+
+    if st.button("🚀 Run Sensor Mapping Migration & Database Repair", use_container_width=True):
+        try:
+            # --- STEP A: PROCESS AND CLEAN DATA ---
+            st.info("⏳ Step A: Reading and deduplicating exported file profiles...")
+            df = pd.read_csv(EXPORT_FILE_PATH)
+            df_clean = df.drop_duplicates(subset=['Sensor ID (RawID)']).copy()
+            
+            # Reformat to match BigQuery hardware_inventory expectations exactly
+            upload_df = pd.DataFrame({
+                'RawID': df_clean['Sensor ID (RawID)'].astype(str).str.strip(),
+                'NodeNum': df_clean['App Name (NodeNum)'].astype(str).str.strip()
+            })
+            st.success(f"✅ Found {len(upload_df)} unique, clean sensor mappings ready for push.")
+            
+            # --- STEP B: APPEND TO HARDWARE INVENTORY ---
+            st.info(f"⏳ Step B: Appending clean maps into BigQuery table: `{INVENTORY_TABLE}`...")
+            table_ref = f"{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}"
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+            
+            client.load_table_from_dataframe(upload_df, table_ref, job_config=job_config).result()
+            st.success("✅ Successfully updated your master hardware inventory assets!")
+            
+            # --- STEP C & D: PURGE NAKED INT STRINGS ---
+            st.info("⏳ Step C & D: Aligning remaining raw numeric NodeNums to active asset names...")
+            
+            repair_numbers_sql = f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
+            SELECT 
+                r.timestamp,
+                -- If NodeNum is a pure 8-digit number string and matches an inventory entry, swap it
+                COALESCE(
+                    IF(REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[0-9]{{8}}$'), i.NodeNum, r.NodeNum), 
+                    r.NodeNum
+                ) AS NodeNum,
+                r.temperature,
+                r.rssi
+            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` i
+              -- Strip decimals on inventory matching to catch matching 8-digit IDs
+              ON REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[0-9]{{8}}$')
+             AND TRIM(r.NodeNum) = SPLIT(TRIM(CAST(i.RawID AS STRING)), '.')[SAFE_OFFSET(0)];
+            """
+            
+            query_job_digits = client.query(repair_numbers_sql)
+            query_job_digits.result()  
+            st.success("🎉 All pure 8-digit hardware strings have been matched and updated to clean physical asset tags!")
+
+            # --- STEP E: TRUNCATE TRAILING NOTES FROM NODENUMS ---
+            st.info("⏳ Step E: Truncating trailing technician notes from NodeNums...")
+            
+            truncate_notes_sql = f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
+            SELECT 
+                r.timestamp,
+                -- If it matches our asset pattern, extract ONLY the first 7 characters (e.g., 'TP-0169')
+                CASE 
+                    WHEN REGEXP_CONTAINS(TRIM(r.NodeNum), r'^[A-Za-z]{{2}}-[0-9]{{4}}') 
+                    THEN REGEXP_EXTRACT(TRIM(r.NodeNum), r'^[A-Za-z]{{2}}-[0-9]{{4}}')
+                    ELSE r.NodeNum 
+                END AS NodeNum,
+                r.temperature,
+                r.rssi
+            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r;
+            """
+            
+            query_job_truncate = client.query(truncate_notes_sql)
+            query_job_truncate.result()  
+            st.success("✂️ Successfully truncated all trailing technician notes! NodeNums are restricted to their clean asset format.")
+            
+            # --- FINAL STEP: REPAIR UNMAPPED LABELS ---
+            st.info("⏳ Final Step: Rebuilding stream telemetry table to fix legacy unmapped data strings...")
+            repair_sql = f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` AS
+            SELECT 
+                r.timestamp,
+                -- If it's unmapped and has a match in the inventory, switch it to the clean NodeNum
+                COALESCE(
+                    IF(r.NodeNum LIKE 'UNMAPPED-%', i.NodeNum, r.NodeNum), 
+                    r.NodeNum
+                ) AS NodeNum,
+                r.temperature,
+                r.rssi
+            FROM `{PROJECT_ID}.{DATASET_ID}.{RAW_DATA_TABLE}` r
+            LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.{INVENTORY_TABLE}` i
+              ON r.NodeNum LIKE 'UNMAPPED-%'
+             AND SPLIT(r.NodeNum, '-')[SAFE_OFFSET(1)] = SPLIT(TRIM(CAST(i.RawID AS STRING)), '.')[SAFE_OFFSET(0)];
+            """
+            
+            query_job = client.query(repair_sql)
+            query_job.result()  
+            
+            st.balloons()
+            st.success(f"🎉 Complete Success! Rebuilt `{RAW_DATA_TABLE}` safely. All historical UNMAPPED rows are now permanently aligned to your active hardware assets!")
+            st.cache_data.clear()
+            
+        except FileNotFoundError:
+            st.error(f"❌ Could not locate your file at `{EXPORT_FILE_PATH}`. Please check that the file is uploaded to your environment root directory.")
+        except Exception as e:
+            st.error(f"❌ Migration Error Encountered: {e}")
+
 # ===============================================================
 # FINAL INTEGRATED EXECUTION BLOCK
 # ===============================================================
@@ -3362,6 +3492,9 @@ def main():
 
     elif admin_page == "🧨 Data Management":
         render_data_management_page(client, reg_df, selected_project)
+
+    elif admin_page == "🧪 Asset Migration Lab":
+        render_data_asset_migration_lab(client)
       
 # ===============================================================
 # EXECUTION ENTRY POINT
