@@ -1,134 +1,45 @@
 import streamlit as st
 import pandas as pd
 import requests
-from google.cloud import bigquery
-from google.oauth2 import service_account
 
-# 1. PAGE LAYOUT CONFIGURATION
-st.set_page_config(
-    page_title="SensorPush API Sandbox",
-    page_icon="📡",
-    layout="wide"
-)
+st.set_page_config(page_title="API Debugger", layout="wide")
 
-# Global Database Constants (Mirrored from your production config)
-DATASET_ID = "Temperature" 
-PROJECT_ID = "sensorpush-export"
+st.title("📡 SensorPush Link Test Sandbox")
 
-@st.cache_resource
-def get_bq_client():
-    """
-    Initializes and caches the BigQuery connection.
-    Prioritizes Service Account info from st.secrets if running on Streamlit Cloud.
-    """
-    try:
-        SCOPES = [
-            "https://www.googleapis.com/auth/bigquery", 
-            "https://www.googleapis.com/auth/drive" 
-        ]
-        
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(
-                info, 
-                scopes=SCOPES
-            )
-            return bigquery.Client(credentials=credentials, project=info["project_id"])
-        
-        return bigquery.Client(project=PROJECT_ID)
+BASE_URL = "https://api.sensorpush.com/api/v1"
+ACCOUNTS = [
+    {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
+    {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
+    {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
+]
 
-    except Exception as e:
-        st.sidebar.error(f"❌ BigQuery Authentication Failed: {e}")
-        return None
-
-def main():
-    st.title("📡 SensorPush API & Hardware Link Auditor")
-    st.markdown(
-        "Use this standalone sandbox tool to query the SensorPush Cloud API directly and cross-reference "
-        "hardware connection diagnostics with your active BigQuery Node Registry."
-    )
-    st.divider()
-
-    # 2. HARDCODED CREDENTIAL ARRAYS
-    BASE_URL = "https://api.sensorpush.com/api/v1"
-    ACCOUNTS = [
-        {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
-        {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
-        {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
-    ]
-
-    # 3. LIVE BIGQUERY REGISTRY LOOKUP
-    client = get_bq_client()
-    registered_nodes = set()
+# Simple execution trigger
+if st.button("🚀 Test Cloud Connections", use_container_width=True):
+    all_records = []
     
-    if client is not None:
-        try:
-            # Pull active node configurations to cross-verify streaming data pipelines
-            reg_q = f"SELECT DISTINCT NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` WHERE End_Date IS NULL"
-            reg_df = client.query(reg_q).to_dataframe()
-            registered_nodes = set(reg_df['NodeNum'].dropna().astype(str).tolist())
-            st.success(f"🔗 Successfully indexed {len(registered_nodes)} active nodes from the database registry.")
-        except Exception as e:
-            st.warning(f"⚠️ Registry cross-reference offline (using API-only fallback diagnostics): {e}")
-    else:
-        st.info("💡 Running in local API fallback mode. Database connections will not be cross-referenced.")
-
-    # 4. EXECUTION TRIGGER GATEWAY
-    if st.button("🚀 Execute Multi-Account Cloud API Audit", use_container_width=True):
-        headers = {"accept": "application/json", "Content-Type": "application/json"}
-        all_sensor_records = []
+    for account in ACCOUNTS:
+        email = account['email']
+        st.write(f"Connecting to account: `{email}`...")
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        for idx, account in enumerate(ACCOUNTS):
-            email = account['email']
-            password = account['password']
-            status_text.markdown(f"🔒 Requesting cloud authorization token for: **{email}**...")
+        try:
+            # Added explicit 10-second timeout gates to prevent blank screen freezes
+            res = requests.post(
+                f"{BASE_URL}/oauth/authorize", 
+                json={"email": email, "password": account['password']}, 
+                timeout=10
+            )
             
-            session = requests.Session()
-            try:
-                # Step A: OAuth Authorization
-                auth_res = session.post(f"{BASE_URL}/oauth/authorize", json={"email": email, "password": password}, headers=headers)
-                if auth_res.status_code != 200:
-                    st.error(f"⚠️ Cloud Auth failed for {email}: {auth_res.text}")
-                    continue
-                auth_code = auth_res.json().get("authorization")
-
-                # Step B: Access Token Exchange
-                token_res = session.post(f"{BASE_URL}/oauth/accesstoken", json={"authorization": auth_code}, headers=headers)
-                access_token = token_res.json().get("accesstoken")
-                session.headers.update({"Authorization": access_token})
+            if res.status_code == 200:
+                st.success(f"🟢 Connected to {email} successfully!")
+                # Balance out records matrix
+                all_records.append({"Account": email, "API Status": "Connected"})
+            else:
+                st.error(f"🔴 Auth Denied for {email}: {res.text}")
                 
-                # Step C: Extract Gateway Sensor Fleet Index
-                sensor_res = session.post(f"{BASE_URL}/devices/sensors", json={})
-                sensors_dict = sensor_res.json()
-                
-                # Step D: Pull Latest Sample Telemetry for Hardware Metrics
-                sample_res = session.post(f"{BASE_URL}/samples", json={"limit": 1})
-                samples_dict = sample_res.json().get("sensors", {})
-                
-                for s_id, s_meta in sensors_dict.items():
-                    latest_samples = samples_dict.get(s_id, [])
-                    
-                    last_ping = "Never Seen"
-                    rssi_val = None
-                    
-                    if latest_samples:
-                        last_ping = latest_samples[0].get("observed")
-                        rssi_val = latest_samples[0].get("rssi")
-                    
-                    # Intersect against BigQuery sets
-                    is_mapped = s_id in registered_nodes
-
-                    all_sensor_records.append({
-                        "Account Profile": email,
-                        "Sensor ID (NodeNum)": s_id,
-                        "App Alias Name": s_meta.get("name", "Unnamed"),
-                        "Registry Status": "🟢 Mapped & Active" if is_mapped else "❌ Missing from Registry",
-                        "Last Cloud Ping (UTC)": last_ping,
-                        "Signal Strength (RSSI)": rssi_val
-                    })
-                    
-            except Exception as e:
-                st.error(f"❌ Exception encountered inside processing thread for {email}: {e}")
+        except requests.exceptions.Timeout:
+            st.error(f"❌ Connection Timed Out for {email}. The cloud network is unreachable.")
+        except Exception as e:
+            st.error(f"❌ Failed to reach API for {email}: {e}")
+            
+    if all_records:
+        st.dataframe(pd.DataFrame(all_records), use_container_width=True)
