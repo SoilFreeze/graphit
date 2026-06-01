@@ -65,7 +65,7 @@ def render_sidebar():
             "📡 Data Recovery",
             "⚙️ Project Master", 
             "📈 Ref Curve Library", 
-            "🧨 Data Management"
+            "🧨 Data Management",
             "🧪 Asset Migration Lab"
         ],
         key="main_admin_nav"
