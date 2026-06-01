@@ -2770,103 +2770,133 @@ def render_ref_curve_library_page(client):
 
 def render_curve_upload_form(client, table_curves):
     """
-    Handles parsing and automated overwriting routines for imported CSV/XLSX reference curve datasets.
+    Handles parsing and automated bulk overwriting routines for multiple imported 
+    CSV/XLSX reference curve datasets at once. Derives unique identifiers directly 
+    from filenames and handles template structures safely.
     """
-    st.markdown("##### 📥 Import Engineering Calibration Profile")
-    st.info("💡 Overwrite rule active: Uploading a file with an identical curve identifier will wipe its old historical data blocks and replace them completely.")
+    st.markdown("##### 📥 Bulk Import Engineering Calibration Profiles")
+    st.info("💡 Overwrite rule active: Uploading files with identifiers that already exist in the library will wipe their old historical data blocks and replace them completely.")
 
-    uploaded_file = st.file_uploader("Choose Curve Dataset File", type=["csv", "xlsx"], key="curve_file_uploader_stream")
+    # Upgraded to accept multiple files simultaneously for bulk operations
+    uploaded_files = st.file_uploader(
+        "Choose Curve Dataset Files", 
+        type=["csv", "xlsx"], 
+        accept_multiple_files=True,
+        key="bulk_curve_file_uploader_stream"
+    )
 
-    if uploaded_file is not None:
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                try:
-                    uploaded_file.seek(0)
-                    uploaded_df = pd.read_csv(uploaded_file)
-                except UnicodeDecodeError:
-                    uploaded_file.seek(0)  
-                    uploaded_df = pd.read_csv(uploaded_file, encoding='ISO-8859-1')
-            else:
-                uploaded_file.seek(0)
-                uploaded_df = pd.read_excel(uploaded_file)
-
-            if uploaded_df is None or uploaded_df.empty:
-                st.error("Uploaded dataset structure contains no parsable rows. Stream pointer empty.")
-                return
-
-            if all(str(col).startswith("Unnamed:") for col in uploaded_df.columns):
-                if not uploaded_df.empty and any(any(x in str(val) for x in ['Time', 'Temp', '°']) for val in uploaded_df.iloc[0].values):
-                    real_headers = [str(val).strip() for val in uploaded_df.iloc[0].values]
-                    uploaded_df.columns = real_headers
-                    uploaded_df = uploaded_df.iloc[1:].reset_index(drop=True)
-                    st.caption("🧹 Detected and removed empty placeholder row at the top. Promoted text metrics to headers.")
-
-            unnamed_cols = [col for col in uploaded_df.columns if str(col).startswith("Unnamed:")]
-            if unnamed_cols and len(unnamed_cols) < len(uploaded_df.columns):
-                uploaded_df = uploaded_df.drop(columns=unnamed_cols)
-
-            uploaded_df = uploaded_df.dropna(how='all')
-
-            rename_dict = {}
-            for col in uploaded_df.columns:
-                c_upper = str(col).upper()
-                if 'TIME' in c_upper or 'DAY' in c_upper:
-                    rename_dict[col] = 'Day'
-                elif 'TEMP' in c_upper or '°' in c_upper:
-                    rename_dict[col] = 'Temp'
-            
-            if rename_dict:
-                uploaded_df = uploaded_df.rename(columns=rename_dict)
-
-            if len(uploaded_df) == 0:
-                st.error("❌ File parsing yielded zero records. Check your column headers.")
-                return
-
-            st.caption(f"🔍 Previewing Verified Dataset Elements ({len(uploaded_df)} total data rows found):")
-            st.dataframe(uploaded_df.head(5), use_container_width=True, hide_index=True)
-
-            possible_id_cols = ['Curve Identifier', 'Curve_Identifier', 'CurveID', 'Curve_ID', 'Curve']
-            found_id_col = next((c for c in possible_id_cols if c in uploaded_df.columns), None)
-
-            if found_id_col:
-                target_curve_identity = str(uploaded_df[found_id_col].iloc[0]).strip()
-                sql_id_match_col = found_id_col
-            else:
-                target_curve_identity = uploaded_file.name.rsplit('.', 1)[0].strip()
-                sql_id_match_col = "CurveID" 
-                uploaded_df[sql_id_match_col] = target_curve_identity
-                st.info(f"📋 Derived unique tracking reference identifier from filename: **{target_curve_identity}**")
-
-            with st.form("confirm_curve_overwrite_upload_form"):
-                st.warning(f"Target Identity Scheduled for Overwrite: **{target_curve_identity}**")
-                
-                if st.form_submit_button("🚀 Commit & Overwrite Live Target Records"):
-                    table_exists = True
+    if uploaded_files:
+        parsed_entries = []
+        
+        # Phase 1: Parse, clean, and stage all uploaded files
+        for u_file in uploaded_files:
+            try:
+                if u_file.name.endswith('.csv'):
+                    u_file.seek(0)
                     try:
-                        client.get_table(table_curves)
-                    except NotFound:
-                        table_exists = False
+                        uploaded_df = pd.read_csv(u_file)
+                    except UnicodeDecodeError:
+                        u_file.seek(0)  
+                        uploaded_df = pd.read_csv(u_file, encoding='ISO-8859-1')
+                else:
+                    u_file.seek(0)
+                    uploaded_df = pd.read_excel(u_file)
 
-                    if table_exists:
-                        purge_sql = f"DELETE FROM `{table_curves}` WHERE {sql_id_match_col} = '{target_curve_identity}'"
-                        client.query(purge_sql).result()
+                if uploaded_df is None or uploaded_df.empty:
+                    st.warning(f"⚠️ Skipping '{u_file.name}': Dataset structure contains no parsable rows.")
+                    continue
 
-                    if 'Day' in uploaded_df.columns and 'Temp' in uploaded_df.columns:
-                        uploaded_df['Day'] = pd.to_numeric(uploaded_df['Day'], errors='coerce')
-                        uploaded_df['Temp'] = pd.to_numeric(uploaded_df['Temp'], errors='coerce')
-                        uploaded_df = uploaded_df.dropna(subset=['Day', 'Temp'])
+                # Dynamic row header promoter for unlabelled rows
+                if all(str(col).startswith("Unnamed:") for col in uploaded_df.columns):
+                    if not uploaded_df.empty and any(any(x in str(val) for x in ['Time', 'Temp', '°']) for val in uploaded_df.iloc[0].values):
+                        real_headers = [str(val).strip() for val in uploaded_df.iloc[0].values]
+                        uploaded_df.columns = real_headers
+                        uploaded_df = uploaded_df.iloc[1:].reset_index(drop=True)
 
-                    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                    load_job = client.load_table_from_dataframe(uploaded_df, table_curves, job_config=job_config)
-                    load_job.result()
+                # Drop remaining unmapped junk columns
+                unnamed_cols = [col for col in uploaded_df.columns if str(col).startswith("Unnamed:")]
+                if unnamed_cols and len(unnamed_cols) < len(uploaded_df.columns):
+                    uploaded_df = uploaded_df.drop(columns=unnamed_cols)
 
-                    st.success(f"✅ Overwrite complete! Baseline parameters for **{target_curve_identity}** updated cleanly.")
-                    st.cache_data.clear()
-                    time.sleep(1.5)
-                    st.rerun()
+                uploaded_df = uploaded_df.dropna(how='all')
 
-        except Exception as file_parse_err:
-            st.error(f"Failed parsing file interface pipelines: {file_parse_err}")
+                # Standardize column naming conventions for BigQuery alignment
+                rename_dict = {}
+                for col in uploaded_df.columns:
+                    c_upper = str(col).upper()
+                    if 'TIME' in c_upper or 'DAY' in c_upper:
+                        rename_dict[col] = 'Day'
+                    elif 'TEMP' in c_upper or '°' in c_upper:
+                        rename_dict[col] = 'Temp'
+                
+                if rename_dict:
+                    uploaded_df = uploaded_df.rename(columns=rename_dict)
+
+                if 'Day' not in uploaded_df.columns or 'Temp' not in uploaded_df.columns:
+                    st.warning(f"⚠️ Skipping '{u_file.name}': Missing required Day or Temperature tracking parameters.")
+                    continue
+
+                # Enforce clean numeric constraints
+                uploaded_df['Day'] = pd.to_numeric(uploaded_df['Day'], errors='coerce')
+                uploaded_df['Temp'] = pd.to_numeric(uploaded_df['Temp'], errors='coerce')
+                uploaded_df = uploaded_df.dropna(subset=['Day', 'Temp'])
+
+                # Derive tracking identifier from filename root
+                target_curve_identity = u_file.name.rsplit('.', 1)[0].strip()
+                uploaded_df['CurveID'] = target_curve_identity
+                
+                # Add upload date flag
+                uploaded_df['upload_date'] = datetime.now().strftime('%Y-%m-%d')
+
+                if not uploaded_df.empty:
+                    parsed_entries.append((target_curve_identity, uploaded_df))
+
+            except Exception as e:
+                st.error(f"Error staging file '{u_file.name}': {e}")
+
+        # Phase 2: Execution and BigQuery Commit
+        if parsed_entries:
+            st.success(f"📋 Successfully verified and staged {len(parsed_entries)} reference curve profiles.")
+            
+            # Show a small consolidated preview grid of what is being uploaded
+            preview_summary = pd.DataFrame([
+                {"Curve Identifier": identity, "Data Points Found": len(df_item)}
+                for identity, df_item in parsed_entries
+            ])
+            st.dataframe(preview_summary, use_container_width=True, hide_index=True)
+
+            with st.form("confirm_bulk_curve_upload_form"):
+                st.warning("⚠️ Authorizing this action will overwrite matching historical entries in your library.")
+                if st.form_submit_button("🚀 Commit Bulk Overwrite Live Target Records"):
+                    try:
+                        # Check table status first
+                        from google.cloud.exceptions import NotFound
+                        table_exists = True
+                        try:
+                            client.get_table(table_curves)
+                        except NotFound:
+                            table_exists = False
+
+                        total_inserted = 0
+                        with st.spinner("Executing bulk catalog database drops and append workflows..."):
+                            for target_identity, clean_df in parsed_entries:
+                                # Safe purge old data if table exists
+                                if table_exists:
+                                    purge_sql = f"DELETE FROM `{table_curves}` WHERE CurveID = '{target_identity}'"
+                                    client.query(purge_sql).result()
+
+                                # Append clean record sets
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(clean_df, table_curves, job_config=job_config).result()
+                                total_inserted += len(clean_df)
+
+                        st.success(f"✅ Bulk Upload Complete! Injected {total_inserted:,} data alignment vectors across {len(parsed_entries)} curves.")
+                        st.cache_data.clear()
+                        time.sleep(1.5)
+                        st.rerun()
+
+                    except Exception as upload_err:
+                        st.error(f"Bulk data streaming transaction failed: {upload_err}")
             
 
 def fetch_curve_inventory(client, table_curves):
