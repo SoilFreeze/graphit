@@ -107,3 +107,28 @@ def main():
                 # Step D: Pull Latest Sample Telemetry for Hardware Metrics
                 sample_res = session.post(f"{BASE_URL}/samples", json={"limit": 1})
                 samples_dict = sample_res.json().get("sensors", {})
+                
+                for s_id, s_meta in sensors_dict.items():
+                    latest_samples = samples_dict.get(s_id, [])
+                    
+                    last_ping = "Never Seen"
+                    rssi_val = None
+                    
+                    if latest_samples:
+                        last_ping = latest_samples[0].get("observed")
+                        rssi_val = latest_samples[0].get("rssi")
+                    
+                    # Intersect against BigQuery sets
+                    is_mapped = s_id in registered_nodes
+
+                    all_sensor_records.append({
+                        "Account Profile": email,
+                        "Sensor ID (NodeNum)": s_id,
+                        "App Alias Name": s_meta.get("name", "Unnamed"),
+                        "Registry Status": "🟢 Mapped & Active" if is_mapped else "❌ Missing from Registry",
+                        "Last Cloud Ping (UTC)": last_ping,
+                        "Signal Strength (RSSI)": rssi_val
+                    })
+                    
+            except Exception as e:
+                st.error(f"❌ Exception encountered inside processing thread for {email}: {e}")
