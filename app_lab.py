@@ -2864,18 +2864,9 @@ active_refs = st.session_state.get("active_refs", [])
 client = get_bq_client() 
 
 # 3. PAGE ROUTING
-# Note: The 'page' selectbox widget is already defined higher up in the sidebar initialization block.
-# Running the loop below hooks directly into that variable without generating element key collisions.
-
 if page == "Summary":
-    # Pass selected_project and metadata so it can dynamically generate the portal link
-    render_summary_dashboard(
-        unit_label, 
-        unit_mode, 
-        display_tz, 
-        selected_project, 
-        st.session_state.get('project_metadata')
-    )
+    # FIXED: Reduced arguments to match the function definition precisely
+    render_summary_dashboard(unit_label, unit_mode, display_tz)
 
 elif page == "Time vs Temp":
     render_global_overview(selected_project, st.session_state.get('project_metadata'), display_tz) 
