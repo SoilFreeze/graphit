@@ -2891,6 +2891,187 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.markdown("##### 📋 Direct Configuration Allocation Matrix")
             render_node_selector(full_reg_df, sorted(proj_reg_df['Project'].dropna().unique().tolist()))
 
+# =============================================================================
+# DATA RECOVERY REQUISITE ENGINE HELPERS
+# =============================================================================
+
+def render_recovery_filters(sp_reg):
+    """Renders hierarchical dropdown blocks and returns selected Node IDs."""
+    st.subheader("🔍 Select Target Hardware")
+    col_f1, col_f2, col_f3 = st.columns(3)
+    
+    with col_f1:
+        u_projects = ["All"] + sorted(sp_reg['Project'].dropna().unique().tolist())
+        rec_proj = st.selectbox("Filter by Project Space Context:", u_projects, key="rec_proj_sel_isolated")
+    
+    proj_filtered = sp_reg if rec_proj == "All" else sp_reg[sp_reg['Project'] == rec_proj]
+    
+    with col_f2:
+        u_locs = ["All"] + sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
+        rec_loc = st.selectbox("Filter by Physical Location Context:", u_locs, key="rec_loc_sel_isolated")
+        
+    with col_f3:
+        loc_filtered = proj_filtered if rec_loc == "All" else proj_filtered[proj_filtered['Location'] == rec_loc]
+        available_nodes = sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+        
+        selected_nodes = st.multiselect(
+            "Select Target Node Numbers", 
+            available_nodes, 
+            default=None,
+            key="rec_nodes_multiselect_isolated",
+            help="Choose the specific sensors to backfill. Leave empty to pull all filtered assets."
+        )
+    return selected_nodes
+
+
+def handle_recovery_trigger(selected_nodes, start_date, end_date):
+    """Manages the cloud pipeline to execute the smart delta data recovery engine."""
+    import requests
+    import numpy as np
+    
+    all_rows = []
+    hardware_map = {}
+    db_max_timestamps = {}
+    node_stats = {}
+    account_stats = {}
+
+    # Define internal target parameter table settings
+    LOCAL_REC_TABLE = "raw_sensorpush"
+    LOCAL_INV_TABLE = "hardware_inventory"
+    LOCAL_API_URL = "https://api.sensorpush.com/api/v1"
+
+    # API credentials dictionary matrix
+    ACCOUNTS = [
+        {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
+        {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
+        {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
+    ]
+
+    start_time_iso = datetime.combine(start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
+    end_time_iso = datetime.combine(end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    with st.status("Executing Cloud Backfill Ingestion Pipeline Run...", expanded=True) as status:
+        # --- STEP A: INVENTORY TRANSLATION MAPPINGS ---
+        st.write("🔍 Extracting Translation Mappings from Hardware Inventory...")
+        try:
+            inv_q = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{LOCAL_INV_TABLE}` WHERE RawID IS NOT NULL"
+            db_client = get_bq_client()
+            for row in db_client.query(inv_q):
+                clean_db_id = str(row.RawID).split('.')[0].strip()
+                hardware_map[clean_db_id] = str(row.NodeNum).strip()
+        except Exception as e:
+            st.error(f"Failed to query inventory map tables: {e}")
+            st.stop()
+
+        # --- STEP B: CHECK BOOKMARKS ---
+        st.write("📅 Checking existing database timeline bookmarks...")
+        try:
+            time_q = f"SELECT NodeNum, MAX(timestamp) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}` GROUP BY NodeNum"
+            for row in db_client.query(time_q):
+                if row.max_time:
+                    db_max_timestamps[str(row.NodeNum)] = row.max_time.isoformat()
+        except Exception as e:
+            st.warning(f"Could not calculate maximum timelines: {e}")
+
+        # --- STEP C: PULL TELEMETRY FROM CLOUD HOUSES ---
+        for acc in ACCOUNTS:
+            st.write(f"🔐 Authenticating token profile for `{acc['email']}`...")
+            account_stats[acc['email']] = 0
+            
+            try:
+                auth_r = requests.post(f"{LOCAL_API_URL}/oauth/authorize", json=acc, timeout=15).json()
+                token = requests.post(f"{LOCAL_API_URL}/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
+                
+                s_resp = requests.post(f"{LOCAL_API_URL}/devices/sensors", headers={"Authorization": token}, json={}, timeout=20).json()
+                device_rssi_map = {}
+                if isinstance(s_resp, dict):
+                    for s_id, s_meta in s_resp.items():
+                        if isinstance(s_meta, dict) and 'rssi' in s_meta:
+                            device_rssi_map[str(s_id).strip()] = s_meta.get('rssi')
+
+                st.write(f"📥 Pulling raw cloud payload matrix for `{acc['email']}`...")
+                samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso}
+                r_samples = requests.post(f"{LOCAL_API_URL}/samples", headers={"Authorization": token}, json=samples_payload, timeout=60).json()
+                
+                sensors_data = r_samples.get('sensors', {})
+                if not sensors_data:
+                    continue
+
+                # --- STEP D: MATCH, TRUNCATE AND DEDUPLICATE ---
+                for s_id, samples in sensors_data.items():
+                    api_root_id = str(s_id).split('.')[0].strip()
+                    friendly_name = hardware_map.get(api_root_id)
+                    
+                    if not friendly_name:
+                        friendly_name = f"UNMAPPED-{api_root_id}"
+                        
+                    if selected_nodes and friendly_name not in selected_nodes:
+                        continue
+                        
+                    if friendly_name not in node_stats:
+                        node_stats[friendly_name] = {"Downloaded": 0, "New Unique Appends": 0}
+                        
+                    latest_db_bookmark = db_max_timestamps.get(friendly_name, "")
+                    current_device_rssi = device_rssi_map.get(str(s_id).strip())
+                    
+                    for s in samples:
+                        temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                        if temp is not None:
+                            node_stats[friendly_name]["Downloaded"] += 1
+                            observed_time = s['observed']
+                            clean_observed = observed_time.replace('Z', '+00:00')
+                            
+                            if not latest_db_bookmark or clean_observed > latest_db_bookmark:
+                                node_stats[friendly_name]["New Unique Appends"] += 1
+                                account_stats[acc['email']] += 1
+                                all_rows.append({
+                                    "timestamp": observed_time,
+                                    "NodeNum": str(friendly_name),
+                                    "temperature": float(temp),
+                                    "rssi": int(current_device_rssi) if current_device_rssi is not None else None
+                                })
+            except Exception:
+                continue
+
+        # --- STEP E: COMMIT UNIQUE SAMPLES TO BIGQUERY ---
+        total_recovered_appends = len(all_rows)
+        if total_recovered_appends == 0:
+            st.info("🔒 Central database perfectly synchronized. 0 duplicate packets written.")
+            status.update(label="Database Up To Date", state="complete")
+        else:
+            st.write(f"📥 Injecting unique rows directly into `{LOCAL_REC_TABLE}`...")
+            try:
+                real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
+                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                errors = db_client.insert_rows_json(real_table_ref, all_rows)
+                if not errors:
+                    st.success(f"🎉 Success! Appended {total_recovered_appends} unique rows to storage.")
+                    summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
+                    st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
+                    status.update(label="Recovery Complete!", state="complete")
+                    st.cache_data.clear()
+                else:
+                    st.error(f"Insertion rejected rows: {errors[:3]}")
+                    status.update(state="error")
+            except Exception as bq_err:
+                st.error(f"Stream submission pipeline failure: {bq_err}")
+                status.update(state="error")
+
+    # --- STEP F: RENDER STATISTICAL BREAKDOWN GRID ---
+    if node_stats:
+        st.write("### 📊 Smart Data Delta Tally Distribution:")
+        summary_records = []
+        for node, counts in node_stats.items():
+            summary_records.append({
+                "Node Number": node,
+                "Total Points in Cloud Window": counts["Downloaded"],
+                "Genuinely New Points Appended": counts["New Unique Appends"]
+            })
+        summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        if total_recovered_appends > 0:
+            st.balloons()
+
 ###################
 # 12. MAIN ROUTER #
 ###################
