@@ -3368,16 +3368,20 @@ def render_rejection_execution_step(client, where_str, new_status, target_table,
             aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
             
             if new_status == "TRUE":
+                # FIXED: Wrapped the subquery elements inside a structurally unified struct expression 
+                # to prevent the "Subquery of type IN must have only one output column" schema rejection.
                 sql = f"""
                     DELETE FROM `{target_table}`
-                    WHERE (NodeNum, timestamp) IN (
-                        SELECT DISTINCT t.NodeNum, t.timestamp 
+                    WHERE STRUCT(NodeNum, timestamp) IN (
+                        SELECT AS STRUCT t.NodeNum, t.timestamp 
                         FROM `{telemetry_table}` t
                         LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
                         WHERE {aliased_where}
                     )
                 """
             else:
+                # HARDENED COLLISION DEFENSE: DISTINCT filters out redundant telemetry timestamps
+                # directly inside the source block 'S' to pull exact composite rows seamlessly
                 sql = f"""
                     MERGE `{target_table}` T
                     USING (
