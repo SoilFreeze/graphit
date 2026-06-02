@@ -1756,7 +1756,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         st.error("Database connection lost.")
         return
 
-    # 1. ENHANCED DIAGNOSTIC ENGINE QUERY
+    # 1. ENHANCED DIAGNOSTIC ENGINE QUERY (Connected to live m.rssi columns)
     diag_q = f"""
         WITH Stats AS (
             SELECT 
@@ -1767,9 +1767,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as count_6h,
                 COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as count_24h,
                 
-                -- Fallbacks for hardware specific signal logging if present in schemas
-                AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN CAST(NULL AS FLOAT64) END) as rssi_last_val,
-                AVG(CAST(NULL AS FLOAT64)) as rssi_avg_val
+                -- Live hardware signal quality hooks
+                ARRAY_AGG(rssi ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as rssi_last_val,
+                AVG(rssi) as rssi_avg_val
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             GROUP BY NodeNum
         )
@@ -1785,8 +1785,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             COALESCE(s.count_1h, 0) as count_1h,
             COALESCE(s.count_6h, 0) as count_6h,
             COALESCE(s.count_24h, 0) as count_24h,
-            COALESCE(s.rssi_last_val, -99.0) as rssi_last,
-            COALESCE(s.rssi_avg_val, -99.0) as rssi_avg
+            s.rssi_last_val as rssi_last,
+            s.rssi_avg_val as rssi_avg
         FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
         LEFT JOIN Stats s ON n.NodeNum = s.NodeNum
         WHERE n.End_Date IS NULL
@@ -1860,26 +1860,33 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         df['efficiency_pct'] = (df['count_24h'] / 96.0) * 100.0
         df['efficiency_pct'] = df['efficiency_pct'].clip(upper=100.0)
 
-        # 5. FIXED CHRONOLOGICAL SORT ENGINE (Safe against low-row counts)
+        # 5. FIXED CHRONOLOGICAL SORT ENGINE
         order = ["❌ Never", "🔴 > 24 Hours", "⏳ < 24 Hours", "🟡 15-60 Mins", "🟢 0-15 Mins"]
         df['Latency_Cat'] = pd.Categorical(df['Latency_Cat'], categories=order, ordered=True)
         df = df.sort_values(by=['Latency_Cat', 'SensorStatus', 'Location']).reset_index(drop=True)
 
-        # 6. MATRIX COMPILATION
+        # 6. SMART LOCATION NAME TRUNCATION ENGINE
+        def truncate_location(loc_val):
+            loc_str = str(loc_val).strip()
+            if len(loc_str) > 18:
+                return f"{loc_str[:15]}..."
+            return loc_str
+
+        df['Clean_Loc'] = df['Location'].apply(truncate_location)
+
+        # 7. MATRIX COMPILATION (Status and Performance permanently dropped)
         display_df = pd.DataFrame({
             "Node ID": df['NodeNum'],
-            "Location": df['Location'],
+            "Location": df['Clean_Loc'],
             "Position": df.apply(lambda r: f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"Bank {r['Bank']}", axis=1),
             "Current Temp": df['last_temp'].apply(format_temperatures),
-            "Status": df['SensorStatus'],
             "Last Seen": df['Time_Ago'],
             "Last Temp": df['last_temp'].apply(format_temperatures),
             "Pings (1h)": df['count_1h'].astype(int),
             "Pings (6h)": df['count_6h'].astype(int),
             "Pings (24h)": df['count_24h'].astype(int),
-            "RSSI Last": df['rssi_last'].apply(lambda x: f"{int(x)} dBm" if x != -99.0 else "N/A"),
-            "RSSI Avg": df['rssi_avg'].apply(lambda x: f"{int(x)} dBm" if x != -99.0 else "N/A"),
-            "Performance": df.apply(lambda r: "Stable" if r['count_1h'] >= 2 else "Intermittent" if r['count_1h'] > 0 else "Stale", axis=1),
+            "RSSI Last": df['rssi_last'].apply(lambda x: f"{int(x)} dBm" if pd.notnull(x) and not pd.isna(x) else "N/A"),
+            "RSSI Avg": df['rssi_avg'].apply(lambda x: f"{int(x)} dBm" if pd.notnull(x) and not pd.isna(x) else "N/A"),
             "Reporting Efficiency": df['efficiency_pct']
         })
 
@@ -1899,7 +1906,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         
     except Exception as e:
         st.error(f"Diagnostics Audit Failed: {e}")
-
 # ===============================================================
 # Function: Status Dashboard (Setup Node Tool) - Left Unchanged
 # ===============================================================
