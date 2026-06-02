@@ -1756,7 +1756,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         st.error("Database connection lost.")
         return
 
-    # 1. ENHANCED DIAGNOSTIC ENGINE QUERY (Connected to live m.rssi columns)
+    # 1. ENHANCED DIAGNOSTIC ENGINE QUERY
     diag_q = f"""
         WITH Stats AS (
             SELECT 
@@ -1800,7 +1800,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
         now_utc = pd.Timestamp.now(tz='UTC')
 
-        # 2. INTERACTIVE SIDEBAR/PAGE DRILLDOWN FILTERS
+        # 2. INTERACTIVE DRILLDOWN FILTERS
         st.markdown("### 🔍 Filter Fleet Scope")
         f_col1, f_col2, f_col3 = st.columns(3)
         
@@ -1828,59 +1828,61 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             st.info("No matching hardware entries found for current selected filters.")
             return
 
-        # 3. CALCULATE LATENCY METRICS
-        def get_latency_strings(row):
+        # 3. CONVERT LATENCY TO PURE HOURS & CALCULATE STYLE COLOR MATRICES
+        def process_latency_metrics(row):
             ping = row['last_ping']
-            if pd.isnull(ping): 
-                return "❌ Never", "Never"
+            if pd.isnull(ping):
+                return pd.Series(["❌ Never", "background-color: #d1d5db; color: #1f2937;", float('inf')])
             
-            ping_utc = ping if ping.tzinfo else ping.tz_localize('UTC')
-            diff_mins = (now_utc - ping_utc).total_seconds() / 60.0
+            ts = ping if ping.tzinfo else ping.tz_localize('UTC')
+            hours_hidden = (now_utc - ts).total_seconds() / 3600.0
+            txt = f"{hours_hidden:.1f}h"
             
-            if diff_mins <= 15: cat = "🟢 0-15 Mins"
-            elif diff_mins <= 60: cat = "🟡 15-60 Mins"
-            elif diff_mins <= 1440: cat = "⏳ < 24 Hours"
-            else: cat = "🔴 > 24 Hours"
-            
-            if diff_mins < 60: time_str = f"{int(diff_mins)}m ago"
-            elif diff_mins < 1440: time_str = f"{round(diff_mins/60, 1)}h ago"
-            else: time_str = f"{int(diff_mins/1440)}d ago"
-            
-            return cat, time_str
+            # Match your precise cross-application color threshold map rules
+            if hours_hidden < 1.0:
+                style = "background-color: #d1fae5; color: #065f46;"
+            elif 1.0 <= hours_hidden <= 6.0:
+                style = "background-color: #fef08a; color: #854d0e;"
+            elif 6.0 < hours_hidden <= 12.0:
+                style = "background-color: #fed7aa; color: #9a3412;"
+            elif 12.0 < hours_hidden <= 24.0:
+                style = "background-color: #fca5a5; color: #991b1b;"
+            else:
+                style = "background-color: #d1d5db; color: #1f2937;"
+                
+            return pd.Series([txt, style, hours_hidden])
 
-        df[['Latency_Cat', 'Time_Ago']] = df.apply(lambda x: pd.Series(get_latency_strings(x)), axis=1)
-        
+        df[['Seen_Text', 'Seen_Style', 'hours_hidden']] = df.apply(process_latency_metrics, axis=1)
+
+        # 4. CHRONOLOGICAL DATA FRAME PRE-SORT
+        df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+
+        # 5. HALF-LENGTH REGEX LOCATION CLIPPER (10 Character Limit)
+        def compress_location(loc_val):
+            loc_str = str(loc_val).strip()
+            if len(loc_str) > 10:
+                return f"{loc_str[:8]}..."
+            return loc_str
+
+        df['Compact_Loc'] = df['Location'].apply(compress_location)
+
+        # 6. TEMPERATURE AND REPORTING EFFICIENCY PARSERS
         unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
         def format_temperatures(val):
             if pd.isnull(val): return "N/A"
             c_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
             return f"{round(c_val, 1)}{unit_label}"
 
-        # 4. CALCULATE Reporting Performance Percentages
-        df['efficiency_pct'] = (df['count_24h'] / 96.0) * 100.0
-        df['efficiency_pct'] = df['efficiency_pct'].clip(upper=100.0)
+        df['efficiency_pct'] = ((df['count_24h'] / 96.0) * 100.0).clip(upper=100.0)
 
-        # 5. FIXED CHRONOLOGICAL SORT ENGINE
-        order = ["❌ Never", "🔴 > 24 Hours", "⏳ < 24 Hours", "🟡 15-60 Mins", "🟢 0-15 Mins"]
-        df['Latency_Cat'] = pd.Categorical(df['Latency_Cat'], categories=order, ordered=True)
-        df = df.sort_values(by=['Latency_Cat', 'SensorStatus', 'Location']).reset_index(drop=True)
-
-        # 6. SMART LOCATION NAME TRUNCATION ENGINE
-        def truncate_location(loc_val):
-            loc_str = str(loc_val).strip()
-            if len(loc_str) > 18:
-                return f"{loc_str[:15]}..."
-            return loc_str
-
-        df['Clean_Loc'] = df['Location'].apply(truncate_location)
-
-        # 7. MATRIX COMPILATION (Status and Performance permanently dropped)
+        # 7. MATRIX PRESENTATION FRAME COMPILE
         display_df = pd.DataFrame({
             "Node ID": df['NodeNum'],
-            "Location": df['Clean_Loc'],
+            "Location": df['Compact_Loc'],
             "Position": df.apply(lambda r: f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"Bank {r['Bank']}", axis=1),
             "Current Temp": df['last_temp'].apply(format_temperatures),
-            "Last Seen": df['Time_Ago'],
+            "Last Seen": df['Seen_Text'],
             "Last Temp": df['last_temp'].apply(format_temperatures),
             "Pings (1h)": df['count_1h'].astype(int),
             "Pings (6h)": df['count_6h'].astype(int),
@@ -1890,8 +1892,15 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             "Reporting Efficiency": df['efficiency_pct']
         })
 
+        # 8. CELL COLOR INJECTION MATRIX OVERRIDE
+        def diagnostic_styler(data):
+            style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
+            for i in data.index:
+                style_canvas.loc[i, 'Last Seen'] = df.loc[i, 'Seen_Style']
+            return style_canvas
+
         st.dataframe(
-            display_df,
+            display_df.style.apply(diagnostic_styler, axis=None),
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -1906,6 +1915,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         
     except Exception as e:
         st.error(f"Diagnostics Audit Failed: {e}")
+        
 # ===============================================================
 # Function: Status Dashboard (Setup Node Tool) - Left Unchanged
 # ===============================================================
