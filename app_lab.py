@@ -3076,35 +3076,106 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         time.sleep(1)
                         st.rerun()
         
-    # --- SUB-TAB 5: BULK UPDATES ---
+    # --- SUB-TAB 6: BULK CHANGES ---
     with tab_bulk_config:
-        st.subheader("📦 Bulk Configuration Engine Workspace")
+        st.subheader("📦 Bulk Changes Engine Workspace")
         
-        cfg_mode = st.radio("Select Allocation Configuration Target Engine:", ["Register/Provision Batch Hardware Entries", "Batch Update Position/Depth Fields"], horizontal=True, key="bulk_cfg_engine_radio")
+        cfg_mode = st.radio(
+            "Select Allocation Configuration Target Engine:", 
+            ["Update Hardware Inventory", "Update Node Registry"], 
+            horizontal=True, 
+            key="bulk_changes_engine_radio"
+        )
         target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+        target_inventory_path = f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory"
         
-        if cfg_mode == "Register/Provision Batch Hardware Entries":
-            st.markdown("### Initialize New Site Registry")
-            st.info("Upload a structured CSV to register all sensors for a new project allocation deployment at once.")
+        # --- ENGINE A: UPDATE HARDWARE INVENTORY ---
+        if cfg_mode == "Update Hardware Inventory":
+            st.markdown("### 📡 Update Hardware Inventory")
+            st.info("Ingest spreadsheet data to append fresh units onto your inventory master table. Required Fields: `RawID`, `NodeNum`.")
             
-            with st.expander("📊 View Required CSV Format Layout (PhysicalID Removed)"):
+            u_file = st.file_uploader(
+                "Upload Inventory Dataset File", 
+                type=["csv", "xlsx"], 
+                key="bulk_inv_file_uploader"
+            )
+            
+            if u_file:
+                try:
+                    # Parse format dynamically based on file extension type
+                    if u_file.name.endswith('.csv'):
+                        df_upload = pd.read_csv(u_file, dtype=str)
+                    else:
+                        df_upload = pd.read_excel(u_file, dtype=str)
+                        
+                    st.write("### Preview Staged Inventory Matrix")
+                    st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
+                    
+                    if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
+                        # Verify case-insensitive column matching requirements
+                        actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
+                        
+                        if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
+                            st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields. Spreadsheets must contain both 'RawID' and 'NodeNum' columns.")
+                        else:
+                            with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
+                                # Clean fields and handle formatting variations
+                                clean_upload_df = pd.DataFrame({
+                                    'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
+                                    'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
+                                }).dropna()
+                                
+                                # Process rows inside a staging environment block to execute target-level validation drops
+                                staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
+                                load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                                client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()
+                                
+                                # Delta Transaction: Insert elements ONLY if the RawID does not occupy active database lines
+                                merge_upsert_sql = f"""
+                                    INSERT INTO `{target_inventory_path}` (RawID, NodeNum)
+                                    SELECT DISTINCT s.RawID, s.NodeNum
+                                    FROM `{staging_table}` s
+                                    WHERE NOT EXISTS (
+                                        SELECT 1 FROM `{target_inventory_path}` i
+                                        WHERE TRIM(CAST(i.RawID AS STRING)) = TRIM(s.RawID)
+                                    )
+                                """
+                                query_job = client.query(merge_upsert_sql)
+                                query_job.result()
+                                
+                                # Clean up scratchpad resource components
+                                client.delete_table(staging_table, not_found_ok=True)
+                                
+                            st.success(f"🎉 Inventory synchronization complete! Appended {query_job.num_dml_affected_rows:,} fresh tracking metrics safely onto your hardware catalog.")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                            
+                except Exception as e:
+                    st.error(f"Failed parsing inventory load batch matrix line rules: {e}")
+                    
+        # --- ENGINE B: UPDATE NODE REGISTRY ---
+        elif cfg_mode == "Update Node Registry":
+            st.markdown("### 📋 Update Node Registry")
+            st.info("Mass register multi-sensor arrays or shift batch deployment settings across timelines using configurations maps.")
+            
+            with st.expander("📊 View Required Registry Template Rules Layout"):
                 st.code("NodeNum,Project,Location,Bank,Depth,Start_Date,SensorStatus")
-                st.caption("Note: PhysicalID column is no longer required and will be automatically skipped if present.")
             
-            u_csv = st.file_uploader("Upload Deployment CSV Configuration File", type="csv", key="bulk_cfg_csv_uploader")
+            u_csv = st.file_uploader("Upload Registry Deployment Map File", type="csv", key="bulk_reg_csv_uploader")
             
             if u_csv:
                 df_upload = pd.read_csv(u_csv)
-                st.write("### Preview Staged Data Matrix")
+                st.write("### Preview Staged Registry Matrix")
                 st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
                 
-                if st.button("🚀 Commit New Project Hardware Registry Blocks", key="bulk_cfg_upload_commit_btn"):
+                if st.button("🚀 Commit Registry Changes", key="bulk_reg_upload_commit_btn", use_container_width=True):
                     try:
                         required = {'NodeNum', 'Project', 'Location'}
                         if not required.issubset(df_upload.columns):
-                            st.error(f"Missing required spreadsheet columns: {required - set(df_upload.columns)}")
+                            st.error(f"Missing required allocation column labels: {required - set(df_upload.columns)}")
                         else:
-                            with st.spinner("Streaming records into BigQuery production index..."):
+                            with st.spinner("Streaming spatial allocations into active registry view..."):
                                 if 'Start_Date' in df_upload.columns:
                                     df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.date
                                 else:
@@ -3116,20 +3187,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 if 'PhysicalID' in df_upload.columns:
                                     df_upload = df_upload.drop(columns=['PhysicalID'])
                                     
-                                from google.cloud import bigquery
                                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_upload, target_registry_path, job_config=job_config).result()
                                 
-                            st.success(f"🎉 Success! Mapped and registered {len(df_upload)} nodes onto your project timeline.")
+                            st.success(f"🎉 Success! Appended {len(df_upload)} nodes onto your asset deployment matrix timeline safely.")
                             st.cache_data.clear()
                             time.sleep(1)
                             st.rerun()
                     except Exception as upload_err:
-                        st.error(f"Bulk hardware load statement routine failed: {upload_err}")
-                    
-        elif cfg_mode == "Batch Update Position/Depth Fields":
-            st.markdown("##### 📋 Direct Configuration Allocation Matrix")
-            render_node_selector(full_reg_df, sorted(proj_reg_df['Project'].dropna().unique().tolist()))
+                        st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
 
 # =============================================================================
 # DATA RECOVERY REQUISITE ENGINE HELPERS
