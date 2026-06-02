@@ -2864,19 +2864,8 @@ active_refs = st.session_state.get("active_refs", [])
 client = get_bq_client() 
 
 # 3. PAGE ROUTING
-page = st.sidebar.selectbox(
-    "Navigation", 
-    [
-        "Summary",
-        "Time vs Temp",
-        "Depth Charts",
-        "Sensor Status",
-        "Node Diagnostics",
-        "Data Processing",
-        "Admin Tools"
-    ],
-    key="nav_page"
-)
+# Note: The 'page' selectbox widget is already defined higher up in the sidebar initialization block.
+# Running the loop below hooks directly into that variable without generating element key collisions.
 
 if page == "Summary":
     # Pass selected_project and metadata so it can dynamically generate the portal link
