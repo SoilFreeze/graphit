@@ -1838,7 +1838,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             hours_hidden = (now_utc - ts).total_seconds() / 3600.0
             txt = f"{hours_hidden:.1f}h"
             
-            # Match your precise cross-application color threshold map rules
             if hours_hidden < 1.0:
                 style = "background-color: #d1fae5; color: #065f46;"
             elif 1.0 <= hours_hidden <= 6.0:
@@ -1858,16 +1857,27 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
         df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
-        # 5. HALF-LENGTH REGEX LOCATION CLIPPER (10 Character Limit)
+        # 5. MAX 5-CHARACTER LOCATION CLIPPER
         def compress_location(loc_val):
             loc_str = str(loc_val).strip()
-            if len(loc_str) > 10:
-                return f"{loc_str[:8]}..."
+            if len(loc_str) > 5:
+                return f"{loc_str[:5]}"
             return loc_str
 
         df['Compact_Loc'] = df['Location'].apply(compress_location)
 
-        # 6. TEMPERATURE AND REPORTING EFFICIENCY PARSERS
+        # 6. FIXED CLEAN POSITION LABELS (Removes "Bank" prefix string)
+        def resolve_clean_position(row):
+            if pd.notnull(row.get('Depth')) and row.get('Depth') != 0:
+                return f"{row['Depth']}ft"
+            if pd.notnull(row.get('Bank')) and str(row.get('Bank')).strip() != "":
+                # Strips out any loose structural occurrences of word variations safely
+                return re.sub(r'(?i)bank\s*', '', str(row['Bank'])).strip()
+            return "-"
+
+        df['Clean_Pos'] = df.apply(resolve_clean_position, axis=1)
+
+        # 7. TEMPERATURE AND REPORTING EFFICIENCY PARSERS
         unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
         def format_temperatures(val):
             if pd.isnull(val): return "N/A"
@@ -1876,11 +1886,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
         df['efficiency_pct'] = ((df['count_24h'] / 96.0) * 100.0).clip(upper=100.0)
 
-        # 7. MATRIX PRESENTATION FRAME COMPILE
+        # 8. MATRIX PRESENTATION FRAME COMPILE
         display_df = pd.DataFrame({
             "Node ID": df['NodeNum'],
             "Location": df['Compact_Loc'],
-            "Position": df.apply(lambda r: f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"Bank {r['Bank']}", axis=1),
+            "Position": df['Clean_Pos'],
             "Current Temp": df['last_temp'].apply(format_temperatures),
             "Last Seen": df['Seen_Text'],
             "Last Temp": df['last_temp'].apply(format_temperatures),
@@ -1892,7 +1902,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             "Reporting Efficiency": df['efficiency_pct']
         })
 
-        # 8. CELL COLOR INJECTION MATRIX OVERRIDE
+        # 9. CELL COLOR INJECTION MATRIX OVERRIDE
         def diagnostic_styler(data):
             style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
             for i in data.index:
