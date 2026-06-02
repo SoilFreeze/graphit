@@ -2925,29 +2925,17 @@ elif page in ["Data Processing", "Admin Tools"]:
     if st.session_state.get('authenticated', False):
         
         if page == "Data Processing":
-            # FIXED: Calls the corrected standardized function name matching your script
             render_data_processing_page(selected_project)
                 
         elif page == "Admin Tools":
-            st.title("🛠️ Admin Tools")
-            tab_admin_sum, tab_bulk_app, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
-                "📋 Admin Summary", 
-                "⚡ Bulk Approval", 
-                "📡 Data Recovery", 
-                "⚙️ Project Master", 
-                "📦 Bulk Updates"
-            ])
-            
-            with tab_admin_sum:
-                render_admin_summary_dashboard(client, selected_project)
-            with tab_bulk_app:
-                render_bulk_approval_maintenance(client, selected_project)
-            with tab_recovery:
-                render_data_recovery_tool(client, selected_project)
-            with tab_proj_master:
-                render_project_master_tool(client, selected_project)
-            with tab_bulk_config:
-                render_bulk_config_engine(client, selected_project)
+            # FIXED: Execution is now cleanly routed entirely to the centralized admin page layout engine
+            render_admin_page(
+                selected_project, 
+                display_tz, 
+                unit_mode, 
+                unit_label, 
+                active_refs
+            )
                 
     else:
         st.divider()
