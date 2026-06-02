@@ -2785,177 +2785,402 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         except Exception as e:
             st.error(f"Failed to generate upgraded overview matrix: {e}")
 
-
-    
     # --- SUB-TAB 2: BULK APPROVAL ---
     with tab_bulk_app:
-        st.subheader("⚡ Bulk Approval & System Maintenance")
+        st.header("⚡ Bulk Approval & Data Maintenance")
+        st.write("Surgically override telemetry data point approval designations across your project timelines.")
         
-        m_mode = st.radio("Select Maintenance Action:", ["Range-Based Bulk Approval", "Targeted Dataset Masking (Soft Hide)", "Database Cleanup Compression"], horizontal=True)
+        # Executes your exact data management filtering loops and structural merge transactions
+        execute_bulk_approval_workspace(client, full_reg_df, selected_project)
+
+# =============================================================================
+# SUB-TAB WORKSPACE HELPERS: BULK APPROVAL DATA MANAGEMENT
+# =============================================================================
+
+def render_bulk_approval_controls():
+    """Renders the top-level scope selection, filter parameters, and target flag status inputs."""
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        target_scope = st.radio(
+            "Target Scope", 
+            ["Project Wide", "Specific Location", "Specific Node"], 
+            horizontal=True, 
+            key="blk_mgmt_target_scope"
+        )
+    with c2:
+        current_status_filter = st.selectbox(
+            "Filter Current Designation Status:",
+            ["All Records", "TRUE", "BadData", "Masked", "Office"],
+            key="blk_mgmt_current_status_filter",
+            help="Limits modifications only to data points that currently match this selected classification."
+        )
+    with c3:
+        new_status = st.selectbox(
+            "Set Approval Status To:", 
+            ["TRUE", "BadData", "Masked", "Office"], 
+            key="blk_mgmt_new_status"
+        )
+    return target_scope, current_status_filter, new_status
+
+
+def render_bulk_approval_filters(reg_df, selected_project, target_scope):
+    """Renders temporal filter vectors alongside numeric sensor value threshold blocks."""
+    col_f1, col_f2, col_f3 = st.columns(3)
+    
+    with col_f1:
+        temporal_dir = st.selectbox("Temporal Direction", ["Between Range", "Older Than", "Newer Than"], key="blk_mgmt_temp_dir")
         
-        if m_mode == "Range-Based Bulk Approval":
-            st.markdown("##### ✅ Range-Based Mass Data Verification")
-            active_locs = sorted(full_reg_df[full_reg_df['Project'] == selected_project]['Location'].unique())
-            sel_loc = st.selectbox("Target Site Location Scope", ["All Locations"] + active_locs, key="bulk_app_loc_sel")
+        if temporal_dir == "Between Range":
+            c_start, c_end = st.columns(2)
+            with c_start:
+                s_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=7), key="blk_mgmt_s_date")
+                s_time = st.time_input("Start Time (Exact)", value=datetime.min.time(), key="blk_mgmt_s_time")
+            with c_end:
+                e_date = st.date_input("End Date", value=datetime.now().date(), key="blk_mgmt_e_date")
+                e_time = st.time_input("End Time (Exact)", value=datetime.max.time(), key="blk_mgmt_e_time")
+        else:
+            s_date = st.date_input("Target Date", value=datetime.now().date() - timedelta(days=7), key="blk_mgmt_single_date")
+            s_time = st.time_input("Target Time (Exact)", value=datetime.min.time(), key="blk_mgmt_single_time")
+            e_date, e_time = None, None
+
+    with col_f2:
+        val_filter = st.selectbox("Value Filter", ["No Threshold", "Above Threshold", "Below Threshold"], key="blk_mgmt_val_filter")
+        threshold = st.number_input("Threshold Value (°F)", value=100.0, key="blk_mgmt_threshold")
+
+    with col_f3:
+        scope_val = None
+        
+        if target_scope == "Project Wide":
+            st.info(f"Targeting all nodes in **{selected_project}**")
+            scope_val = selected_project
+
+        elif target_scope == "Specific Location":
+            u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist(), key=natural_sort_key)
+            scope_val = st.selectbox("Select Location", u_locs, key="blk_mgmt_loc_select")
+
+        elif target_scope == "Specific Node":
+            u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist(), key=natural_sort_key)
+            selected_loc = st.selectbox("First, Select Location", u_locs, key="blk_mgmt_loc_node_select")
             
-            c1, c2 = st.columns(2)
-            b_s = c1.date_input("Approval Window Start Date", value=datetime.now() - timedelta(days=7), key="bulk_app_s_date")
-            b_e = c2.date_input("Approval Window End Date", value=datetime.now(), key="bulk_app_e_date")
+            u_nodes = sorted(
+                reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == selected_loc)]['NodeNum'].dropna().unique().tolist(),
+                key=natural_sort_key
+            )
+            scope_val = st.selectbox("Then, Select Node", u_nodes, key="blk_mgmt_node_select")
             
-            if st.button("🚀 Execute Bulk Validation Append", use_container_width=True):
-                loc_f = f"AND n.Location = '{sel_loc}'" if sel_loc != "All Locations" else ""
+    return {
+        "temporal_dir": temporal_dir, 
+        "s_date": s_date, "s_time": s_time,
+        "e_date": e_date, "e_time": e_time,
+        "val_filter": val_filter, "threshold": threshold, "scope_val": scope_val
+    }
+
+
+def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, current_status_filter, f):
+    """Constructs analytical logical statements parsing historical coordinates."""
+    proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].dropna().unique().tolist()
+    if not proj_nodes:
+        return "NodeNum = 'NONE'"
+
+    if target_scope == "Specific Node":
+        where_clauses = [f"NodeNum = '{f['scope_val']}'"]
+    elif target_scope == "Specific Location":
+        loc_nodes = reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == f['scope_val'])]['NodeNum'].dropna().unique().tolist()
+        nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
+        where_clauses = [f"NodeNum IN ({nodes_str})"]
+    else:
+        nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
+        where_clauses = [f"NodeNum IN ({nodes_str})"]
+
+    start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
+
+    if f["temporal_dir"] == "Between Range":
+        end_ts_str = f"{f['e_date'].strftime('%Y-%m-%d')} {f['e_time'].strftime('%H:%M:%S')}"
+        where_clauses.append(f"timestamp BETWEEN '{start_ts_str}' AND '{end_ts_str}'")
+    elif f["temporal_dir"] in ["Older Than", "Newer Than"]:
+        op = "<" if f["temporal_dir"] == "Older Than" else ">"
+        where_clauses.append(f"timestamp {op} '{start_ts_str}'")
+    
+    if f["val_filter"] == "Above Threshold":
+        where_clauses.append(f"temperature > {f['threshold']}")
+    elif f["val_filter"] == "Below Threshold":
+        where_clauses.append(f"temperature < {f['threshold']}")
+
+    if current_status_filter != "All Records":
+        if current_status_filter == "TRUE":
+            where_clauses.append("r.approve IS NULL")
+        else:
+            where_clauses.append(f"r.approve = '{current_status_filter}'")
+
+    return " AND ".join(where_clauses)
+
+
+def execute_bulk_approval_workspace(client, reg_df, selected_project):
+    """Main administrative execution module managing tab data manipulation routines."""
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
+
+    target_scope, current_status_filter, new_status = render_bulk_approval_controls()
+    st.divider()
+
+    filters = render_bulk_approval_filters(reg_df, selected_project, target_scope)
+    where_str = build_bulk_approval_where_clause(reg_df, selected_project, target_scope, current_status_filter, filters)
+    aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
+    
+    # STEP 1: VERIFICATION CONTAINER BLOCK
+    if st.button("🔍 Step 1: Verify Match Count & Current Status", key="blk_mgmt_verify_btn", use_container_width=True):
+        status_q = f"""
+            SELECT 
+                COALESCE(r.approve, 'TRUE') as Designation,
+                COUNT(*) as Point_Count
+            FROM `{telemetry_table}` t
+            LEFT JOIN `{target_table}` r 
+                ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+            WHERE {aliased_where}
+            GROUP BY Designation
+            ORDER BY Point_Count DESC
+        """
+        try:
+            with st.spinner("Analyzing active database designation profiles..."):
+                res = client.query(status_q).to_dataframe()
+            
+            if not res.empty:
+                st.subheader("📊 Active Designation Profile Summary")
+                st.dataframe(
+                    res.rename(columns={"Designation": "Current Designation Status", "Point_Count": "Total Data Points"}), 
+                    use_container_width=True, 
+                    hide_index=True
+                )
+                st.metric("Total Consolidated Points in Selection", f"{res['Point_Count'].sum():,}")
+            else:
+                st.warning("No telemetry points found matching this configuration window. Check your date filter scopes or threshold parameters.")
+        except Exception as e:
+            st.error(f"Verification Matrix Compilation Failed: {e}")
+
+    st.divider()
+    
+    # STEP 2: OVERRIDE TRANSACTION ENGINE EXECUTION BLOCK
+    st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
+    if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
+        if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
+            if new_status == "TRUE":
                 sql = f"""
-                    INSERT INTO `{OVERRIDE_TABLE}` (NodeNum, timestamp, approve)
-                    SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR), 'TRUE'
-                    FROM (
-                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` 
-                        UNION ALL 
-                        SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                    ) AS r
-                    INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
-                    WHERE n.Project = '{selected_project}' {loc_f} 
-                    AND r.timestamp BETWEEN '{b_s}' AND '{b_e}'
-                    AND NOT EXISTS (
-                        SELECT 1 FROM `{OVERRIDE_TABLE}` x 
-                        WHERE x.NodeNum = r.NodeNum AND x.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                    DELETE FROM `{target_table}`
+                    WHERE STRUCT(NodeNum, timestamp) IN (
+                        SELECT AS STRUCT t.NodeNum, t.timestamp 
+                        FROM `{telemetry_table}` t
+                        LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+                        WHERE {aliased_where}
                     )
                 """
-                client.query(sql).result()
-                st.success("Batch approval modification set successfully completed.")
-                st.cache_data.clear()
-
-        elif m_mode == "Targeted Dataset Masking (Soft Hide)":
-            st.markdown("##### 🚫 Targeted Core Overrides Manager")
-            
-            mc1, mc2, mc3 = st.columns(3)
-            target_scope = mc1.radio("Target Scope Selection", ["Project Wide", "Specific Location", "Specific Node"], horizontal=True)
-            current_status_filter = mc2.selectbox("Filter Current Designation:", ["All Records", "TRUE", "BadData", "Masked", "Office"])
-            new_status = mc3.selectbox("Set Approval Field Overwrite Status To:", ["TRUE", "BadData", "Masked", "Office"])
-            
-            st.divider()
-            
-            fc1, fc2, fc3 = st.columns(3)
-            temporal_dir = fc1.selectbox("Temporal Filtering Direction", ["Between Range", "Older Than", "Newer Than"])
-            if temporal_dir == "Between Range":
-                s_date = fc2.date_input("Start Filter Date", value=datetime.now().date() - timedelta(days=7), key="mask_s_date")
-                s_time = fc2.time_input("Start Time (Exact Mins)", value=datetime.min.time(), key="mask_s_time")
-                e_date = fc3.date_input("End Filter Date", value=datetime.now().date() - timedelta(days=7), key="mask_e_date")
-                e_time = fc3.time_input("End Time (Exact Mins)", value=datetime.max.time(), key="mask_e_time")
             else:
-                s_date = fc2.date_input("Anchor Point Date", value=datetime.now().date() - timedelta(days=7), key="mask_single_date")
-                s_time = fc2.time_input("Anchor Point Time", value=datetime.min.time(), key="mask_single_time")
-                e_date, e_time = None, None
+                sql = f"""
+                    MERGE `{target_table}` T
+                    USING (
+                        SELECT DISTINCT t.NodeNum, t.timestamp 
+                        FROM `{telemetry_table}` t 
+                        LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+                        WHERE {aliased_where}
+                    ) S
+                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                    WHEN MATCHED THEN
+                        UPDATE SET approve = '{new_status}'
+                    WHEN NOT MATCHED THEN
+                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                """
+            try:
+                with st.spinner("Processing database merge mapping vectors..."):
+                    job = client.query(sql)
+                    job.result()
+                st.success(f"✅ Reclassification successful! Processed and updated {job.num_dml_affected_rows:,} records inside the rejection catalog.")
+                st.cache_data.clear()
+                st.balloons()
+                time.sleep(1.5)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
+    
+    # --- SUB-TAB 3: NODE LOGISTICS ---
+    with tab_logistics:
+        st.subheader("📋 Individual Node Asset Management")
+        reg_mode = st.radio("Logistics Mode", ["Search & Manage Single Node", "Global Status Audit"], horizontal=True, key="admin_logistics_radio_toggle")
 
-            v_filter = fc1.selectbox("Thermal Boundaries Constraint Value Filter", ["No Threshold", "Above Threshold", "Below Threshold"], key="mask_v_filter")
-            threshold = fc2.number_input("Threshold Temperature Value Field (°F)", value=100.0, key="mask_threshold_input")
+        if reg_mode == "Search & Manage Single Node":
+            search_id = st.text_input("🔍 Find Node (Enter NodeNum ID)", placeholder="e.g., TP-0105 or 12345678")
+            if search_id:
+                matches = full_reg_df[full_reg_df['NodeNum'] == search_id.strip()].sort_values('Start_Date', ascending=False)
 
-            scope_val = None
-            if target_scope == "Project Wide":
-                scope_val = selected_project
-            elif target_scope == "Specific Location":
-                u_locs = sorted(full_reg_df[full_reg_df['Project'] == selected_project]['Location'].unique().tolist(), key=natural_sort_key)
-                scope_val = fc3.selectbox("Target Location Scope Dropdown", u_locs, key="mask_loc_scoped_dropdown")
-            elif target_scope == "Specific Node":
-                u_locs = sorted(full_reg_df[full_reg_df['Project'] == selected_project]['Location'].unique().tolist(), key=natural_sort_key)
-                selected_loc = fc3.selectbox("Target Location Scope Dropdown", u_locs, key="mask_sub_loc_picker")
-                u_nodes = sorted(full_reg_df[(full_reg_df['Project'] == selected_project) & (full_reg_df['Location'] == selected_loc)]['NodeNum'].unique().tolist(), key=natural_sort_key)
-                scope_val = fc3.selectbox("Target Node Scope Dropdown", u_nodes, key="mask_node_scoped_dropdown")
+                if not matches.empty:
+                    options = matches.apply(lambda r: f"{r['Project']} | {r['Location']} (Start: {r['Start_Date']})", axis=1).tolist()
+                    selection = st.selectbox("Select specific assignment to manage:", options, key="node_logistics_match_dropdown")
+                    row = matches.iloc[options.index(selection)]
+                    
+                    st.divider()
+                    
+                    with st.form("surgical_node_edit_form_v2"):
+                        st.markdown(f"### 📝 Edit Assignment Lineage: **{row['NodeNum']}**")
+                        c1, c2 = st.columns(2)
+                        u_proj = c1.text_input("Assigned Project Space", value=str(row['Project']))
+                        u_loc = c2.text_input("Assigned Physical Location", value=str(row['Location']))
+                        u_bank = c1.text_input("Bank Identifier", value=str(row['Bank']) if pd.notnull(row['Bank']) and str(row['Bank']).strip() != 'None' else "")
+                        u_depth = c2.number_input("Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
+                        
+                        d1, d2 = st.columns(2)
+                        raw_start = pd.to_datetime(row['Start_Date'])
+                        default_start = raw_start.date() if pd.notnull(raw_start) else datetime.now().date()
+                        u_start = d1.date_input("Assignment Start Date", value=default_start)
+                        
+                        raw_end = pd.to_datetime(row['End_Date'])
+                        is_retired = pd.notnull(raw_end)
+                        default_end = raw_end.date() if is_retired else datetime.now().date()
+                        u_end = d2.date_input("Assignment End Date", value=default_end)
+                        apply_end = d2.checkbox("Enforce Active Expiration/End Date Status", value=is_retired)
 
-            f_bundle = {"temporal_dir": temporal_dir, "s_date": s_date, "s_time": s_time, "e_date": e_date, "e_time": e_time, "val_filter": v_filter, "threshold": threshold, "scope_val": scope_val}
-            where_clause_str = build_management_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, f_bundle)
+                        status_list = ["Active", "Diagnostic", "Available", "Need Repair", "Dead"]
+                        current_stat = str(row['SensorStatus']).strip()
+                        default_idx = status_list.index(current_stat) if current_stat in status_list else 0
+                        u_stat = st.selectbox("Hardware Operational Status Tier", status_list, index=default_idx)
+                        
+                        op_type = st.radio(
+                            "Update Strategy Rollout", 
+                            ["Correction (Overwrite this entry row)", "Re-assignment (Retire current timeline, start a new assignment line)"],
+                            help="Correction updates the row directly. Re-assignment caps this row with an end date and provisions a fresh entry line."
+                        )
+
+                        submit_save = st.form_submit_button("💾 Commit Transaction Update Overwrite", use_container_width=True)
+
+                    if submit_save:
+                        today_str = datetime.now().strftime('%Y-%m-%d')
+                        end_val = f"DATE('{u_end}')" if apply_end else "NULL"
+                        sql_depth_val = "NULL" if u_depth == 0.0 else f"{u_depth}"
+                        sql_bank_val = f"'{u_bank.strip()}'" if u_bank.strip() != "" else "NULL"
+                        
+                        where_bank = f"Bank = '{row['Bank']}'" if pd.notnull(row['Bank']) and str(row['Bank']).strip() != '' else "Bank IS NULL"
+                        where_depth = f"Depth = {row['Depth']}" if pd.notnull(row['Depth']) and str(row['Depth']).strip() != '' else "Depth IS NULL"
+                        where_end = f"End_Date = DATE('{pd.to_datetime(row['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(row['End_Date']) else "End_Date IS NULL"
+
+                        if "Correction" in op_type:
+                            sql = f"""
+                                UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                SET Project='{u_proj.strip()}', Location='{u_loc.strip()}', Bank={sql_bank_val}, 
+                                    Depth={sql_depth_val}, SensorStatus='{u_stat}', 
+                                    Start_Date=DATE('{u_start}'), End_Date={end_val}
+                                WHERE NodeNum='{row['NodeNum']}' 
+                                  AND Start_Date=DATE('{pd.to_datetime(row['Start_Date']).strftime('%Y-%m-%d')}')
+                                  AND Project='{row['Project']}'
+                                  AND Location='{row['Location']}'
+                                  AND {where_bank} AND {where_depth} AND {where_end}
+                            """
+                        else:
+                            sql = f"""
+                                BEGIN TRANSACTION;
+                                UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET End_Date=DATE('{today_str}') 
+                                WHERE NodeNum='{row['NodeNum']}' AND End_Date IS NULL;
+                                
+                                INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                (NodeNum, Project, Location, Bank, Depth, Start_Date, SensorStatus, End_Date)
+                                VALUES ('{row['NodeNum']}', '{u_proj.strip()}', '{u_loc.strip()}', {sql_bank_val}, {sql_depth_val}, DATE('{today_str}'), '{u_stat}', NULL);
+                                COMMIT;
+                            """
+                        client.query(sql).result()
+                        st.success("Success! Node registry row processed.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+
+                    st.divider()
+                    with st.expander("🧨 Danger Zone: Delete This Row Entry Permanently"):
+                        confirm_delete = st.checkbox(f"Confirm permanent system deletion for {row['NodeNum']} assignment block row")
+                        if st.button("🗑️ Permanently Drop Selected Row out of BigQuery", type="primary", disabled=not confirm_delete):
+                            where_bank = f"Bank = '{row['Bank']}'" if pd.notnull(row['Bank']) and str(row['Bank']).strip() != '' else "Bank IS NULL"
+                            where_depth = f"Depth = {row['Depth']}" if pd.notnull(row['Depth']) and str(row['Depth']).strip() != '' else "Depth IS NULL"
+                            where_end = f"End_Date = DATE('{pd.to_datetime(row['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(row['End_Date']) else "End_Date IS NULL"
+
+                            delete_sql = f"""
+                                DELETE FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` 
+                                WHERE NodeNum='{row['NodeNum']}'
+                                  AND Start_Date=DATE('{pd.to_datetime(row['Start_Date']).strftime('%Y-%m-%d')}')
+                                  AND Project='{row['Project']}'
+                                  AND Location='{row['Location']}'
+                                  AND {where_bank} AND {where_depth} AND {where_end}
+                            """
+                            client.query(delete_sql).result()
+                            st.warning("Record completely purged from system databases.")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                else:
+                    st.info("No timeline records discovered for this hardware identifier path entry.")
+
+        elif reg_mode == "Global Status Audit":
+            st.subheader("📊 Live Fleet System Registry Audit")
+            available_stats = [str(s).strip() for s in full_reg_df['SensorStatus'].unique() if pd.notnull(s)]
+            
+            f1, f2 = st.columns(2)
+            initial_defaults = [s for s in ["Active", "On Project", "Diagnostic"] if s in available_stats]
+            
+            sel_stats = f1.multiselect("Filter System Status View Constraints", options=available_stats, default=initial_defaults)
+            active_only = f2.checkbox("Show Only Active Timelines (End_Date IS NULL)", value=True)
+            
+            view_df = full_reg_df.copy()
+            if sel_stats:
+                view_df = view_df[view_df['SensorStatus'].str.strip().isin(sel_stats)]
+            if active_only:
+                view_df = view_df[view_df['End_Date'].isna()]
+            
+            st.dataframe(
+                view_df.sort_values(['Project', 'Location', 'Depth']).rename(columns={"NodeNum": "Node ID"}), 
+                use_container_width=True, 
+                hide_index=True
+            )
+
+    # --- SUB-TAB 4: DATA RECOVERY ---
+    with tab_recovery:
+        st.subheader("📡 Operational Cloud Data Backfill Engine")
+        st.write("Surgically request missed or interrupted data logs directly from the hardware cloud servers.")
+
+        # 1. READ FRESH TARGET HARDWARE METRICS
+        try:
+            sp_reg_q = f"""
+                SELECT NodeNum, Project, Location 
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
+                WHERE End_Date IS NULL 
+                  AND (NodeNum LIKE 'TP%' OR REGEXP_CONTAINS(NodeNum, r'^[0-9]+$'))
+            """
+            sp_reg = client.query(sp_reg_q).to_dataframe()
+        except Exception as e:
+            st.error(f"Failed to index active gateway hardware lists: {e}")
+            sp_reg = pd.DataFrame(columns=['NodeNum', 'Project', 'Location'])
+
+        if sp_reg.empty:
+            st.warning("No active SensorPush or TP hardware profiles currently indexed in the node registry.")
+        else:
+            # 2. RENDER THE INTERACTIVE CRITERIA DROPDOWNS
+            selected_nodes = render_recovery_filters(sp_reg)
 
             st.divider()
+            st.subheader("📅 Define Recovery Timeline Parameters")
             
-            if st.button("🔍 Step 1: Verify Matching Point Count Indicators", use_container_width=True, key="mask_verify_trigger_btn"):
-                aliased_where = where_clause_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
-                status_q = f"""
-                    SELECT COALESCE(r.approve, 'TRUE') as Designation, COUNT(*) as Point_Count
-                    FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` t
-                    LEFT JOIN `{OVERRIDE_TABLE}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
-                    WHERE {aliased_where} GROUP BY Designation
-                """
-                try:
-                    res_df = client.query(status_q).to_dataframe()
-                    if not res_df.empty:
-                        st.dataframe(res_df.rename(columns={"Designation": "Current Status", "Point_Count": "Count"}), use_container_width=True, hide_index=True)
-                        st.metric("Total Points Staged for Override", f"{res_df['Point_Count'].sum():,}")
-                    else:
-                        st.info("0 rows found matching current filtering combinations.")
-                except Exception as ex:
-                    st.error(f"Analysis Routine Interrupted: {ex}")
+            c_d1, c_d2 = st.columns(2)
+            # Default recovery window points safely back to yesterday
+            yesterday = datetime.now().date() - timedelta(days=1)
+            
+            start_date = c_d1.date_input("Extraction Window Start Date", value=yesterday, key="rec_start_date_picker")
+            end_date = c_d2.date_input("Extraction Window End Date", value=datetime.now().date(), key="rec_end_date_picker")
 
-            if st.checkbox("Confirm database write execution parameters authorization statement check.", key="mask_write_auth_toggle"):
-                if st.button(f"🚀 Step 2: Execute Override Modifications to '{new_status}'", use_container_width=True, key="mask_execute_run_btn"):
-                    aliased_where = where_clause_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
-                    if new_status == "TRUE":
-                        exec_sql = f"""
-                            DELETE FROM `{OVERRIDE_TABLE}` WHERE STRUCT(NodeNum, timestamp) IN (
-                                SELECT AS STRUCT t.NodeNum, t.timestamp FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` t
-                                LEFT JOIN `{OVERRIDE_TABLE}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp WHERE {aliased_where}
-                            )
-                        """
-                    else:
-                        exec_sql = f"""
-                            MERGE `{OVERRIDE_TABLE}` T
-                            USING (
-                                SELECT DISTINCT t.NodeNum, t.timestamp FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` t 
-                                LEFT JOIN `{OVERRIDE_TABLE}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp WHERE {aliased_where}
-                            ) S ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
-                            WHEN MATCHED THEN UPDATE SET approve = '{new_status}'
-                            WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
-                        """
-                    try:
-                        job_run = client.query(exec_sql)
-                        job_run.result()
-                        st.success(f"Successfully processed {job_run.num_dml_affected_rows:,} change sets inside database overrides catalog.")
-                        st.cache_data.clear()
-                    except Exception as err:
-                        st.error(f"Transaction Rejected: {err}")
+            if start_date > end_date:
+                st.error("❌ Invalid Timeline: Start date cannot be placed after the target completion date context.")
+            else:
+                st.divider()
+                
+                # 3. VERIFY INPUT TARGETS AND RUN PIPELINE HANDSHAKE
+                target_label = f"{len(selected_nodes)} selected nodes" if selected_nodes else "ALL active project hardware"
+                st.warning(f"⚠️ Action Required: Initiating backfill protocol for {target_label} from **{start_date}** through **{end_date}**.")
+                
+                if st.button("📥 Execute Cloud Backfill Ingestion Pipeline Run", type="primary", use_container_width=True, key="execute_recovery_run_btn"):
+                    handle_recovery_trigger(selected_nodes, start_date, end_date)
 
-        elif m_mode == "Database Cleanup Compression":
-            st.markdown("##### 🧹 Database Table Compression Toolkit")
-            target_tbl = st.radio("Select Target Infrastructure Table Stream Source:", ["SensorPush", "Lord"], horizontal=True, key="maint_compression_radio")
-            if st.button("🧨 Execute Hourly Index Compression Workflow", use_container_width=True, key="maint_compression_run_btn"):
-                path = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_tbl.lower()}"
-                if target_tbl.lower() == "sensorpush":
-                    sql = f"""
-                        CREATE OR REPLACE TABLE `{path}` AS 
-                        SELECT TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, NodeNum, ROUND(AVG(temperature), 1) as temperature, AVG(rssi) as rssi 
-                        FROM `{path}` GROUP BY 1, 2
-                    """
-                else:
-                    sql = f"""
-                        CREATE OR REPLACE TABLE `{path}` AS 
-                        SELECT TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, NodeNum, ROUND(AVG(temperature), 1) as temperature 
-                        FROM `{path}` GROUP BY 1, 2
-                    """
-                try:
-                    client.query(sql).result()
-                    st.success("Table compression logic executed. Cleanup successful.")
-                    st.cache_data.clear()
-                except Exception as ex:
-                    st.error(f"Compression sequence failure: {ex}")
-
-    # --- SUB-TAB 3: DATA RECOVERY ---
-    with tab_recovery:
-        st.subheader("📡 Remote Data Recovery Service Hub")
-        
-        sp_reg = full_reg_df[(full_reg_df['NodeNum'].str.startswith('TP', na=False)) & (full_reg_df['End_Date'].isna())].copy()
-        selected_nodes = render_recovery_filters(sp_reg)
-        
-        st.divider()
-        rc1, rc2 = st.columns(2)
-        start_date = rc1.date_input("Recovery Window Start Date", value=datetime.now() - timedelta(days=3), key="rec_window_s_date")
-        end_date = rc2.date_input("Recovery Window End Date", value=datetime.now(), key="rec_window_e_date")
-        
-        if st.button("🚀 Trigger Smart Delta Recovery Pipeline Ingestion", use_container_width=True, key="recovery_pipeline_trigger_btn"):
-            global INVENTORY_TABLE, TABLE_ID, BASE_URL
-            INVENTORY_TABLE = "hardware_inventory"
-            TABLE_ID = "raw_sensorpush"
-            BASE_URL = "https://api.sensorpush.com/api/v1"
-            handle_recovery_trigger(selected_nodes, start_date, end_date)
-
-    # --- SUB-TAB 4: PROJECT MASTER ---
+    # --- SUB-TAB 5: PROJECT MASTER ---
     with tab_proj_master:
         st.subheader("⚙️ Project Lifecycle Management")
         
