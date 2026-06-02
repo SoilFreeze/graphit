@@ -2669,9 +2669,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.error(f"Registry Link Offline: {e}")
         return
 
-    # 2. SEAMLESS SUB-TAB CONTAINER LAYOUT
-    tab_admin_sum, tab_bulk_app, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
+    # 2. NAVIGATION TABS (Updated to 6 slots)
+    tab_admin_sum, tab_logistics, tab_bulk_app, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
         "📋 Admin Summary", 
+        "📋 Node Logistics",
         "⚡ Bulk Approval", 
         "📡 Data Recovery", 
         "⚙️ Project Master", 
@@ -2784,6 +2785,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         except Exception as e:
             st.error(f"Failed to generate upgraded overview matrix: {e}")
 
+
+    
     # --- SUB-TAB 2: BULK APPROVAL ---
     with tab_bulk_app:
         st.subheader("⚡ Bulk Approval & System Maintenance")
