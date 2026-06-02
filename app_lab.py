@@ -2906,7 +2906,6 @@ client = get_bq_client()
 
 # 3. PAGE ROUTING
 if page == "Summary":
-    # FIXED: Reduced arguments to match the function definition precisely
     render_summary_dashboard(unit_label, unit_mode, display_tz)
 
 elif page == "Time vs Temp":
@@ -2926,11 +2925,8 @@ elif page in ["Data Processing", "Admin Tools"]:
     if st.session_state.get('authenticated', False):
         
         if page == "Data Processing":
-            tab_io, tab_ref_curves = st.tabs(["Upload & Export", "Ref Curve Library"])
-            with tab_io:
-                render_data_intake_page(selected_project)
-            with tab_ref_curves:
-                render_ref_curve_library(client, selected_project)
+            # FIXED: Calls the corrected standardized function name matching your script
+            render_data_processing_page(selected_project)
                 
         elif page == "Admin Tools":
             st.title("🛠️ Admin Tools")
