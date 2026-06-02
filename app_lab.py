@@ -216,6 +216,25 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True
 )
+# --- NEW INSERTION: CSS TO FORCE DATA TABLE PROGRESS COLUMNS RED ---
+st.sidebar.markdown(
+    """
+    <style>
+        /* Target the progress bar fill indicators inside Streamlit data grids */
+        div[data-testid="stDataFrame"] div[role="progressbar"] > div {
+            background-color: rgb(214, 39, 40) !important;
+        }
+        /* Target alternative HTML5 fallback elements if utilized by the matrix view */
+        progress::-webkit-progress-value {
+            background: rgb(214, 39, 40) !important;
+        }
+        progress::-moz-progress-bar {
+            background: rgb(214, 39, 40) !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # 4. MEASUREMENT & UNITS
 st.sidebar.subheader("🌡️ Units")
