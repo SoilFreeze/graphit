@@ -2954,9 +2954,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # --- SUB-TAB 4: PROJECT MASTER ---
     with tab_proj_master:
-        # FIXED: Hooked cleanly to your script's exact project master module name
-        render_project_master_page(client, selected_project)
-
+        render_project_master_tool(client, selected_project)
+        
     # --- SUB-TAB 5: BULK UPDATES ---
     with tab_bulk_config:
         st.subheader("📦 Bulk Configuration Engine Workspace")
