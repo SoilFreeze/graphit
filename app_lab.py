@@ -2682,29 +2682,107 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_admin_sum:
         st.subheader("📋 Centralized Infrastructure Status Overview")
         
-        active_nodes_df = full_reg_df[full_reg_df['End_Date'].isna()].copy()
-        total_live_pool = active_nodes_df['NodeNum'].nunique()
-        
-        m_col1, m_col2 = st.columns(2)
-        m_col1.metric("Total Active Sensors Currently in Use", f"{total_live_pool} Units")
-        
-        st.markdown("### 🏗️ Active Deployment Overview Matrix")
+        # Table 1: Hardware Inventory Fleet Breakdown (Matches image layout)
+        st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
         try:
-            summary_summary_q = f"""
+            def classify_hardware_family(node):
+                node_str = str(node).lower()
+                if "-ch" in node_str: return "Lord"
+                elif node_str.startswith("sp"): return "SP"
+                elif node_str.startswith("tp"): return "TP"
+                return "None of the Above"
+
+            fleet_df = full_reg_df.copy()
+            fleet_df['Hardware Family'] = fleet_df['NodeNum'].apply(classify_hardware_family)
+            fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
+            fleet_df['is_active'] = fleet_df['End_Date'].isna()
+            
+            # Filter to mirror the live deduplicated overview count matrix precisely
+            deduped_units = fleet_df.sort_values(by=['Parent ID', 'is_active'], ascending=[True, False]).drop_duplicates(subset=['Parent ID']).copy()
+            
+            fleet_pivot = deduped_units.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
+            desired_order = ["TP", "SP", "Lord", "None of the Above"]
+            fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
+            
+            # Re-ensure exact status column structures exist to avoid indexing errors
+            for stat_col in ["Available", "Dead", "Diagnostic", "On Project"]:
+                if stat_col not in fleet_pivot.columns:
+                    fleet_pivot[stat_col] = 0
+            
+            fleet_pivot = fleet_pivot[["Available", "Dead", "Diagnostic", "On Project"]]
+            fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
+            st.dataframe(fleet_pivot.reset_index(), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.caption(f"Inventory matrix loading: {e}")
+
+        st.divider()
+
+        # Table 2: Upgraded Project Overview Matrix
+        st.markdown("### 🏗️ Active Deployment Overview Matrix")
+        summary_summary_q = f"""
+            WITH Metrics AS (
                 SELECT 
                     n.Project,
-                    COUNT(DISTINCT n.NodeNum) as Total_Mapped_Sensors,
-                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_Seen_24h
+                    COUNT(DISTINCT n.NodeNum) as Mapped_Sensors,
+                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_in_last_6_hours,
+                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_in_last_24_hours
                 FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
                 LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
                 WHERE n.End_Date IS NULL
                 GROUP BY n.Project
-                ORDER BY n.Project ASC
-            """
+            )
+            SELECT 
+                p.Project,
+                p.ProjectName,
+                p.ProjectStatus,
+                p.Date_Freezedown,
+                COALESCE(m.Mapped_Sensors, 0) as Mapped_Sensors,
+                COALESCE(m.Active_in_last_6_hours, 0) as Active_in_last_6_hours,
+                COALESCE(m.Active_in_last_24_hours, 0) as Active_in_last_24_hours
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` p
+            LEFT JOIN Metrics m ON p.Project = m.Project
+            WHERE p.ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
+              AND UPPER(p.Project) NOT LIKE '%OFFICE%'
+            ORDER BY p.Project ASC
+        """
+        
+        try:
             sum_summary_df = client.query(summary_summary_q).to_dataframe()
-            st.dataframe(sum_summary_df, use_container_width=True, hide_index=True)
+            
+            # Compute operational day-counters metrics context loops in Python
+            rows = []
+            for _, r in sum_summary_df.iterrows():
+                p_status = str(r['ProjectStatus']).strip()
+                f_date = r['Date_Freezedown']
+                
+                # Default status state text string matching parameters
+                status_tracking_text = "Not Freezing"
+                
+                if pd.notnull(f_date):
+                    days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
+                    days_count = max(0, days_elapsed)
+                    
+                    if p_status.lower() == "freezedown":
+                        status_tracking_text = f"Day {days_count} of Freezedown"
+                    elif p_status.lower() == "maintenance":
+                        status_tracking_text = f"Day {days_count} of Maintenance"
+                    elif p_status.lower() == "pre-freeze":
+                        status_tracking_text = f"Pre-freeze (Day {days_count})"
+                
+                rows.append({
+                    "Project ID": r['Project'],
+                    "Project Name": r['ProjectName'] if pd.notnull(r['ProjectName']) else r['Project'],
+                    "Mapped Sensors": int(r['Mapped_Sensors']),
+                    "Active in last 6 hours": int(r['Active_in_last_6_hours']),
+                    "Active in last 24 hours": int(r['Active_in_last_24_hours']),
+                    "Project Status Timeline": status_tracking_text
+                })
+                
+            display_summary_df = pd.DataFrame(rows)
+            st.dataframe(display_summary_df, use_container_width=True, hide_index=True)
+            
         except Exception as e:
-            st.caption(f"Asset runtime metrics loading: {e}")
+            st.error(f"Failed to generate upgraded overview matrix: {e}")
 
     # --- SUB-TAB 2: BULK APPROVAL ---
     with tab_bulk_app:
