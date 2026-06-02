@@ -2954,7 +2954,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # --- SUB-TAB 4: PROJECT MASTER ---
     with tab_proj_master:
-        render_project_master_tool(client, selected_project)
+        render_project_master_page(client, selected_project)
         
     # --- SUB-TAB 5: BULK UPDATES ---
     with tab_bulk_config:
