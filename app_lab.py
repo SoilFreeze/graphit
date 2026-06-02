@@ -967,9 +967,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
 
-
-
-
 ###########################
 # PAGE 4: SENSOR STATUS - #
 ###########################
@@ -1860,11 +1857,15 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             return f"{round(c_val, 1)}{unit_label}"
 
         # 4. CALCULATE Reporting Performance Percentages
-        # Baseline target rates: 4 pings/hour ideal for standard intervals
         df['efficiency_pct'] = (df['count_24h'] / 96.0) * 100.0
         df['efficiency_pct'] = df['efficiency_pct'].clip(upper=100.0)
 
-        # 5. MATRIX COMPILATION
+        # 5. FIXED CHRONOLOGICAL SORT ENGINE (Safe against low-row counts)
+        order = ["❌ Never", "🔴 > 24 Hours", "⏳ < 24 Hours", "🟡 15-60 Mins", "🟢 0-15 Mins"]
+        df['Latency_Cat'] = pd.Categorical(df['Latency_Cat'], categories=order, ordered=True)
+        df = df.sort_values(by=['Latency_Cat', 'SensorStatus', 'Location']).reset_index(drop=True)
+
+        # 6. MATRIX COMPILATION
         display_df = pd.DataFrame({
             "Node ID": df['NodeNum'],
             "Location": df['Location'],
@@ -1881,11 +1882,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             "Performance": df.apply(lambda r: "Stable" if r['count_1h'] >= 2 else "Intermittent" if r['count_1h'] > 0 else "Stale", axis=1),
             "Reporting Efficiency": df['efficiency_pct']
         })
-
-        # Sort Order Rules
-        order = ["❌ Never", "🔴 > 24 Hours", "⏳ < 24 Hours", "🟡 15-60 Mins", "🟢 0-15 Mins"]
-        df['Latency_Cat'] = pd.Categorical(df['Latency_Cat'], categories=order, ordered=True)
-        display_df = display_df.iloc[df.sort_values('Latency_Cat').index].reset_index(drop=True)
 
         st.dataframe(
             display_df,
