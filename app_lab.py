@@ -3081,7 +3081,49 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
         
         if cfg_mode == "Register/Provision Batch Hardware Entries":
-            render_bulk_deployment_tab(client, target_registry_path)
+            st.markdown("### Initialize New Site Registry")
+            st.info("Upload a structured CSV to register all sensors for a new project allocation deployment at once.")
+            
+            with st.expander("📊 View Required CSV Format Layout (PhysicalID Removed)"):
+                st.code("NodeNum,Project,Location,Bank,Depth,Start_Date,SensorStatus")
+                st.caption("Note: PhysicalID column is no longer required and will be automatically skipped if present.")
+            
+            u_csv = st.file_uploader("Upload Deployment CSV Configuration File", type="csv", key="bulk_cfg_csv_uploader")
+            
+            if u_csv:
+                df_upload = pd.read_csv(u_csv)
+                st.write("### Preview Staged Data Matrix")
+                st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
+                
+                if st.button("🚀 Commit New Project Hardware Registry Blocks", key="bulk_cfg_upload_commit_btn"):
+                    try:
+                        required = {'NodeNum', 'Project', 'Location'}
+                        if not required.issubset(df_upload.columns):
+                            st.error(f"Missing required spreadsheet columns: {required - set(df_upload.columns)}")
+                        else:
+                            with st.spinner("Streaming records into BigQuery production index..."):
+                                if 'Start_Date' in df_upload.columns:
+                                    df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.date
+                                else:
+                                    df_upload['Start_Date'] = datetime.now().date()
+                                    
+                                if 'SensorStatus' not in df_upload.columns:
+                                    df_upload['SensorStatus'] = 'On Project'
+
+                                if 'PhysicalID' in df_upload.columns:
+                                    df_upload = df_upload.drop(columns=['PhysicalID'])
+                                    
+                                from google.cloud import bigquery
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(df_upload, target_registry_path, job_config=job_config).result()
+                                
+                            st.success(f"🎉 Success! Mapped and registered {len(df_upload)} nodes onto your project timeline.")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                    except Exception as upload_err:
+                        st.error(f"Bulk hardware load statement routine failed: {upload_err}")
+                    
         elif cfg_mode == "Batch Update Position/Depth Fields":
             st.markdown("##### 📋 Direct Configuration Allocation Matrix")
             render_node_selector(full_reg_df, sorted(proj_reg_df['Project'].dropna().unique().tolist()))
