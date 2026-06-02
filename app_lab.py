@@ -2606,8 +2606,9 @@ def render_data_processing_page(selected_project):
 
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
     """
-    Advanced Admin Tools: Consolidated central command dashboard.
-    Organizes sub-tab logic routines around structured operational roles.
+    Advanced Admin Tools: Centralized administrative command center.
+    All sidebar sub-navigation radio buttons have been removed. Layout routing 
+    is handled cleanly via the core multi-page navigation selectbox.
     """
     st.header("🛠️ Admin Tools")
     
@@ -2616,7 +2617,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.error("Database connection unavailable.")
         return
 
-    # 1. CENTRAL DATABASE DATA RECOVERY FETCH
+    # 1. CENTRAL TRANSACTIONAL DATA FETCH
     try:
         reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
         full_reg_df = client.query(reg_q).to_dataframe()
@@ -2627,7 +2628,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.error(f"Registry Link Offline: {e}")
         return
 
-    # 2. STANDARD SUB-TAB NAVIGATION ENGINE SPECIFICATIONS
+    # 2. SEAMLESS SUB-TAB CONTAINER LAYOUT
     tab_admin_sum, tab_bulk_app, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
         "📋 Admin Summary", 
         "⚡ Bulk Approval", 
@@ -2636,9 +2637,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         "📦 Bulk Updates"
     ])
 
-    # =============================================================================
-    # SUB-TAB 1: ADMIN SUMMARY
-    # =============================================================================
+    # --- SUB-TAB 1: ADMIN SUMMARY ---
     with tab_admin_sum:
         st.subheader("📋 Centralized Infrastructure Status Overview")
         
@@ -2648,7 +2647,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         m_col1, m_col2 = st.columns(2)
         m_col1.metric("Total Active Sensors Currently in Use", f"{total_live_pool} Units")
         
-        # Pull real-time project aggregation data lists
         st.markdown("### 🏗️ Active Deployment Overview Matrix")
         try:
             summary_summary_q = f"""
@@ -2667,9 +2665,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         except Exception as e:
             st.caption(f"Asset runtime metrics loading: {e}")
 
-    # =============================================================================
-    # SUB-TAB 2: BULK APPROVAL & MAINTENANCE
-    # =============================================================================
+    # --- SUB-TAB 2: BULK APPROVAL ---
     with tab_bulk_app:
         st.subheader("⚡ Bulk Approval & System Maintenance")
         
@@ -2716,43 +2712,39 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             
             st.divider()
             
-            # Extract precise timeframe bounds components
             fc1, fc2, fc3 = st.columns(3)
             temporal_dir = fc1.selectbox("Temporal Filtering Direction", ["Between Range", "Older Than", "Newer Than"])
             if temporal_dir == "Between Range":
-                s_date = fc2.date_input("Start Filter Date", value=datetime.now().date() - timedelta(days=7))
-                s_time = fc2.time_input("Start Time (Exact Mins)", value=datetime.min.time())
-                e_date = fc3.date_input("End Filter Date", value=datetime.now().date())
-                e_time = fc3.time_input("End Time (Exact Mins)", value=datetime.max.time())
+                s_date = fc2.date_input("Start Filter Date", value=datetime.now().date() - timedelta(days=7), key="mask_s_date")
+                s_time = fc2.time_input("Start Time (Exact Mins)", value=datetime.min.time(), key="mask_s_time")
+                e_date = fc3.date_input("End Filter Date", value=datetime.now().date() - timedelta(days=7), key="mask_e_date")
+                e_time = fc3.time_input("End Time (Exact Mins)", value=datetime.max.time(), key="mask_e_time")
             else:
-                s_date = fc2.date_input("Anchor Point Date", value=datetime.now().date() - timedelta(days=7))
-                s_time = fc2.time_input("Anchor Point Time", value=datetime.min.time())
+                s_date = fc2.date_input("Anchor Point Date", value=datetime.now().date() - timedelta(days=7), key="mask_single_date")
+                s_time = fc2.time_input("Anchor Point Time", value=datetime.min.time(), key="mask_single_time")
                 e_date, e_time = None, None
 
-            v_filter = fc1.selectbox("Thermal Boundaries Constraint Value Filter", ["No Threshold", "Above Threshold", "Below Threshold"])
-            threshold = fc2.number_input("Threshold Temperature Value Field (°F)", value=100.0)
+            v_filter = fc1.selectbox("Thermal Boundaries Constraint Value Filter", ["No Threshold", "Above Threshold", "Below Threshold"], key="mask_v_filter")
+            threshold = fc2.number_input("Threshold Temperature Value Field (°F)", value=100.0, key="mask_threshold_input")
 
-            # Resolve targeting entities metrics mapping parameters
             scope_val = None
             if target_scope == "Project Wide":
                 scope_val = selected_project
-                st.caption(f"Targeting environment workspace matching project tag: **{selected_project}**")
             elif target_scope == "Specific Location":
                 u_locs = sorted(full_reg_df[full_reg_df['Project'] == selected_project]['Location'].unique().tolist(), key=natural_sort_key)
-                scope_val = fc3.selectbox("Target Location Scope Dropdown", u_locs)
+                scope_val = fc3.selectbox("Target Location Scope Dropdown", u_locs, key="mask_loc_scoped_dropdown")
             elif target_scope == "Specific Node":
                 u_locs = sorted(full_reg_df[full_reg_df['Project'] == selected_project]['Location'].unique().tolist(), key=natural_sort_key)
                 selected_loc = fc3.selectbox("Target Location Scope Dropdown", u_locs, key="mask_sub_loc_picker")
                 u_nodes = sorted(full_reg_df[(full_reg_df['Project'] == selected_project) & (full_reg_df['Location'] == selected_loc)]['NodeNum'].unique().tolist(), key=natural_sort_key)
-                scope_val = fc3.selectbox("Target Node Scope Dropdown", u_nodes)
+                scope_val = fc3.selectbox("Target Node Scope Dropdown", u_nodes, key="mask_node_scoped_dropdown")
 
-            # Re-compile filtering dictionary elements to match build functions
             f_bundle = {"temporal_dir": temporal_dir, "s_date": s_date, "s_time": s_time, "e_date": e_date, "e_time": e_time, "val_filter": v_filter, "threshold": threshold, "scope_val": scope_val}
             where_clause_str = build_management_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, f_bundle)
 
             st.divider()
             
-            if st.button("🔍 Step 1: Verify Matching Point Count Indicators", use_container_width=True):
+            if st.button("🔍 Step 1: Verify Matching Point Count Indicators", use_container_width=True, key="mask_verify_trigger_btn"):
                 aliased_where = where_clause_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
                 status_q = f"""
                     SELECT COALESCE(r.approve, 'TRUE') as Designation, COUNT(*) as Point_Count
@@ -2770,8 +2762,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 except Exception as ex:
                     st.error(f"Analysis Routine Interrupted: {ex}")
 
-            if st.checkbox("Confirm database write execution parameters authorization statement check."):
-                if st.button(f"🚀 Step 2: Execute Override Modifications to '{new_status}'", use_container_width=True):
+            if st.checkbox("Confirm database write execution parameters authorization statement check.", key="mask_write_auth_toggle"):
+                if st.button(f"🚀 Step 2: Execute Override Modifications to '{new_status}'", use_container_width=True, key="mask_execute_run_btn"):
                     aliased_where = where_clause_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
                     if new_status == "TRUE":
                         exec_sql = f"""
@@ -2801,7 +2793,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         elif m_mode == "Database Cleanup Compression":
             st.markdown("##### 🧹 Database Table Compression Toolkit")
             target_tbl = st.radio("Select Target Infrastructure Table Stream Source:", ["SensorPush", "Lord"], horizontal=True, key="maint_compression_radio")
-            if st.button("🧨 Execute Hourly Index Compression Workflow", use_container_width=True):
+            if st.button("🧨 Execute Hourly Index Compression Workflow", use_container_width=True, key="maint_compression_run_btn"):
                 path = f"{PROJECT_ID}.{DATASET_ID}.raw_{target_tbl.lower()}"
                 if target_tbl.lower() == "sensorpush":
                     sql = f"""
@@ -2822,52 +2814,40 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 except Exception as ex:
                     st.error(f"Compression sequence failure: {ex}")
 
-    # =============================================================================
-    # SUB-TAB 3: DATA RECOVERY
-    # =============================================================================
+    # --- SUB-TAB 3: DATA RECOVERY ---
     with tab_recovery:
         st.subheader("📡 Remote Data Recovery Service Hub")
         
         sp_reg = full_reg_df[(full_reg_df['NodeNum'].str.startswith('TP', na=False)) & (full_reg_df['End_Date'].isna())].copy()
-        
         selected_nodes = render_recovery_filters(sp_reg)
-        st.divider()
         
+        st.divider()
         rc1, rc2 = st.columns(2)
         start_date = rc1.date_input("Recovery Window Start Date", value=datetime.now() - timedelta(days=3), key="rec_window_s_date")
         end_date = rc2.date_input("Recovery Window End Date", value=datetime.now(), key="rec_window_e_date")
         
-        if st.button("🚀 Trigger Smart Delta Recovery Pipeline Ingestion", use_container_width=True):
-            # Map parameters dynamically across local global configuration constants
-            global INVENTORY_TABLE, TABLE_ID
+        if st.button("🚀 Trigger Smart Delta Recovery Pipeline Ingestion", use_container_width=True, key="recovery_pipeline_trigger_btn"):
+            global INVENTORY_TABLE, TABLE_ID, BASE_URL
             INVENTORY_TABLE = "hardware_inventory"
             TABLE_ID = "raw_sensorpush"
-            global BASE_URL
             BASE_URL = "https://api.sensorpush.com/api/v1"
-            
             handle_recovery_trigger(selected_nodes, start_date, end_date)
 
-    # =============================================================================
-    # SUB-TAB 4: PROJECT MASTER
-    # =============================================================================
-    with tab_project:
+    # --- SUB-TAB 4: PROJECT MASTER ---
+    with tab_proj_master:
         render_project_master_page(client, selected_project)
 
-    # =============================================================================
-    # SUB-TAB 5: BULK UPDATES
-    # =============================================================================
+    # --- SUB-TAB 5: BULK UPDATES ---
     with tab_bulk_config:
         st.subheader("📦 Bulk Configuration Engine Workspace")
         
-        cfg_mode = st.radio("Select Allocation Configuration Target Engine:", ["Register/Provision Batch Hardware Entries", "Batch Update Position/Depth Fields"], horizontal=True)
+        cfg_mode = st.radio("Select Allocation Configuration Target Engine:", ["Register/Provision Batch Hardware Entries", "Batch Update Position/Depth Fields"], horizontal=True, key="bulk_cfg_engine_radio")
         target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
         
         if cfg_mode == "Register/Provision Batch Hardware Entries":
             render_bulk_deployment_tab(client, target_registry_path)
-            
         elif cfg_mode == "Batch Update Position/Depth Fields":
             st.markdown("##### 📋 Direct Configuration Allocation Matrix")
-            # Pulls active editable allocation datagrid engine from tools scripts
             render_node_selector(full_reg_df, sorted(proj_reg_df['Project'].dropna().unique().tolist()))
 
 ###################
