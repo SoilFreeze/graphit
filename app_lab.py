@@ -2803,7 +2803,7 @@ def render_bulk_approval_controls():
     with c2:
         current_status_filter = st.selectbox(
             "Filter Current Designation Status:",
-            ["All Records", "TRUE", "BadData", "Masked", "Office"],
+            options=["ALL", "PENDING", "TRUE", "FALSE", "BADDATA"],
             key="blk_mgmt_current_status_filter",
             help="Limits modifications only to data points that currently match this selected classification."
         )
