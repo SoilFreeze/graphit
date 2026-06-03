@@ -2516,16 +2516,18 @@ def render_bulk_approval_controls():
             key="blk_mgmt_target_scope"
         )
     with c2:
+        # 🎯 MIRRORED DROP DOWN: Restructured to support your specific ledger options + 'ALL BUT NULL'
         current_status_filter = st.selectbox(
             "Filter Current Designation Status:",
-            options=["ALL", "PENDING", "TRUE", "Masked", "OFFICE", "BADDATA", "FALSE"],
+            options=["ALL", "ALL BUT NULL", "TRUE", "NULL (Streaming / Unreviewed)", "Masked", "OFFICE", "BadData"],
             key="blk_mgmt_current_status_filter",
             help="Limits modifications only to data points that currently match this selected classification."
         )
     with c3:
+        # 🎯 STANDARDIZED TARGETS: Clean destination string states matching your script logic
         new_status = st.selectbox(
             "Set Approval Status To:", 
-            ["TRUE", "Masked", "OFFICE", "BADDATA", "FALSE"], 
+            ["TRUE", "Masked", "OFFICE", "BadData"], 
             key="blk_mgmt_new_status"
         )
     return target_scope, current_status_filter, new_status
@@ -2591,7 +2593,6 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     """Constructs analytical logical statements parsing historical coordinates."""
     where_clauses = []
 
-    # 🎯 FIX: Global project handling
     if selected_project != "All Projects":
         if target_scope == "Specific Node":
             where_clauses.append(f"NodeNum = '{f['scope_val']}'")
@@ -2608,7 +2609,6 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
                 where_clauses.append("NodeNum = 'NONE'")
         where_clauses.append(f"Project = '{selected_project}'")
     else:
-        # Bypasses single project constraints to parse the global matrix
         where_clauses.append("Project IS NOT NULL")
 
     start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
@@ -2625,9 +2625,12 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"temperature < {f['threshold']}")
 
+    # 🎯 FIX: Explicitly handles selection logic mapping including 'ALL BUT NULL'
     if current_status_filter != "ALL":
-        if current_status_filter == "PENDING":
-            where_clauses.append("(r.approve IS NULL OR UPPER(CAST(r.approve AS STRING)) = 'PENDING')")
+        if current_status_filter == "ALL BUT NULL":
+            where_clauses.append("r.approve IS NOT NULL")
+        elif current_status_filter == "NULL (Streaming / Unreviewed)":
+            where_clauses.append("r.approve IS NULL")
         elif current_status_filter == "TRUE":
             where_clauses.append("r.approve IS NULL")
         else:
@@ -2653,7 +2656,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.write("Drop outliers outside [-30°F, 120°F] and condense historical datasets into 1-decimal hourly point means.")
     
     if st.button("⚡ Run SensorPush/LORD Hourly Data Cleanup & Aggregator", use_container_width=True):
-        # 🎯 FIX: Global vs project-specific hourly cleanup routing
         project_filter_sql = "" if selected_project == "All Projects" else f"WHERE Project = '{selected_project}'"
         
         cleanup_sql = f"""
