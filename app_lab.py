@@ -2983,8 +2983,14 @@ def render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_l
             active_node_record = target_rows.iloc[0].to_dict()
             target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
             
-            # FIXED: Passed available_projects_list directly to align scope parameters
-            render_node_action_manager(client, active_node_record, full_reg_df, available_projects_list, target_registry_path)
+            # FIXED: Bypasses positional variable naming conflicts by mapping fields explicitly
+            render_node_action_manager(
+                client=client, 
+                selected_node_data=active_node_record, 
+                reg_df=full_reg_df, 
+                proj_list=available_projects_list, 
+                target_registry=target_registry_path
+            )
             
             # Append your comprehensive data diagnostic checker tabs at the footer base
             render_data_checker(client, full_reg_df)
