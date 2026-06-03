@@ -2651,6 +2651,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     All sidebar sub-navigation radio buttons have been removed. Layout routing 
     is handled cleanly via the core multi-page navigation selectbox.
     """
+    import re
+    from datetime import datetime, timedelta
+    
     st.header("🛠️ Admin Tools")
     
     client = get_bq_client()
@@ -2669,14 +2672,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.error(f"Registry Link Offline: {e}")
         return
 
-    # 2. NAVIGATION TABS (Updated to 6 slots)
-    tab_admin_sum, tab_logistics, tab_bulk_app, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
+    # 2. NAVIGATION TABS (6 slots neatly aligned)
+    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
         "📋 Admin Summary", 
-        "📋 Node Logistics",
         "⚡ Bulk Approval", 
+        "📋 Node Logistics",
         "📡 Data Recovery", 
         "⚙️ Project Master", 
-        "📦 Bulk Updates"
+        "📦 Bulk Changes"
     ])
 
     # --- SUB-TAB 1: ADMIN SUMMARY ---
@@ -2756,7 +2759,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 p_status = str(r['ProjectStatus']).strip()
                 f_date = r['Date_Freezedown']
                 
-                # Default status state text string matching parameters
                 status_tracking_text = "Not Freezing"
                 
                 if pd.notnull(f_date):
@@ -2789,10 +2791,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_bulk_app:
         st.header("⚡ Bulk Approval & Data Maintenance")
         st.write("Surgically override telemetry data point approval designations across your project timelines.")
+        # Fixed execution endpoint to cleanly point to the isolated engine helper
+        execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
-        # FIXED: Changed 'reg_df' to 'full_reg_df' to match your actual dataframe variable name
-        _approval_workspace(client, full_reg_df, selected_project, tab_logistics)
-
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: BULK APPROVAL DATA MANAGEMENT
 # =============================================================================
@@ -3185,7 +3186,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
         st.subheader("📡 Operational Cloud Data Backfill Engine")
         st.write("Surgically request missed or interrupted data logs directly from the hardware cloud servers.")
 
-        # 1. READ FRESH TARGET HARDWARE METRICS
         try:
             sp_reg_q = f"""
                 SELECT NodeNum, Project, Location 
@@ -3201,14 +3201,12 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
         if sp_reg.empty:
             st.warning("No active SensorPush or TP hardware profiles currently indexed in the node registry.")
         else:
-            # 2. RENDER THE INTERACTIVE CRITERIA DROPDOWNS
             selected_nodes = render_recovery_filters(sp_reg)
 
             st.divider()
             st.subheader("📅 Define Recovery Timeline Parameters")
             
             c_d1, c_d2 = st.columns(2)
-            # Default recovery window points safely back to yesterday
             yesterday = datetime.now().date() - timedelta(days=1)
             
             start_date = c_d1.date_input("Extraction Window Start Date", value=yesterday, key="rec_start_date_picker")
@@ -3219,7 +3217,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             else:
                 st.divider()
                 
-                # 3. VERIFY INPUT TARGETS AND RUN PIPELINE HANDSHAKE
                 target_label = f"{len(selected_nodes)} selected nodes" if selected_nodes else "ALL active project hardware"
                 st.warning(f"⚠️ Action Required: Initiating backfill protocol for {target_label} from **{start_date}** through **{end_date}**.")
                 
@@ -3346,7 +3343,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         st.cache_data.clear()
                         time.sleep(1)
                         st.rerun()
-        
+
     # --- SUB-TAB 6: BULK CHANGES ---
     with tab_bulk_config:
         st.subheader("📦 Bulk Changes Engine Workspace")
@@ -3373,7 +3370,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             
             if u_file:
                 try:
-                    # Parse format dynamically based on file extension type
                     if u_file.name.endswith('.csv'):
                         df_upload = pd.read_csv(u_file, dtype=str)
                     else:
@@ -3383,25 +3379,21 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
                     
                     if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
-                        # Verify case-insensitive column matching requirements
                         actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
                         
                         if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
                             st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields. Spreadsheets must contain both 'RawID' and 'NodeNum' columns.")
                         else:
                             with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
-                                # Clean fields and handle formatting variations
                                 clean_upload_df = pd.DataFrame({
                                     'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
                                     'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
                                 }).dropna()
                                 
-                                # Process rows inside a staging environment block to execute target-level validation drops
                                 staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
                                 load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
                                 client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()
                                 
-                                # Delta Transaction: Insert elements ONLY if the RawID does not occupy active database lines
                                 merge_upsert_sql = f"""
                                     INSERT INTO `{target_inventory_path}` (RawID, NodeNum)
                                     SELECT DISTINCT s.RawID, s.NodeNum
@@ -3414,7 +3406,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                                 query_job = client.query(merge_upsert_sql)
                                 query_job.result()
                                 
-                                # Clean up scratchpad resource components
                                 client.delete_table(staging_table, not_found_ok=True)
                                 
                             st.success(f"🎉 Inventory synchronization complete! Appended {query_job.num_dml_affected_rows:,} fresh tracking metrics safely onto your hardware catalog.")
@@ -3467,7 +3458,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                             st.rerun()
                     except Exception as upload_err:
                         st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
-
 # =============================================================================
 # DATA RECOVERY REQUISITE ENGINE HELPERS
 # =============================================================================
