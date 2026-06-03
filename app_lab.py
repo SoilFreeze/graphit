@@ -2516,7 +2516,7 @@ def render_bulk_approval_controls():
             key="blk_mgmt_target_scope"
         )
     with c2:
-        # 🎯 MIRRORED DROP DOWN: Restructured to support your specific ledger options + 'ALL BUT NULL'
+        # 🎯 MIRRORED DROP DOWN: Explicitly handles selection filters including 'ALL BUT NULL'
         current_status_filter = st.selectbox(
             "Filter Current Designation Status:",
             options=["ALL", "ALL BUT NULL", "TRUE", "NULL (Streaming / Unreviewed)", "Masked", "OFFICE", "BadData"],
@@ -2625,7 +2625,7 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"temperature < {f['threshold']}")
 
-    # 🎯 FIX: Explicitly handles selection logic mapping including 'ALL BUT NULL'
+    # 🎯 LEAKPROOF STATUS ALIGNMENT LOGIC: Correctly checks for explicit filters and custom null variations
     if current_status_filter != "ALL":
         if current_status_filter == "ALL BUT NULL":
             where_clauses.append("r.approve IS NOT NULL")
@@ -2742,8 +2742,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
             
-            # 🎯 FIX: If setting to TRUE and filtering from NULL, we MUST MERGE/INSERT a 'TRUE' string 
-            # instead of attempting a DELETE on non-existent records.
+            # If setting to TRUE and clearing structured records, use a targeted subquery DELETE
             if new_status == "TRUE" and current_status_filter != "NULL (Streaming / Unreviewed)":
                 sql = f"""
                     DELETE FROM `{target_table}`
@@ -2754,11 +2753,11 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     )
                 """
             else:
-                # Captures 'TRUE' string assignments or custom codes (Masked, OFFICE, BadData)
+                # 🎯 SCHEMA CORRECTION: Removed 'Project' from targets to align with raw ledger constraints
                 sql = f"""
                     MERGE `{target_table}` T
                     USING (
-                        SELECT DISTINCT t.Project, t.NodeNum, t.timestamp 
+                        SELECT DISTINCT t.NodeNum, t.timestamp 
                         FROM `{telemetry_table}` t 
                         WHERE {aliased_where}
                     ) S
@@ -2766,8 +2765,8 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     WHEN MATCHED THEN
                         UPDATE SET approve = '{new_status}'
                     WHEN NOT MATCHED THEN
-                        INSERT (Project, NodeNum, timestamp, approve) 
-                        VALUES (S.Project, S.NodeNum, S.timestamp, '{new_status}')
+                        INSERT (NodeNum, timestamp, approve) 
+                        VALUES (S.NodeNum, S.timestamp, '{new_status}')
                 """
             try:
                 with st.spinner("Processing database merge mapping vectors..."):
@@ -2795,15 +2794,16 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     else:
         ts_str = str(timestamp)
 
+    # 🎯 SCHEMA CORRECTION: Aligned targeting scopes to remove unmapped Project columns
     write_q = f"""
         MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
-        USING (SELECT '{project_id}' as Project, '{node_num}' as NodeNum, TIMESTAMP('{ts_str}') as timestamp) S
-        ON T.Project = S.Project AND T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+        USING (SELECT '{node_num}' as NodeNum, TIMESTAMP('{ts_str}') as timestamp) S
+        ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
         WHEN MATCHED THEN
           UPDATE SET approve = '{new_status}'
         WHEN NOT MATCHED THEN
-          INSERT (Project, NodeNum, timestamp, approve) 
-          VALUES (S.Project, S.NodeNum, S.timestamp, '{new_status}')
+          INSERT (NodeNum, timestamp, approve) 
+          VALUES (S.NodeNum, S.timestamp, '{new_status}')
     """
     try:
         client.query(write_q).result()
@@ -2811,7 +2811,6 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     except Exception as e:
         st.error(f"⚠️ Cloud DB Commit Failed: {e}")
         return False
-
 
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: NODE LOGISTICS ENGINE
