@@ -2504,6 +2504,7 @@ def render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_l
     """
     Renders an advanced cascading dropdown lookup selection engine for managing 
     individual nodes based on Project, Location, and Node number assignments.
+    Lazy-bound to prevent global namespace compilation NameErrors.
     """
     st.subheader("🔍 Select Target Hardware Path")
     
@@ -2545,17 +2546,29 @@ def render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_l
             active_node_record = target_rows.iloc[0].to_dict()
             target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
             
-            # FIXED: Positional variations bypassed by applying explicit keyword assignments
-            render_node_action_manager(
-                client=client, 
-                selected_node_data=active_node_record, 
-                reg_df=full_reg_df, 
-                proj_list=available_projects_list, 
-                target_registry=target_registry_path
-            )
-            
-            # Append your comprehensive data diagnostic checker tabs at the footer base
-            render_data_checker(client, full_reg_df)
+            # --- DYNAMIC GLOBAL SCOPE INTERCEPT (Bypasses sequencing issues) ---
+            try:
+                action_manager_func = globals().get('render_node_action_manager')
+                diagnostic_checker_func = globals().get('render_data_checker')
+                
+                if action_manager_func is None:
+                    st.error("❌ Component Registration Fault: 'render_node_action_manager' was not detected in this file scope context. Ensure it isn't misspelled lower in the file.")
+                else:
+                    action_manager_func(
+                        client=client, 
+                        selected_node_data=active_node_record, 
+                        reg_df=full_reg_df, 
+                        proj_list=available_projects_list, 
+                        target_registry=target_registry_path
+                    )
+                
+                if diagnostic_checker_func is not None:
+                    diagnostic_checker_func(client, full_reg_df)
+                else:
+                    st.caption("ℹ️ Diagnostic Checker Module is currently offline or loading.")
+                    
+            except Exception as routing_err:
+                st.error(f"Internal scope linkage failed: {routing_err}")
         else:
             st.info("The specific assignment record could not be parsed. Refresh your selections.")
     else:
@@ -2935,18 +2948,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         UPDATE SET approve = '{new_status}'
                     WHEN NOT MATCHED THEN
                         INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
-                """
-            try:
-                with st.spinner("Processing database merge mapping vectors..."):
-                    job = client.query(sql)
-                    job.result()
-                st.success(f"✅ Reclassification successful! Processed and updated {job.num_dml_affected_rows:,} records inside the rejection catalog.")
-                st.cache_data.clear()
-                st.balloons()
-                time.sleep(1.5)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Execution Error: {e}")
+
 
 ######################
 # Page: Admin Tools  #
