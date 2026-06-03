@@ -2497,6 +2497,43 @@ def render_data_processing_page(selected_project):
 # Page: Admin Tool Helpers  #
 ######################
 # =============================================================================
+# SUB-TAB BULK APPROVAL
+# =============================================================================
+def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
+    """
+    Executes a proper database commit to write approvals, rejections, 
+    or BADDATA flags to your permanent tracking ledger.
+    """
+    client = get_bq_client()
+    if client is None:
+        return False
+        
+    # Standardize time format for BigQuery SQL engine
+    if isinstance(timestamp, pd.Timestamp):
+        ts_str = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')
+    else:
+        ts_str = str(timestamp)
+
+    # MERGE statement: Updates matching row if it exists, inserts a new one if it doesn't
+    write_q = f"""
+        MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
+        USING (SELECT '{project_id}' as Project, '{node_num}' as NodeNum, TIMESTAMP('{ts_str}') as timestamp) S
+        ON T.Project = S.Project AND T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+        WHEN MATCHED THEN
+          UPDATE SET approval_status = '{new_status}'
+        WHEN NOT MATCHED THEN
+          INSERT (Project, NodeNum, timestamp, approval_status) 
+          VALUES (S.Project, S.NodeNum, S.timestamp, '{new_status}')
+    """
+    
+    try:
+        client.query(write_q).result() # Enforces synchronous wait until DB commits
+        return True
+    except Exception as e:
+        st.error(f"⚠️ Cloud DB Commit Failed: {e}")
+        return False
+
+# =============================================================================
 # SUB-TAB WORKSPACE HELPERS: NODE LOGISTICS ENGINE
 # =============================================================================
 
@@ -2892,7 +2929,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     if st.button("🔍 Step 1: Verify Match Count & Current Status", key="blk_mgmt_verify_btn", use_container_width=True):
         status_q = f"""
             SELECT 
-                COALESCE(r.approve, 'TRUE') as Designation,
+                COALESCE(r.approval_status, 'TRUE') as Designation,
                 COUNT(*) as Point_Count
             FROM `{telemetry_table}` t
             LEFT JOIN `{target_table}` r 
@@ -2924,6 +2961,8 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
+            
+            # --- IF SETTING TO TRUE: DELETE RECORDS OUT OF THE REJECTIONS OVERRIDE LEDGER ---
             if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
@@ -2934,26 +2973,30 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         WHERE {aliased_where}
                     )
                 """
+            # --- IF SETTING TO BADDATA / FALSE: WRITE AND MERGE REJECTIONS TO THE LEDGER ---
             else:
                 sql = f"""
                     MERGE `{target_table}` T
                     USING (
-                        SELECT DISTINCT t.NodeNum, t.timestamp 
+                        SELECT DISTINCT t.Project, t.NodeNum, t.timestamp 
                         FROM `{telemetry_table}` t 
                         LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
                         WHERE {aliased_where}
                     ) S
                     ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
                     WHEN MATCHED THEN
-                        UPDATE SET approve = '{new_status}'
+                        UPDATE SET approval_status = '{new_status}'
                     WHEN NOT MATCHED THEN
-                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                        INSERT (Project, NodeNum, timestamp, approval_status) 
+                        VALUES (S.Project, S.NodeNum, S.timestamp, '{new_status}')
                 """
             try:
                 with st.spinner("Processing database merge mapping vectors..."):
                     job = client.query(sql)
                     job.result()
                 st.success(f"✅ Reclassification successful! Processed and updated {job.num_dml_affected_rows:,} records inside the rejection catalog.")
+                
+                # Instantly flush cache layers to make client portal sync reactive
                 st.cache_data.clear()
                 st.balloons()
                 time.sleep(1.5)
@@ -2961,7 +3004,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             except Exception as e:
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
-
 
 ######################
 # Page: Admin Tools  #
