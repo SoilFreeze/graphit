@@ -2791,7 +2791,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.write("Surgically override telemetry data point approval designations across your project timelines.")
         
         # Executes your exact data management filtering loops and structural merge transactions
-        execute_bulk_approval_workspace(client, full_reg_df, selected_project)
+        execute_bulk_approval_workspace(client, reg_df, selected_project, tab_logistics)
 
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: BULK APPROVAL DATA MANAGEMENT
@@ -2915,9 +2915,9 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     return " AND ".join(where_clauses)
 
 
-def execute_bulk_approval_workspace(client, reg_df, selected_project):
+def execute_bulk_approval_workspace(client, reg_df, selected_project, tab_logistics):
     """Main administrative execution module managing tab data manipulation routines."""
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
