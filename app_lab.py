@@ -2647,137 +2647,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         
     # --- SUB-TAB 3: NODE LOGISTICS ---
     with tab_logistics:
-        st.subheader("📋 Individual Node Asset Management")
-        reg_mode = st.radio("Logistics Mode", ["Search & Manage Single Node", "Global Status Audit"], horizontal=True, key="admin_logistics_radio_toggle")
-
-        if reg_mode == "Search & Manage Single Node":
-            search_id = st.text_input("🔍 Find Node (Enter NodeNum ID)", placeholder="e.g., TP-0105 or 12345678")
-            if search_id:
-                matches = full_reg_df[full_reg_df['NodeNum'] == search_id.strip()].sort_values('Start_Date', ascending=False)
-
-                if not matches.empty:
-                    options = matches.apply(lambda r: f"{r['Project']} | {r['Location']} (Start: {r['Start_Date']})", axis=1).tolist()
-                    selection = st.selectbox("Select specific assignment to manage:", options, key="node_logistics_match_dropdown")
-                    row = matches.iloc[options.index(selection)]
-                    
-                    st.divider()
-                    
-                    with st.form("surgical_node_edit_form_v2"):
-                        st.markdown(f"### 📝 Edit Assignment Lineage: **{row['NodeNum']}**")
-                        c1, c2 = st.columns(2)
-                        u_proj = c1.text_input("Assigned Project Space", value=str(row['Project']))
-                        u_loc = c2.text_input("Assigned Physical Location", value=str(row['Location']))
-                        u_bank = c1.text_input("Bank Identifier", value=str(row['Bank']) if pd.notnull(row['Bank']) and str(row['Bank']).strip() != 'None' else "")
-                        u_depth = c2.number_input("Depth (ft)", value=float(row['Depth']) if pd.notnull(row['Depth']) else 0.0)
-                        
-                        d1, d2 = st.columns(2)
-                        raw_start = pd.to_datetime(row['Start_Date'])
-                        default_start = raw_start.date() if pd.notnull(raw_start) else datetime.now().date()
-                        u_start = d1.date_input("Assignment Start Date", value=default_start)
-                        
-                        raw_end = pd.to_datetime(row['End_Date'])
-                        is_retired = pd.notnull(raw_end)
-                        default_end = raw_end.date() if is_retired else datetime.now().date()
-                        u_end = d2.date_input("Assignment End Date", value=default_end)
-                        apply_end = d2.checkbox("Enforce Active Expiration/End Date Status", value=is_retired)
-
-                        status_list = ["Active", "Diagnostic", "Available", "Need Repair", "Dead"]
-                        current_stat = str(row['SensorStatus']).strip()
-                        default_idx = status_list.index(current_stat) if current_stat in status_list else 0
-                        u_stat = st.selectbox("Hardware Operational Status Tier", status_list, index=default_idx)
-                        
-                        op_type = st.radio(
-                            "Update Strategy Rollout", 
-                            ["Correction (Overwrite this entry row)", "Re-assignment (Retire current timeline, start a new assignment line)"],
-                            help="Correction updates the row directly. Re-assignment caps this row with an end date and provisions a fresh entry line."
-                        )
-
-                        submit_save = st.form_submit_button("💾 Commit Transaction Update Overwrite", use_container_width=True)
-
-                    if submit_save:
-                        today_str = datetime.now().strftime('%Y-%m-%d')
-                        end_val = f"DATE('{u_end}')" if apply_end else "NULL"
-                        sql_depth_val = "NULL" if u_depth == 0.0 else f"{u_depth}"
-                        sql_bank_val = f"'{u_bank.strip()}'" if u_bank.strip() != "" else "NULL"
-                        
-                        where_bank = f"Bank = '{row['Bank']}'" if pd.notnull(row['Bank']) and str(row['Bank']).strip() != '' else "Bank IS NULL"
-                        where_depth = f"Depth = {row['Depth']}" if pd.notnull(row['Depth']) and str(row['Depth']).strip() != '' else "Depth IS NULL"
-                        where_end = f"End_Date = DATE('{pd.to_datetime(row['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(row['End_Date']) else "End_Date IS NULL"
-
-                        if "Correction" in op_type:
-                            sql = f"""
-                                UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                                SET Project='{u_proj.strip()}', Location='{u_loc.strip()}', Bank={sql_bank_val}, 
-                                    Depth={sql_depth_val}, SensorStatus='{u_stat}', 
-                                    Start_Date=DATE('{u_start}'), End_Date={end_val}
-                                WHERE NodeNum='{row['NodeNum']}' 
-                                  AND Start_Date=DATE('{pd.to_datetime(row['Start_Date']).strftime('%Y-%m-%d')}')
-                                  AND Project='{row['Project']}'
-                                  AND Location='{row['Location']}'
-                                  AND {where_bank} AND {where_depth} AND {where_end}
-                            """
-                        else:
-                            sql = f"""
-                                BEGIN TRANSACTION;
-                                UPDATE `{PROJECT_ID}.{DATASET_ID}.node_registry` SET End_Date=DATE('{today_str}') 
-                                WHERE NodeNum='{row['NodeNum']}' AND End_Date IS NULL;
-                                
-                                INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                                (NodeNum, Project, Location, Bank, Depth, Start_Date, SensorStatus, End_Date)
-                                VALUES ('{row['NodeNum']}', '{u_proj.strip()}', '{u_loc.strip()}', {sql_bank_val}, {sql_depth_val}, DATE('{today_str}'), '{u_stat}', NULL);
-                                COMMIT;
-                            """
-                        client.query(sql).result()
-                        st.success("Success! Node registry row processed.")
-                        st.cache_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-
-                    st.divider()
-                    with st.expander("🧨 Danger Zone: Delete This Row Entry Permanently"):
-                        confirm_delete = st.checkbox(f"Confirm permanent system deletion for {row['NodeNum']} assignment block row")
-                        if st.button("🗑️ Permanently Drop Selected Row out of BigQuery", type="primary", disabled=not confirm_delete):
-                            where_bank = f"Bank = '{row['Bank']}'" if pd.notnull(row['Bank']) and str(row['Bank']).strip() != '' else "Bank IS NULL"
-                            where_depth = f"Depth = {row['Depth']}" if pd.notnull(row['Depth']) and str(row['Depth']).strip() != '' else "Depth IS NULL"
-                            where_end = f"End_Date = DATE('{pd.to_datetime(row['End_Date']).strftime('%Y-%m-%d')}')" if pd.notnull(row['End_Date']) else "End_Date IS NULL"
-
-                            delete_sql = f"""
-                                DELETE FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` 
-                                WHERE NodeNum='{row['NodeNum']}'
-                                  AND Start_Date=DATE('{pd.to_datetime(row['Start_Date']).strftime('%Y-%m-%d')}')
-                                  AND Project='{row['Project']}'
-                                  AND Location='{row['Location']}'
-                                  AND {where_bank} AND {where_depth} AND {where_end}
-                            """
-                            client.query(delete_sql).result()
-                            st.warning("Record completely purged from system databases.")
-                            st.cache_data.clear()
-                            time.sleep(1)
-                            st.rerun()
-                else:
-                    st.info("No timeline records discovered for this hardware identifier path entry.")
-
-        elif reg_mode == "Global Status Audit":
-            st.subheader("📊 Live Fleet System Registry Audit")
-            available_stats = [str(s).strip() for s in full_reg_df['SensorStatus'].unique() if pd.notnull(s)]
-            
-            f1, f2 = st.columns(2)
-            initial_defaults = [s for s in ["Active", "On Project", "Diagnostic"] if s in available_stats]
-            
-            sel_stats = f1.multiselect("Filter System Status View Constraints", options=available_stats, default=initial_defaults)
-            active_only = f2.checkbox("Show Only Active Timelines (End_Date IS NULL)", value=True)
-            
-            view_df = full_reg_df.copy()
-            if sel_stats:
-                view_df = view_df[view_df['SensorStatus'].str.strip().isin(sel_stats)]
-            if active_only:
-                view_df = view_df[view_df['End_Date'].isna()]
-            
-            st.dataframe(
-                view_df.sort_values(['Project', 'Location', 'Depth']).rename(columns={"NodeNum": "Node ID"}), 
-                use_container_width=True, 
-                hide_index=True
-            )
+        st.header("📋 Node Logistics & Asset Management")
+        st.write("Find and modify individual sensor attributes, review historical timelines, or analyze fleet deployment diagnostics.")
+        
+        # Pulls project list context from the central data frame
+        available_projects_list = sorted(proj_reg_df['Project'].dropna().unique().tolist())
+        
+        # Calls the unified frontend interface
+        render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_list)
 
     # --- SUB-TAB 4: DATA RECOVERY ---
     with tab_recovery:
@@ -3056,6 +2933,69 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             st.rerun()
                     except Exception as upload_err:
                         st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
+
+# =============================================================================
+# SUB-TAB WORKSPACE HELPERS: NODE LOGISTICS ENGINE
+# =============================================================================
+
+def render_upgraded_node_logistics_tab(client, full_reg_df, proj_list):
+    """
+    Renders an advanced cascading dropdown lookup selection engine for managing 
+    individual nodes based on Project, Location, and Node number assignments.
+    """
+    st.subheader("🔍 Select Target Hardware Path")
+    
+    # 1. CASCADING SELECTBOX CONTROLS (Identical to Data Recovery layout)
+    col_l1, col_l2, col_l3 = st.columns(3)
+    
+    with col_l1:
+        # Include all projects, including the Office restock reservoir
+        u_projects = sorted(list(set(["Office"] + proj_list)))
+        selected_log_proj = st.selectbox("Select Project Space Context:", u_projects, key="node_log_project_filter")
+        
+    proj_filtered = full_reg_df[full_reg_df['Project'] == selected_log_proj]
+    
+    with col_l2:
+        u_locations = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
+        if not u_locations:
+            u_locations = ["No Registered Locations"]
+        selected_log_loc = st.selectbox("Select Physical Location Context:", u_locations, key="node_log_location_filter")
+        
+    loc_filtered = proj_filtered[proj_filtered['Location'] == selected_log_loc]
+    
+    with col_l3:
+        u_nodes = sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+        selected_log_node = st.selectbox(
+            "Select Target Node Number ID:", 
+            u_nodes, 
+            index=0 if u_nodes else None,
+            key="node_log_node_filter",
+            help="Pick the specific hardware tracking record to pull up in the editor."
+        )
+
+    st.divider()
+
+    # 2. IF A VALID NODE IS SELECTED, INJECT THE ENTIRE DATA ENGINE MATRIX
+    if selected_log_node:
+        # Isolate the current row context records matching our cascading dropdown selections
+        target_rows = loc_filtered[loc_filtered['NodeNum'] == selected_log_node].sort_values(by='Start_Date', ascending=False)
+        
+        if not target_rows.empty:
+            active_node_record = target_rows.iloc[0].to_dict()
+            
+            # Target Registry metadata destination parameters 
+            target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+            
+            # Call your integrated graph component and asset attribute editor forms
+            render_node_action_manager(client, active_node_record, full_reg_df, proj_list, target_registry_path)
+            
+            # Append your comprehensive data diagnostic checker tabs at the footer base
+            render_data_checker(client, full_reg_df)
+        else:
+            st.info("The specific assignment record could not be parsed. Refresh your selections.")
+    else:
+        st.info("💡 Please specify a valid Project, Location, and Node path above to populate the management editor panels.")
+
 # =============================================================================
 # DATA RECOVERY REQUISITE ENGINE HELPERS
 # =============================================================================
