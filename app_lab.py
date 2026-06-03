@@ -2790,8 +2790,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.header("⚡ Bulk Approval & Data Maintenance")
         st.write("Surgically override telemetry data point approval designations across your project timelines.")
         
-        # Executes your exact data management filtering loops and structural merge transactions
-        execute_bulk_approval_workspace(client, reg_df, selected_project, tab_logistics)
+        # FIXED: Changed 'reg_df' to 'full_reg_df' to match your actual dataframe variable name
+        execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
 
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: BULK APPROVAL DATA MANAGEMENT
