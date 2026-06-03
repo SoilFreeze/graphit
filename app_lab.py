@@ -2736,51 +2736,53 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
     
     # =========================================================================
-    # SECTION 4: STEP 2 - TRANSMISSION OVERRIDE LEDGER WRITER
-    # =========================================================================
-    st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
-    if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
-        if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
+# SECTION 4: STEP 2 - TRANSMISSION OVERRIDE LEDGER WRITER
+# =========================================================================
+st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
+if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
+    if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
+        
+        # 🎯 FIX: If setting to TRUE and filtering from NULL, we MUST MERGE/INSERT a 'TRUE' string 
+        # instead of attempting a DELETE on non-existent records.
+        if new_status == "TRUE" and current_status_filter != "NULL (Streaming / Unreviewed)":
+            sql = f"""
+                DELETE FROM `{target_table}`
+                WHERE STRUCT(NodeNum, timestamp) IN (
+                    SELECT AS STRUCT t.NodeNum, t.timestamp 
+                    FROM `{telemetry_table}` t
+                    WHERE {aliased_where}
+                )
+            """
+        else:
+            # Captures 'TRUE' string assignments or custom codes (Masked, OFFICE, BadData)
+            sql = f"""
+                MERGE `{target_table}` T
+                USING (
+                    SELECT DISTINCT t.Project, t.NodeNum, t.timestamp 
+                    FROM `{telemetry_table}` t 
+                    WHERE {aliased_where}
+                ) S
+                ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                WHEN MATCHED THEN
+                    UPDATE SET approve = '{new_status}'
+                WHEN NOT MATCHED THEN
+                    INSERT (Project, NodeNum, timestamp, approve) 
+                    VALUES (S.Project, S.NodeNum, S.timestamp, '{new_status}')
+            """
+        try:
+            with st.spinner("Processing database merge mapping vectors..."):
+                job = client.query(sql)
+                job.result()
             
-            if new_status == "TRUE":
-                sql = f"""
-                    DELETE FROM `{target_table}`
-                    WHERE STRUCT(NodeNum, timestamp) IN (
-                        SELECT AS STRUCT t.NodeNum, t.timestamp 
-                        FROM `{telemetry_table}` t
-                        WHERE {aliased_where}
-                    )
-                """
-            else:
-                sql = f"""
-                    MERGE `{target_table}` T
-                    USING (
-                        SELECT DISTINCT t.Project, t.NodeNum, t.timestamp 
-                        FROM `{telemetry_table}` t 
-                        WHERE {aliased_where}
-                    ) S
-                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
-                    WHEN MATCHED THEN
-                        UPDATE SET approve = '{new_status}'
-                    WHEN NOT MATCHED THEN
-                        INSERT (Project, NodeNum, timestamp, approve) 
-                        VALUES (S.Project, S.NodeNum, S.timestamp, '{new_status}')
-                """
-            try:
-                with st.spinner("Processing database merge mapping vectors..."):
-                    job = client.query(sql)
-                    job.result()
-                
-                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records.")
-                st.cache_data.clear()
-                run_profile_audit()
-                st.balloons()
-                time.sleep(1.0)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Execution Error: {e}")
-                st.code(sql, language="sql")
-
+            st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records.")
+            st.cache_data.clear()
+            run_profile_audit()
+            st.balloons()
+            time.sleep(1.0)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Execution Error: {e}")
+            st.code(sql, language="sql")
 
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
