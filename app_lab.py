@@ -2632,10 +2632,17 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     Main administrative execution module managing bulk data approval modification routines.
     Completely isolated from layout tab blocks to prevent NameErrors.
     
-    Reads 'approval_status' from the view, writes to 'approve' in the raw ledger.
+    - Runs SensorPush/LORD data compaction up top.
+    - Features auto-refreshing Step 1 verification matrices directly after Step 2 commits.
     """
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
+
+    # Initialize a session state bucket to preserve table visibility across button triggers
+    if "blk_mgmt_profile_df" not in st.session_state:
+        st.session_state.blk_mgmt_profile_df = None
+    if "blk_mgmt_total_points" not in st.session_state:
+        st.session_state.blk_mgmt_total_points = 0
 
     # =========================================================================
     # SECTION 1: TOP LEVEL GLOBAL DATA CLEANUP UTILITY
@@ -2644,22 +2651,16 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.write("Surgically drop outliers outside [-30°F, 120°F] and condense historical datasets into 1-decimal hourly point means.")
     
     if st.button("⚡ Run SensorPush/LORD Hourly Data Cleanup & Aggregator", use_container_width=True):
-        # Production data aggregation routine tracking only valid physical readings
         cleanup_sql = f"""
             DECLARE target_proj STRING DEFAULT '{selected_project}';
 
             WITH compacted_hourly_logs AS (
                 SELECT 
-                    Project,
-                    NodeNum,
-                    Bank,
-                    Location,
-                    Depth,
+                    Project, NodeNum, Bank, Location, Depth,
                     TIMESTAMP_TRUNC(timestamp, HOUR) as hourly_timestamp,
                     ROUND(AVG(temperature), 1) as rounded_avg_temp
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
                 WHERE Project = target_proj
-                  # Outlier Shield bounds
                   AND temperature >= -30.0 AND temperature <= 120.0
                 GROUP BY Project, NodeNum, Bank, Location, Depth, TIMESTAMP_TRUNC(timestamp, HOUR)
             )
@@ -2670,6 +2671,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 job = client.query(cleanup_sql)
                 job.result()
             st.success("✅ Telemetry pipeline compaction completed! Outliers removed and frames consolidated to 1 point per hour.")
+            st.cache_data.clear()
         except Exception as e:
             st.error(f"Compaction Engine Failed: {e}")
 
@@ -2680,24 +2682,19 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     # =========================================================================
     st.subheader("⚙️ Bulk Status Configuration & Coordinates")
 
-    # 1. Render Controls & Collect Settings
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
 
-    # 2. Render Ingestion Filtering Matrices
     filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
     where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
     
-    # Align targeting strings directly to view structures (approval_status)
     aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
                               .replace("timestamp", "t.timestamp")
                               .replace("temperature", "t.temperature")
                               .replace("r.approve", "t.approval_status"))
     
-    # =========================================================================
-    # SECTION 3: STEP 1 - THE MASTER VIEW PROFILER
-    # =========================================================================
-    if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
+    # 🔁 REUSEABLE VERIFICATION LOGIC ENGINE
+    def run_profile_audit():
         status_q = f"""
             SELECT 
                 COALESCE(t.approval_status, 'NULL (Streaming / Unreviewed)') as Current_Designation_Status,
@@ -2709,31 +2706,42 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             GROUP BY Current_Designation_Status
             ORDER BY Total_Captured_Points DESC
         """
-        try:
-            with st.spinner("Auditing active database designation profiles..."):
-                res = client.query(status_q).to_dataframe()
-            
+        with st.spinner("Auditing active database designation profiles..."):
+            res = client.query(status_q).to_dataframe()
             if not res.empty:
-                st.subheader("📊 Active Designation Profile Summary")
-                st.dataframe(res, use_container_width=True, hide_index=True)
-                
-                total_sum = res['Total_Captured_Points'].sum()
-                st.metric("Total Consolidated Points in Selection Scope", f"{total_sum:,}")
+                st.session_state.blk_mgmt_profile_df = res
+                st.session_state.blk_mgmt_total_points = res['Total_Captured_Points'].sum()
             else:
-                st.warning("No telemetry data points found matching this configuration window. Check your date filter scopes or threshold parameters.")
+                st.session_state.blk_mgmt_profile_df = pd.DataFrame()
+                st.session_state.blk_mgmt_total_points = 0
+
+    # =========================================================================
+    # SECTION 3: STEP 1 - THE MASTER VIEW PROFILER
+    # =========================================================================
+    if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
+        try:
+            run_profile_audit()
         except Exception as e:
             st.error(f"Verification Matrix Compilation Failed: {e}")
+
+    # Render the verification frames if memory states hold data
+    if st.session_state.blk_mgmt_profile_df is not None:
+        if not st.session_state.blk_mgmt_profile_df.empty:
+            st.subheader("📊 Active Designation Profile Summary")
+            st.dataframe(st.session_state.blk_mgmt_profile_df, use_container_width=True, hide_index=True)
+            st.metric("Total Consolidated Points in Selection Scope", f"{st.session_state.blk_mgmt_total_points:,}")
+        else:
+            st.warning("No telemetry data points found matching this configuration window.")
 
     st.divider()
     
     # =========================================================================
-    # SECTION 4: STEP 2 - OVERRIDE TRANSACTION ENGINE EXECUTION BLOCK
+    # SECTION 4: STEP 2 - TRANSMISSION OVERRIDE LEDGER WRITER (WITH AUTO-REFRESH)
     # =========================================================================
     st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
             
-            # --- PATH A: IF RETURNING TO TRUE, REMOVE LOGS FROM REJECTIONS TABLE COMPLETELY ---
             if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
@@ -2743,7 +2751,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         WHERE {aliased_where}
                     )
                 """
-            # --- PATH B: MERGE ADMINISTRATIVE OVERRIDES INTO LEDGER (Writes to ledger 'approve') ---
             else:
                 sql = f"""
                     MERGE `{target_table}` T
@@ -2763,17 +2770,21 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 with st.spinner("Processing database merge mapping vectors..."):
                     job = client.query(sql)
                     job.result()
-                st.success(f"✅ Reclassification successful! Processed and updated {job.num_dml_affected_rows:,} records inside the rejection catalog.")
                 
-                # Instantly clear cache layers so updates reflect immediately on client sites
+                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records.")
+                
+                # 1. Flush Streamlit RAM cache so portals update immediately
                 st.cache_data.clear()
+                
+                # 2. ⚡ THE AUTO-REDO TRICK: Force code to query fresh counts BEFORE page elements redraw
+                run_profile_audit()
+                
                 st.balloons()
-                time.sleep(1.5)
+                time.sleep(1.0)
                 st.rerun()
             except Exception as e:
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
-
 
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     """
