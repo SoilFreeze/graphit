@@ -2791,7 +2791,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.write("Surgically override telemetry data point approval designations across your project timelines.")
         
         # FIXED: Changed 'reg_df' to 'full_reg_df' to match your actual dataframe variable name
-        execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
+        _approval_workspace(client, full_reg_df, selected_project, tab_logistics)
 
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: BULK APPROVAL DATA MANAGEMENT
@@ -2915,19 +2915,24 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     return " AND ".join(where_clauses)
 
 
-def execute_bulk_approval_workspace(client, reg_df, selected_project, tab_logistics):
-    """Main administrative execution module managing tab data manipulation routines."""
-    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
+    """
+    Main administrative execution module managing bulk data approval modification routines.
+    Completely isolated from layout tab blocks to prevent NameErrors.
+    """
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
+    # 1. Render Controls & Collect Settings
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
 
-    filters = render_bulk_approval_filters(reg_df, selected_project, target_scope)
-    where_str = build_bulk_approval_where_clause(reg_df, selected_project, target_scope, current_status_filter, filters)
+    # 2. Render Ingestion Filtering Matrices
+    filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
+    where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
     aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
     
-    # STEP 1: VERIFICATION CONTAINER BLOCK
+    # 3. STEP 1: VERIFICATION CONTAINER BLOCK
     if st.button("🔍 Step 1: Verify Match Count & Current Status", key="blk_mgmt_verify_btn", use_container_width=True):
         status_q = f"""
             SELECT 
@@ -2953,11 +2958,52 @@ def execute_bulk_approval_workspace(client, reg_df, selected_project, tab_logist
                 )
                 st.metric("Total Consolidated Points in Selection", f"{res['Point_Count'].sum():,}")
             else:
-                st.warning("No telemetry points found matching this configuration window. Check your date filter scopes or threshold parameters.")
+                st.warning("No telemetry data points found matching this configuration window. Check your date filter scopes or threshold parameters.")
         except Exception as e:
             st.error(f"Verification Matrix Compilation Failed: {e}")
 
     st.divider()
+    
+    # 4. STEP 2: OVERRIDE TRANSACTION ENGINE EXECUTION BLOCK
+    st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
+    if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
+        if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
+            if new_status == "TRUE":
+                sql = f"""
+                    DELETE FROM `{target_table}`
+                    WHERE STRUCT(NodeNum, timestamp) IN (
+                        SELECT AS STRUCT t.NodeNum, t.timestamp 
+                        FROM `{telemetry_table}` t
+                        LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+                        WHERE {aliased_where}
+                    )
+                """
+            else:
+                sql = f"""
+                    MERGE `{target_table}` T
+                    USING (
+                        SELECT DISTINCT t.NodeNum, t.timestamp 
+                        FROM `{telemetry_table}` t 
+                        LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
+                        WHERE {aliased_where}
+                    ) S
+                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                    WHEN MATCHED THEN
+                        UPDATE SET approve = '{new_status}'
+                    WHEN NOT MATCHED THEN
+                        INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                """
+            try:
+                with st.spinner("Processing database merge mapping vectors..."):
+                    job = client.query(sql)
+                    job.result()
+                st.success(f"✅ Reclassification successful! Processed and updated {job.num_dml_affected_rows:,} records inside the rejection catalog.")
+                st.cache_data.clear()
+                st.balloons()
+                time.sleep(1.5)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
     
     # STEP 2: OVERRIDE TRANSACTION ENGINE EXECUTION BLOCK
     st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
