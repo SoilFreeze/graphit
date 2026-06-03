@@ -2516,7 +2516,6 @@ def render_bulk_approval_controls():
             key="blk_mgmt_target_scope"
         )
     with c2:
-        # 🎯 MIRRORED DROP DOWN: Explicitly handles PENDING and case-sensitive variants
         current_status_filter = st.selectbox(
             "Filter Current Designation Status:",
             options=["ALL", "PENDING", "TRUE", "Masked", "OFFICE", "BADDATA", "FALSE"],
@@ -2524,7 +2523,6 @@ def render_bulk_approval_controls():
             help="Limits modifications only to data points that currently match this selected classification."
         )
     with c3:
-        # 🎯 STANDARDIZED TARGETS: Outputs your clean database string states
         new_status = st.selectbox(
             "Set Approval Status To:", 
             ["TRUE", "Masked", "OFFICE", "BADDATA", "FALSE"], 
@@ -2560,22 +2558,26 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
     with col_f3:
         scope_val = None
         
-        if target_scope == "Project Wide":
-            st.info(f"Targeting all nodes in **{selected_project}**")
-            scope_val = selected_project
+        if selected_project == "All Projects":
+            st.info("Targeting **Global Registry Scope** (All Active Projects)")
+            scope_val = "ALL_PROJECTS"
+        else:
+            if target_scope == "Project Wide":
+                st.info(f"Targeting all nodes in **{selected_project}**")
+                scope_val = selected_project
 
-        elif target_scope == "Specific Location":
-            u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist())
-            scope_val = st.selectbox("Select Location", u_locs, key="blk_mgmt_loc_select")
+            elif target_scope == "Specific Location":
+                u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist())
+                scope_val = st.selectbox("Select Location", u_locs, key="blk_mgmt_loc_select")
 
-        elif target_scope == "Specific Node":
-            u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist())
-            selected_loc = st.selectbox("First, Select Location", u_locs, key="blk_mgmt_loc_node_select")
-            
-            u_nodes = sorted(
-                reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == selected_loc)]['NodeNum'].dropna().unique().tolist()
-            )
-            scope_val = st.selectbox("Then, Select Node", u_nodes, key="blk_mgmt_node_select")
+            elif target_scope == "Specific Node":
+                u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist())
+                selected_loc = st.selectbox("First, Select Location", u_locs, key="blk_mgmt_loc_node_select")
+                
+                u_nodes = sorted(
+                    reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == selected_loc)]['NodeNum'].dropna().unique().tolist()
+                )
+                scope_val = st.selectbox("Then, Select Node", u_nodes, key="blk_mgmt_node_select")
             
     return {
         "temporal_dir": temporal_dir, 
@@ -2587,19 +2589,27 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
 
 def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, current_status_filter, f):
     """Constructs analytical logical statements parsing historical coordinates."""
-    proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].dropna().unique().tolist()
-    if not proj_nodes:
-        return "NodeNum = 'NONE'"
+    where_clauses = []
 
-    if target_scope == "Specific Node":
-        where_clauses = [f"NodeNum = '{f['scope_val']}'"]
-    elif target_scope == "Specific Location":
-        loc_nodes = reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == f['scope_val'])]['NodeNum'].dropna().unique().tolist()
-        nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
-        where_clauses = [f"NodeNum IN ({nodes_str})"]
+    # 🎯 FIX: Global project handling
+    if selected_project != "All Projects":
+        if target_scope == "Specific Node":
+            where_clauses.append(f"NodeNum = '{f['scope_val']}'")
+        elif target_scope == "Specific Location":
+            loc_nodes = reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == f['scope_val'])]['NodeNum'].dropna().unique().tolist()
+            nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
+            where_clauses.append(f"NodeNum IN ({nodes_str})")
+        else:
+            proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].dropna().unique().tolist()
+            if proj_nodes:
+                nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
+                where_clauses.append(f"NodeNum IN ({nodes_str})")
+            else:
+                where_clauses.append("NodeNum = 'NONE'")
+        where_clauses.append(f"Project = '{selected_project}'")
     else:
-        nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
-        where_clauses = [f"NodeNum IN ({nodes_str})"]
+        # Bypasses single project constraints to parse the global matrix
+        where_clauses.append("Project IS NOT NULL")
 
     start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
 
@@ -2615,7 +2625,6 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"temperature < {f['threshold']}")
 
-    # 🎯 LEAKPROOF LOGIC: Handles missing ledger records (PENDING/NULL) accurately
     if current_status_filter != "ALL":
         if current_status_filter == "PENDING":
             where_clauses.append("(r.approve IS NULL OR UPPER(CAST(r.approve AS STRING)) = 'PENDING')")
@@ -2628,17 +2637,10 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
 
 
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
-    """
-    Main administrative execution module managing bulk data approval modification routines.
-    Completely isolated from layout tab blocks to prevent NameErrors.
-    
-    - Runs SensorPush/LORD data compaction up top.
-    - Features auto-refreshing Step 1 verification matrices directly after Step 2 commits.
-    """
+    """Main administrative execution module managing bulk data approval modification routines."""
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
-    # Initialize a session state bucket to preserve table visibility across button triggers
     if "blk_mgmt_profile_df" not in st.session_state:
         st.session_state.blk_mgmt_profile_df = None
     if "blk_mgmt_total_points" not in st.session_state:
@@ -2648,23 +2650,23 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     # SECTION 1: TOP LEVEL GLOBAL DATA CLEANUP UTILITY
     # =========================================================================
     st.subheader("🧹 SensorPush/LORD Telemetry Optimization Engine")
-    st.write("Surgically drop outliers outside [-30°F, 120°F] and condense historical datasets into 1-decimal hourly point means.")
+    st.write("Drop outliers outside [-30°F, 120°F] and condense historical datasets into 1-decimal hourly point means.")
     
     if st.button("⚡ Run SensorPush/LORD Hourly Data Cleanup & Aggregator", use_container_width=True):
+        # 🎯 FIX: Global vs project-specific hourly cleanup routing
+        project_filter_sql = "" if selected_project == "All Projects" else f"WHERE Project = '{selected_project}'"
+        
         cleanup_sql = f"""
-            DECLARE target_proj STRING DEFAULT '{selected_project}';
-
             WITH compacted_hourly_logs AS (
                 SELECT 
                     Project, NodeNum, Bank, Location, Depth,
                     TIMESTAMP_TRUNC(timestamp, HOUR) as hourly_timestamp,
                     ROUND(AVG(temperature), 1) as rounded_avg_temp
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-                WHERE Project = target_proj
-                  AND temperature >= -30.0 AND temperature <= 120.0
+                {project_filter_sql}
                 GROUP BY Project, NodeNum, Bank, Location, Depth, TIMESTAMP_TRUNC(timestamp, HOUR)
             )
-            SELECT COUNT(*) FROM compacted_hourly_logs;
+            SELECT COUNT(*) FROM compacted_hourly_logs WHERE rounded_avg_temp >= -30.0 AND rounded_avg_temp <= 120.0;
         """
         try:
             with st.spinner("Processing timeframe vector aggregation mapping rules..."):
@@ -2678,10 +2680,8 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
 
     # =========================================================================
-    # SECTION 2: BULK UPDATER CONTROLS & COMPASS LAYOUT
+    # SECTION 2: BULK UPDATER CONTROLS
     # =========================================================================
-    st.subheader("⚙️ Bulk Status Configuration & Coordinates")
-
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
 
@@ -2693,7 +2693,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                               .replace("temperature", "t.temperature")
                               .replace("r.approve", "t.approval_status"))
     
-    # 🔁 REUSEABLE VERIFICATION LOGIC ENGINE
     def run_profile_audit():
         status_q = f"""
             SELECT 
@@ -2724,7 +2723,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
         except Exception as e:
             st.error(f"Verification Matrix Compilation Failed: {e}")
 
-    # Render the verification frames if memory states hold data
     if st.session_state.blk_mgmt_profile_df is not None:
         if not st.session_state.blk_mgmt_profile_df.empty:
             st.subheader("📊 Active Designation Profile Summary")
@@ -2736,7 +2734,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
     
     # =========================================================================
-    # SECTION 4: STEP 2 - TRANSMISSION OVERRIDE LEDGER WRITER (WITH AUTO-REFRESH)
+    # SECTION 4: STEP 2 - TRANSMISSION OVERRIDE LEDGER WRITER
     # =========================================================================
     st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
@@ -2772,13 +2770,8 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     job.result()
                 
                 st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records.")
-                
-                # 1. Flush Streamlit RAM cache so portals update immediately
                 st.cache_data.clear()
-                
-                # 2. ⚡ THE AUTO-REDO TRICK: Force code to query fresh counts BEFORE page elements redraw
                 run_profile_audit()
-                
                 st.balloons()
                 time.sleep(1.0)
                 st.rerun()
@@ -2786,11 +2779,9 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
 
+
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
-    """
-    Executes a proper database commit to write approvals, rejections, 
-    or BADDATA flags to your permanent tracking ledger.
-    """
+    """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
     client = get_bq_client()
     if client is None:
         return False
@@ -2816,6 +2807,7 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     except Exception as e:
         st.error(f"⚠️ Cloud DB Commit Failed: {e}")
         return False
+
 
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: NODE LOGISTICS ENGINE
