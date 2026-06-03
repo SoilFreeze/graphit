@@ -2493,6 +2493,9 @@ def render_data_processing_page(selected_project):
                         use_container_width=True
                     )
 
+######################
+# Page: Admin Tool Helpers  #
+######################
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: NODE LOGISTICS ENGINE
 # =============================================================================
@@ -2504,7 +2507,7 @@ def render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_l
     """
     st.subheader("🔍 Select Target Hardware Path")
     
-    # 1. CASCADING SELECTBOX CONTROLS (Identical to Data Recovery layout)
+    # 1. CASCADING SELECTBOX CONTROLS (Matches Data Recovery layout seamlessly)
     col_l1, col_l2, col_l3 = st.columns(3)
     
     with col_l1:
@@ -2542,7 +2545,7 @@ def render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_l
             active_node_record = target_rows.iloc[0].to_dict()
             target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
             
-            # FIXED: Bypasses positional variable naming conflicts by mapping fields explicitly
+            # FIXED: Positional variations bypassed by applying explicit keyword assignments
             render_node_action_manager(
                 client=client, 
                 selected_node_data=active_node_record, 
@@ -2557,6 +2560,7 @@ def render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_l
             st.info("The specific assignment record could not be parsed. Refresh your selections.")
     else:
         st.info("💡 Please specify a valid Project, Location, and Node path above to populate the management editor panels.")
+
 
 # =============================================================================
 # DATA RECOVERY REQUISITE ENGINE HELPERS
@@ -2602,12 +2606,10 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
     node_stats = {}
     account_stats = {}
 
-    # Define internal target parameter table settings
     LOCAL_REC_TABLE = "raw_sensorpush"
     LOCAL_INV_TABLE = "hardware_inventory"
     LOCAL_API_URL = "https://api.sensorpush.com/api/v1"
 
-    # API credentials dictionary matrix
     ACCOUNTS = [
         {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
         {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
@@ -2618,7 +2620,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
     end_time_iso = datetime.combine(end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     with st.status("Executing Cloud Backfill Ingestion Pipeline Run...", expanded=True) as status:
-        # --- STEP A: INVENTORY TRANSLATION MAPPINGS ---
         st.write("🔍 Extracting Translation Mappings from Hardware Inventory...")
         try:
             inv_q = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{LOCAL_INV_TABLE}` WHERE RawID IS NOT NULL"
@@ -2630,7 +2631,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             st.error(f"Failed to query inventory map tables: {e}")
             st.stop()
 
-        # --- STEP B: CHECK BOOKMARKS ---
         st.write("📅 Checking existing database timeline bookmarks...")
         try:
             time_q = f"SELECT NodeNum, MAX(timestamp) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}` GROUP BY NodeNum"
@@ -2640,7 +2640,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
         except Exception as e:
             st.warning(f"Could not calculate maximum timelines: {e}")
 
-        # --- STEP C: PULL TELEMETRY FROM CLOUD HOUSES ---
         for acc in ACCOUNTS:
             st.write(f"🔐 Authenticating token profile for `{acc['email']}`...")
             account_stats[acc['email']] = 0
@@ -2664,7 +2663,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 if not sensors_data:
                     continue
 
-                # --- STEP D: MATCH, TRUNCATE AND DEDUPLICATE ---
                 for s_id, samples in sensors_data.items():
                     api_root_id = str(s_id).split('.')[0].strip()
                     friendly_name = hardware_map.get(api_root_id)
@@ -2700,7 +2698,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             except Exception:
                 continue
 
-        # --- STEP E: COMMIT UNIQUE SAMPLES TO BIGQUERY ---
         total_recovered_appends = len(all_rows)
         if total_recovered_appends == 0:
             st.info("🔒 Central database perfectly synchronized. 0 duplicate packets written.")
@@ -2724,7 +2721,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 st.error(f"Stream submission pipeline failure: {bq_err}")
                 status.update(state="error")
 
-    # --- STEP F: RENDER STATISTICAL BREAKDOWN GRID ---
     if node_stats:
         st.write("### 📊 Smart Data Delta Tally Distribution:")
         summary_records = []
@@ -2738,6 +2734,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
         if total_recovered_appends > 0:
             st.balloons()
+
 
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: BULK APPROVAL DATA MANAGEMENT
@@ -2864,7 +2861,7 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
     """
     Main administrative execution module managing bulk data approval modification routines.
-    Cleaned to prevent StreamlitDuplicateElementKey exceptions.
+    Completely isolated from layout tab blocks to prevent NameErrors.
     """
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
