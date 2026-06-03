@@ -2938,7 +2938,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 # SUB-TAB WORKSPACE HELPERS: NODE LOGISTICS ENGINE
 # =============================================================================
 
-def render_upgraded_node_logistics_tab(client, full_reg_df, proj_list):
+def render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_list):
     """
     Renders an advanced cascading dropdown lookup selection engine for managing 
     individual nodes based on Project, Location, and Node number assignments.
@@ -2950,7 +2950,7 @@ def render_upgraded_node_logistics_tab(client, full_reg_df, proj_list):
     
     with col_l1:
         # Include all projects, including the Office restock reservoir
-        u_projects = sorted(list(set(["Office"] + proj_list)))
+        u_projects = sorted(list(set(["Office"] + available_projects_list)))
         selected_log_proj = st.selectbox("Select Project Space Context:", u_projects, key="node_log_project_filter")
         
     proj_filtered = full_reg_df[full_reg_df['Project'] == selected_log_proj]
@@ -2977,17 +2977,14 @@ def render_upgraded_node_logistics_tab(client, full_reg_df, proj_list):
 
     # 2. IF A VALID NODE IS SELECTED, INJECT THE ENTIRE DATA ENGINE MATRIX
     if selected_log_node:
-        # Isolate the current row context records matching our cascading dropdown selections
         target_rows = loc_filtered[loc_filtered['NodeNum'] == selected_log_node].sort_values(by='Start_Date', ascending=False)
         
         if not target_rows.empty:
             active_node_record = target_rows.iloc[0].to_dict()
-            
-            # Target Registry metadata destination parameters 
             target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
             
-            # Call your integrated graph component and asset attribute editor forms
-            render_node_action_manager(client, active_node_record, full_reg_df, proj_list, target_registry_path)
+            # FIXED: Passed available_projects_list directly to align scope parameters
+            render_node_action_manager(client, active_node_record, full_reg_df, available_projects_list, target_registry_path)
             
             # Append your comprehensive data diagnostic checker tabs at the footer base
             render_data_checker(client, full_reg_df)
