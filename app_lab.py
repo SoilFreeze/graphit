@@ -2492,447 +2492,6 @@ def render_data_processing_page(selected_project):
                         mime="text/csv",
                         use_container_width=True
                     )
-######################
-# Page: Admin Tools  #
-######################
-
-def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Advanced Admin Tools: Centralized administrative command center.
-    All sidebar sub-navigation radio buttons have been removed. Layout routing 
-    is handled cleanly via the core multi-page navigation selectbox.
-    """
-    import re
-    from datetime import datetime, timedelta
-    
-    st.header("🛠️ Admin Tools")
-    
-    client = get_bq_client()
-    if client is None: 
-        st.error("Database connection unavailable.")
-        return
-
-    # 1. CENTRAL TRANSACTIONAL DATA FETCH
-    try:
-        reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
-        full_reg_df = client.query(reg_q).to_dataframe()
-        
-        proj_reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
-        proj_reg_df = client.query(proj_reg_q).to_dataframe()
-    except Exception as e:
-        st.error(f"Registry Link Offline: {e}")
-        return
-
-    # 2. NAVIGATION TABS (6 slots neatly aligned)
-    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
-        "📋 Admin Summary", 
-        "⚡ Bulk Approval", 
-        "📋 Node Logistics",
-        "📡 Data Recovery", 
-        "⚙️ Project Master", 
-        "📦 Bulk Changes"
-    ])
-
-    # --- SUB-TAB 1: ADMIN SUMMARY ---
-    with tab_admin_sum:
-        st.subheader("📋 Centralized Infrastructure Status Overview")
-        
-        # Table 1: Hardware Inventory Fleet Breakdown (Matches image layout)
-        st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
-        try:
-            def classify_hardware_family(node):
-                node_str = str(node).lower()
-                if "-ch" in node_str: return "Lord"
-                elif node_str.startswith("sp"): return "SP"
-                elif node_str.startswith("tp"): return "TP"
-                return "None of the Above"
-
-            fleet_df = full_reg_df.copy()
-            fleet_df['Hardware Family'] = fleet_df['NodeNum'].apply(classify_hardware_family)
-            fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
-            fleet_df['is_active'] = fleet_df['End_Date'].isna()
-            
-            # Filter to mirror the live deduplicated overview count matrix precisely
-            deduped_units = fleet_df.sort_values(by=['Parent ID', 'is_active'], ascending=[True, False]).drop_duplicates(subset=['Parent ID']).copy()
-            
-            fleet_pivot = deduped_units.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
-            desired_order = ["TP", "SP", "Lord", "None of the Above"]
-            fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
-            
-            # Re-ensure exact status column structures exist to avoid indexing errors
-            for stat_col in ["Available", "Dead", "Diagnostic", "On Project"]:
-                if stat_col not in fleet_pivot.columns:
-                    fleet_pivot[stat_col] = 0
-            
-            fleet_pivot = fleet_pivot[["Available", "Dead", "Diagnostic", "On Project"]]
-            fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
-            st.dataframe(fleet_pivot.reset_index(), use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.caption(f"Inventory matrix loading: {e}")
-
-        st.divider()
-
-        # Table 2: Upgraded Project Overview Matrix
-        st.markdown("### 🏗️ Active Deployment Overview Matrix")
-        summary_summary_q = f"""
-            WITH Metrics AS (
-                SELECT 
-                    n.Project,
-                    COUNT(DISTINCT n.NodeNum) as Mapped_Sensors,
-                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_in_last_6_hours,
-                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_in_last_24_hours
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
-                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
-                WHERE n.End_Date IS NULL
-                GROUP BY n.Project
-            )
-            SELECT 
-                p.Project,
-                p.ProjectName,
-                p.ProjectStatus,
-                p.Date_Freezedown,
-                COALESCE(m.Mapped_Sensors, 0) as Mapped_Sensors,
-                COALESCE(m.Active_in_last_6_hours, 0) as Active_in_last_6_hours,
-                COALESCE(m.Active_in_last_24_hours, 0) as Active_in_last_24_hours
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` p
-            LEFT JOIN Metrics m ON p.Project = m.Project
-            WHERE p.ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
-              AND UPPER(p.Project) NOT LIKE '%OFFICE%'
-            ORDER BY p.Project ASC
-        """
-        
-        try:
-            sum_summary_df = client.query(summary_summary_q).to_dataframe()
-            
-            # Compute operational day-counters metrics context loops in Python
-            rows = []
-            for _, r in sum_summary_df.iterrows():
-                p_status = str(r['ProjectStatus']).strip()
-                f_date = r['Date_Freezedown']
-                
-                status_tracking_text = "Not Freezing"
-                
-                if pd.notnull(f_date):
-                    days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
-                    days_count = max(0, days_elapsed)
-                    
-                    if p_status.lower() == "freezedown":
-                        status_tracking_text = f"Day {days_count} of Freezedown"
-                    elif p_status.lower() == "maintenance":
-                        status_tracking_text = f"Day {days_count} of Maintenance"
-                    elif p_status.lower() == "pre-freeze":
-                        status_tracking_text = f"Pre-freeze (Day {days_count})"
-                
-                rows.append({
-                    "Project ID": r['Project'],
-                    "Project Name": r['ProjectName'] if pd.notnull(r['ProjectName']) else r['Project'],
-                    "Mapped Sensors": int(r['Mapped_Sensors']),
-                    "Active in last 6 hours": int(r['Active_in_last_6_hours']),
-                    "Active in last 24 hours": int(r['Active_in_last_24_hours']),
-                    "Project Status Timeline": status_tracking_text
-                })
-                
-            display_summary_df = pd.DataFrame(rows)
-            st.dataframe(display_summary_df, use_container_width=True, hide_index=True)
-            
-        except Exception as e:
-            st.error(f"Failed to generate upgraded overview matrix: {e}")
-
-    # --- SUB-TAB 2: BULK APPROVAL ---
-    with tab_bulk_app:
-        st.header("⚡ Bulk Approval & Data Maintenance")
-        st.write("Surgically override telemetry data point approval designations across your project timelines.")
-        # Fixed execution endpoint to cleanly point to the isolated engine helper
-        execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
-        
-    # --- SUB-TAB 3: NODE LOGISTICS ---
-    with tab_logistics:
-        st.header("📋 Node Logistics & Asset Management")
-        st.write("Find and modify individual sensor attributes, review historical timelines, or analyze fleet deployment diagnostics.")
-        
-        # Pulls project list context from the central data frame
-        available_projects_list = sorted(proj_reg_df['Project'].dropna().unique().tolist())
-        
-        # Calls the unified frontend interface
-        render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_list)
-
-    # --- SUB-TAB 4: DATA RECOVERY ---
-    with tab_recovery:
-        st.subheader("📡 Operational Cloud Data Backfill Engine")
-        st.write("Surgically request missed or interrupted data logs directly from the hardware cloud servers.")
-
-        try:
-            sp_reg_q = f"""
-                SELECT NodeNum, Project, Location 
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
-                WHERE End_Date IS NULL 
-                  AND (NodeNum LIKE 'TP%' OR REGEXP_CONTAINS(NodeNum, r'^[0-9]+$'))
-            """
-            sp_reg = client.query(sp_reg_q).to_dataframe()
-        except Exception as e:
-            st.error(f"Failed to index active gateway hardware lists: {e}")
-            sp_reg = pd.DataFrame(columns=['NodeNum', 'Project', 'Location'])
-
-        if sp_reg.empty:
-            st.warning("No active SensorPush or TP hardware profiles currently indexed in the node registry.")
-        else:
-            selected_nodes = render_recovery_filters(sp_reg)
-
-            st.divider()
-            st.subheader("📅 Define Recovery Timeline Parameters")
-            
-            c_d1, c_d2 = st.columns(2)
-            yesterday = datetime.now().date() - timedelta(days=1)
-            
-            start_date = c_d1.date_input("Extraction Window Start Date", value=yesterday, key="rec_start_date_picker")
-            end_date = c_d2.date_input("Extraction Window End Date", value=datetime.now().date(), key="rec_end_date_picker")
-
-            if start_date > end_date:
-                st.error("❌ Invalid Timeline: Start date cannot be placed after the target completion date context.")
-            else:
-                st.divider()
-                
-                target_label = f"{len(selected_nodes)} selected nodes" if selected_nodes else "ALL active project hardware"
-                st.warning(f"⚠️ Action Required: Initiating backfill protocol for {target_label} from **{start_date}** through **{end_date}**.")
-                
-                if st.button("📥 Execute Cloud Backfill Ingestion Pipeline Run", type="primary", use_container_width=True, key="execute_recovery_run_btn"):
-                    handle_recovery_trigger(selected_nodes, start_date, end_date)
-
-    # --- SUB-TAB 5: PROJECT MASTER ---
-    with tab_proj_master:
-        st.subheader("⚙️ Project Lifecycle Management")
-        
-        # Navigation actions row
-        action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
-        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
-
-        if action == "📋 Project List":
-            st.subheader("📋 Complete Project Registry Table")
-            query = f"SELECT * FROM `{table_projects}` ORDER BY Project ASC"
-            try:
-                with st.spinner("Extracting structural project lists..."):
-                    df = client.query(query).to_dataframe()
-                if not df.empty:
-                    for col in ['Date_Freezedown', 'Date_Completion']:
-                        if col in df.columns:
-                            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-                else:
-                    st.info("The central project tracking configuration registry is currently empty.")
-            except Exception as e:
-                st.error(f"Failed to extract project records: {e}")
-
-        elif action == "🏗️ New Project":
-            st.subheader("🏗️ Initialize New Project Profile")
-            try:
-                all_p_q = f"SELECT Project FROM `{table_projects}` ORDER BY Project ASC"
-                existing_p_list = client.query(all_p_q).to_dataframe()['Project'].tolist()
-            except Exception:
-                existing_p_list = []
-
-            use_template = st.checkbox("📋 Clone settings from an existing project template?", key="pm_clone_toggle")
-            template_data = {}
-            if use_template and existing_p_list:
-                template_source = st.selectbox("Select Project to Clone From", existing_p_list, key="pm_clone_source")
-                if template_source:
-                    try:
-                        t_res = client.query(f"SELECT * FROM `{table_projects}` WHERE Project = '{template_source}'").to_dataframe()
-                        if not t_res.empty:
-                            template_data = t_res.iloc[0].to_dict()
-                    except Exception as e:
-                        st.error(f"Error reading template parameters: {e}")
-
-            with st.form("new_project_form_pm"):
-                col1, col2 = st.columns(2)
-                n_code = col1.text_input("Project ID / Job # (e.g., 2541-Phase 2)*")
-                n_name = col2.text_input("Friendly Project Name", value=template_data.get('ProjectName', ''))
-                
-                c_g1, c_g2 = st.columns(2)
-                n_city = c_g1.text_input("City Deployment Field", value=template_data.get('City', ''))
-                n_tz = c_g2.text_input("Operational Timezone Reference", value=template_data.get('Timezone', 'America/Los_Angeles'))
-                
-                n_up_notes = st.text_input("Automated Pipeline Sync Notes (UploadNote)", value=template_data.get('UploadNote', 'Data will be uploaded once per business day.'))
-                n_as_built = st.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
-                n_notes = st.text_area("Initial Site Engineering Field Notes", value=template_data.get('EngNotes', ''))
-                
-                if st.form_submit_button("🚀 Commit New Project Entry"):
-                    if not n_code.strip():
-                        st.error("Unique Internal Project Identifier reference required.")
-                    else:
-                        insert_q = f"""
-                            INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, City, Timezone, UploadNote, AsBuiltFile, EngNotes)
-                            VALUES ('{n_code.strip()}', '{n_name.strip()}', 'Initialized', '{n_city.strip()}', '{n_tz.strip()}', '{n_up_notes.strip()}', '{n_as_built.strip()}', '{n_notes.strip()}')
-                        """
-                        client.query(insert_q).result()
-                        st.success(f"Registered **{n_code.strip()}** successfully.")
-                        st.cache_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-
-        elif action == "🔧 Edit Project Metadata":
-            st.subheader(f"🔧 Configuration Editor: {selected_project}")
-            proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
-            p_res = client.query(proj_q).to_dataframe()
-            
-            if p_res.empty:
-                st.error("Please pick an active project in the sidebar to modify metadata metrics.")
-            else:
-                p_data = p_res.iloc[0].to_dict()
-                with st.form("comprehensive_edit_project_pm"):
-                    c1, c2 = st.columns(2)
-                    u_project_id = c1.text_input("Project ID", value=p_data.get('Project', ''), disabled=True)
-                    u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
-
-                    c3, c4 = st.columns(2)
-                    u_city = c3.text_input("City", value=p_data.get('City', ''))
-                    u_tz = c4.text_input("Timezone", value=p_data.get('Timezone', 'America/Los_Angeles'))
-                    
-                    u_up_notes = st.text_input("Upload Notes", value=p_data.get('UploadNote', ''))
-                    u_as_built = st.text_input("As-Built File Tracking ID", value=p_data.get('AsBuiltFile', ''))
-
-                    c5, c6 = st.columns(2)
-                    status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
-                    curr_status = p_data.get('ProjectStatus', 'Initialized')
-                    s_idx = status_options.index(curr_status) if curr_status in status_options else 0
-                    u_status = c5.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
-                    
-                    def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) else None
-                    u_date_freeze = c5.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
-                    u_date_comp = c6.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
-
-                    u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
-
-                    if st.form_submit_button("💾 Overwrite Project Registry Information"):
-                        freeze_val = f"DATE('{u_date_freeze}')" if u_date_freeze else "NULL"
-                        comp_val = f"DATE('{u_date_comp}')" if u_date_comp else "NULL"
-                        
-                        update_q = f"""
-                            UPDATE `{table_projects}` SET 
-                                ProjectName = '{u_project_name.strip()}', ProjectStatus = '{u_status}', City = '{u_city.strip()}',
-                                Timezone = '{u_tz.strip()}', UploadNote = '{u_up_notes.strip()}', AsBuiltFile = '{u_as_built.strip()}',
-                                EngNotes = '{u_notes.strip()}', Date_Freezedown = {freeze_val}, Date_Completion = {comp_val}
-                            WHERE Project = '{selected_project}'
-                        """
-                        client.query(update_q).result()
-                        st.success(f"✅ Configuration data modified for: {selected_project}")
-                        st.cache_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-
-    # --- SUB-TAB 6: BULK CHANGES ---
-    with tab_bulk_config:
-        st.subheader("📦 Bulk Changes Engine Workspace")
-        
-        cfg_mode = st.radio(
-            "Select Allocation Configuration Target Engine:", 
-            ["Update Hardware Inventory", "Update Node Registry"], 
-            horizontal=True, 
-            key="bulk_changes_engine_radio"
-        )
-        target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-        target_inventory_path = f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory"
-        
-        # --- ENGINE A: UPDATE HARDWARE INVENTORY ---
-        if cfg_mode == "Update Hardware Inventory":
-            st.markdown("### 📡 Update Hardware Inventory")
-            st.info("Ingest spreadsheet data to append fresh units onto your inventory master table. Required Fields: `RawID`, `NodeNum`.")
-            
-            u_file = st.file_uploader(
-                "Upload Inventory Dataset File", 
-                type=["csv", "xlsx"], 
-                key="bulk_inv_file_uploader"
-            )
-            
-            if u_file:
-                try:
-                    if u_file.name.endswith('.csv'):
-                        df_upload = pd.read_csv(u_file, dtype=str)
-                    else:
-                        df_upload = pd.read_excel(u_file, dtype=str)
-                        
-                    st.write("### Preview Staged Inventory Matrix")
-                    st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
-                    
-                    if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
-                        actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
-                        
-                        if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
-                            st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields. Spreadsheets must contain both 'RawID' and 'NodeNum' columns.")
-                        else:
-                            with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
-                                clean_upload_df = pd.DataFrame({
-                                    'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
-                                    'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
-                                }).dropna()
-                                
-                                staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
-                                load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-                                client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()
-                                
-                                merge_upsert_sql = f"""
-                                    INSERT INTO `{target_inventory_path}` (RawID, NodeNum)
-                                    SELECT DISTINCT s.RawID, s.NodeNum
-                                    FROM `{staging_table}` s
-                                    WHERE NOT EXISTS (
-                                        SELECT 1 FROM `{target_inventory_path}` i
-                                        WHERE TRIM(CAST(i.RawID AS STRING)) = TRIM(s.RawID)
-                                    )
-                                """
-                                query_job = client.query(merge_upsert_sql)
-                                query_job.result()
-                                
-                                client.delete_table(staging_table, not_found_ok=True)
-                                
-                            st.success(f"🎉 Inventory synchronization complete! Appended {query_job.num_dml_affected_rows:,} fresh tracking metrics safely onto your hardware catalog.")
-                            st.cache_data.clear()
-                            time.sleep(1)
-                            st.rerun()
-                            
-                except Exception as e:
-                    st.error(f"Failed parsing inventory load batch matrix line rules: {e}")
-                    
-        # --- ENGINE B: UPDATE NODE REGISTRY ---
-        elif cfg_mode == "Update Node Registry":
-            st.markdown("### 📋 Update Node Registry")
-            st.info("Mass register multi-sensor arrays or shift batch deployment settings across timelines using configurations maps.")
-            
-            with st.expander("📊 View Required Registry Template Rules Layout"):
-                st.code("NodeNum,Project,Location,Bank,Depth,Start_Date,SensorStatus")
-            
-            u_csv = st.file_uploader("Upload Registry Deployment Map File", type="csv", key="bulk_reg_csv_uploader")
-            
-            if u_csv:
-                df_upload = pd.read_csv(u_csv)
-                st.write("### Preview Staged Registry Matrix")
-                st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
-                
-                if st.button("🚀 Commit Registry Changes", key="bulk_reg_upload_commit_btn", use_container_width=True):
-                    try:
-                        required = {'NodeNum', 'Project', 'Location'}
-                        if not required.issubset(df_upload.columns):
-                            st.error(f"Missing required allocation column labels: {required - set(df_upload.columns)}")
-                        else:
-                            with st.spinner("Streaming spatial allocations into active registry view..."):
-                                if 'Start_Date' in df_upload.columns:
-                                    df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.date
-                                else:
-                                    df_upload['Start_Date'] = datetime.now().date()
-                                    
-                                if 'SensorStatus' not in df_upload.columns:
-                                    df_upload['SensorStatus'] = 'On Project'
-
-                                if 'PhysicalID' in df_upload.columns:
-                                    df_upload = df_upload.drop(columns=['PhysicalID'])
-                                    
-                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                client.load_table_from_dataframe(df_upload, target_registry_path, job_config=job_config).result()
-                                
-                            st.success(f"🎉 Success! Appended {len(df_upload)} nodes onto your asset deployment matrix timeline safely.")
-                            st.cache_data.clear()
-                            time.sleep(1)
-                            st.rerun()
-                    except Exception as upload_err:
-                        st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
 
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: NODE LOGISTICS ENGINE
@@ -3391,6 +2950,450 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 st.rerun()
             except Exception as e:
                 st.error(f"Execution Error: {e}")
+
+######################
+# Page: Admin Tools  #
+######################
+
+def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    """
+    Advanced Admin Tools: Centralized administrative command center.
+    All sidebar sub-navigation radio buttons have been removed. Layout routing 
+    is handled cleanly via the core multi-page navigation selectbox.
+    """
+    import re
+    from datetime import datetime, timedelta
+    
+    st.header("🛠️ Admin Tools")
+    
+    client = get_bq_client()
+    if client is None: 
+        st.error("Database connection unavailable.")
+        return
+
+    # 1. CENTRAL TRANSACTIONAL DATA FETCH
+    try:
+        reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
+        full_reg_df = client.query(reg_q).to_dataframe()
+        
+        proj_reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
+        proj_reg_df = client.query(proj_reg_q).to_dataframe()
+    except Exception as e:
+        st.error(f"Registry Link Offline: {e}")
+        return
+
+    # 2. NAVIGATION TABS (6 slots neatly aligned)
+    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
+        "📋 Admin Summary", 
+        "⚡ Bulk Approval", 
+        "📋 Node Logistics",
+        "📡 Data Recovery", 
+        "⚙️ Project Master", 
+        "📦 Bulk Changes"
+    ])
+
+    # --- SUB-TAB 1: ADMIN SUMMARY ---
+    with tab_admin_sum:
+        st.subheader("📋 Centralized Infrastructure Status Overview")
+        
+        # Table 1: Hardware Inventory Fleet Breakdown (Matches image layout)
+        st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
+        try:
+            def classify_hardware_family(node):
+                node_str = str(node).lower()
+                if "-ch" in node_str: return "Lord"
+                elif node_str.startswith("sp"): return "SP"
+                elif node_str.startswith("tp"): return "TP"
+                return "None of the Above"
+
+            fleet_df = full_reg_df.copy()
+            fleet_df['Hardware Family'] = fleet_df['NodeNum'].apply(classify_hardware_family)
+            fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
+            fleet_df['is_active'] = fleet_df['End_Date'].isna()
+            
+            # Filter to mirror the live deduplicated overview count matrix precisely
+            deduped_units = fleet_df.sort_values(by=['Parent ID', 'is_active'], ascending=[True, False]).drop_duplicates(subset=['Parent ID']).copy()
+            
+            fleet_pivot = deduped_units.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
+            desired_order = ["TP", "SP", "Lord", "None of the Above"]
+            fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
+            
+            # Re-ensure exact status column structures exist to avoid indexing errors
+            for stat_col in ["Available", "Dead", "Diagnostic", "On Project"]:
+                if stat_col not in fleet_pivot.columns:
+                    fleet_pivot[stat_col] = 0
+            
+            fleet_pivot = fleet_pivot[["Available", "Dead", "Diagnostic", "On Project"]]
+            fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
+            st.dataframe(fleet_pivot.reset_index(), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.caption(f"Inventory matrix loading: {e}")
+
+        st.divider()
+
+        # Table 2: Upgraded Project Overview Matrix
+        st.markdown("### 🏗️ Active Deployment Overview Matrix")
+        summary_summary_q = f"""
+            WITH Metrics AS (
+                SELECT 
+                    n.Project,
+                    COUNT(DISTINCT n.NodeNum) as Mapped_Sensors,
+                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_in_last_6_hours,
+                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_in_last_24_hours
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
+                WHERE n.End_Date IS NULL
+                GROUP BY n.Project
+            )
+            SELECT 
+                p.Project,
+                p.ProjectName,
+                p.ProjectStatus,
+                p.Date_Freezedown,
+                COALESCE(m.Mapped_Sensors, 0) as Mapped_Sensors,
+                COALESCE(m.Active_in_last_6_hours, 0) as Active_in_last_6_hours,
+                COALESCE(m.Active_in_last_24_hours, 0) as Active_in_last_24_hours
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` p
+            LEFT JOIN Metrics m ON p.Project = m.Project
+            WHERE p.ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
+              AND UPPER(p.Project) NOT LIKE '%OFFICE%'
+            ORDER BY p.Project ASC
+        """
+        
+        try:
+            sum_summary_df = client.query(summary_summary_q).to_dataframe()
+            
+            # Compute operational day-counters metrics context loops in Python
+            rows = []
+            for _, r in sum_summary_df.iterrows():
+                p_status = str(r['ProjectStatus']).strip()
+                f_date = r['Date_Freezedown']
+                
+                status_tracking_text = "Not Freezing"
+                
+                if pd.notnull(f_date):
+                    days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
+                    days_count = max(0, days_elapsed)
+                    
+                    if p_status.lower() == "freezedown":
+                        status_tracking_text = f"Day {days_count} of Freezedown"
+                    elif p_status.lower() == "maintenance":
+                        status_tracking_text = f"Day {days_count} of Maintenance"
+                    elif p_status.lower() == "pre-freeze":
+                        status_tracking_text = f"Pre-freeze (Day {days_count})"
+                
+                rows.append({
+                    "Project ID": r['Project'],
+                    "Project Name": r['ProjectName'] if pd.notnull(r['ProjectName']) else r['Project'],
+                    "Mapped Sensors": int(r['Mapped_Sensors']),
+                    "Active in last 6 hours": int(r['Active_in_last_6_hours']),
+                    "Active in last 24 hours": int(r['Active_in_last_24_hours']),
+                    "Project Status Timeline": status_tracking_text
+                })
+                
+            display_summary_df = pd.DataFrame(rows)
+            st.dataframe(display_summary_df, use_container_width=True, hide_index=True)
+            
+        except Exception as e:
+            st.error(f"Failed to generate upgraded overview matrix: {e}")
+
+    # --- SUB-TAB 2: BULK APPROVAL ---
+    with tab_bulk_app:
+        st.header("⚡ Bulk Approval & Data Maintenance")
+        st.write("Surgically override telemetry data point approval designations across your project timelines.")
+        # Fixed execution endpoint to cleanly point to the isolated engine helper
+        execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
+        
+    # --- SUB-TAB 3: NODE LOGISTICS ---
+    with tab_logistics:
+        st.header("📋 Node Logistics & Asset Management")
+        st.write("Find and modify individual sensor attributes, review historical timelines, or analyze fleet deployment diagnostics.")
+        
+        # Pulls project list context from the central data frame
+        available_projects_list = sorted(proj_reg_df['Project'].dropna().unique().tolist())
+        
+        # Calls the unified frontend interface
+        render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_list)
+
+    # --- SUB-TAB 4: DATA RECOVERY ---
+    with tab_recovery:
+        st.subheader("📡 Operational Cloud Data Backfill Engine")
+        st.write("Surgically request missed or interrupted data logs directly from the hardware cloud servers.")
+
+        try:
+            sp_reg_q = f"""
+                SELECT NodeNum, Project, Location 
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
+                WHERE End_Date IS NULL 
+                  AND (NodeNum LIKE 'TP%' OR REGEXP_CONTAINS(NodeNum, r'^[0-9]+$'))
+            """
+            sp_reg = client.query(sp_reg_q).to_dataframe()
+        except Exception as e:
+            st.error(f"Failed to index active gateway hardware lists: {e}")
+            sp_reg = pd.DataFrame(columns=['NodeNum', 'Project', 'Location'])
+
+        if sp_reg.empty:
+            st.warning("No active SensorPush or TP hardware profiles currently indexed in the node registry.")
+        else:
+            selected_nodes = render_recovery_filters(sp_reg)
+
+            st.divider()
+            st.subheader("📅 Define Recovery Timeline Parameters")
+            
+            c_d1, c_d2 = st.columns(2)
+            yesterday = datetime.now().date() - timedelta(days=1)
+            
+            start_date = c_d1.date_input("Extraction Window Start Date", value=yesterday, key="rec_start_date_picker")
+            end_date = c_d2.date_input("Extraction Window End Date", value=datetime.now().date(), key="rec_end_date_picker")
+
+            if start_date > end_date:
+                st.error("❌ Invalid Timeline: Start date cannot be placed after the target completion date context.")
+            else:
+                st.divider()
+                
+                target_label = f"{len(selected_nodes)} selected nodes" if selected_nodes else "ALL active project hardware"
+                st.warning(f"⚠️ Action Required: Initiating backfill protocol for {target_label} from **{start_date}** through **{end_date}**.")
+                
+                if st.button("📥 Execute Cloud Backfill Ingestion Pipeline Run", type="primary", use_container_width=True, key="execute_recovery_run_btn"):
+                    handle_recovery_trigger(selected_nodes, start_date, end_date)
+
+    # --- SUB-TAB 5: PROJECT MASTER ---
+    with tab_proj_master:
+        st.subheader("⚙️ Project Lifecycle Management")
+        
+        # Navigation actions row
+        action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
+        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
+
+        if action == "📋 Project List":
+            st.subheader("📋 Complete Project Registry Table")
+            query = f"SELECT * FROM `{table_projects}` ORDER BY Project ASC"
+            try:
+                with st.spinner("Extracting structural project lists..."):
+                    df = client.query(query).to_dataframe()
+                if not df.empty:
+                    for col in ['Date_Freezedown', 'Date_Completion']:
+                        if col in df.columns:
+                            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("The central project tracking configuration registry is currently empty.")
+            except Exception as e:
+                st.error(f"Failed to extract project records: {e}")
+
+        elif action == "🏗️ New Project":
+            st.subheader("🏗️ Initialize New Project Profile")
+            try:
+                all_p_q = f"SELECT Project FROM `{table_projects}` ORDER BY Project ASC"
+                existing_p_list = client.query(all_p_q).to_dataframe()['Project'].tolist()
+            except Exception:
+                existing_p_list = []
+
+            use_template = st.checkbox("📋 Clone settings from an existing project template?", key="pm_clone_toggle")
+            template_data = {}
+            if use_template and existing_p_list:
+                template_source = st.selectbox("Select Project to Clone From", existing_p_list, key="pm_clone_source")
+                if template_source:
+                    try:
+                        t_res = client.query(f"SELECT * FROM `{table_projects}` WHERE Project = '{template_source}'").to_dataframe()
+                        if not t_res.empty:
+                            template_data = t_res.iloc[0].to_dict()
+                    except Exception as e:
+                        st.error(f"Error reading template parameters: {e}")
+
+            with st.form("new_project_form_pm"):
+                col1, col2 = st.columns(2)
+                n_code = col1.text_input("Project ID / Job # (e.g., 2541-Phase 2)*")
+                n_name = col2.text_input("Friendly Project Name", value=template_data.get('ProjectName', ''))
+                
+                c_g1, c_g2 = st.columns(2)
+                n_city = c_g1.text_input("City Deployment Field", value=template_data.get('City', ''))
+                n_tz = c_g2.text_input("Operational Timezone Reference", value=template_data.get('Timezone', 'America/Los_Angeles'))
+                
+                n_up_notes = st.text_input("Automated Pipeline Sync Notes (UploadNote)", value=template_data.get('UploadNote', 'Data will be uploaded once per business day.'))
+                n_as_built = st.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
+                n_notes = st.text_area("Initial Site Engineering Field Notes", value=template_data.get('EngNotes', ''))
+                
+                if st.form_submit_button("🚀 Commit New Project Entry"):
+                    if not n_code.strip():
+                        st.error("Unique Internal Project Identifier reference required.")
+                    else:
+                        insert_q = f"""
+                            INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, City, Timezone, UploadNote, AsBuiltFile, EngNotes)
+                            VALUES ('{n_code.strip()}', '{n_name.strip()}', 'Initialized', '{n_city.strip()}', '{n_tz.strip()}', '{n_up_notes.strip()}', '{n_as_built.strip()}', '{n_notes.strip()}')
+                        """
+                        client.query(insert_q).result()
+                        st.success(f"Registered **{n_code.strip()}** successfully.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+
+        elif action == "🔧 Edit Project Metadata":
+            st.subheader(f"🔧 Configuration Editor: {selected_project}")
+            proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
+            p_res = client.query(proj_q).to_dataframe()
+            
+            if p_res.empty:
+                st.error("Please pick an active project in the sidebar to modify metadata metrics.")
+            else:
+                p_data = p_res.iloc[0].to_dict()
+                with st.form("comprehensive_edit_project_pm"):
+                    c1, c2 = st.columns(2)
+                    u_project_id = c1.text_input("Project ID", value=p_data.get('Project', ''), disabled=True)
+                    u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
+
+                    c3, c4 = st.columns(2)
+                    u_city = c3.text_input("City", value=p_data.get('City', ''))
+                    u_tz = c4.text_input("Timezone", value=p_data.get('Timezone', 'America/Los_Angeles'))
+                    
+                    u_up_notes = st.text_input("Upload Notes", value=p_data.get('UploadNote', ''))
+                    u_as_built = st.text_input("As-Built File Tracking ID", value=p_data.get('AsBuiltFile', ''))
+
+                    c5, c6 = st.columns(2)
+                    status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
+                    curr_status = p_data.get('ProjectStatus', 'Initialized')
+                    s_idx = status_options.index(curr_status) if curr_status in status_options else 0
+                    u_status = c5.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
+                    
+                    def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) else None
+                    u_date_freeze = c5.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
+                    u_date_comp = c6.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
+
+                    u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
+
+                    if st.form_submit_button("💾 Overwrite Project Registry Information"):
+                        freeze_val = f"DATE('{u_date_freeze}')" if u_date_freeze else "NULL"
+                        comp_val = f"DATE('{u_date_comp}')" if u_date_comp else "NULL"
+                        
+                        update_q = f"""
+                            UPDATE `{table_projects}` SET 
+                                ProjectName = '{u_project_name.strip()}', ProjectStatus = '{u_status}', City = '{u_city.strip()}',
+                                Timezone = '{u_tz.strip()}', UploadNote = '{u_up_notes.strip()}', AsBuiltFile = '{u_as_built.strip()}',
+                                EngNotes = '{u_notes.strip()}', Date_Freezedown = {freeze_val}, Date_Completion = {comp_val}
+                            WHERE Project = '{selected_project}'
+                        """
+                        client.query(update_q).result()
+                        st.success(f"✅ Configuration data modified for: {selected_project}")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+
+    # --- SUB-TAB 6: BULK CHANGES ---
+    with tab_bulk_config:
+        st.subheader("📦 Bulk Changes Engine Workspace")
+        
+        cfg_mode = st.radio(
+            "Select Allocation Configuration Target Engine:", 
+            ["Update Hardware Inventory", "Update Node Registry"], 
+            horizontal=True, 
+            key="bulk_changes_engine_radio"
+        )
+        target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+        target_inventory_path = f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory"
+        
+        # --- ENGINE A: UPDATE HARDWARE INVENTORY ---
+        if cfg_mode == "Update Hardware Inventory":
+            st.markdown("### 📡 Update Hardware Inventory")
+            st.info("Ingest spreadsheet data to append fresh units onto your inventory master table. Required Fields: `RawID`, `NodeNum`.")
+            
+            u_file = st.file_uploader(
+                "Upload Inventory Dataset File", 
+                type=["csv", "xlsx"], 
+                key="bulk_inv_file_uploader"
+            )
+            
+            if u_file:
+                try:
+                    if u_file.name.endswith('.csv'):
+                        df_upload = pd.read_csv(u_file, dtype=str)
+                    else:
+                        df_upload = pd.read_excel(u_file, dtype=str)
+                        
+                    st.write("### Preview Staged Inventory Matrix")
+                    st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
+                    
+                    if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
+                        actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
+                        
+                        if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
+                            st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields. Spreadsheets must contain both 'RawID' and 'NodeNum' columns.")
+                        else:
+                            with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
+                                clean_upload_df = pd.DataFrame({
+                                    'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
+                                    'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
+                                }).dropna()
+                                
+                                staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
+                                load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                                client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()
+                                
+                                merge_upsert_sql = f"""
+                                    INSERT INTO `{target_inventory_path}` (RawID, NodeNum)
+                                    SELECT DISTINCT s.RawID, s.NodeNum
+                                    FROM `{staging_table}` s
+                                    WHERE NOT EXISTS (
+                                        SELECT 1 FROM `{target_inventory_path}` i
+                                        WHERE TRIM(CAST(i.RawID AS STRING)) = TRIM(s.RawID)
+                                    )
+                                """
+                                query_job = client.query(merge_upsert_sql)
+                                query_job.result()
+                                
+                                client.delete_table(staging_table, not_found_ok=True)
+                                
+                            st.success(f"🎉 Inventory synchronization complete! Appended {query_job.num_dml_affected_rows:,} fresh tracking metrics safely onto your hardware catalog.")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                            
+                except Exception as e:
+                    st.error(f"Failed parsing inventory load batch matrix line rules: {e}")
+                    
+        # --- ENGINE B: UPDATE NODE REGISTRY ---
+        elif cfg_mode == "Update Node Registry":
+            st.markdown("### 📋 Update Node Registry")
+            st.info("Mass register multi-sensor arrays or shift batch deployment settings across timelines using configurations maps.")
+            
+            with st.expander("📊 View Required Registry Template Rules Layout"):
+                st.code("NodeNum,Project,Location,Bank,Depth,Start_Date,SensorStatus")
+            
+            u_csv = st.file_uploader("Upload Registry Deployment Map File", type="csv", key="bulk_reg_csv_uploader")
+            
+            if u_csv:
+                df_upload = pd.read_csv(u_csv)
+                st.write("### Preview Staged Registry Matrix")
+                st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
+                
+                if st.button("🚀 Commit Registry Changes", key="bulk_reg_upload_commit_btn", use_container_width=True):
+                    try:
+                        required = {'NodeNum', 'Project', 'Location'}
+                        if not required.issubset(df_upload.columns):
+                            st.error(f"Missing required allocation column labels: {required - set(df_upload.columns)}")
+                        else:
+                            with st.spinner("Streaming spatial allocations into active registry view..."):
+                                if 'Start_Date' in df_upload.columns:
+                                    df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.date
+                                else:
+                                    df_upload['Start_Date'] = datetime.now().date()
+                                    
+                                if 'SensorStatus' not in df_upload.columns:
+                                    df_upload['SensorStatus'] = 'On Project'
+
+                                if 'PhysicalID' in df_upload.columns:
+                                    df_upload = df_upload.drop(columns=['PhysicalID'])
+                                    
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(df_upload, target_registry_path, job_config=job_config).result()
+                                
+                            st.success(f"🎉 Success! Appended {len(df_upload)} nodes onto your asset deployment matrix timeline safely.")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                    except Exception as upload_err:
+                        st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
+
+
 
 ###################
 # 12. MAIN ROUTER #
