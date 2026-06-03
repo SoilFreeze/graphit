@@ -2948,6 +2948,19 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         UPDATE SET approve = '{new_status}'
                     WHEN NOT MATCHED THEN
                         INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                """
+            try:
+                with st.spinner("Processing database merge mapping vectors..."):
+                    job = client.query(sql)
+                    job.result()
+                st.success(f"✅ Reclassification successful! Processed and updated {job.num_dml_affected_rows:,} records inside the rejection catalog.")
+                st.cache_data.clear()
+                st.balloons()
+                time.sleep(1.5)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
+                st.code(sql, language="sql")
 
 
 ######################
@@ -2955,11 +2968,11 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
 ######################
 
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
-    """
-    Advanced Admin Tools: Centralized administrative command center.
-    All sidebar sub-navigation radio buttons have been removed. Layout routing 
-    is handled cleanly via the core multi-page navigation selectbox.
-    """
+
+   # Advanced Admin Tools: Centralized administrative command center.
+   # All sidebar sub-navigation radio buttons have been removed. Layout routing 
+   # is handled cleanly via the core multi-page navigation selectbox.
+   
     import re
     from datetime import datetime, timedelta
     
