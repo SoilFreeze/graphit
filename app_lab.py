@@ -2912,6 +2912,8 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     """
     Main administrative execution module managing bulk data approval modification routines.
     Completely isolated from layout tab blocks to prevent NameErrors.
+    
+    Reads 'approval_status' from the view, writes to 'approve' in the raw ledger.
     """
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
@@ -2923,17 +2925,20 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     # 2. Render Ingestion Filtering Matrices
     filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
     where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
-    aliased_where = where_str.replace("NodeNum", "t.NodeNum").replace("timestamp", "t.timestamp").replace("temperature", "t.temperature")
+    
+    # 🎯 ALIGNMENT: Replace based on the master view's column schema (approval_status)
+    aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
+                              .replace("timestamp", "t.timestamp")
+                              .replace("temperature", "t.temperature")
+                              .replace("approve", "t.approval_status"))
     
     # 3. STEP 1: VERIFICATION CONTAINER BLOCK
     if st.button("🔍 Step 1: Verify Match Count & Current Status", key="blk_mgmt_verify_btn", use_container_width=True):
         status_q = f"""
             SELECT 
-                COALESCE(r.approval_status, 'TRUE') as Designation,
+                COALESCE(t.approval_status, 'TRUE') as Designation,
                 COUNT(*) as Point_Count
             FROM `{telemetry_table}` t
-            LEFT JOIN `{target_table}` r 
-                ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
             WHERE {aliased_where}
             GROUP BY Designation
             ORDER BY Point_Count DESC
@@ -2962,32 +2967,30 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
             
-            # --- IF SETTING TO TRUE: DELETE RECORDS OUT OF THE REJECTIONS OVERRIDE LEDGER ---
+            # --- IF SETTING TO TRUE: DELETE ENTRIES OUT OF THE OVERRIDE LEDGER ---
             if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
                     WHERE STRUCT(NodeNum, timestamp) IN (
                         SELECT AS STRUCT t.NodeNum, t.timestamp 
                         FROM `{telemetry_table}` t
-                        LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
                         WHERE {aliased_where}
                     )
                 """
-            # --- IF SETTING TO BADDATA / FALSE: WRITE AND MERGE REJECTIONS TO THE LEDGER ---
+            # --- IF SETTING TO MASKED / OFFICE / BADDATA: MERGE INTO THE LEDGER ---
             else:
                 sql = f"""
                     MERGE `{target_table}` T
                     USING (
                         SELECT DISTINCT t.Project, t.NodeNum, t.timestamp 
                         FROM `{telemetry_table}` t 
-                        LEFT JOIN `{target_table}` r ON t.NodeNum = r.NodeNum AND t.timestamp = r.timestamp
                         WHERE {aliased_where}
                     ) S
                     ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
                     WHEN MATCHED THEN
-                        UPDATE SET approval_status = '{new_status}'
+                        UPDATE SET approve = '{new_status}' -- 👈 Writes to ledger schema
                     WHEN NOT MATCHED THEN
-                        INSERT (Project, NodeNum, timestamp, approval_status) 
+                        INSERT (Project, NodeNum, timestamp, approve) 
                         VALUES (S.Project, S.NodeNum, S.timestamp, '{new_status}')
                 """
             try:
@@ -2996,7 +2999,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     job.result()
                 st.success(f"✅ Reclassification successful! Processed and updated {job.num_dml_affected_rows:,} records inside the rejection catalog.")
                 
-                # Instantly flush cache layers to make client portal sync reactive
+                # Instantly clear cache layers so updates reflect immediately
                 st.cache_data.clear()
                 st.balloons()
                 time.sleep(1.5)
