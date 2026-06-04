@@ -3219,7 +3219,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         "📋 Node Logistics",
         "📡 Data Recovery", 
         "⚙️ Project Master", 
-        "📦 Bulk Changes"
+        "📦 Bulk Uploads"  # <-- Changed label string text here
     ])
 
     # --- SUB-TAB 1: ADMIN SUMMARY ---
@@ -3536,18 +3536,19 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         time.sleep(1)
                         st.rerun()
 
-    # --- SUB-TAB 6: BULK CHANGES ---
+    # --- SUB-TAB 6: BULK UPLOADS ---
     with tab_bulk_config:
-        st.subheader("📦 Bulk Changes Engine Workspace")
+        st.subheader("📦 Centralized Bulk Ingestion Engine")
         
         cfg_mode = st.radio(
-            "Select Allocation Configuration Target Engine:", 
-            ["Update Hardware Inventory", "Update Node Registry"], 
+            "Select Allocation Ingestion Target Engine:", 
+            ["Update Hardware Inventory", "Update Node Registry", "Upload Soil Reference Curves"], 
             horizontal=True, 
-            key="bulk_changes_engine_radio"
+            key="bulk_uploads_engine_radio"
         )
         target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
         target_inventory_path = f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory"
+        target_curves_path = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
         
         # --- ENGINE A: UPDATE HARDWARE INVENTORY ---
         if cfg_mode == "Update Hardware Inventory":
@@ -3583,7 +3584,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 }).dropna()
                                 
                                 staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
-                                load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                                load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRANSLATE")
                                 client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()
                                 
                                 merge_upsert_sql = f"""
@@ -3610,8 +3611,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     
         # --- ENGINE B: UPDATE NODE REGISTRY ---
         elif cfg_mode == "Update Node Registry":
-            st.markdown("### 📋 Update Node Registry")
-            st.info("Mass register multi-sensor arrays or shift batch deployment settings across timelines using configurations maps.")
+            st.markdown("### 📋 Update Node Registry Maps")
+            st.info("Mass register multi-sensor arrays or shift batch deployment settings across timelines using configuration maps.")
             
             with st.expander("📊 View Required Registry Template Rules Layout"):
                 st.code("NodeNum,Project,Location,Bank,Depth,Start_Date,SensorStatus")
@@ -3650,6 +3651,59 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             st.rerun()
                     except Exception as upload_err:
                         st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
+
+        # --- ENGINE C: UPLOAD SOIL REFERENCE CURVES ---
+        elif cfg_mode == "Upload Soil Reference Curves":
+            st.markdown("### 📈 Ingest Theoretical Reference Curves")
+            st.info("💡 **Overwrite Rule Active:** Uploading files with identifiers that already exist in the system will automatically clear out their old historical data blocks and replace them completely.")
+            st.caption("Expected Format: CSV files (e.g., `2538-T1.csv`). Data should start on Row 3. Col 1: Day, Col 2: Temperature.")
+            
+            u_files = st.file_uploader(
+                "Select Soil Curve CSV Files", 
+                type="csv", 
+                accept_multiple_files=True, 
+                key="bulk_uploads_curves_uploader"
+            )
+            
+            if u_files:
+                if st.button("💾 Commit Curve Files to BigQuery", key="bulk_uploads_curves_commit_btn", use_container_width=True):
+                    progress_bar = st.progress(0)
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    
+                    for idx, f in enumerate(u_files):
+                        try:
+                            curve_id = f.name.replace(".csv", "").strip()
+                            try:
+                                f.seek(0)
+                                ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
+                            except Exception:
+                                f.seek(0)
+                                ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
+
+                            ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
+                            ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
+                            ref_df = ref_df.dropna(subset=['Day', 'Temp'])
+                            ref_df['CurveID'] = curve_id
+                            ref_df['upload_date'] = today_str
+
+                            if not ref_df.empty:
+                                # Safe purge conflicting records to support recursive execution
+                                client.query(f"DELETE FROM `{target_curves_path}` WHERE CurveID='{curve_id}'").result()
+                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                client.load_table_from_dataframe(ref_df, target_curves_path, job_config=job_config).result()
+                                st.toast(f"Import Complete: {curve_id}", icon="✅")
+                            else:
+                                st.error(f"❌ {f.name} contained no valid numeric data vectors after row 2.")
+                                
+                            progress_bar.progress((idx + 1) / len(u_files))
+                            
+                        except Exception as e:
+                            st.error(f"❌ Error processing reference file {f.name}: {e}")
+                    
+                    st.success("🎉 Soil reference curves successfully processed and saved system-wide.")
+                    st.cache_data.clear()
+                    time.sleep(1.0)
+                    st.rerun()
 
 
 
