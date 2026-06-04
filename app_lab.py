@@ -3261,6 +3261,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     import numpy as np
     import plotly.graph_objects as go
     from datetime import datetime, timedelta
+    import time
+    import requests
+    import pandas as pd
     
     st.header("🛠️ Admin Tools")
     
@@ -3426,15 +3429,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 st.info("The system project registry data store is unpopulated.")
         except Exception as master_err:
             st.error(f"Failed to build master data log directory: {master_err}")
+
     # --- SUB-TAB 2: BULK APPROVAL ---
     with tab_bulk_app:
         st.header("⚡ Bulk Approval & Data Maintenance")
         st.write("Surgically override telemetry data point approval designations across your project timelines.")
-        # Fixed execution endpoint to cleanly point to the isolated engine helper
         execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
     # =========================================================================
-    # SUB-TAB 3: 📋 NODE MASTER (DYNAMIC CONFIGURATION PORT)
+    # SUB-TAB 3: 📋 NODE MASTER
     # =========================================================================
     with tab_logistics:
         st.title("📋 Node Status and Changes")
@@ -3497,9 +3500,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         if st.button("🚀 Execute Cloud Backfill Ingestion Pipeline Run", use_container_width=True, key="btn_trigger_recovery_run"):
             
             # --- START HARDENED WORKER LOGIC ---
-            import requests
-            import numpy as np
-            
             all_rows = []
             hardware_map = {}
             db_max_timestamps = {}
@@ -3787,7 +3787,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         
         cfg_mode = st.radio(
             "Select Allocation Ingestion Target Engine:", 
-            ["Update Hardware Inventory", "Update Node Registry"], # Removed soil curves choice
+            ["Update Hardware Inventory", "Update Node Registry"], 
             horizontal=True, 
             key="bulk_uploads_engine_radio"
         )
@@ -3989,7 +3989,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 st.cache_data.clear()
                 time.sleep(1.0)
                 st.rerun()
-
+                
 # =============================================================================
 # 🛠️ REUSABLE LAB ENGINE ASSIGNMENT PIPELINES
 # =============================================================================
