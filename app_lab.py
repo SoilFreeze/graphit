@@ -1226,7 +1226,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
     except Exception as e:
         st.error(f"Sensor Status Error: {e}")
-
+        
 # ===============================================================
 # Function: Status Dashboard (Setup Node Tool) - Left Unchanged
 # ===============================================================
