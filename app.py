@@ -4421,15 +4421,16 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
                 return
 
             # 🛡️ HARDENED STRING ESCAPING WORKSPACE: Protect single quotes from breaking SQL string borders
-            final_loc_str = raw_loc_str.replace("'", "''")
-            safe_proj = str(edit_proj).replace("'", "''")
-            safe_status = str(edit_status).replace("'", "''")
-            safe_bank = edit_bank.strip().replace("'", "''")
+            final_loc_str = str(raw_loc_str).replace("'", "''").strip()
+            safe_proj = str(edit_proj).replace("'", "''").strip()
+            safe_status = str(edit_status).replace("'", "''").strip()
+            safe_bank = str(edit_bank).strip().replace("'", "''")
 
             sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
             sql_bank_val = f"'{safe_bank}'" if safe_bank != "" else "NULL"
             sql_end_val = f"DATE('{edit_end}')" if use_end_date_toggle else "NULL"
             
+            # Explicit transaction script utilizing clear variable mapping anchors
             update_sql = f"""
                 BEGIN TRANSACTION;
                 DELETE FROM `{target_registry}` 
