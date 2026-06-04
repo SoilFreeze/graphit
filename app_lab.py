@@ -3854,153 +3854,153 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.balloons()
                     
     # --- SUB-TAB 5: PROJECT MASTER ---
-with tab_proj_master:
-    st.subheader("⚙️ Project Lifecycle Management")
-    
-    # Navigation actions row
-    action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
-    table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
-
-    if action == "📋 Project List":
-        st.subheader("📋 Complete Project Registry Table")
-        query = f"SELECT * FROM `{table_projects}` ORDER BY Project ASC"
-        try:
-            with st.spinner("Extracting structural project lists..."):
-                df = client.query(query).to_dataframe()
-            if not df.empty:
-                for col in ['Date_Freezedown', 'Date_Completion']:
-                    if col in df.columns:
-                        df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.info("The central project tracking configuration registry is currently empty.")
-        except Exception as e:
-            st.error(f"Failed to extract project records: {e}")
-
-    elif action == "🏗️ New Project":
-        st.subheader("🏗️ Initialize New Project Profile")
-        try:
-            all_p_q = f"SELECT Project FROM `{table_projects}` ORDER BY Project ASC"
-            existing_p_list = client.query(all_p_q).to_dataframe()['Project'].tolist()
-        except Exception:
-            existing_p_list = []
-
-        use_template = st.checkbox("📋 Clone settings from an existing project template?", key="pm_clone_toggle")
-        template_data = {}
-        if use_template and existing_p_list:
-            template_source = st.selectbox("Select Project to Clone From", existing_p_list, key="pm_clone_source")
-            if template_source:
-                try:
-                    t_res = client.query(f"SELECT * FROM `{table_projects}` WHERE Project = '{template_source}'").to_dataframe()
-                    if not t_res.empty:
-                        template_data = t_res.iloc[0].to_dict()
-                except Exception as e:
-                    st.error(f"Error reading template parameters: {e}")
-
-        with st.form("new_project_form_pm"):
-            col1, col2 = st.columns(2)
-            n_code = col1.text_input("Project ID / Job # (e.g., 2541-Phase 2)*")
-            n_name = col2.text_input("Friendly Project Name", value=template_data.get('ProjectName', ''))
-            
-            c_g1, c_g2 = st.columns(2)
-            n_city = c_g1.text_input("City Deployment Field", value=template_data.get('City', ''))
-            n_tz = c_g2.text_input("Operational Timezone Reference", value=template_data.get('Timezone', 'America/Los_Angeles'))
-            
-            n_up_notes = st.text_input("Automated Pipeline Sync Notes (UploadNote)", value=template_data.get('UploadNote', 'Data will be uploaded once per business day.'))
-            n_as_built = st.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
-            n_notes = st.text_area("Initial Site Engineering Field Notes", value=template_data.get('EngNotes', ''))
-            
-            if st.form_submit_button("🚀 Commit New Project Entry"):
-                if not n_code.strip():
-                    st.error("Unique Internal Project Identifier reference required.")
-                else:
-                    safe_n_code = n_code.strip().replace("'", "''")
-                    safe_n_name = n_name.strip().replace("'", "''")
-                    safe_n_city = n_city.strip().replace("'", "''")
-                    safe_n_tz = n_tz.strip().replace("'", "''")
-                    safe_n_up_notes = n_up_notes.strip().replace("'", "''")
-                    safe_n_as_built = n_as_built.strip().replace("'", "''")
-                    safe_n_notes = n_notes.strip().replace("'", "''")
-
-                    insert_q = f"""
-                        INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, City, Timezone, UploadNote, AsBuiltFile, EngNotes)
-                        VALUES ('{safe_n_code}', '{safe_n_name}', 'Initialized', '{safe_n_city}', '{safe_n_tz}', '{safe_n_up_notes}', '{safe_n_as_built}', '{safe_n_notes}')
-                    """
-                    try:
-                        client.query(insert_q).result()
-                        st.success(f"Registered **{safe_n_code}** successfully.")
-                        st.cache_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as ins_err:
-                        st.error(f"Database insertion failed: {ins_err}")
-
-    elif action == "🔧 Edit Project Metadata":
-        st.subheader(f"🔧 Configuration Editor: {selected_project}")
-        proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
-        try:
-            p_res = client.query(proj_q).to_dataframe()
-        except Exception as e:
-            p_res = pd.DataFrame()
-            st.error(f"Error querying table metadata: {e}")
+    with tab_proj_master:
+        st.subheader("⚙️ Project Lifecycle Management")
         
-        if p_res.empty:
-            st.error("Please pick an active project in the sidebar to modify metadata metrics.")
-        else:
-            p_data = p_res.iloc[0].to_dict()
-            with st.form("comprehensive_edit_project_pm"):
-                c1, c2 = st.columns(2)
-                u_project_id = c1.text_input("Project ID", value=p_data.get('Project', ''), disabled=True)
-                u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
-
-                c3, c4 = st.columns(2)
-                u_city = c3.text_input("City", value=p_data.get('City', ''))
-                u_tz = c4.text_input("Timezone", value=p_data.get('Timezone', 'America/Los_Angeles'))
-                
-                u_up_notes = st.text_input("Upload Notes", value=p_data.get('UploadNote', ''))
-                u_as_built = st.text_input("As-Built File Tracking ID", value=p_data.get('AsBuiltFile', ''))
-
-                c5, c6 = st.columns(2)
-                status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
-                curr_status = p_data.get('ProjectStatus', 'Initialized')
-                s_idx = status_options.index(curr_status) if curr_status in status_options else 0
-                u_status = c5.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
-                
-                def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) and str(d) != 'NaT' else None
-                u_date_freeze = c5.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
-                u_date_comp = c6.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
-
-                u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
-
-                if st.form_submit_button("💾 Overwrite Project Registry Information"):
-                    # 🛡️ HARDENED DATE NULL HANDLERS: Defends against 'DATE(None)' structures
-                    freeze_val = f"DATE('{u_date_freeze}')" if (u_date_freeze and str(u_date_freeze) != 'None') else "NULL"
-                    comp_val = f"DATE('{u_date_comp}')" if (u_date_comp and str(u_date_comp) != 'None') else "NULL"
-                    
-                    # 🛡️ TEXT ESCAPING SYSTEM: Protects against broken single quotes
-                    safe_name = u_project_name.strip().replace("'", "''")
-                    safe_city = u_city.strip().replace("'", "''")
-                    safe_tz = u_tz.strip().replace("'", "''")
-                    safe_up_notes = u_up_notes.strip().replace("'", "''")
-                    safe_as_built = u_as_built.strip().replace("'", "''")
-                    safe_notes = u_notes.strip().replace("'", "''")
-                    
-                    update_q = f"""
-                        UPDATE `{table_projects}` SET 
-                            ProjectName = '{safe_name}', ProjectStatus = '{u_status}', City = '{safe_city}',
-                            Timezone = '{safe_tz}', UploadNote = '{safe_up_notes}', AsBuiltFile = '{safe_as_built}',
-                            EngNotes = '{safe_notes}', Date_Freezedown = {freeze_val}, Date_Completion = {comp_val}
-                        WHERE Project = '{selected_project}'
-                    """
+        # Navigation actions row
+        action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
+        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
+    
+        if action == "📋 Project List":
+            st.subheader("📋 Complete Project Registry Table")
+            query = f"SELECT * FROM `{table_projects}` ORDER BY Project ASC"
+            try:
+                with st.spinner("Extracting structural project lists..."):
+                    df = client.query(query).to_dataframe()
+                if not df.empty:
+                    for col in ['Date_Freezedown', 'Date_Completion']:
+                        if col in df.columns:
+                            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("The central project tracking configuration registry is currently empty.")
+            except Exception as e:
+                st.error(f"Failed to extract project records: {e}")
+    
+        elif action == "🏗️ New Project":
+            st.subheader("🏗️ Initialize New Project Profile")
+            try:
+                all_p_q = f"SELECT Project FROM `{table_projects}` ORDER BY Project ASC"
+                existing_p_list = client.query(all_p_q).to_dataframe()['Project'].tolist()
+            except Exception:
+                existing_p_list = []
+    
+            use_template = st.checkbox("📋 Clone settings from an existing project template?", key="pm_clone_toggle")
+            template_data = {}
+            if use_template and existing_p_list:
+                template_source = st.selectbox("Select Project to Clone From", existing_p_list, key="pm_clone_source")
+                if template_source:
                     try:
-                        client.query(update_q).result()
-                        st.success(f"✅ Configuration data modified for: {selected_project}")
-                        st.cache_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as query_err:
-                        st.error(f"❌ BigQuery update rejected: {query_err}")
-                        st.code(update_q, language="sql")
+                        t_res = client.query(f"SELECT * FROM `{table_projects}` WHERE Project = '{template_source}'").to_dataframe()
+                        if not t_res.empty:
+                            template_data = t_res.iloc[0].to_dict()
+                    except Exception as e:
+                        st.error(f"Error reading template parameters: {e}")
+    
+            with st.form("new_project_form_pm"):
+                col1, col2 = st.columns(2)
+                n_code = col1.text_input("Project ID / Job # (e.g., 2541-Phase 2)*")
+                n_name = col2.text_input("Friendly Project Name", value=template_data.get('ProjectName', ''))
+                
+                c_g1, c_g2 = st.columns(2)
+                n_city = c_g1.text_input("City Deployment Field", value=template_data.get('City', ''))
+                n_tz = c_g2.text_input("Operational Timezone Reference", value=template_data.get('Timezone', 'America/Los_Angeles'))
+                
+                n_up_notes = st.text_input("Automated Pipeline Sync Notes (UploadNote)", value=template_data.get('UploadNote', 'Data will be uploaded once per business day.'))
+                n_as_built = st.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
+                n_notes = st.text_area("Initial Site Engineering Field Notes", value=template_data.get('EngNotes', ''))
+                
+                if st.form_submit_button("🚀 Commit New Project Entry"):
+                    if not n_code.strip():
+                        st.error("Unique Internal Project Identifier reference required.")
+                    else:
+                        safe_n_code = n_code.strip().replace("'", "''")
+                        safe_n_name = n_name.strip().replace("'", "''")
+                        safe_n_city = n_city.strip().replace("'", "''")
+                        safe_n_tz = n_tz.strip().replace("'", "''")
+                        safe_n_up_notes = n_up_notes.strip().replace("'", "''")
+                        safe_n_as_built = n_as_built.strip().replace("'", "''")
+                        safe_n_notes = n_notes.strip().replace("'", "''")
+    
+                        insert_q = f"""
+                            INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, City, Timezone, UploadNote, AsBuiltFile, EngNotes)
+                            VALUES ('{safe_n_code}', '{safe_n_name}', 'Initialized', '{safe_n_city}', '{safe_n_tz}', '{safe_n_up_notes}', '{safe_n_as_built}', '{safe_n_notes}')
+                        """
+                        try:
+                            client.query(insert_q).result()
+                            st.success(f"Registered **{safe_n_code}** successfully.")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as ins_err:
+                            st.error(f"Database insertion failed: {ins_err}")
+    
+        elif action == "🔧 Edit Project Metadata":
+            st.subheader(f"🔧 Configuration Editor: {selected_project}")
+            proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
+            try:
+                p_res = client.query(proj_q).to_dataframe()
+            except Exception as e:
+                p_res = pd.DataFrame()
+                st.error(f"Error querying table metadata: {e}")
+            
+            if p_res.empty:
+                st.error("Please pick an active project in the sidebar to modify metadata metrics.")
+            else:
+                p_data = p_res.iloc[0].to_dict()
+                with st.form("comprehensive_edit_project_pm"):
+                    c1, c2 = st.columns(2)
+                    u_project_id = c1.text_input("Project ID", value=p_data.get('Project', ''), disabled=True)
+                    u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
+    
+                    c3, c4 = st.columns(2)
+                    u_city = c3.text_input("City", value=p_data.get('City', ''))
+                    u_tz = c4.text_input("Timezone", value=p_data.get('Timezone', 'America/Los_Angeles'))
+                    
+                    u_up_notes = st.text_input("Upload Notes", value=p_data.get('UploadNote', ''))
+                    u_as_built = st.text_input("As-Built File Tracking ID", value=p_data.get('AsBuiltFile', ''))
+    
+                    c5, c6 = st.columns(2)
+                    status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
+                    curr_status = p_data.get('ProjectStatus', 'Initialized')
+                    s_idx = status_options.index(curr_status) if curr_status in status_options else 0
+                    u_status = c5.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
+                    
+                    def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) and str(d) != 'NaT' else None
+                    u_date_freeze = c5.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
+                    u_date_comp = c6.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
+    
+                    u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
+    
+                    if st.form_submit_button("💾 Overwrite Project Registry Information"):
+                        # 🛡️ HARDENED DATE NULL HANDLERS: Defends against 'DATE(None)' structures
+                        freeze_val = f"DATE('{u_date_freeze}')" if (u_date_freeze and str(u_date_freeze) != 'None') else "NULL"
+                        comp_val = f"DATE('{u_date_comp}')" if (u_date_comp and str(u_date_comp) != 'None') else "NULL"
+                        
+                        # 🛡️ TEXT ESCAPING SYSTEM: Protects against broken single quotes
+                        safe_name = u_project_name.strip().replace("'", "''")
+                        safe_city = u_city.strip().replace("'", "''")
+                        safe_tz = u_tz.strip().replace("'", "''")
+                        safe_up_notes = u_up_notes.strip().replace("'", "''")
+                        safe_as_built = u_as_built.strip().replace("'", "''")
+                        safe_notes = u_notes.strip().replace("'", "''")
+                        
+                        update_q = f"""
+                            UPDATE `{table_projects}` SET 
+                                ProjectName = '{safe_name}', ProjectStatus = '{u_status}', City = '{safe_city}',
+                                Timezone = '{safe_tz}', UploadNote = '{safe_up_notes}', AsBuiltFile = '{safe_as_built}',
+                                EngNotes = '{safe_notes}', Date_Freezedown = {freeze_val}, Date_Completion = {comp_val}
+                            WHERE Project = '{selected_project}'
+                        """
+                        try:
+                            client.query(update_q).result()
+                            st.success(f"✅ Configuration data modified for: {selected_project}")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as query_err:
+                            st.error(f"❌ BigQuery update rejected: {query_err}")
+                            st.code(update_q, language="sql")
 
     # =========================================================================
     # SUB-TAB 6: BULK UPLOADS (NOW CLEANLY REDUCED TO SPREADSHEETS)
