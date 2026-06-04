@@ -2775,8 +2775,12 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
 
     filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
+    
+    # 1. BUILD THE RAW BASE CLAUSE FOR THE RECORDS MATCHING
     where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
     
+    # 2. SCHEMA CORRECTION: Splitting lookups out safely 
+    # master_data_view uses "approval_status" and has project context
     aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
                               .replace("timestamp", "t.timestamp")
                               .replace("temperature", "t.temperature")
@@ -2814,7 +2818,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
 
     if st.session_state.blk_mgmt_profile_df is not None:
         if not st.session_state.blk_mgmt_profile_df.empty:
-            # RENAMED HEADER AS REQUESTED
             st.subheader("📊 Current Node Status")
             st.dataframe(st.session_state.blk_mgmt_profile_df, use_container_width=True, hide_index=True)
             st.metric("Total Consolidated Points in Selection Scope", f"{st.session_state.blk_mgmt_total_points:,}")
@@ -2830,8 +2833,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
             
-            # FIXED: Target status of TRUE now cleanly executes a deletion statement 
-            # to permanently unblock the points for your client site portals.
+            # SCHEMA ALIGNMENT: Merge statements target ONLY NodeNum and timestamp in manual_rejections
             if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
