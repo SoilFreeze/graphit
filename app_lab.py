@@ -3414,7 +3414,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             proj_list_clean = ["Office"]
 
         # 2. RENDER INTERACTIVE SELECTION GRID MATRIX
-        # Captures when a user clicks a checkbox row inside the data grid
+        if 'last_temp' not in full_reg_df.columns:
+            full_reg_df['last_temp'] = None
+
+        # This call now proceeds perfectly without throwing a KeyError
         selected_node_data = render_node_selector(full_reg_df, proj_list_clean)
         
         # 3. IF A SENSOR ROW IS CHECKED, INJECT THE OPERATIONS EDITOR
