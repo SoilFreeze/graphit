@@ -834,8 +834,11 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
     - Empirical data only (no theoretical lines).
-    - Baseline: First Monday at 06:00 AM (Black Dashed Line).
-    - Recent Line: 6:00 AM of the most recent day containing data (Bright Orange Solid Line).
+    - Recent Line: Most recent day's 6:00 AM snapshot (Bright Orange Solid Line).
+    - Fallback Engine: If a specific pipe lacks a 6 AM reading on the most recent day,
+      it scans that same day to find its closest available reading as a fallback substitute.
+    - Baseline: First Monday at 06:00 AM (Black Dashed Line) forced to sit on top layer.
+    - Outlier Filter: Explicitly excludes any rogue sensor pings reading above 50°F.
     - Freezing Line: Light Blue (Hex #ADD8E6).
     - Scale: Fixed -20 to 80.
     - Frame: Full 4-sided black box.
@@ -858,12 +861,16 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         st.warning("No data found for this project.")
         return
 
-    # 3. PRE-PROCESS DATA
+    # 3. PRE-PROCESS DATA & APPLY 50°F OUTLIER MASK FILTER
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+    
+    # HARD FILTER CRITERIA: Ignore any weird readings above 50°F before building charts
+    p_df = p_df[p_df['temperature'] <= 50.0]
+    
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
     if depth_df.empty:
-        st.info("No sensors with valid 'Depth' values found in the Node Registry.")
+        st.info("No sensors with valid 'Depth' values under 50°F found in the registry.")
         return
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
@@ -885,7 +892,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             
             fig = go.Figure()
 
-            # --- A. CALCULATE BASELINE (True First Week Data) ---
+            # --- A. CALCULATE BASELINE RAW HOOKS ---
             baseline_ts = loc_data['timestamp_local'].min()
             b_window = loc_data[
                 (loc_data['timestamp_local'] >= baseline_ts - pd.Timedelta(hours=12)) & 
@@ -893,6 +900,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             ]
             
             baseline_date_str = ""
+            snap_base = pd.DataFrame()
             if not b_window.empty:
                 baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
                 snap_base = (
@@ -901,54 +909,45 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     .drop_duplicates('NodeNum')
                     .sort_values('Depth_Num')
                 )
-                
-                b_temps = snap_base['temperature']
-                if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
-                
-                fig.add_trace(go.Scatter(
-                    x=b_temps, y=snap_base['Depth_Num'], 
-                    mode='lines', 
-                    name=f'Baseline ({baseline_date_str})',
-                    line=dict(color='black', width=2.5, dash='dash'),
-                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
-                ))
 
-            # --- B. DYNAMIC MOST RECENT 6:00 AM LINE SEARCH ENGINE ---
-            # Group by localized date to hunt down hours matching 06:00
+            # --- B. HARDENED MOST RECENT LINE SEARCH ENGINE (WITH PIPE-LEVEL FALLBACKS) ---
             loc_data['date_str'] = loc_data['timestamp_local'].dt.strftime('%Y-%m-%d')
             loc_data['hour_int'] = loc_data['timestamp_local'].dt.hour
             
-            # Filter rows to only look at 6 AM entries
-            six_am_pool = loc_data[loc_data['hour_int'] == 6]
             recent_6am_date_str = ""
-            snap_recent = pd.DataFrame()
+            recent_profile_rows = []
             
-            if not six_am_pool.empty:
-                # Find the maximum date containing a 6 AM check-in
-                sorted_6am_dates = sorted(six_am_pool['date_str'].unique(), reverse=True)
+            if not loc_data.empty:
+                sorted_all_dates = sorted(loc_data['date_str'].unique(), reverse=True)
                 
-                for candidate_date in sorted_6am_dates:
-                    # Skip if the most recent day happens to overlap with our baseline week date
+                for candidate_date in sorted_all_dates:
                     if candidate_date == baseline_date_str:
                         continue
+                    
+                    day_pool = loc_data[loc_data['date_str'] == candidate_date]
+                    if day_pool.empty:
+                        continue
                         
-                    candidate_window = six_am_pool[six_am_pool['date_str'] == candidate_date]
-                    if not candidate_window.empty:
-                        recent_6am_date_str = candidate_date
-                        # Deduplicate multiple pings within that specific hour row context
-                        snap_recent = (
-                            candidate_window.sort_values(['NodeNum', 'timestamp_local'], ascending=[True, False])
-                            .drop_duplicates('NodeNum')
-                            .sort_values('Depth_Num')
-                        )
-                        break
+                    recent_6am_date_str = candidate_date
+                    
+                    for node_id, node_group in day_pool.groupby('NodeNum'):
+                        exact_6am = node_group[node_group['hour_int'] == 6]
+                        if not exact_6am.empty:
+                            recent_profile_rows.append(exact_6am.sort_values('timestamp_local').iloc[-1])
+                        else:
+                            # Symmetrical dynamic fallback checking window
+                            node_group = node_group.assign(hour_dist=(node_group['hour_int'] - 6).abs())
+                            best_fallback_row = node_group.sort_values(by=['hour_dist', 'timestamp_local']).iloc[0]
+                            recent_profile_rows.append(best_fallback_row)
+                    break
 
-            # --- C. PLOT WEEKLY HISTORICAL SNAPSHOTS ---
+            snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
+
+            # --- C. PLOT WEEKLY HISTORICAL SNAPSHOTS (Mondays) ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
                 
-                # CRITICAL EXCLUSION CRITERIA: Skip if it matches the baseline OR the most recent day's line
                 if current_loop_date == baseline_date_str or current_loop_date == recent_6am_date_str:
                     continue
                     
@@ -965,6 +964,15 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         .sort_values('Depth_Num')
                     )
                     
+                    # Hard fallback window processing check
+                    if snap_week.empty:
+                        snap_week = (
+                            window.assign(hour_dist=(window['timestamp_local'].dt.hour - 6).abs())
+                            .sort_values(by=['hour_dist', 'timestamp_local'])
+                            .drop_duplicates('NodeNum')
+                            .sort_values('Depth_Num')
+                        )
+                    
                     temps = snap_week['temperature']
                     if unit_mode == "Celsius": temps = (temps - 32) * 5/9
                     
@@ -977,7 +985,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
-            # --- D. INJECT THE BRIGHT ORANGE MOST RECENT 6:00 AM PROFILE ---
+            # --- D. INJECT THE BRIGHT ORANGE HARDENED MOST RECENT PROFILE ---
             if not snap_recent.empty:
                 recent_temps = snap_recent['temperature']
                 if unit_mode == "Celsius": recent_temps = (recent_temps - 32) * 5/9
@@ -985,16 +993,32 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 fig.add_trace(go.Scatter(
                     x=recent_temps, y=snap_recent['Depth_Num'],
                     mode='lines+markers',
-                    name=f'<b>Most Recent ({recent_6am_date_str} 6AM)</b>',
+                    name=f'<b>Most Recent ({recent_6am_date_str} 6AM*)</b>',
                     line=dict(color='#ff7f0e', width=3.5, shape='spline', smoothing=1.1),
                     marker=dict(size=6, color='#ff7f0e'),
-                    hovertemplate=f"Most Recent: {recent_6am_date_str} 06:00<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                    hovertemplate="Most Recent: %{text}<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label + "<extra></extra>",
+                    text=snap_recent['timestamp_local'].dt.strftime('%b %d, %H:%M')
                 ))
 
-            # --- E. FREEZING REFERENCE LINE ---
+            # --- E. LAYER OVERRIDE: INJECT BLACK DASHED BASELINE AT THE VERY END ---
+            # By plotting this trace last, web rendering engines place it on top of everything else
+            if not snap_base.empty:
+                b_temps = snap_base['temperature']
+                if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
+                
+                fig.add_trace(go.Scatter(
+                    x=b_temps, y=snap_base['Depth_Num'], 
+                    mode='lines+markers', 
+                    name=f'<b>Baseline ({baseline_date_str})</b>',
+                    line=dict(color='black', width=3, dash='dash'),
+                    marker=dict(size=5, color='black'),
+                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                ))
+
+            # --- F. FREEZING REFERENCE LINE ---
             fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
-            # --- F. STANDARDIZED SCALING & BOX FRAME ---
+            # --- G. STANDARDIZED SCALING & BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
