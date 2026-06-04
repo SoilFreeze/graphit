@@ -295,7 +295,15 @@ active_refs = st.session_state.get("active_refs", [])
 #############
 # - Graph - #
 #############
-
+def get_unit_labels():
+    """
+    Helper utility to safely extract current global scale configurations 
+    and maintain synchronization across multi-app view states.
+    """
+    unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
+    unit_label = "°C" if unit_mode == "Celsius" else "°F"
+    return unit_mode, unit_label
+    
 def natural_sort_key(s):
     """
     Splits strings into chunks of text and numbers to allow natural sorting.
