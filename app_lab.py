@@ -10,6 +10,7 @@ import pytz
 import traceback
 import io
 import re
+import numpy as np
 
 # 1. CONFIGURATION & STYLING
 st.set_page_config(
