@@ -3935,6 +3935,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         except Exception as ins_err:
                             st.error(f"Database insertion failed: {ins_err}")
     
+        # =========================================================================
+        # SUB-TAB 5: PROJECT MASTER
+        # =========================================================================
         elif action == "🔧 Edit Project Metadata":
             st.subheader(f"🔧 Configuration Editor: {selected_project}")
             proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
@@ -3949,9 +3952,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             else:
                 p_data = p_res.iloc[0].to_dict()
                 with st.form("comprehensive_edit_project_pm"):
-                    c1, c2 = st.columns(2)
-                    u_project_id = c1.text_input("Project ID", value=p_data.get('Project', ''), disabled=True)
-                    u_project_name = c2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
+                    col1, col2 = st.columns(2)
+                    u_project_id = col1.text_input("Project ID", value=p_data.get('Project', ''), disabled=True)
+                    u_project_name = col2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
     
                     c3, c4 = st.columns(2)
                     u_city = c3.text_input("City", value=p_data.get('City', ''))
@@ -3960,24 +3963,42 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     u_up_notes = st.text_input("Upload Notes", value=p_data.get('UploadNote', ''))
                     u_as_built = st.text_input("As-Built File Tracking ID", value=p_data.get('AsBuiltFile', ''))
     
-                    c5, c6 = st.columns(2)
+                    st.divider()
+                    st.markdown("#### 🔄 Lifecycle Status & Target Phase Date")
+                    col_status, col_date = st.columns(2)
+                    
                     status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
                     curr_status = p_data.get('ProjectStatus', 'Initialized')
                     s_idx = status_options.index(curr_status) if curr_status in status_options else 0
-                    u_status = c5.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
+                    u_status = col_status.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
+                    
+                    # Dynamic mapping dictionary linking choices to your real database columns
+                    status_date_mappings = {
+                        "Initialized": "Date_Initialized",
+                        "Pre-freeze": "Date_PreFreeze",
+                        "Freezedown": "Date_Freezedown",
+                        "Maintenance": "Date_Maintenance",
+                        "Archived": "Date_Archived"
+                    }
+                    
+                    target_date_column = status_date_mappings.get(u_status, "Date_Freezedown")
                     
                     def safe_date(d): return pd.to_datetime(d).date() if pd.notnull(d) and str(d) != 'NaT' else None
-                    u_date_freeze = c5.date_input("Date Freezedown Started", value=safe_date(p_data.get('Date_Freezedown')))
-                    u_date_comp = c6.date_input("Date Project Completed", value=safe_date(p_data.get('Date_Completion')))
+                    
+                    # Automatically pull the existing date for whatever status phase is currently selected
+                    u_phase_date = col_date.date_input(
+                        f"Set Date for Phase: {u_status}", 
+                        value=safe_date(p_data.get(target_date_column))
+                    )
     
+                    st.divider()
                     u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
     
                     if st.form_submit_button("💾 Overwrite Project Registry Information"):
-                        # 🛡️ HARDENED DATE NULL HANDLERS: Defends against 'DATE(None)' structures
-                        freeze_val = f"DATE('{u_date_freeze}')" if (u_date_freeze and str(u_date_freeze) != 'None') else "NULL"
-                        comp_val = f"DATE('{u_date_comp}')" if (u_date_comp and str(u_date_comp) != 'None') else "NULL"
+                        # Format our calculated date cleanly to prevent 'DATE(None)' syntax errors
+                        formatted_date_clause = f"DATE('{u_phase_date}')" if (u_phase_date and str(u_phase_date) != 'None') else "NULL"
                         
-                        # 🛡️ TEXT ESCAPING SYSTEM: Protects against broken single quotes
+                        # Escape text strings safely to shield against embedded single quotes
                         safe_name = u_project_name.strip().replace("'", "''")
                         safe_city = u_city.strip().replace("'", "''")
                         safe_tz = u_tz.strip().replace("'", "''")
@@ -3985,16 +4006,22 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         safe_as_built = u_as_built.strip().replace("'", "''")
                         safe_notes = u_notes.strip().replace("'", "''")
                         
+                        # Dynamically updates both ProjectStatus and the exact matching Phase Date column from your schema
                         update_q = f"""
                             UPDATE `{table_projects}` SET 
-                                ProjectName = '{safe_name}', ProjectStatus = '{u_status}', City = '{safe_city}',
-                                Timezone = '{safe_tz}', UploadNote = '{safe_up_notes}', AsBuiltFile = '{safe_as_built}',
-                                EngNotes = '{safe_notes}', Date_Freezedown = {freeze_val}, Date_Completion = {comp_val}
+                                ProjectName = '{safe_name}', 
+                                ProjectStatus = '{u_status}', 
+                                City = '{safe_city}',
+                                Timezone = '{safe_tz}', 
+                                UploadNote = '{safe_up_notes}', 
+                                AsBuiltFile = '{safe_as_built}',
+                                EngNotes = '{safe_notes}', 
+                                {target_date_column} = {formatted_date_clause}
                             WHERE Project = '{selected_project}'
                         """
                         try:
                             client.query(update_q).result()
-                            st.success(f"✅ Configuration data modified for: {selected_project}")
+                            st.success(f"✅ Configuration and {target_date_column} modified for: {selected_project}")
                             st.cache_data.clear()
                             time.sleep(1)
                             st.rerun()
