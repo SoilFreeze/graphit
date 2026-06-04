@@ -2801,7 +2801,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 st.session_state.blk_mgmt_total_points = 0
 
     # =========================================================================
-    # PROFILER VERIFICATION BLOCK (STEP 1)
+    # SECTION 3: STEP 1 - THE MASTER VIEW PROFILER
     # =========================================================================
     if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
         try:
@@ -2811,7 +2811,8 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
 
     if st.session_state.blk_mgmt_profile_df is not None:
         if not st.session_state.blk_mgmt_profile_df.empty:
-            st.subheader("📊 Active Designation Profile Summary")
+            # RENAMED HEADER AS REQUESTED
+            st.subheader("📊 Current Node Status")
             st.dataframe(st.session_state.blk_mgmt_profile_df, use_container_width=True, hide_index=True)
             st.metric("Total Consolidated Points in Selection Scope", f"{st.session_state.blk_mgmt_total_points:,}")
         else:
@@ -2820,13 +2821,15 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
     
     # =========================================================================
-    # TRANSMISSION OVERRIDE EXECUTOR (STEP 2)
+    # SECTION 4: STEP 2 - TRANSMISSION OVERRIDE LEDGER WRITER
     # =========================================================================
     st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
             
-            if new_status == "TRUE" and current_status_filter != "NULL (Streaming / Unreviewed)":
+            # FIXED: Target status of TRUE now cleanly executes a deletion statement 
+            # to permanently unblock the points for your client site portals.
+            if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
                     WHERE STRUCT(NodeNum, timestamp) IN (
@@ -2851,11 +2854,11 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         VALUES (S.NodeNum, S.timestamp, '{new_status}')
                 """
             try:
-                with st.spinner("Processing database merge mapping vectors..."):
+                with st.spinner("Processing database status reclassifications..."):
                     job = client.query(sql)
                     job.result()
                 
-                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records.")
+                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records inside the registry ledger.")
                 st.cache_data.clear()
                 run_profile_audit()
                 st.balloons()
