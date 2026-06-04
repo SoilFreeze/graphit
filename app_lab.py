@@ -3460,13 +3460,18 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         with col_l2:
             u_locations = sorted(proj_filtered_df['Location'].dropna().unique().tolist(), key=natural_sort_key) if not proj_filtered_df.empty else []
             if not u_locations:
-                u_locations = ["No Registered Locations"]
-            selected_log_loc = st.selectbox("Select Physical Location Context:", u_locations, key="node_log_location_filter")
+                u_locations = ["Office"]
+                
+            # Append special marker string for entering a brand new location choice
+            location_options = u_locations + ["➕ Add New Location..."]
+            selected_log_loc = st.selectbox("Select Physical Location Context:", location_options, key="node_log_location_filter")
             
         loc_filtered_df = proj_filtered_df[proj_filtered_df['Location'] == selected_log_loc] if not proj_filtered_df.empty else pd.DataFrame()
         
         with col_l3:
-            u_nodes = sorted(loc_filtered_df['NodeNum'].dropna().unique().tolist(), key=natural_sort_key) if not loc_filtered_df.empty else []
+            # If we are viewing a filtered location list, extract nodes. Otherwise, look up project nodes.
+            node_lookup_df = loc_filtered_df if selected_log_loc != "➕ Add New Location..." else proj_filtered_df
+            u_nodes = sorted(node_lookup_df['NodeNum'].dropna().unique().tolist(), key=natural_sort_key) if not node_lookup_df.empty else []
             selected_log_node = st.selectbox(
                 "Select Target Node Number ID:", 
                 u_nodes, 
@@ -3477,8 +3482,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.divider()
 
         # 2. IF A NODE IS SPECIFIED, ROUTE RENDER PROCESSING DATA ENGINE
-        if selected_log_node and not loc_filtered_df.empty:
-            # Query the raw records from production database directly to maintain live sorting states
+        if selected_log_node:
             history_query = f"""
                 SELECT *, 
                        CAST(Start_Date AS STRING) as start_date_str,
@@ -3497,21 +3501,17 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 st.markdown(f"### 🕒 Assignment History Timeline: **{selected_log_node}**")
                 st.caption("💡 **Tip:** Use the checkbox selector in the tracking table below to force loading an archived historical row entry context into the editor panel form matrix.")
                 
-                # Initialize custom session states to anchor rows inside history frames
                 hist_ed_key = f"hist_ed_{selected_log_node}"
                 if f"active_hist_idx_{selected_log_node}" not in st.session_state:
-                    st.session_state[f"active_hist_idx_{selected_log_node}"] = 0 # Default seamlessly to row index 0 (Most Current)
+                    st.session_state[f"active_hist_idx_{selected_log_node}"] = 0
 
-                # Process data framework matrix display states 
                 display_history_df = raw_node_history_df.copy()
                 display_history_df.insert(0, "Select", False)
                 
-                # Maintain sticky index checkboxes safely
                 curr_active_idx = st.session_state[f"active_hist_idx_{selected_log_node}"]
                 if curr_active_idx < len(display_history_df):
                     display_history_df.loc[curr_active_idx, "Select"] = True
 
-                # Interactive user state routing catcher
                 if hist_ed_key in st.session_state and "edited_rows" in st.session_state[hist_ed_key]:
                     user_changes = st.session_state[hist_ed_key]["edited_rows"]
                     clicked_indices = [int(idx) for idx, changes in user_changes.items() if changes.get("Select") == True]
@@ -3520,7 +3520,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.session_state[hist_ed_key]["edited_rows"] = {}
                         st.rerun()
 
-                # Render history editor framework
                 st.data_editor(
                     display_history_df,
                     hide_index=True,
@@ -3537,7 +3536,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     key=hist_ed_key
                 )
 
-                # Route chosen row down to context engine fields
                 target_selected_idx = st.session_state[f"active_hist_idx_{selected_log_node}"]
                 if target_selected_idx >= len(raw_node_history_df):
                     target_selected_idx = 0
@@ -3546,13 +3544,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                 st.divider()
                 
-                # 3. CALL REFACTORED ATTRIBUTES PANEL FORCED EDITOR MATRICES
+                # 3. CALL REFACTORED ATTRIBUTES PANEL WITH PROJECTS UNIQUE LOCATION VECTOR
                 try:
                     render_lab_node_action_manager(
                         client=client,
                         selected_node_data=chosen_target_record,
                         reg_df=full_reg_df,
                         proj_list=u_projects,
+                        known_project_locations=u_locations, # Pass project unique locations list context down
                         target_registry=target_registry_path
                     )
                     render_data_checker(client, full_reg_df)
@@ -3562,7 +3561,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 st.info("No prior deployment entries found tracked for this hardware tracking context.")
         else:
             st.info("💡 Please specify a valid Project, Location, and Node path above to populate management components.")
-            
             
     # -------------------------------------------------------------------------
     # TAB 4: DATA RECOVERY PIPELINE ENGINE
@@ -4276,16 +4274,15 @@ def render_lab_node_selector(reg_df, proj_list):
     return st.session_state["lab_active_selected_record"]
 
 
-def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
-    """Displays line graphs alongside transactional metadata forms supporting historical time-series manipulation."""
-    import plotly.graph_objects as go
+def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list, known_project_locations, target_registry):
+    """Displays transactional metadata forms supporting historical time-series manipulation with cascading locations lists."""
     import time
+    from datetime import datetime
     
     node_id = selected_node_data['NodeNum']
     origin_start_str = str(selected_node_data.get('Start_Date'))
-    
-    # Clean string labels displaying exactly which historical window variant is being edited
     end_label_text = str(selected_node_data.get('End_Date')) if pd.notnull(selected_node_data.get('End_Date')) else "Current Active Window"
+    
     st.markdown(f"### 🛠️ Modify Assignment Attributes")
     st.caption(f"📝 Currently Editing Configuration Path for Node: **{node_id}** | Window Timeline: `({origin_start_str})` ➡️ `({end_label_text})`")
     
@@ -4293,8 +4290,32 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
     with st.form("lab_attribute_form_historical"):
         col1, col2, col3 = st.columns(3)
         edit_proj = col1.selectbox("Project Space Target Context", proj_list, index=proj_list.index(selected_node_data['Project']) if selected_node_data['Project'] in proj_list else 0)
-        edit_loc = col2.text_input("Assign to Location / Borehole Location", value=str(selected_node_data.get('Location', '')))
         
+        # LOCATION ARCHITECTURE OVERRIDE
+        current_loc_val = str(selected_node_data.get('Location', ''))
+        
+        # Build dropdown options containing current assigned options pool
+        form_loc_options = sorted(list(set(known_project_locations)))
+        if current_loc_val not in form_loc_options and current_loc_val.strip() != "":
+            form_loc_options.append(current_loc_val)
+        form_loc_options.append("➕ Add Custom Location...")
+        
+        # Default index lookup
+        default_loc_idx = form_loc_options.index(current_loc_val) if current_loc_val in form_loc_options else 0
+        
+        # Standard Selectbox replacing old raw input field
+        chosen_form_loc = col2.selectbox(
+            "Location", 
+            options=form_loc_options, 
+            index=default_loc_idx,
+            help="Select an existing project location from the drop-down menu, or choose Add Custom Location to enter a new one."
+        )
+        
+        # Auxiliary text block exposed below dropdown if custom append action is requested
+        custom_loc_input = ""
+        if chosen_form_loc == "➕ Add Custom Location...":
+            custom_loc_input = st.text_input("Enter New Custom Location String name:", placeholder="e.g., Borehole-12")
+            
         status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
         curr_status_str = str(selected_node_data.get('SensorStatus', 'On Project'))
         status_idx = status_options.index(curr_status_str) if curr_status_str in status_options else 0
@@ -4303,8 +4324,6 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         c4, c5, c6, c7 = st.columns(4)
         edit_bank = c4.text_input("Bank Field Mapping", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
         edit_depth = c5.number_input("Depth Metric (ft)", value=float(selected_node_data.get('Depth', 0.0)))
-        
-        # Safe chronological parameter calculations
         edit_start = c6.date_input("Deployment Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date())
         
         # END DATE CONTROL OVERRIDE SYSTEM BLOCK
@@ -4315,39 +4334,63 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         edit_end = c7.date_input("Deployment End Date", value=default_end_date, disabled=not use_end_date_toggle)
 
         if st.form_submit_button("💾 Overwrite Targeted Assignment Attributes Configuration Row Line", use_container_width=True):
+            # Parse which parameter string gets handled
+            final_loc_str = custom_loc_input.strip() if chosen_form_loc == "➕ Add Custom Location..." else chosen_form_loc
+            
+            if chosen_form_loc == "➕ Add Custom Location..." and not custom_loc_input.strip():
+                st.error("❌ Action Rejected: Custom location field string value cannot be blank.")
+                return
+
             sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
             sql_end_val = f"DATE('{edit_end}')" if use_end_date_toggle else "NULL"
             
-            # Use multi-statement atomic transactions to wipe old row lines matching historical start markers and re-insert cleanly
             update_sql = f"""
                 BEGIN TRANSACTION;
                 DELETE FROM `{target_registry}` 
                 WHERE NodeNum = '{node_id}' AND Start_Date = DATE('{selected_node_data['Start_Date']}');
                 INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                VALUES ('{node_id}', '{edit_proj}', '{edit_loc}', {sql_bank}, {sql_depth}, '{edit_status}', DATE('{edit_start}'), {sql_end_val});
+                VALUES ('{node_id}', '{edit_proj}', '{final_loc_str}', {sql_bank}, {sql_depth}, '{edit_status}', DATE('{edit_start}'), {sql_end_val});
                 COMMIT;
             """
             client.query(update_sql).result()
-            st.success("✅ Historic baseline record properties updated inside telemetry registry schema maps successfully!")
+            st.success("✅ Clean update forced entry modified down into central metadata records!")
             st.cache_data.clear()
             time.sleep(0.5)
             st.rerun()
 
-    # 2. QUICK TASKS FOOTER MATRICES
+    # 2. QUICK TASKS FOOTER MATRICES (Now containing End Assignment, Change Sensor, and Hard Delete)
     st.markdown("##### Quick Operational Tasks")
-    o1, o2, o3 = st.columns(3)
+    o1, o2, o3, o4 = st.columns(4)
+    
     with o1:
+        with st.expander("🔚 End Assignment"):
+            st.caption("Surgically stamp a termination date onto this deployment window.")
+            if st.button("Confirm End Assignment", key="btn_end_task_hist", use_container_width=True):
+                end_sql = f"""
+                    UPDATE `{target_registry}` 
+                    SET End_Date = CURRENT_DATE() 
+                    WHERE NodeNum='{node_id}' AND Start_Date = DATE('{selected_node_data['Start_Date']}')
+                """
+                client.query(end_sql).result()
+                st.success("🏁 Target assignment window finalized successfully!")
+                st.cache_data.clear()
+                time.sleep(0.5)
+                st.rerun()
+                
+    with o2:
         with st.expander("🔄 Change Sensor ID"):
             swap_target = st.text_input("Replacement Node Tag ID string:", placeholder="e.g., TP-0105")
             if st.button("Execute Change Sensor Protocol", key="btn_swap_task_hist") and swap_target:
                 client.query(f"UPDATE `{target_registry}` SET NodeNum='{swap_target}' WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
                 st.cache_data.clear()
                 st.rerun()
-    with o2:
+                
+    with o3:
         with st.expander("➕ Add New Manual Assignment"):
             st.caption("Insert manual lines tracking log entries.")
-    with o3:
+            
+    with o4:
         with st.expander("🗑️ Permanent Hard Delete Row Line"):
             if st.checkbox("Authorize permanent line termination"):
                 if st.button("Delete Selected Historical Row Line Block", type="primary"):
@@ -4358,18 +4401,155 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
 
 
 def render_lab_data_checker(client, reg_df):
-    """Calculates chronological gap analyses system-wide to flag timeline risks."""
+    """
+    Calculates and monitors systemic data conflicts, chronological alignment 
+    gaps, timeline skips, and hardware assignment overlaps across the fleet.
+    """
     st.markdown("### 🔍 Data Checker Diagnostics")
-    c1, c2, c3, c4 = st.tabs(["⏱️ Gaps in Data (Missing Office Time)", "🚨 Orphaned Nodes (Missing Next Assignment)", "🚨 Multiple / Duplicate Assignments", "🚨 Location & Position Overlaps"])
     
+    if reg_df.empty:
+        st.info("The system node registry is unpopulated. Skipping automated integrity scans.")
+        return
+
+    # Extract clean baseline reference structures
+    active_registry_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    master_telemetry_view = f"{PROJECT_ID}.{DATASET_ID}.master_data_view"
+    
+    c1, c2, c3, c4 = st.tabs([
+        "⏱️ Gaps in Data (Missing Office Time)", 
+        "🚨 Orphaned Nodes (Missing Next Assignment)", 
+        "🚨 Multiple / Duplicate Assignments", 
+        "🚨 Location & Position Overlaps"
+    ])
+    
+    # =========================================================================
+    # TAB 1: CHRONOLOGICAL TIMELINE GAPS (MISSING OFFICE TIME)
+    # =========================================================================
     with c1:
-        st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
+        st.markdown("#### ⏱️ Chronological Gap Analysis")
+        gap_query = f"""
+            WITH OrderedAssignments AS (
+                SELECT 
+                    NodeNum, Project, Start_Date, End_Date,
+                    LEAD(Start_Date) OVER (PARTITION BY NodeNum ORDER BY Start_Date ASC) as next_start
+                FROM `{active_registry_table}`
+            )
+            SELECT 
+                NodeNum as `Node ID`,
+                Project as `Ended Project ID`,
+                End_Date as `Decommission Date`,
+                next_start as `Next Deployment Date`,
+                DATE_DIFF(next_start, End_Date, DAY) as `Unmonitored Gap (Days)`
+            FROM OrderedAssignments
+            WHERE End_Date IS NOT NULL 
+              AND next_start IS NOT NULL 
+              AND DATE_DIFF(next_start, End_Date, DAY) > 1
+            ORDER BY `Unmonitored Gap (Days)` DESC
+        """
+        try:
+            gap_df = client.query(gap_query).to_dataframe()
+            if not gap_df.empty:
+                st.error("⚠️ **Timeline Discontinuity Warning:** The following hardware sensors contain unmonitored tracking gaps between historical assignments without an intermediate 'Office' log record:")
+                st.dataframe(gap_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("✅ **Chronological Integrity Verified:** No timeline gaps or missing 'Office' storage windows detected across node history logs.")
+        except Exception as e:
+            st.caption(f"Timeline gap engine initializing: {e}")
+
+    # =========================================================================
+    # TAB 2: ORPHANED SENSORS (MISSING END DATES ON PREVIOUS DEPLOYMENTS)
+    # =========================================================================
     with c2:
-        st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
+        st.markdown("#### 🚨 Open-Ended Terminations Checklist")
+        orphan_query = f"""
+            WITH ActiveCounts AS (
+                SELECT NodeNum, COUNT(*) as open_windows
+                FROM `{active_registry_table}`
+                WHERE End_Date IS NULL
+                GROUP BY NodeNum
+            )
+            SELECT 
+                r.NodeNum as `Node ID`,
+                r.Project as `Project ID`,
+                r.Location as `Location / Borehole`,
+                r.Start_Date as `Deployment Start`
+            FROM `{active_registry_table}` r
+            JOIN ActiveCounts a ON r.NodeNum = a.NodeNum
+            WHERE r.End_Date IS NULL AND a.open_windows > 1
+            ORDER BY r.NodeNum ASC, r.Start_Date ASC
+        """
+        try:
+            orphan_df = client.query(orphan_query).to_dataframe()
+            if not orphan_df.empty:
+                st.error("⚠️ **Orphaned Open-End Alert:** The following nodes have been reassigned to new lines but their older historical assignments were never closed out with an `End_Date`:")
+                st.dataframe(orphan_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("✅ **Clean Terminations Verified:** All decommissioned hardware records successfully close prior windows when moving to a new deployment channel.")
+
+        except Exception as e:
+            st.caption(f"Orphan scan engine initializing: {e}")
+
+    # =========================================================================
+    # TAB 3: DUAL / MULTIPLE ASSIGNMENTS OVERLAPPING TIMELINES
+    # =========================================================================
     with c3:
-        st.success("✅ Clean database entries. No duplicate entries discovered with identical project and date windows.")
+        st.markdown("#### 🚨 Timeline Window Overlap Scans")
+        overlap_query = f"""
+            SELECT 
+                t1.NodeNum as `Node ID`,
+                t1.Project as `Proj A`,
+                t1.Start_Date as `Start A`,
+                t1.End_Date as `End A`,
+                t2.Project as `Proj B`,
+                t2.Start_Date as `Start B`,
+                t2.End_Date as `End B`
+            FROM `{active_registry_table}` t1
+            JOIN `{active_registry_table}` t2 
+              ON t1.NodeNum = t2.NodeNum 
+             AND t1.Start_Date < t2.Start_Date
+             AND (t1.End_Date IS NULL OR t1.End_Date > t2.Start_Date)
+            ORDER BY t1.NodeNum ASC
+        """
+        try:
+            overlap_df = client.query(overlap_query).to_dataframe()
+            if not overlap_df.empty:
+                st.error("⚠️ **Simultaneous Allocation Conflict:** The following sensors are registered to multiple distinct physical configurations with overlapping operational timelines:")
+                st.dataframe(overlap_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("✅ **Clean Database Entries:** No concurrent duplicate records with overlapping calendar windows identified.")
+        except Exception as e:
+            st.caption(f"Overlap cross-scan metrics initializing: {e}")
+
+    # =========================================================================
+    # TAB 4: SPATIAL OVERLAPS (MULTIPLE HARDWARE IN ONE SPATIAL COORDINATE)
+    # =========================================================================
     with c4:
-        st.success("✅ Perfect grid alignment. Every active physical installation coordinate holds exactly one distinct hardware sensor entity.")
+        st.markdown("#### 🚨 Position and Coordinate Collision Check")
+        spatial_query = f"""
+            SELECT 
+                Project as `Project ID`,
+                Location as `Location`,
+                COALESCE(CAST(Depth AS STRING), CONCAT('Bank ', Bank)) as `Coordinate Position`,
+                STRING_AGG(NodeNum, ' ↔️ ') as `Conflicting Node Group`,
+                COUNT(*) as `Active Hardware Count`
+            FROM `{active_registry_table}`
+            WHERE End_Date IS NULL 
+              AND Project != 'Office' 
+              AND Location != 'Office'
+            GROUP BY Project, Location, Bank, Depth
+            HAVING COUNT(*) > 1
+            ORDER BY Project ASC, Location ASC
+        """
+        try:
+            spatial_df = client.query(spatial_query).to_dataframe()
+            if not spatial_df.empty:
+                st.error("⚠️ **Spatial Grid Collision Detected:** The following borehole coordinates currently house more than one active telemetry asset simultaneously:")
+                st.dataframe(spatial_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("✅ **Perfect Grid Alignment:** Every active coordinate holds exactly one distinct active hardware asset mapping layout.")
+        except Exception as e:
+            st.caption(f"Spatial proximity engine initializing: {e}")
+
 
 ###################
 # 12. MAIN ROUTER #
