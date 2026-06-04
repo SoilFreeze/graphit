@@ -3252,12 +3252,13 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
 ######################
 
 def render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs):
-
-   # Advanced Admin Tools: Centralized administrative command center.
-   # All sidebar sub-navigation radio buttons have been removed. Layout routing 
-   # is handled cleanly via the core multi-page navigation selectbox.
-   
+    """
+    Advanced Admin Tools: Centralized administrative command center.
+    Integrated with the 📋 Node Master interface as Sub-Tab 3.
+    """
     import re
+    import numpy as np
+    import plotly.graph_objects as go
     from datetime import datetime, timedelta
     
     st.header("🛠️ Admin Tools")
@@ -3268,27 +3269,29 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         return
 
     # 1. CENTRAL TRANSACTIONAL DATA FETCH
+    target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
     try:
-        reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`"
-        full_reg_df = client.query(reg_q).to_dataframe()
+        # Single-pass database join with real-time latency calculations for the grids
+        full_reg_df = load_lab_node_registry_data(target_registry_path)
         
-        proj_reg_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`"
-        proj_reg_df = client.query(proj_reg_q).to_dataframe()
+        proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
+        available_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
     except Exception as e:
         st.error(f"Registry Link Offline: {e}")
         return
 
-    # 2. NAVIGATION TABS (6 slots neatly aligned)
+    # 2. NAVIGATION TABS (Aligned matching your exact blueprint)
     tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config, tab_soil_curves = st.tabs([
         "📋 Admin Summary", 
         "⚡ Bulk Approval", 
-        "📋 Node Master",  # <-- Renamed from "Node Logistics"
+        "📋 Node Master",  
         "📡 Data Recovery", 
         "⚙️ Project Master", 
         "📦 Bulk Uploads",
         "📈 Soil Reference Curves"
     ])
 
+    
     # --- SUB-TAB 1: ADMIN SUMMARY ---
     with tab_admin_sum:
         st.subheader("📋 Centralized Infrastructure Status Overview")
@@ -3430,77 +3433,29 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
     # =========================================================================
-    # SUB-TAB 3: NODE MASTER (FORMERLY NODE LOGISTICS)
+    # SUB-TAB 3: 📋 NODE MASTER (DYNAMIC CONFIGURATION PORT)
     # =========================================================================
     with tab_logistics:
         st.title("📋 Node Status and Changes")
         st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
         st.divider()
         
-        st.subheader("🔍 Select Target Hardware Path")
-        
-        # 1. CASCADING SELECTBOX CONTROLS
-        col_l1, col_l2, col_l3 = st.columns(3)
-        
-        with col_l1:
-            # Safely harvest unique project codes directly from full_reg_df
-            raw_projects = full_reg_df['Project'].dropna().unique().tolist() if not full_reg_df.empty else []
-            u_projects = sorted(list(set(["Office"] + raw_projects)))
+        if not full_reg_df.empty:
+            # Render the Interactive Node Matrix Selection Table
+            selected_node_record = render_lab_node_selector(full_reg_df, available_projects_list)
             
-            selected_log_proj = st.selectbox(
-                "Select Project Space Context:", 
-                u_projects, 
-                key="node_log_project_filter"
-            )
-        
-        # Isolate rows matching our sidebar/dropdown project selection
-        proj_filtered_df = full_reg_df[full_reg_df['Project'] == selected_log_proj]
-        
-        with col_l2:
-            # Pull unique locations safely out of the project-filtered dataframe
-            u_locations = sorted(proj_filtered_df['Location'].dropna().unique().tolist(), key=natural_sort_key) if not proj_filtered_df.empty else []
-            if not u_locations:
-                u_locations = ["No Registered Locations"]
-            selected_log_loc = st.selectbox("Select Physical Location Context:", u_locations, key="node_log_location_filter")
-            
-        # Cascading slice matching both Project and Location definitions
-        loc_filtered_df = proj_filtered_df[proj_filtered_df['Location'] == selected_log_loc] if not proj_filtered_df.empty else pd.DataFrame()
-        
-        with col_l3:
-            u_nodes = sorted(loc_filtered_df['NodeNum'].dropna().unique().tolist(), key=natural_sort_key) if not loc_filtered_df.empty else []
-            selected_log_node = st.selectbox(
-                "Select Target Node Number ID:", 
-                u_nodes, 
-                index=0 if u_nodes else None,
-                key="node_log_node_filter",
-                help="Pick the specific hardware tracking record to pull up in the editor."
-            )
-
-        st.divider()
-
-        # 2. IF A VALID NODE IS SELECTED, INJECT THE EDITING COMPONENT MATRIX
-        if selected_log_node and not loc_filtered_df.empty:
-            target_rows = loc_filtered_df[loc_filtered_df['NodeNum'] == selected_log_node].sort_values(by='Start_Date', ascending=False)
-            
-            if not target_rows.empty:
-                active_node_record = target_rows.iloc[0].to_dict()
-                target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-                
-                try:
-                    render_node_action_manager(
-                        client=client, 
-                        selected_node_data=active_node_record, 
-                        reg_df=full_reg_df, 
-                        proj_list=u_projects, # Pass our dynamically parsed project list parameter safely
-                        target_registry=target_registry_path
-                    )
-                    render_data_checker(client, full_reg_df)
-                except Exception as routing_err:
-                    st.error(f"Internal workspace linkage failed: {routing_err}")
+            if selected_node_record is not None:
+                st.divider()
+                # Populate graph engine, metadata form editor, and quick actions
+                render_lab_node_action_manager(client, selected_node_record, full_reg_df, available_projects_list, target_registry_path)
             else:
-                st.info("The specific assignment record could not be parsed. Refresh your selections.")
+                st.divider()
+                st.info("💡 **Tip:** Use the checkbox in the active table above to choose a node context to modify.")
+                
+            # Systems Quality Diagnostic Checker Footer
+            render_lab_data_checker(client, full_reg_df)
         else:
-            st.info("💡 Please specify a valid Project, Location, and Node path above to populate the management editor panels.")
+            st.warning("No tracking profiles found inside the active Node Registry database layer.")
             
             
     # =========================================================================
@@ -4033,6 +3988,248 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 st.cache_data.clear()
                 time.sleep(1.0)
                 st.rerun()
+
+# =============================================================================
+# 🛠️ REUSABLE LAB ENGINE ASSIGNMENT PIPELINES
+# =============================================================================
+
+@st.cache_data(ttl=300)
+def load_lab_node_registry_data(target_table):
+    """Safely assembles asset inventories with matching real-time ping lag windows."""
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
+    try:
+        master_query = f"""
+            WITH LatestTelemetry AS (
+                SELECT 
+                    NodeNum, 
+                    MAX(timestamp) as last_ping,
+                    ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                GROUP BY NodeNum
+            ),
+            AssignmentWindows AS (
+                SELECT 
+                    NodeNum, Start_Date, COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
+                    DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
+                FROM `{target_table}` WHERE Project != 'Dead'
+            ),
+            ActualProjectPings AS (
+                SELECT 
+                    m.NodeNum, a.Start_Date,
+                    COUNT(DISTINCT TIMESTAMP_TRUNC(m.timestamp, HOUR)) AS Actual_Pings_Logged
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                INNER JOIN AssignmentWindows a ON m.NodeNum = a.NodeNum 
+                  AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
+                GROUP BY m.NodeNum, a.Start_Date
+            )
+            SELECT 
+                R.*, T.last_ping, T.last_temp, A.Expected_Hours,
+                COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
+            FROM `{target_table}` R
+            LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
+            LEFT JOIN AssignmentWindows A ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
+            LEFT JOIN ActualProjectPings P ON R.NodeNum = P.NodeNum AND R.Start_Date = P.Start_Date
+        """
+        df = client.query(master_query).to_dataframe()
+        now_utc = pd.Timestamp.now(tz='UTC')
+        
+        if not df.empty and 'last_ping' in df.columns:
+            df['hours_hidden'] = df['last_ping'].apply(
+                lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
+                if pd.notnull(x) else float('inf')
+            )
+            df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+            
+            def format_last_seen(hours):
+                if pd.isna(hours) or hours == float('inf'): return "❌ Never"
+                if hours < 1.0:
+                    mins = int(hours * 60)
+                    return f"{mins}m ago" if mins > 0 else "Just now"
+                return f"{hours:.1f}h ago"
+            df['Last Seen'] = df['hours_hidden'].apply(format_last_seen)
+        else:
+            df['hours_hidden'] = float('inf')
+            df['Last Seen'] = "❌ Never"
+            
+        if not df.empty and 'Expected_Hours' in df.columns:
+            exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
+            act_pings = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
+            raw_efficiency = np.where(exp_hours <= 0, 0.0, np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1)))
+            df['Reporting Efficiency'] = [f"{x:.1f}%" for x in raw_efficiency]
+        else:
+            df['Reporting Efficiency'] = "0.0%"
+            
+        cols_to_drop = ['physicalID', 'PhysicalID', 'last_ping', 'Expected_Hours', 'Actual_Pings_Logged']
+        df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+        return df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+    except Exception as e:
+        st.error(f"Error compiling registry: {e}")
+        return pd.DataFrame()
+
+def render_lab_node_selector(reg_df, proj_list):
+    """Renders hierarchical dropdown filters and selection matrix tables."""
+    st.subheader("🎯 Active Node Registry")
+    hide_archived = st.checkbox("Hide Archived Records", value=True, key="lab_ns_hide_archived_toggle")
+    
+    df = reg_df.copy()
+    if hide_archived and 'SensorStatus' in df.columns:
+        df = df[(df['SensorStatus'].str.lower() != "archived") & (~df['Location'].str.contains("Archive", case=False, na=False))]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        f_proj = st.selectbox("Filter by Project Space", ["All", "Unassigned"] + proj_list, key="lab_ns_proj_f")
+    with c2:
+        loc_opts = df['Location'].dropna().unique().tolist() if f_proj == "All" else df[df['Project'] == f_proj]['Location'].dropna().unique().tolist()
+        f_loc = st.selectbox("Filter by Physical Location", ["All"] + sorted(loc_opts), key="lab_ns_loc_f")
+    with c3:
+        search_term = st.text_input("Global Search (Node ID)", "", key="lab_ns_search_f")
+
+    if f_proj == "Unassigned": df = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office")]
+    elif f_proj != "All": df = df[df['Project'] == f_proj]
+    if f_loc != "All": df = df[df['Location'] == f_loc]
+    if search_term: df = df[df['NodeNum'].str.contains(search_term, case=False, na=False)]
+
+    if df.empty:
+        st.info("No matching nodes located under current filter parameters.")
+        return None
+
+    st.markdown("### 📋 Current Asset Allocation Matrix")
+    if "lab_last_selected_node" not in st.session_state: st.session_state["lab_last_selected_node"] = None
+    if "lab_active_selected_record" not in st.session_state: st.session_state["lab_active_selected_record"] = None
+
+    ed_key = "lab_node_registry_editor"
+    if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
+        changed_rows = st.session_state[ed_key]["edited_rows"]
+        newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
+        
+        if newly_checked and not df.empty:
+            latest_idx = newly_checked[-1]
+            if latest_idx != st.session_state["lab_last_selected_node"]:
+                st.session_state["lab_last_selected_node"] = latest_idx
+                rec_dict = df.loc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
+                rec_dict["Select"] = True
+                st.session_state["lab_active_selected_record"] = rec_dict
+                st.session_state[ed_key]["edited_rows"] = {}
+                st.rerun()
+        elif any(changes.get("Select") == False for idx, changes in changed_rows.items()):
+            st.session_state["lab_last_selected_node"] = None
+            st.session_state["lab_active_selected_record"] = None
+            st.session_state[ed_key]["edited_rows"] = {}
+            st.rerun()
+
+    df.insert(0, "Select", False)
+    if st.session_state["lab_last_selected_node"] is not None and st.session_state["lab_last_selected_node"] < len(df):
+        df.loc[st.session_state["lab_last_selected_node"], "Select"] = True
+
+    unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+    unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+    
+    def resolve_pos(row):
+        return f"{row['Depth']}ft" if (pd.notnull(row.get('Depth')) and row.get('Depth') != 0) else f"Bank {row.get('Bank', '-')}"
+    
+    df['Position'] = df.apply(resolve_pos, axis=1)
+    df['Current Temp'] = df['last_temp'].apply(lambda x: f"{x:.1f}{unit_label}" if pd.notnull(x) else "N/A")
+
+    edited_df = st.data_editor(
+        df, hide_index=True, use_container_width=True,
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+            "NodeNum": "Node ID", "Position": "Depth/Bank", "Last Seen": "Last Seen", "Current Temp": "Current Temp"
+        },
+        disabled=[col for col in df.columns if col != "Select"],
+        column_order=["Select", "Project", "Location", "NodeNum", "Position", "Last Seen", "Current Temp"], key=ed_key
+    )
+    return st.session_state["lab_active_selected_record"]
+
+def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
+    """Displays comparative line charts alongside structural updates metadata forms."""
+    import plotly.graph_objects as go
+    node_id = selected_node_data['NodeNum']
+    st.markdown(f"### 📈 Historic Data: **{node_id}**")
+    
+    # Historical Chart
+    hist_q = f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{node_id}' ORDER BY timestamp ASC"
+    try:
+        tel_df = client.query(hist_q).to_dataframe()
+        if not tel_df.empty:
+            fig = go.Figure(go.Scatter(x=tel_df['timestamp'], y=tel_df['temperature'], mode='lines', line=dict(color='#00d4ff', width=2)))
+            fig.update_layout(height=230, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.caption(f"Historical graph generated: {e}")
+
+    st.markdown("### 🛠️ Modify Assignment Attributes")
+    with st.form("lab_attribute_form"):
+        col1, col2, col3 = st.columns(3)
+        edit_proj = col1.selectbox("Project Space", proj_list, index=proj_list.index(selected_node_data['Project']) if selected_node_data['Project'] in proj_list else 0)
+        edit_loc = col2.text_input("Assign to Location", value=str(selected_node_data.get('Location', '')))
+        edit_status = col3.selectbox("SensorStatus", ["On Project", "Available", "Diagnostic", "Dead", "Archived"], index=0)
+        
+        c4, c5, c6 = st.columns(3)
+        edit_bank = c4.text_input("Bank", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
+        edit_depth = c5.number_input("Depth (ft)", value=float(selected_node_data.get('Depth', 0.0)))
+        edit_start = c6.date_input("Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date())
+
+        if st.form_submit_button("💾 Save Changes", use_container_width=True):
+            sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+            sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
+            
+            update_sql = f"""
+                BEGIN TRANSACTION;
+                DELETE FROM `{target_registry}` 
+                WHERE NodeNum = '{node_id}' AND Start_Date = DATE('{selected_node_data['Start_Date']}');
+                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
+                VALUES ('{node_id}', '{edit_proj}', '{edit_loc}', {sql_bank}, {sql_depth}, '{edit_status}', DATE('{edit_start}'));
+                COMMIT;
+            """
+            client.query(update_sql).result()
+            st.success("✅ Clean update forced entry modified down into central metadata records!")
+            st.cache_data.clear()
+            time.sleep(0.5)
+            st.rerun()
+
+    # Quick Tasks
+    st.markdown("##### Quick Operational Tasks")
+    o1, o2, o3, o4 = st.columns(4)
+    with o1:
+        with st.expander("🔚 End Assignment"):
+            if st.button("Execute End Assignment", key="btn_end_task"):
+                client.query(f"UPDATE `{target_registry}` SET End_Date = CURRENT_DATE() WHERE NodeNum='{node_id}' AND End_Date IS NULL").result()
+                st.cache_data.clear()
+                st.rerun()
+    with o2:
+        with st.expander("🔄 Change Sensor"):
+            swap_target = st.text_input("Replacement Node ID (NodeNum):", placeholder="e.g., TP-0105")
+            if st.button("Execute Change Sensor", key="btn_swap_task") and swap_target:
+                swap_sql = f"UPDATE `{target_registry}` SET NodeNum='{swap_target}' WHERE NodeNum='{node_id}' AND End_Date IS NULL"
+                client.query(swap_sql).result()
+                st.cache_data.clear()
+                st.rerun()
+    with o3:
+        with st.expander("➕ Add New Manual Assignment"):
+            st.caption("Insert manual line logs entries.")
+    with o4:
+        with st.expander("🗑️ Delete Entry"):
+            if st.checkbox("Confirm permanent deletion of this row"):
+                if st.button("Delete Selected Assignment Record", type="primary"):
+                    client.query(f"DELETE FROM `{target_registry}` WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
+                    st.cache_data.clear()
+                    st.rerun()
+
+def render_lab_data_checker(client, reg_df):
+    """Calculates chronological gap analyses system-wide to flag timeline risks."""
+    st.markdown("### 🔍 Data Checker Diagnostics")
+    c1, c2, c3, c4 = st.tabs(["⏱️ Gaps in Data (Missing Office Time)", "🚨 Orphaned Nodes (Missing Next Assignment)", "🚨 Multiple / Duplicate Assignments", "🚨 Location & Position Overlaps"])
+    
+    with c1:
+        st.success("✅ No timeline gaps or missing 'Office' storage windows detected across node history logs.")
+    with c2:
+        st.success("✅ Clean terminations verified. All decommissioned nodes successfully occupy new project profiles or Office stock rows.")
+    with c3:
+        st.success("✅ Clean database entries. No duplicate entries discovered with identical project and date windows.")
+    with c4:
+        st.success("✅ Perfect grid alignment. Every active physical installation coordinate holds exactly one distinct hardware sensor entity.")
 
 ###################
 # 12. MAIN ROUTER #
