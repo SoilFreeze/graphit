@@ -3029,6 +3029,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
     start_time_iso = datetime.combine(start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
     end_time_iso = datetime.combine(end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
+    # Seed the stats tracker with ALL selected nodes so they show up even with 0 points
     if selected_nodes:
         for node in selected_nodes:
             node_stats[node] = 0
@@ -3042,6 +3043,8 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 clean_db_id = str(row.RawID).split('.')[0].strip()
                 friendly_name = str(row.NodeNum).strip()
                 hardware_map[clean_db_id] = friendly_name
+                
+                # Seed dynamically if a global recovery run is occurring without precise node filters
                 if not selected_nodes:
                     node_stats[friendly_name] = 0
         except Exception as e:
@@ -3122,10 +3125,12 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 st.error(f"Stream submission pipeline failure: {bq_err}")
                 status.update(state="error")
 
+    # --- RENDER STATISTICAL BREAKDOWN GRID (SHOWS EVERY TARGETED SENSOR) ---
     if node_stats:
         st.write("### 📊 Data Recovery Tally Distribution:")
         summary_records = []
         for node, count in node_stats.items():
+            # Filter the report overview if the operator specifically limited the backfill scope
             if selected_nodes and node not in selected_nodes:
                 continue
             summary_records.append({
@@ -3134,6 +3139,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             })
         summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        
         if total_recovered_appends > 0:
             st.balloons()
 
