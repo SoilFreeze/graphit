@@ -3958,8 +3958,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
 
                     if st.form_submit_button("💾 Overwrite Project Registry Information"):
-                        freeze_val = f"DATE('{u_date_freeze}')" if u_date_freeze else "NULL"
-                        comp_val = f"DATE('{u_date_comp}')" if u_date_comp else "NULL"
+                        # HARDENED CONVERTER BLOCK: Prevents generating invalid "DATE('None')" syntax
+                        freeze_val = f"DATE('{u_date_freeze}')" if (u_date_freeze and str(u_date_freeze) != 'None') else "NULL"
+                        comp_val = f"DATE('{u_date_comp}')" if (u_date_comp and str(u_date_comp) != 'None') else "NULL"
                         
                         update_q = f"""
                             UPDATE `{table_projects}` SET 
