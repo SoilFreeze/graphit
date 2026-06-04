@@ -834,7 +834,11 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Engineering-grade Vertical Temperature Profiles.
     - Empirical data only (no theoretical lines).
-    - Baseline: First Monday at 06:00 AM (Black Dashed Line).
+    - Recent Line: Most recent day's 6:00 AM snapshot (Bright Orange Solid Line).
+    - Fallback Engine: If a specific pipe lacks a 6 AM reading on the most recent day,
+      it scans that same day to find its closest available reading as a fallback substitute.
+    - Baseline: First Monday at 06:00 AM (Black Dashed Line) forced to sit on top layer.
+    - Outlier Filter: Explicitly excludes any rogue sensor pings reading above 50°F.
     - Freezing Line: Light Blue (Hex #ADD8E6).
     - Scale: Fixed -20 to 80.
     - Frame: Full 4-sided black box.
@@ -857,18 +861,22 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         st.warning("No data found for this project.")
         return
 
-    # 3. PRE-PROCESS DATA
+    # 3. PRE-PROCESS DATA & APPLY 50°F OUTLIER MASK FILTER
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+    
+    # HARD FILTER CRITERIA: Ignore any weird readings above 50°F before building charts
+    p_df = p_df[p_df['temperature'] <= 50.0]
+    
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
     if depth_df.empty:
-        st.info("No sensors with valid 'Depth' values found in the Node Registry.")
+        st.info("No sensors with valid 'Depth' values under 50°F found in the registry.")
         return
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     
-    # 4. GENERATE SNAPSHOTS
+    # 4. TIMELINE REFERENCE SYSTEM CONTROLS
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
     locations = sorted(depth_df['Location'].unique())
@@ -876,70 +884,100 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     for loc in locations:
         with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
+            
+            # Ensure timestamps are localized matching display preferences
+            if loc_data['timestamp'].dt.tz is None:
+                loc_data['timestamp'] = loc_data['timestamp'].dt.tz_localize('UTC')
+            loc_data['timestamp_local'] = loc_data['timestamp'].dt.tz_convert(display_tz)
+            
             fig = go.Figure()
 
-            # --- A. CALCULATE BASELINE (True First Week Data - No hardcoded offset shift) ---
-            baseline_ts = loc_data['timestamp'].min()
-            
-            # Create an exact 24-hour window around that first timestamp to grab the profile
+            # --- A. CALCULATE BASELINE RAW HOOKS ---
+            baseline_ts = loc_data['timestamp_local'].min()
             b_window = loc_data[
-                (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
-                (loc_data['timestamp'] <= baseline_ts + pd.Timedelta(hours=12))
+                (loc_data['timestamp_local'] >= baseline_ts - pd.Timedelta(hours=12)) & 
+                (loc_data['timestamp_local'] <= baseline_ts + pd.Timedelta(hours=12))
             ]
             
-            # Store the exact baseline date string so we can block it from the weekly loop
             baseline_date_str = ""
-            
+            snap_base = pd.DataFrame()
             if not b_window.empty:
-                # Standardize to a date string (e.g., '2026-04-20')
                 baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
-                
-                snap = (
-                    b_window.assign(diff=(b_window['timestamp'] - baseline_ts).abs())
+                snap_base = (
+                    b_window.assign(diff=(b_window['timestamp_local'] - baseline_ts).abs())
                     .sort_values(['NodeNum', 'diff'])
                     .drop_duplicates('NodeNum')
                     .sort_values('Depth_Num')
                 )
-                
-                b_temps = snap['temperature']
-                if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
-                
-                # Plot the clean, single Black Dashed Baseline
-                fig.add_trace(go.Scatter(
-                    x=b_temps, y=snap['Depth_Num'], 
-                    mode='lines', 
-                    name=f'Baseline ({baseline_date_str})',
-                    line=dict(color='black', width=2.5, dash='dash'),
-                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
-                ))
+
+            # --- B. HARDENED MOST RECENT LINE SEARCH ENGINE (WITH PIPE-LEVEL FALLBACKS) ---
+            loc_data['date_str'] = loc_data['timestamp_local'].dt.strftime('%Y-%m-%d')
+            loc_data['hour_int'] = loc_data['timestamp_local'].dt.hour
             
-            # --- B. PLOT WEEKLY SNAPSHOTS (Deduplicated) ---
+            recent_6am_date_str = ""
+            recent_profile_rows = []
+            
+            if not loc_data.empty:
+                sorted_all_dates = sorted(loc_data['date_str'].unique(), reverse=True)
+                
+                for candidate_date in sorted_all_dates:
+                    if candidate_date == baseline_date_str:
+                        continue
+                    
+                    day_pool = loc_data[loc_data['date_str'] == candidate_date]
+                    if day_pool.empty:
+                        continue
+                        
+                    recent_6am_date_str = candidate_date
+                    
+                    for node_id, node_group in day_pool.groupby('NodeNum'):
+                        exact_6am = node_group[node_group['hour_int'] == 6]
+                        if not exact_6am.empty:
+                            recent_profile_rows.append(exact_6am.sort_values('timestamp_local').iloc[-1])
+                        else:
+                            # Symmetrical dynamic fallback checking window
+                            node_group = node_group.assign(hour_dist=(node_group['hour_int'] - 6).abs())
+                            best_fallback_row = node_group.sort_values(by=['hour_dist', 'timestamp_local']).iloc[0]
+                            recent_profile_rows.append(best_fallback_row)
+                    break
+
+            snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
+
+            # --- C. PLOT WEEKLY HISTORICAL SNAPSHOTS (Mondays) ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
                 
-                # CRITICAL CRITERIA: If this week matches the baseline date, SKIP IT 
-                if current_loop_date == baseline_date_str:
+                if current_loop_date == baseline_date_str or current_loop_date == recent_6am_date_str:
                     continue
                     
                 window = loc_data[
-                    (loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                    (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))
+                    (loc_data['timestamp_local'] >= target_ts - pd.Timedelta(hours=12)) & 
+                    (loc_data['timestamp_local'] <= target_ts + pd.Timedelta(hours=12))
                 ]
                 
                 if not window.empty:
-                    snap = (
-                        window.assign(diff=(window['timestamp'] - target_ts).abs())
+                    snap_week = (
+                        window.assign(diff=(window['timestamp_local'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
                         .drop_duplicates('NodeNum')
                         .sort_values('Depth_Num')
                     )
                     
-                    temps = snap['temperature']
+                    # Hard fallback window processing check
+                    if snap_week.empty:
+                        snap_week = (
+                            window.assign(hour_dist=(window['timestamp_local'].dt.hour - 6).abs())
+                            .sort_values(by=['hour_dist', 'timestamp_local'])
+                            .drop_duplicates('NodeNum')
+                            .sort_values('Depth_Num')
+                        )
+                    
+                    temps = snap_week['temperature']
                     if unit_mode == "Celsius": temps = (temps - 32) * 5/9
                     
                     fig.add_trace(go.Scatter(
-                        x=temps, y=snap['Depth_Num'], 
+                        x=temps, y=snap_week['Depth_Num'], 
                         mode='lines+markers', 
                         name=current_loop_date,
                         line=dict(shape='spline', smoothing=1.1, width=1.5),
@@ -947,10 +985,40 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
-            # --- C. FREEZING REFERENCE LINE ---
+            # --- D. INJECT THE BRIGHT ORANGE HARDENED MOST RECENT PROFILE ---
+            if not snap_recent.empty:
+                recent_temps = snap_recent['temperature']
+                if unit_mode == "Celsius": recent_temps = (recent_temps - 32) * 5/9
+                
+                fig.add_trace(go.Scatter(
+                    x=recent_temps, y=snap_recent['Depth_Num'],
+                    mode='lines+markers',
+                    name=f'<b>Most Recent ({recent_6am_date_str} 6AM*)</b>',
+                    line=dict(color='#ff7f0e', width=3.5, shape='spline', smoothing=1.1),
+                    marker=dict(size=6, color='#ff7f0e'),
+                    hovertemplate="Most Recent: %{text}<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label + "<extra></extra>",
+                    text=snap_recent['timestamp_local'].dt.strftime('%b %d, %H:%M')
+                ))
+
+            # --- E. LAYER OVERRIDE: INJECT BLACK DASHED BASELINE AT THE VERY END ---
+            # By plotting this trace last, web rendering engines place it on top of everything else
+            if not snap_base.empty:
+                b_temps = snap_base['temperature']
+                if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
+                
+                fig.add_trace(go.Scatter(
+                    x=b_temps, y=snap_base['Depth_Num'], 
+                    mode='lines+markers', 
+                    name=f'<b>Baseline ({baseline_date_str})</b>',
+                    line=dict(color='black', width=3, dash='dash'),
+                    marker=dict(size=5, color='black'),
+                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                ))
+
+            # --- F. FREEZING REFERENCE LINE ---
             fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
-            # --- D. STANDARDIZED SCALING & BOX FRAME ---
+            # --- G. STANDARDIZED SCALING & BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
@@ -1062,6 +1130,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         # 4. FORMATTING HELPERS
         def get_status_icon(hrs):
+            if hrs == float('inf') or hrs >= 999.0: return "❌ Never"
             if hrs <= 1.0: return f"🟢 {hrs:.1f}h"
             if hrs <= 6.0: return f"🟠 {hrs:.1f}h"
             return f"🔴 {hrs:.1f}h"
@@ -1076,22 +1145,33 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             d = cur - prev
             return f"🔺 +{d:.1f}" if d > 0.1 else f"🔹 {d:.1f}" if d < -0.1 else "➡️ 0.0"
 
-        # 5. LOCATION SUMMARY (High-Resolution Spread with Conditional Color Styler)
+        # 5. LOCATION PERFORMANCE SUMMARY
         st.subheader("📍 Location Performance Summary")
         
-        summary_df = df.groupby('Location').apply(lambda x: pd.Series({
-            'Total Nodes': int(len(x)),
-            'Seen 1h': int(x['seen_1h_f'].sum()),
-            'Seen 6h': int(x['seen_6h_f'].sum()),
-            'Seen 24h': int(x['seen_24h_f'].sum()),
-            '24h Coverage': f"{x['coverage_24h'].mean():.1f}%",
-            '7d Coverage': f"{x['coverage_7d'].mean():.1f}%",
-            'Avg Temp': fmt_t(x['current_temp'].mean()),
-            'Low 24h': fmt_t(x['low_24h'].min()),
-            'High 24h': fmt_t(x['high_24h'].max()),
-            'Best Seen': get_status_icon(x['last_seen_hrs'].min()),
-            'Worst Seen': get_status_icon(x['last_seen_hrs'].max())
-        })).reset_index()
+        # Helper processing block to extract true numerical metrics before parsing text icons
+        summary_rows = []
+        for loc, loc_group in df.groupby('Location'):
+            # Safely grab raw numerical min/max values to calculate true delinquent sensor
+            min_hours_lag = loc_group['last_seen_hrs'].min()
+            max_hours_lag = loc_group['last_seen_hrs'].max() # Represents the actual worst sensor check-in lag
+            
+            summary_rows.append({
+                'Location': loc,
+                'Total Nodes': int(len(loc_group)),
+                'Seen 1h': int(loc_group['seen_1h_f'].sum()),
+                'Seen 6h': int(loc_group['seen_6h_f'].sum()),
+                'Seen 24h': int(loc_group['seen_24h_f'].sum()),
+                '24h Coverage': f"{loc_group['coverage_24h'].mean():.1f}%",
+                '7d Coverage': f"{loc_group['coverage_7d'].mean():.1f}%",
+                'Avg Temp': fmt_t(loc_group['current_temp'].mean()),
+                'Low 24h': fmt_t(loc_group['low_24h'].min()),
+                'High 24h': fmt_t(loc_group['high_24h'].max()),
+                # FIXED: Formats based on true numerical limits so icons don't break sorting logic
+                'Best Seen': get_status_icon(min_hours_lag),
+                'Worst Seen': get_status_icon(max_hours_lag)
+            })
+            
+        summary_df = pd.DataFrame(summary_rows)
 
         # Custom Cell Color Matrix Engine for Hardware Availability Toggles
         def style_missing_counters(val_df):
@@ -1145,7 +1225,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
     except Exception as e:
-        st.error(f"Sensor Status Error: {e}")        
+        st.error(f"Sensor Status Error: {e}")
 
 # ===============================================================
 # Function: Status Dashboard (Setup Node Tool) - Left Unchanged
