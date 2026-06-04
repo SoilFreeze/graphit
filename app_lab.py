@@ -3658,14 +3658,22 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             
             st.write("#### 📂 Currently Active Library Curves")
             try:
-                # Upgraded regex-based query to gracefully split CurveID strings without failing on formatting irregularities
+                # 1. Fetch the overall table's last modification time directly from dataset metadata
+                meta_q = f"""
+                    SELECT FORMAT_TIMESTAMP('%m/%d/%Y', last_modified_time, 'America/Los_Angeles') as last_mod
+                    FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
+                    WHERE table_id = 'reference_curves'
+                """
+                meta_df = client.query(meta_q).to_dataframe()
+                table_last_update = meta_df['last_mod'].iloc[0] if not meta_df.empty else "N/A"
+
+                # 2. Extract active curve entries grouped cleanly by ID attributes
                 inv_curves_q = f"""
                     SELECT 
                         REGEXP_EXTRACT(CurveID, r'^(\\d+)') as `Project`,
                         REGEXP_EXTRACT(CurveID, r'-(.+)$') as `File Name`,
                         CurveID as `Raw_ID`,
-                        COUNT(*) as `Entries`,
-                        MAX(upload_date) as `Uploaded`
+                        COUNT(*) as `Entries`
                     FROM `{target_curves_path}` 
                     WHERE CurveID IS NOT NULL
                     GROUP BY CurveID
@@ -3674,16 +3682,16 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 active_curves_df = client.query(inv_curves_q).to_dataframe()
                 
                 if not active_curves_df.empty:
-                    # Clean up any missing splits or defaults in pandas before rendering
+                    # Clean up missing or mismatched regex fields in pandas
                     active_curves_df['Project'] = active_curves_df['Project'].fillna("System-Wide")
                     active_curves_df['File Name'] = active_curves_df['File Name'].fillna(active_curves_df['Raw_ID'])
                     
-                    # Rename columns to match exact requested fields
+                    # Package into the exact four data columns requested
                     final_render_df = pd.DataFrame({
                         "Project": active_curves_df['Project'],
                         "File Name": active_curves_df['File Name'],
                         "Number of Entries": active_curves_df['Entries'],
-                        "Date Uploaded": active_curves_df['Uploaded']
+                        "Date Uploaded": table_last_update  # Uses the metadata system update timestamp
                     })
 
                     st.dataframe(
@@ -3698,7 +3706,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 else:
                     st.info("ℹ️ The reference curve datastore is currently unpopulated.")
             except Exception as schema_err:
-                # Diagnostic fallback log to let you see exactly what BigQuery rejected if it happens again
                 st.error(f"❌ Reference catalog compilation error: {schema_err}")
 
             st.divider()
@@ -3717,7 +3724,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             if u_files:
                 if st.button("💾 Commit Curve Files to BigQuery", key="bulk_uploads_curves_commit_btn", use_container_width=True):
                     progress_bar = st.progress(0)
-                    today_str = datetime.now().strftime('%Y-%m-%d')
                     
                     for idx, f in enumerate(u_files):
                         try:
@@ -3733,12 +3739,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
                             ref_df = ref_df.dropna(subset=['Day', 'Temp'])
                             ref_df['CurveID'] = curve_id
-                            ref_df['upload_date'] = today_str
 
                             if not ref_df.empty:
                                 client.query(f"DELETE FROM `{target_curves_path}` WHERE CurveID='{curve_id}'").result()
-                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                                client.load_table_from_dataframe(ref_df, target_curves_path, job_config=job_config).result()
+                                
+                                # Use specific schema configuration mapping matching your three native columns
+                                job_config = bigquery.LoadJobConfig(
+                                    schema=[
+                                        bigquery.SchemaField("CurveID", "STRING"),
+                                        bigquery.SchemaField("Day", "INTEGER"),
+                                        bigquery.SchemaField("Temp", "FLOAT"),
+                                    ],
+                                    write_disposition="WRITE_APPEND"
+                                )
+                                client.load_table_from_dataframe(ref_df[['CurveID', 'Day', 'Temp']], target_curves_path, job_config=job_config).result()
                                 st.toast(f"Import Complete: {curve_id}", icon="✅")
                             else:
                                 st.error(f"❌ {f.name} contained no valid numeric data vectors after row 2.")
@@ -3752,7 +3766,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.cache_data.clear()
                     time.sleep(1.0)
                     st.rerun()
-
 
 ###################
 # 12. MAIN ROUTER #
