@@ -296,15 +296,6 @@ active_refs = st.session_state.get("active_refs", [])
 # - Graph - #
 #############
 
-def get_unit_labels():
-    """
-    Helper utility to safely extract current global scale configurations 
-    and maintain synchronization across multi-app view states.
-    """
-    unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
-    unit_label = "°C" if unit_mode == "Celsius" else "°F"
-    return unit_mode, unit_label
-
 def natural_sort_key(s):
     """
     Splits strings into chunks of text and numbers to allow natural sorting.
@@ -2909,148 +2900,278 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
         return False
 
 # =============================================================================
-# WORKER UTILITIES: NODE LOGISTICS ENGINE (FROM TOOLS)
+# PAGE MODULE: 🛠️ NODE MANAGER
 # =============================================================================
 
-def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
+def render_node_selector(reg_df, proj_list):
     """
-    Renders the editing form panels and handles transactional database inserts 
-    to append updated node tracking metrics records.
+    Renders an active inventory node selection engine with integrated 
+    Last Seen reporting, project uptime efficiencies, and a fleet hardware status matrix.
     """
-    st.markdown(f"### ⚙️ Operational Settings Editor: **{selected_node_data.get('NodeNum')}**")
+    st.subheader("🎯 Active Node Registry")
     
-    # Isolate current parameters from the active record dictionary
-    current_project = str(selected_node_data.get('Project', 'Office'))
-    current_location = str(selected_node_data.get('Location', ''))
-    current_bank = str(selected_node_data.get('Bank', 'A'))
-    current_depth = float(selected_node_data.get('Depth', 0.0))
-    current_status = str(selected_node_data.get('SensorStatus', 'On Project'))
+    hide_archived = st.checkbox("Hide Archived Records", value=True, key="ns_hide_archived_toggle")
     
-    # Process date fields safely
-    raw_date = selected_node_data.get('Start_Date')
-    if isinstance(raw_date, (datetime, date)):
-        current_start_date = raw_date
+    df = reg_df.copy()
+    if hide_archived and 'SensorStatus' in df.columns:
+        df = df[
+            (df['SensorStatus'].str.lower() != "archived") & 
+            (df['Location'].str.contains("Archive", case=False, na=False) == False)
+        ]
+
+    # Layout Filter Row
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        f_proj = st.selectbox("Filter by Project Space", ["All", "Unassigned"] + proj_list, key="ns_proj_f")
+    with c2:
+        if f_proj == "All":
+            loc_opts = df['Location'].dropna().unique().tolist()
+        elif f_proj == "Unassigned":
+            loc_opts = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office") | (df['Location'] == "Office")]['Location'].dropna().unique().tolist()
+        else:
+            loc_opts = df[df['Project'] == f_proj]['Location'].dropna().unique().tolist()
+            
+        f_loc = st.selectbox("Filter by Physical Location", ["All"] + sorted(loc_opts), key="ns_loc_f")
+    with c3:
+        search_term = st.text_input("Global Search (Node ID)", "", key="ns_search_f")
+
+    # Execute Cascading Filters
+    if f_proj == "Unassigned":
+        df = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office")]
+    elif f_proj != "All":
+        df = df[df['Project'] == f_proj]
+        
+    if f_loc != "All":
+        df = df[df['Location'] == f_loc]
+        
+    if search_term:
+        df = df[df['NodeNum'].str.contains(search_term, case=False, na=False)]
+
+    if df.empty:
+        st.info("No matching nodes located under current filter parameters.")
+        return None
+
+    # Chronological sorting layer
+    if 'hours_hidden' in df.columns:
+        df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+        df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
     else:
-        try:
-            current_start_date = pd.to_datetime(raw_date).date()
-        except Exception:
-            current_start_date = datetime.now().date()
+        df['hours_hidden'] = float('inf')
 
-    # Layout adjustment forms matching your tools design
-    edit_c1, edit_c2, edit_c3 = st.columns(3)
+    # =============================================================================
+    # ASSET FLEET SUMMARY METRICS BREAKDOWN
+    # =============================================================================
+    st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
     
-    with edit_c1:
-        # Pull directly from the data registry series to remain completely independent
-        raw_projects = reg_df['Project'].dropna().unique().tolist() if 'reg_df' in locals() else []
-        u_projects = sorted(list(set(["Office"] + raw_projects)))
+    def classify_hardware_family(node):
+        node_str = str(node).lower()
+        if "-ch" in node_str:
+            return "Lord"
+        elif node_str.startswith("sp"):
+            return "SP"
+        elif node_str.startswith("tp"):
+            return "TP"
+        else:
+            return "None of the Above"
+
+    summary_df = reg_df.copy()
+    summary_df['Hardware Family'] = summary_df['NodeNum'].apply(classify_hardware_family)
+    
+    # Isolate parent units to avoid splitting multi-channel boxes into inflated categories
+    summary_df['Parent ID'] = summary_df['NodeNum'].apply(
+        lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x
+    )
+    
+    if 'End_Date' in summary_df.columns:
+        summary_df['is_active'] = summary_df['End_Date'].isna()
+    else:
+        summary_df['is_active'] = True
         
-        new_node_project = st.selectbox(
-            "Target Allocation Project:", 
-            options=u_projects, 
-            index=u_projects.index(current_project) if current_project in u_projects else 0
-        )
-        new_node_location = st.text_input("Target Allocation Location / Borehole:", value=current_location)
-
-    with edit_c2:
-        bank_options = ["A", "B", "C", "D", "E", "X"]
-        new_node_bank = st.selectbox(
-            "Bank Designation String:", 
-            options=bank_options, 
-            index=bank_options.index(current_bank) if current_bank in bank_options else 0
-        )
-        new_node_depth = st.number_input(
-            "Sensor Vertical Placement Depth (Feet):", 
-            value=float(current_depth), 
-            step=1.0, 
-            format="%.2f"
-        )
-
-    with edit_c3:
-        status_options = ["On Project", "In Office/Shop", "Decommissioned", "Spare/Storage"]
-        new_node_status = st.selectbox(
-            "Operational Tracking Status:", 
-            options=status_options, 
-            index=status_options.index(current_status) if current_status in status_options else 0
-        )
-        new_node_start_date = st.date_input("Deployment Modification Effective Date:", value=current_start_date)
-
-    st.markdown("#### 🚀 Step 3: Authorize Change Record")
-    with st.expander("⚠️ View Registry Transaction Script Actions"):
-        st.write(
-            f"Executing this deployment write adds a tracking line into `{target_registry}` mapping "
-            f"**{selected_node_data.get('NodeNum')}** to Project **{new_node_project}** at depth **{new_node_depth} ft** "
-            f"effective **{new_node_start_date.strftime('%m/%d/%Y')}**."
-        )
+    sort_keys = ['Parent ID', 'is_active']
+    sort_asc = [True, False]
+    
+    if 'Start_Date' in summary_df.columns:
+        sort_keys.append('Start_Date')
+        sort_asc.append(False)
         
-        if st.checkbox("I verify that these field allocation parameters match our physical sensor logs.", key="confirm_node_logistics_action_write"):
-            if st.button(f"💾 Append Deployment Update for {selected_node_data.get('NodeNum')}", type="primary", use_container_width=True):
+    summary_df = summary_df.sort_values(by=sort_keys, ascending=sort_asc)
+    deduped_units = summary_df.drop_duplicates(subset=['Parent ID']).copy()
+    
+    try:
+        fleet_pivot = deduped_units.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
+        desired_order = ["TP", "SP", "Lord", "None of the Above"]
+        fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
+        fleet_pivot['Total Units'] = fleet_pivot.sum(axis=1)
+        
+        st.dataframe(fleet_pivot, use_container_width=True)
+    except Exception as pivot_err:
+        st.info("💡 Inventory matrix is populating. Assign statuses to your hardware to generate totals.")
+        
+    st.markdown("---")
+
+    # =============================================================================
+    # INTERACTIVE DATA EDITOR UI (WITH INDEPENDENT LOCAL STYLER)
+    # =============================================================================
+    st.markdown("### 📋 Current Asset Allocation Matrix")
+
+    if "last_selected_node" not in st.session_state:
+        st.session_state["last_selected_node"] = None
+    if "active_selected_node_record" not in st.session_state:
+        st.session_state["active_selected_node_record"] = None
+
+    ed_key = "node_registry_editor"
+    if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
+        changed_rows = st.session_state[ed_key]["edited_rows"]
+        newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
+        
+        if newly_checked and not df.empty:
+            latest_idx = newly_checked[-1]
+            if latest_idx != st.session_state["last_selected_node"]:
+                st.session_state["last_selected_node"] = latest_idx
                 
-                # Construct the payload dictionary using strict uppercase values for consistency
-                new_logistics_payload = [{
-                    "NodeNum": str(selected_node_data.get('NodeNum')).strip(),
-                    "Project": str(new_node_project).strip(),
-                    "Location": str(new_node_location).strip(),
-                    "Bank": str(new_node_bank).strip().upper(),
-                    "Depth": float(new_node_depth),
-                    "Start_Date": str(new_node_start_date.strftime('%Y-%m-%d')),
-                    "SensorStatus": str(new_node_status).strip()
-                }]
+                rec_dict = df.loc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
+                rec_dict["Select"] = True
+                st.session_state["active_selected_node_record"] = rec_dict
+                st.session_state[ed_key]["edited_rows"] = {}
+                st.rerun()
+        
+        elif any(changes.get("Select") == False for idx, changes in changed_rows.items()):
+            st.session_state["last_selected_node"] = None
+            st.session_state["active_selected_node_record"] = None
+            st.session_state[ed_key]["edited_rows"] = {}
+            st.rerun()
+
+    df.insert(0, "Select", False)
+    if st.session_state["last_selected_node"] is not None and st.session_state["last_selected_node"] < len(df):
+        df.loc[st.session_state["last_selected_node"], "Select"] = True
+
+    def node_selector_styler(data):
+        style_canvas = pd.DataFrame('', index=data.index, columns=data.columns)
+        for i in data.index:
+            try:
+                val = data.loc[i, 'hours_hidden']
+                hours_val = None if (val == float('inf') or pd.isnull(val)) else float(val)
+                color_style = assign_row_color(hours_val)
+            except Exception:
+                color_style = "background-color: transparent;"
+            
+            for col in data.columns:
+                if col != "Select":
+                    style_canvas.loc[i, col] = color_style
+        return style_canvas
+
+    # Generate custom strings for combined depth/bank labels and unit-aware temperatures
+    unit_mode, unit_label = get_unit_labels()
+    
+    def get_pos_label(row):
+        if pd.notnull(row.get('Depth')) and row.get('Depth') != 0:
+            return f"{row['Depth']}ft"
+        return f"Bank {row['Bank']}" if pd.notnull(row.get('Bank')) and str(row.get('Bank')).strip() != "" else "-"
+
+    df['Position'] = df.apply(get_pos_label, axis=1)
+    df['Current Temp'] = df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label))
+
+    edited_df = st.data_editor(
+        df.style.apply(node_selector_styler, axis=None) if not df.empty else df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select", default=False, required=True),
+            "Project": "Project",
+            "Location": "Location",
+            "NodeNum": "Node ID",
+            "Position": "Depth/Bank",
+            "Last Seen": st.column_config.TextColumn("Last Seen", help="Hours since last server telemetry ping"),
+            "Current Temp": "Current Temp",
+        },
+        disabled=[col for col in df.columns if col != "Select"],
+        column_order=["Select", "Project", "Location", "NodeNum", "Position", "Last Seen", "Current Temp"], 
+        key=ed_key
+    )
+
+    if st.session_state["active_selected_node_record"] is not None:
+        selected_returned_row = st.session_state["active_selected_node_record"].copy()
+        if "Select" in selected_returned_row:
+            del selected_returned_row["Select"]
+    else:
+        selected_returned_row = None
+            
+    st.markdown("---")
+    with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
+        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact snapshot copy of your `node_registry_dummy` table.")
+        
+        confirm_token = st.text_input(
+            "Type out 'OVERWRITE' to authorize replacing your production environment data models:", 
+            value="", 
+            key="force_production_overwrite_token_input"
+        )
+        
+        if st.button("💥 Wipe Production & Clone Playground Table", type="primary", use_container_width=True):
+            if confirm_token.strip() != "OVERWRITE":
+                st.error("Authorization token verification failed. Action aborted.")
+            else:
+                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+                dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
+                
+                job_config = bigquery.QueryJobConfig(
+                    write_disposition="WRITE_TRUNCATE",
+                    destination=prod_table
+                )
+                
+                sql = f"SELECT * FROM `{dummy_table}`"
                 
                 try:
-                    with st.spinner("Appending tracking metrics to node registry matrix..."):
-                        job_config = bigquery.LoadJobConfig(
-                            schema=[
-                                bigquery.SchemaField("NodeNum", "STRING"),
-                                bigquery.SchemaField("Project", "STRING"),
-                                bigquery.SchemaField("Location", "STRING"),
-                                bigquery.SchemaField("Bank", "STRING"),
-                                bigquery.SchemaField("Depth", "FLOAT"),
-                                bigquery.SchemaField("Start_Date", "DATE"),
-                                bigquery.SchemaField("SensorStatus", "STRING"),
-                            ],
-                            write_disposition="WRITE_APPEND"
-                        )
+                    with st.spinner("Executing complete environment teardown and reconstruction workflows..."):
+                        query_job = client.query(sql, job_config=job_config)
+                        query_job.result()
                         
-                        log_df = pd.DataFrame(new_logistics_payload)
-                        log_df['Start_Date'] = pd.to_datetime(log_df['Start_Date']).dt.date
-                        
-                        client.load_table_from_dataframe(log_df, target_registry, job_config=job_config).result()
-                        
-                    st.success(f"🎉 Success! Asset registry mapping updated for node {selected_node_data.get('NodeNum')}.")
+                    st.success("🔥 Production registry completely reset and replaced with dummy playground snapshot!")
                     st.cache_data.clear()
-                    time.sleep(1.0)
+                    time.sleep(1.5)
                     st.rerun()
-                except Exception as log_err:
-                    st.error(f"❌ Failed to commit node asset updates to registry table: {log_err}")
-
-
-def render_data_checker(client, full_reg_df):
-    """
-    Renders a quality assurance diagnostics matrix highlighting configuration or orphan risks.
-    """
-    st.divider()
-    st.markdown("### 🔍 System Registry Diagnostics Audit")
+                except Exception as e:
+                    st.error(f"Failed to copy staging parameters: {e}")
+                    st.code(sql, language="sql")
+                    
+    return selected_returned_row
+# =============================================================================
+# 1. HISTORICAL TELEMETRY GRAPH COMPONENT
+# =============================================================================
+def render_node_historical_graph(client, node_id):
+    """Fetches and displays the complete historical thermal chart for the chosen node context."""
+    st.markdown(f"### 📈 Historic Data: **{node_id}**")
     
-    with st.expander("📊 View Discovered Inventory Conflict Logs", expanded=False):
-        # 1. Look for orphan entries (nodes present in registry but missing inside hardware inventory)
-        try:
-            orphan_q = f"""
-                SELECT DISTINCT r.NodeNum, r.Project, r.Location 
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
-                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` i 
-                  ON TRIM(r.NodeNum) = TRIM(i.NodeNum)
-                WHERE i.NodeNum IS NULL AND r.NodeNum IS NOT NULL
-                ORDER BY r.NodeNum ASC
-            """
-            orphan_df = client.query(orphan_q).to_dataframe()
-            
-            if not orphan_df.empty:
-                st.warning("⚠️ **Orphan Sensor Alert:** The following node tags exist in deployment schedules but lack hardware index keys:")
-                st.dataframe(orphan_df, use_container_width=True, hide_index=True)
-            else:
-                st.success("✅ All registered node mappings align cleanly with the Hardware Inventory catalog.")
-        except Exception as e:
-            st.caption(f"Integrity check skipped or loading: {e}")
+    hist_q = f"""
+        SELECT timestamp, temperature 
+        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
+        WHERE NodeNum = '{node_id}' 
+        ORDER BY timestamp ASC
+    """
+    try:
+        with st.spinner("Retrieving complete historical telemetric data logs..."):
+            tel_df = client.query(hist_q).to_dataframe()
+        
+        if not tel_df.empty:
+            fig = go.Figure(go.Scatter(
+                x=tel_df['timestamp'], 
+                y=tel_df['temperature'], 
+                mode='lines', 
+                line=dict(color='#00d4ff', width=2),
+                name="Thermal Curve"
+            ))
+            fig.update_layout(
+                height=250, 
+                template="plotly_dark", 
+                margin=dict(l=20, r=20, t=10, b=20),
+                xaxis_title="Timeline Logs",
+                yaxis_title="Temperature"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption("ℹ️ No historical telemetric data markers discovered for this hardware footprint.")
+    except Exception as e:
+        st.error(f"Failed generating historical context graph: {e}")
+
 
 
 # =============================================================================
@@ -3446,16 +3567,21 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
         st.divider()
         
+        # 1. PARSE CLEAN ACTIVE PROJECT LIST FOR IN-FORM DROPDOWNS
         if not proj_reg_df.empty:
             proj_list_clean = sorted([str(p).strip() for p in proj_reg_df['Project'].unique() if p])
         else:
             proj_list_clean = ["Office"]
 
+        # 2. RENDER INTERACTIVE SELECTION GRID MATRIX
+        # Captures when a user clicks a checkbox row inside the data grid
         selected_node_data = render_node_selector(full_reg_df, proj_list_clean)
         
+        # 3. IF A SENSOR ROW IS CHECKED, INJECT THE OPERATIONS EDITOR
         if selected_node_data is not None:
             st.divider()
             target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+            
             try:
                 render_node_action_manager(
                     client=client, 
@@ -3470,8 +3596,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.divider()
             st.info("💡 **Tip:** Use the checkbox in the active table above to choose a node context to modify.")
             
+        # 4. RUN COMPREHENSIVE CONFIGURATION DIAGNOSTICS MATRIX AT THE FOOTER
         render_data_checker(client, full_reg_df)
 
+
+    
     # =========================================================================
     # NEW INSERTION: SUB-TAB 4: DATA RECOVERY (SensorPush Cloud API Bridge)
     # =========================================================================
@@ -3502,7 +3631,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         if st.button("🚀 Run Cloud API Recovery Backfill Service", type="primary", use_container_width=True, key="lab_recovery_trigger_btn"):
             handle_recovery_trigger(selected_recovery_nodes, start_date, end_date)
 
-
+    
+    
     # --- SUB-TAB 5: PROJECT MASTER ---
     with tab_proj_master:
         st.subheader("⚙️ Project Lifecycle Management")
