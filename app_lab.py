@@ -3473,7 +3473,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         )
         st.divider()
 
-        # 1. DEFINE PARAMETER CONTROLS
+        # 1. INTEGRATED HIERARCHICAL SEARCH FILTERS
+        # Leverages your helper function to seamlessly cascade Project -> Location -> NodeNum
+        selected_recovery_nodes = render_recovery_filters(full_reg_df)
+
+        st.divider()
+
+        # 2. DEFINE TIMELINE CONTROLS
         st.subheader("📅 Define Recovery Timeline Parameters")
         rec_c1, rec_c2 = st.columns(2)
         with rec_c1:
@@ -3481,22 +3487,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         with rec_c2:
             rec_end_date = st.date_input("Extraction Window End Date", value=datetime.now().date(), key="dt_rec_end")
 
-        st.markdown("#### 🛰️ Target Fleet Coordination Scope")
-        # Gather all registered elements to build the multi-choice selector canvas
-        known_active_nodes = sorted(full_reg_df['NodeNum'].dropna().unique().tolist())
-        selected_recovery_nodes = st.multiselect(
-            "Specify Target Nodes to Recover (Leave blank to backfill all known hardware assets):",
-            options=known_active_nodes,
-            key="recovery_nodes_multiselect"
-        )
-
         st.divider()
 
-        # 2. SELECTION METRIC WARNING BANNER
-        scope_text = f"{len(selected_recovery_nodes)} selected nodes" if selected_recovery_nodes else "ALL registered fleet nodes"
+        # 3. SELECTION METRIC WARNING BANNER
+        scope_text = f"{len(selected_recovery_nodes)} selected nodes" if selected_recovery_nodes else "ALL nodes matching current dropdown scope"
         st.warning(f"⚠️ **Action Required:** Initiating backfill protocol for {scope_text} from **{rec_start_date}** through **{rec_end_date}**.")
 
-        # 3. TRIGGER EXECUTION PIPELINE BUTTON
+        # 4. TRIGGER EXECUTION PIPELINE BUTTON
         if st.button("🚀 Execute Cloud Backfill Ingestion Pipeline Run", use_container_width=True, key="btn_trigger_recovery_run"):
             
             # --- START HARDENED WORKER LOGIC ---
@@ -3520,8 +3517,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             end_time_iso = datetime.combine(rec_end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
             # Seed data status tracker parameters
-            if selected_recovery_nodes:
-                for node in selected_recovery_nodes:
+            # FIXED: If no multiselect nodes are explicitly clicked, fall back to the cascading dropdown selection scope
+            final_target_nodes = selected_recovery_nodes if selected_recovery_nodes else sorted(
+                (full_reg_df if 'rec_proj_sel_isolated' not in st.session_state or st.session_state['rec_proj_sel_isolated'] == "All" 
+                 else full_reg_df[full_reg_df['Project'] == st.session_state['rec_proj_sel_isolated']])['NodeNum'].dropna().unique().tolist()
+            )
+
+            if final_target_nodes:
+                for node in final_target_nodes:
                     node_stats[node] = 0
 
             with st.status("Executing Cloud Backfill Ingestion Pipeline Run...", expanded=True) as status_box:
@@ -3532,7 +3535,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         clean_db_id = str(row.RawID).split('.')[0].strip()
                         friendly_name = str(row.NodeNum).strip()
                         hardware_map[clean_db_id] = friendly_name
-                        if not selected_recovery_nodes:
+                        if not final_target_nodes:
                             node_stats[friendly_name] = 0
                 except Exception as e:
                     st.error(f"Failed to query inventory map tables: {e}")
@@ -3580,7 +3583,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 if friendly_name not in node_stats:
                                     node_stats[friendly_name] = 0
                                 
-                            if selected_recovery_nodes and friendly_name not in selected_recovery_nodes:
+                            if final_target_nodes and friendly_name not in final_target_nodes:
                                 continue
                                 
                             current_device_rssi = device_rssi_map.get(str(s_id).strip())
@@ -3623,13 +3626,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.error(f"Batch loading ingestion pipeline failure: {bq_err}")
                         status_box.update(state="error")
 
-            # --- 4. RENDER STATISTICAL BREAKDOWN SUMMARY LEDGER ---
+            # --- 5. RENDER STATISTICAL BREAKDOWN SUMMARY LEDGER ---
             if node_stats:
                 st.write("### 📊 Data Recovery Tally Distribution:")
                 summary_records = []
                 grand_total_tally = 0
                 
-                nodes_to_report = selected_recovery_nodes if selected_recovery_nodes else sorted(list(node_stats.keys()))
+                nodes_to_report = final_target_nodes if final_target_nodes else sorted(list(node_stats.keys()))
                 
                 for node in nodes_to_report:
                     if node not in node_stats:
