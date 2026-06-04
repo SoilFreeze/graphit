@@ -4358,7 +4358,7 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
     import time
     from datetime import datetime
     
-    node_id = selected_node_data['NodeNum']
+    node_id = str(selected_node_data['NodeNum']).strip()
     origin_start_str = str(selected_node_data.get('Start_Date'))
     end_label_text = str(selected_node_data.get('End_Date')) if pd.notnull(selected_node_data.get('End_Date')) else "Current Active Window"
     
@@ -4414,14 +4414,20 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
 
         if st.form_submit_button("💾 Overwrite Targeted Assignment Attributes Configuration Row Line", use_container_width=True):
             # Parse which parameter string gets handled
-            final_loc_str = custom_loc_input.strip() if chosen_form_loc == "➕ Add Custom Location..." else chosen_form_loc
+            raw_loc_str = custom_loc_input.strip() if chosen_form_loc == "➕ Add Custom Location..." else chosen_form_loc
             
-            if chosen_form_loc == "➕ Add Custom Location..." and not custom_loc_input.strip():
+            if chosen_form_loc == "➕ Add Custom Location..." and not raw_loc_str:
                 st.error("❌ Action Rejected: Custom location field string value cannot be blank.")
                 return
 
+            # 🛡️ HARDENED STRING ESCAPING WORKSPACE: Protect single quotes from breaking SQL string borders
+            final_loc_str = raw_loc_str.replace("'", "''")
+            safe_proj = str(edit_proj).replace("'", "''")
+            safe_status = str(edit_status).replace("'", "''")
+            safe_bank = edit_bank.strip().replace("'", "''")
+
             sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
-            sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
+            sql_bank_val = f"'{safe_bank}'" if safe_bank != "" else "NULL"
             sql_end_val = f"DATE('{edit_end}')" if use_end_date_toggle else "NULL"
             
             update_sql = f"""
@@ -4429,14 +4435,18 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
                 DELETE FROM `{target_registry}` 
                 WHERE NodeNum = '{node_id}' AND Start_Date = DATE('{selected_node_data['Start_Date']}');
                 INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                VALUES ('{node_id}', '{edit_proj}', '{final_loc_str}', {sql_bank}, {sql_depth}, '{edit_status}', DATE('{edit_start}'), {sql_end_val});
+                VALUES ('{node_id}', '{safe_proj}', '{final_loc_str}', {sql_bank_val}, {sql_depth}, '{safe_status}', DATE('{edit_start}'), {sql_end_val});
                 COMMIT;
             """
-            client.query(update_sql).result()
-            st.success("✅ Entry updated within the registry layout maps successfully!")
-            st.cache_data.clear()
-            time.sleep(0.5)
-            st.rerun()
+            try:
+                client.query(update_sql).result()
+                st.success("✅ Entry updated within the registry layout maps successfully!")
+                st.cache_data.clear()
+                time.sleep(0.5)
+                st.rerun()
+            except Exception as bq_exec_err:
+                st.error(f"❌ Database Transaction Failed: {bq_exec_err}")
+                st.code(update_sql, language="sql")
 
     # 2. QUICK TASKS FOOTER MATRICES
     st.markdown("##### Quick Operational Tasks")
@@ -4461,7 +4471,8 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         with st.expander("🔄 Change Sensor ID"):
             swap_target = st.text_input("Replacement Node Tag ID string:", placeholder="e.g., TP-0105")
             if st.button("Execute Change Sensor Protocol", key="btn_swap_task_hist") and swap_target:
-                client.query(f"UPDATE `{target_registry}` SET NodeNum='{swap_target}' WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
+                safe_swap = str(swap_target).strip().replace("'", "''")
+                client.query(f"UPDATE `{target_registry}` SET NodeNum='{safe_swap}' WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
                 st.cache_data.clear()
                 st.rerun()
                 
