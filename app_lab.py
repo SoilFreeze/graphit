@@ -4175,12 +4175,14 @@ def render_lab_node_selector(reg_df, proj_list):
 
 
 def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
-    """Displays comparative line charts alongside structural updates metadata forms."""
+    """Displays comparative line charts, historical assignment timelines, and structural updates metadata forms."""
     import plotly.graph_objects as go
+    import time
+    
     node_id = selected_node_data['NodeNum']
     st.markdown(f"### 📈 Historic Data: **{node_id}**")
     
-    # Historical Chart
+    # 1. HISTORICAL TELEMETRY CHART
     hist_q = f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{node_id}' ORDER BY timestamp ASC"
     try:
         tel_df = client.query(hist_q).to_dataframe()
@@ -4191,6 +4193,44 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
     except Exception as e:
         st.caption(f"Historical graph generated: {e}")
 
+    # =========================================================================
+    # NEW EXTENSION: COMPLETE NODE ASSIGNMENT HISTORY TIMELINE
+    # =========================================================================
+    st.markdown(f"### 🕒 Assignment History Timeline: **{node_id}**")
+    history_q = f"""
+        SELECT 
+            Project,
+            Location,
+            Bank,
+            Depth,
+            SensorStatus,
+            FORMAT_DATE('%b %d, %Y', Start_Date) as `Start Date`,
+            COALESCE(FORMAT_DATE('%b %d, %Y', End_Date), '🔴 Active / Current') as `End Date`
+        FROM `{target_registry}`
+        WHERE NodeNum = '{node_id}'
+        ORDER BY Start_Date DESC
+    """
+    try:
+        node_history_df = client.query(history_q).to_dataframe()
+        if not node_history_df.empty:
+            # Clean up missing display fields safely
+            node_history_df['Bank'] = node_history_df['Bank'].fillna('—')
+            node_history_df['Depth'] = node_history_df['Depth'].apply(lambda x: f"{x} ft" if pd.notnull(x) and x != 0.0 else '—')
+            
+            st.dataframe(
+                node_history_df,
+                use_container_width=True,
+                hide_index=True,
+                column_order=["Project", "Location", "Bank", "Depth", "Start Date", "End Date", "SensorStatus"]
+            )
+        else:
+            st.info("ℹ️ No prior historical assignment blocks tracked for this asset registration ID.")
+    except Exception as history_err:
+        st.caption(f"Unable to parse historical registry matrix timeline lines: {history_err}")
+
+    st.divider()
+
+    # 2. MODIFY ATTRIBUTES MANAGEMENT ENGINE FORM
     st.markdown("### 🛠️ Modify Assignment Attributes")
     with st.form("lab_attribute_form"):
         col1, col2, col3 = st.columns(3)
@@ -4221,7 +4261,7 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
             time.sleep(0.5)
             st.rerun()
 
-    # Quick Tasks
+    # 3. QUICK OPERATIONS TASK INGESTION BLOCKS
     st.markdown("##### Quick Operational Tasks")
     o1, o2, o3, o4 = st.columns(4)
     with o1:
@@ -4248,6 +4288,8 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
                     client.query(f"DELETE FROM `{target_registry}` WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
                     st.cache_data.clear()
                     st.rerun()
+
+
 
 def render_lab_data_checker(client, reg_df):
     """Calculates chronological gap analyses system-wide to flag timeline risks."""
