@@ -2527,21 +2527,72 @@ def render_bulk_approval_controls():
             key="blk_mgmt_target_scope"
         )
     with c2:
-        # 🎯 MIRRORED DROP DOWN: Explicitly handles selection filters including 'ALL BUT NULL'
+        # FIXED: Standardized to explicit lower-case matching rules to coordinate with BigQuery string states
         current_status_filter = st.selectbox(
             "Filter Current Designation Status:",
-            options=["ALL", "ALL BUT NULL", "TRUE", "NULL (Streaming / Unreviewed)", "Masked", "OFFICE", "BadData"],
+            options=["all", "all but null", "true", "null (streaming / unreviewed)", "masked", "office", "baddata"],
             key="blk_mgmt_current_status_filter",
             help="Limits modifications only to data points that currently match this selected classification."
         )
     with c3:
-        # 🎯 STANDARDIZED TARGETS: Clean destination string states matching your script logic
+        # FIXED: Standardized destinations to lowercase to maintain clean query conversions
         new_status = st.selectbox(
             "Set Approval Status To:", 
-            ["TRUE", "Masked", "OFFICE", "BadData"], 
+            ["true", "masked", "office", "baddata"], 
             key="blk_mgmt_new_status"
         )
     return target_scope, current_status_filter, new_status
+
+
+def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, current_status_filter, f):
+    """Constructs analytical logical statements parsing historical coordinates."""
+    where_clauses = []
+
+    if selected_project != "All Projects":
+        if target_scope == "Specific Node":
+            where_clauses.append(f"NodeNum = '{f['scope_val']}'")
+        elif target_scope == "Specific Location":
+            loc_nodes = reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == f['scope_val'])]['NodeNum'].dropna().unique().tolist()
+            nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
+            where_clauses.append(f"NodeNum IN ({nodes_str})")
+        else:
+            proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].dropna().unique().tolist()
+            if proj_nodes:
+                nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
+                where_clauses.append(f"NodeNum IN ({nodes_str})")
+            else:
+                where_clauses.append("NodeNum = 'NONE'")
+        where_clauses.append(f"Project = '{selected_project}'")
+    else:
+        where_clauses.append("Project IS NOT NULL")
+
+    start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
+
+    if f["temporal_dir"] == "Between Range":
+        end_ts_str = f"{f['e_date'].strftime('%Y-%m-%d')} {f['e_time'].strftime('%H:%M:%S')}"
+        where_clauses.append(f"timestamp BETWEEN '{start_ts_str}' AND '{end_ts_str}'")
+    elif f["temporal_dir"] in ["Older Than", "Newer Than"]:
+        op = "<" if f["temporal_dir"] == "Older Than" else ">"
+        where_clauses.append(f"timestamp {op} '{start_ts_str}'")
+    
+    if f["val_filter"] == "Above Threshold":
+        where_clauses.append(f"temperature > {f['threshold']}")
+    elif f["val_filter"] == "Below Threshold":
+        where_clauses.append(f"temperature < {f['threshold']}")
+
+    # FIXED: Clear string evaluations to eliminate logic-flipping dropouts
+    if current_status_filter != "all":
+        if current_status_filter == "all but null":
+            where_clauses.append("r.approve IS NOT NULL")
+        elif current_status_filter == "null (streaming / unreviewed)":
+            where_clauses.append("r.approve IS NULL")
+        elif current_status_filter == "true":
+            # Points are considered approved if they are completely clear of the rejections ledger
+            where_clauses.append("r.approve IS NULL")
+        else:
+            where_clauses.append(f"LOWER(CAST(r.approve AS STRING)) = '{str(current_status_filter).lower()}'")
+
+    return " AND ".join(where_clauses)
 
 
 def render_bulk_approval_filters(reg_df, selected_project, target_scope):
@@ -2599,55 +2650,6 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
         "val_filter": val_filter, "threshold": threshold, "scope_val": scope_val
     }
 
-
-def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, current_status_filter, f):
-    """Constructs analytical logical statements parsing historical coordinates."""
-    where_clauses = []
-
-    if selected_project != "All Projects":
-        if target_scope == "Specific Node":
-            where_clauses.append(f"NodeNum = '{f['scope_val']}'")
-        elif target_scope == "Specific Location":
-            loc_nodes = reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == f['scope_val'])]['NodeNum'].dropna().unique().tolist()
-            nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
-            where_clauses.append(f"NodeNum IN ({nodes_str})")
-        else:
-            proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].dropna().unique().tolist()
-            if proj_nodes:
-                nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
-                where_clauses.append(f"NodeNum IN ({nodes_str})")
-            else:
-                where_clauses.append("NodeNum = 'NONE'")
-        where_clauses.append(f"Project = '{selected_project}'")
-    else:
-        where_clauses.append("Project IS NOT NULL")
-
-    start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
-
-    if f["temporal_dir"] == "Between Range":
-        end_ts_str = f"{f['e_date'].strftime('%Y-%m-%d')} {f['e_time'].strftime('%H:%M:%S')}"
-        where_clauses.append(f"timestamp BETWEEN '{start_ts_str}' AND '{end_ts_str}'")
-    elif f["temporal_dir"] in ["Older Than", "Newer Than"]:
-        op = "<" if f["temporal_dir"] == "Older Than" else ">"
-        where_clauses.append(f"timestamp {op} '{start_ts_str}'")
-    
-    if f["val_filter"] == "Above Threshold":
-        where_clauses.append(f"temperature > {f['threshold']}")
-    elif f["val_filter"] == "Below Threshold":
-        where_clauses.append(f"temperature < {f['threshold']}")
-
-    # 🎯 LEAKPROOF STATUS ALIGNMENT LOGIC: Correctly checks for explicit filters and custom null variations
-    if current_status_filter != "ALL":
-        if current_status_filter == "ALL BUT NULL":
-            where_clauses.append("r.approve IS NOT NULL")
-        elif current_status_filter == "NULL (Streaming / Unreviewed)":
-            where_clauses.append("r.approve IS NULL")
-        elif current_status_filter == "TRUE":
-            where_clauses.append("r.approve IS NULL")
-        else:
-            where_clauses.append(f"UPPER(CAST(r.approve AS STRING)) = '{str(current_status_filter).upper()}'")
-
-    return " AND ".join(where_clauses)
 
 
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
