@@ -3462,9 +3462,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.warning("No tracking profiles found inside the active Node Registry database layer.")
             
             
-    # =========================================================================
-    # SUB-TAB 4: DATA RECOVERY PIPELINE ENGINE
-    # =========================================================================
+    # -------------------------------------------------------------------------
+    # TAB 4: DATA RECOVERY PIPELINE ENGINE
+    # -------------------------------------------------------------------------
     with tab_recovery:
         st.title("📡 Data Recovery Engine")
         st.write(
@@ -3473,13 +3473,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         )
         st.divider()
 
-        # 1. INTEGRATED HIERARCHICAL SEARCH FILTERS
-        # Leverages your helper function to seamlessly cascade Project -> Location -> NodeNum
-        selected_recovery_nodes = render_recovery_filters(full_reg_df)
+        # 1. RENDER STREAMLINED HIERARCHICAL SEARCH DROPDOWNS
+        # Collects chosen node indices contextually from Project Space and Location selections
+        dropdown_selected_nodes = render_recovery_filters(full_reg_df)
 
         st.divider()
 
-        # 2. DEFINE TIMELINE CONTROLS
+        # 2. DEFINE TIMELINE RECOVERY CONTROLS
         st.subheader("📅 Define Recovery Timeline Parameters")
         rec_c1, rec_c2 = st.columns(2)
         with rec_c1:
@@ -3489,14 +3489,34 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider()
 
-        # 3. SELECTION METRIC WARNING BANNER
-        scope_text = f"{len(selected_recovery_nodes)} selected nodes" if selected_recovery_nodes else "ALL nodes matching current dropdown scope"
+        # 3. CONTEXTUAL DETERMINATION OF TARGET HARDWARE SCOPE
+        # If specific nodes aren't selected in the multiselect box, fallback to all nodes matching the dropdown choices
+        if dropdown_selected_nodes:
+            final_target_nodes = dropdown_selected_nodes
+        else:
+            # Reconstruct dropdown slice filter criteria dynamically to prevent extraction drops
+            active_proj_context = st.session_state.get('rec_proj_sel_isolated', 'All')
+            active_loc_context = st.session_state.get('rec_loc_sel_isolated', 'All')
+            
+            slice_df = full_reg_df.copy()
+            if active_proj_context != "All":
+                slice_df = slice_df[slice_df['Project'] == active_proj_context]
+            if active_loc_context != "All":
+                slice_df = slice_df[slice_df['Location'] == active_loc_context]
+                
+            final_target_nodes = sorted(slice_df['NodeNum'].dropna().unique().tolist())
+
+        # 4. SELECTION METRIC WARNING BANNER
+        scope_text = f"{len(final_target_nodes)} selected nodes" if final_target_nodes else "ALL registered fleet nodes"
         st.warning(f"⚠️ **Action Required:** Initiating backfill protocol for {scope_text} from **{rec_start_date}** through **{rec_end_date}**.")
 
-        # 4. TRIGGER EXECUTION PIPELINE BUTTON
+        # 5. TRIGGER EXECUTION PIPELINE BUTTON
         if st.button("🚀 Execute Cloud Backfill Ingestion Pipeline Run", use_container_width=True, key="btn_trigger_recovery_run"):
             
             # --- START HARDENED WORKER LOGIC ---
+            import requests
+            import numpy as np
+            
             all_rows = []
             hardware_map = {}
             db_max_timestamps = {}
@@ -3517,12 +3537,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             end_time_iso = datetime.combine(rec_end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
             # Seed data status tracker parameters
-            # FIXED: If no multiselect nodes are explicitly clicked, fall back to the cascading dropdown selection scope
-            final_target_nodes = selected_recovery_nodes if selected_recovery_nodes else sorted(
-                (full_reg_df if 'rec_proj_sel_isolated' not in st.session_state or st.session_state['rec_proj_sel_isolated'] == "All" 
-                 else full_reg_df[full_reg_df['Project'] == st.session_state['rec_proj_sel_isolated']])['NodeNum'].dropna().unique().tolist()
-            )
-
             if final_target_nodes:
                 for node in final_target_nodes:
                     node_stats[node] = 0
@@ -3626,7 +3640,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.error(f"Batch loading ingestion pipeline failure: {bq_err}")
                         status_box.update(state="error")
 
-            # --- 5. RENDER STATISTICAL BREAKDOWN SUMMARY LEDGER ---
+            # --- 6. RENDER STATISTICAL BREAKDOWN SUMMARY LEDGER ---
             if node_stats:
                 st.write("### 📊 Data Recovery Tally Distribution:")
                 summary_records = []
