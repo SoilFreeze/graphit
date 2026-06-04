@@ -3658,23 +3658,36 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             
             st.write("#### 📂 Currently Active Library Curves")
             try:
-                # Upgraded query to parse CurveID strings into distinct Project and File Name segments
+                # Upgraded regex-based query to gracefully split CurveID strings without failing on formatting irregularities
                 inv_curves_q = f"""
                     SELECT 
-                        SPLIT(CurveID, '-')[SAFE_OFFSET(0)] as `Project`,
-                        COALESCE(SPLIT(CurveID, '-')[SAFE_OFFSET(1)], CurveID) as `File Name`,
-                        COUNT(*) as `Number of Entries`,
-                        MAX(upload_date) as `Date Uploaded`
+                        REGEXP_EXTRACT(CurveID, r'^(\\d+)') as `Project`,
+                        REGEXP_EXTRACT(CurveID, r'-(.+)$') as `File Name`,
+                        CurveID as `Raw_ID`,
+                        COUNT(*) as `Entries`,
+                        MAX(upload_date) as `Uploaded`
                     FROM `{target_curves_path}` 
+                    WHERE CurveID IS NOT NULL
                     GROUP BY CurveID
                     ORDER BY `Project` ASC, `File Name` ASC
                 """
                 active_curves_df = client.query(inv_curves_q).to_dataframe()
                 
                 if not active_curves_df.empty:
-                    # Enforce strict column arrangement layout requested
+                    # Clean up any missing splits or defaults in pandas before rendering
+                    active_curves_df['Project'] = active_curves_df['Project'].fillna("System-Wide")
+                    active_curves_df['File Name'] = active_curves_df['File Name'].fillna(active_curves_df['Raw_ID'])
+                    
+                    # Rename columns to match exact requested fields
+                    final_render_df = pd.DataFrame({
+                        "Project": active_curves_df['Project'],
+                        "File Name": active_curves_df['File Name'],
+                        "Number of Entries": active_curves_df['Entries'],
+                        "Date Uploaded": active_curves_df['Uploaded']
+                    })
+
                     st.dataframe(
-                        active_curves_df[["Project", "File Name", "Number of Entries", "Date Uploaded"]], 
+                        final_render_df, 
                         use_container_width=True, 
                         hide_index=True,
                         column_config={
@@ -3685,7 +3698,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 else:
                     st.info("ℹ️ The reference curve datastore is currently unpopulated.")
             except Exception as schema_err:
-                st.caption("ℹ️ Reference catalog directory is currently loading or updating.")
+                # Diagnostic fallback log to let you see exactly what BigQuery rejected if it happens again
+                st.error(f"❌ Reference catalog compilation error: {schema_err}")
 
             st.divider()
 
@@ -3738,7 +3752,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.cache_data.clear()
                     time.sleep(1.0)
                     st.rerun()
-
 
 
 ###################
