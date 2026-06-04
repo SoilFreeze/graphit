@@ -1411,7 +1411,13 @@ def render_node_selector(df, unique_projects, unit_mode="F", unit_label="°F"):
             break
 
     if temp_col_key:
-        df['Current Temp'] = df[temp_col_key].apply(lambda x: fmt_temp(x, unit_mode, unit_label))
+        safe_mode = unit_mode if 'unit_mode' in locals() or 'unit_mode' in globals() else 'F'
+        safe_label = unit_label if 'unit_label' in locals() or 'unit_label' in globals() else '°F'
+    
+        # Run the application mapper utilizing the localized safety fallback scopes
+        df['Current Temp'] = df['last_temp'].apply(
+            lambda x: fmt_temp(x, safe_mode, safe_label) if 'fmt_temp' in globals() else "N/A"
+        )
     else:
         df['Current Temp'] = "N/A"
     # =========================================================================
