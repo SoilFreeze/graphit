@@ -2900,82 +2900,145 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
         return False
 
 # =============================================================================
-# SUB-TAB WORKSPACE HELPERS: NODE LOGISTICS ENGINE
+# WORKER UTILITIES: NODE LOGISTICS ENGINE (FROM TOOLS)
 # =============================================================================
 
-def render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_list):
+def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """
-    Renders an advanced cascading dropdown lookup selection engine for managing 
-    individual nodes based on Project, Location, and Node number assignments.
-    Lazy-bound to prevent global namespace compilation NameErrors.
+    Renders the editing form panels and handles transactional database inserts 
+    to append updated node tracking metrics records.
     """
-    st.subheader("🔍 Select Target Hardware Path")
+    st.markdown(f"### ⚙️ Operational Settings Editor: **{selected_node_data.get('NodeNum')}**")
     
-    # 1. CASCADING SELECTBOX CONTROLS (Matches Data Recovery layout seamlessly)
-    col_l1, col_l2, col_l3 = st.columns(3)
+    # Isolate current parameters from the active record dictionary
+    current_project = str(selected_node_data.get('Project', 'Office'))
+    current_location = str(selected_node_data.get('Location', ''))
+    current_bank = str(selected_node_data.get('Bank', 'A'))
+    current_depth = float(selected_node_data.get('Depth', 0.0))
+    current_status = str(selected_node_data.get('SensorStatus', 'On Project'))
     
-    with col_l1:
-        # Include all projects, including the Office restock reservoir
-        u_projects = sorted(list(set(["Office"] + available_projects_list)))
-        selected_log_proj = st.selectbox("Select Project Space Context:", u_projects, key="node_log_project_filter")
-        
-    proj_filtered = full_reg_df[full_reg_df['Project'] == selected_log_proj]
+    # Process date fields safely
+    raw_date = selected_node_data.get('Start_Date')
+    if isinstance(raw_date, (datetime, date)):
+        current_start_date = raw_date
+    else:
+        try:
+            current_start_date = pd.to_datetime(raw_date).date()
+        except Exception:
+            current_start_date = datetime.now().date()
+
+    # Layout adjustment forms matching your tools design
+    edit_c1, edit_c2, edit_c3 = st.columns(3)
     
-    with col_l2:
-        u_locations = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
-        if not u_locations:
-            u_locations = ["No Registered Locations"]
-        selected_log_loc = st.selectbox("Select Physical Location Context:", u_locations, key="node_log_location_filter")
-        
-    loc_filtered = proj_filtered[proj_filtered['Location'] == selected_log_loc]
-    
-    with col_l3:
-        u_nodes = sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
-        selected_log_node = st.selectbox(
-            "Select Target Node Number ID:", 
-            u_nodes, 
-            index=0 if u_nodes else None,
-            key="node_log_node_filter",
-            help="Pick the specific hardware tracking record to pull up in the editor."
+    with edit_c1:
+        u_projects = sorted(list(set(["Office"] + proj_list)))
+        new_node_project = st.selectbox(
+            "Target Allocation Project:", 
+            options=u_projects, 
+            index=u_projects.index(current_project) if current_project in u_projects else 0
+        )
+        new_node_location = st.text_input("Target Allocation Location / Borehole:", value=current_location)
+
+    with edit_c2:
+        bank_options = ["A", "B", "C", "D", "E", "X"]
+        new_node_bank = st.selectbox(
+            "Bank Designation String:", 
+            options=bank_options, 
+            index=bank_options.index(current_bank) if current_bank in bank_options else 0
+        )
+        new_node_depth = st.number_input(
+            "Sensor Vertical Placement Depth (Feet):", 
+            value=float(current_depth), 
+            step=1.0, 
+            format="%.2f"
         )
 
-    st.divider()
+    with edit_c3:
+        status_options = ["On Project", "In Office/Shop", "Decommissioned", "Spare/Storage"]
+        new_node_status = st.selectbox(
+            "Operational Tracking Status:", 
+            options=status_options, 
+            index=status_options.index(current_status) if current_status in status_options else 0
+        )
+        new_node_start_date = st.date_input("Deployment Modification Effective Date:", value=current_start_date)
 
-    # 2. IF A VALID NODE IS SELECTED, INJECT THE ENTIRE DATA ENGINE MATRIX
-    if selected_log_node:
-        target_rows = loc_filtered[loc_filtered['NodeNum'] == selected_log_node].sort_values(by='Start_Date', ascending=False)
+    st.markdown("#### 🚀 Step 3: Authorize Change Record")
+    with st.expander("⚠️ View Registry Transaction Script Actions"):
+        st.write(
+            f"Executing this deployment write adds a tracking line into `{target_registry}` mapping "
+            f"**{selected_node_data.get('NodeNum')}** to Project **{new_node_project}** at depth **{new_node_depth} ft** "
+            f"effective **{new_node_start_date.strftime('%m/%d/%Y')}**."
+        )
         
-        if not target_rows.empty:
-            active_node_record = target_rows.iloc[0].to_dict()
-            target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+        if st.checkbox("I verify that these field allocation parameters match our physical sensor logs.", key="confirm_node_logistics_action_write"):
+            if st.button(f"💾 Append Deployment Update for {selected_node_data.get('NodeNum')}", type="primary", use_container_width=True):
+                
+                # Construct the payload dictionary using strict uppercase values for consistency
+                new_logistics_payload = [{
+                    "NodeNum": str(selected_node_data.get('NodeNum')).strip(),
+                    "Project": str(new_node_project).strip(),
+                    "Location": str(new_node_location).strip(),
+                    "Bank": str(new_node_bank).strip().upper(),
+                    "Depth": float(new_node_depth),
+                    "Start_Date": str(new_node_start_date.strftime('%Y-%m-%d')),
+                    "SensorStatus": str(new_node_status).strip()
+                }]
+                
+                try:
+                    with st.spinner("Appending tracking metrics to node registry matrix..."):
+                        job_config = bigquery.LoadJobConfig(
+                            schema=[
+                                bigquery.SchemaField("NodeNum", "STRING"),
+                                bigquery.SchemaField("Project", "STRING"),
+                                bigquery.SchemaField("Location", "STRING"),
+                                bigquery.SchemaField("Bank", "STRING"),
+                                bigquery.SchemaField("Depth", "FLOAT"),
+                                bigquery.SchemaField("Start_Date", "DATE"),
+                                bigquery.SchemaField("SensorStatus", "STRING"),
+                            ],
+                            write_disposition="WRITE_APPEND"
+                        )
+                        
+                        log_df = pd.DataFrame(new_logistics_payload)
+                        log_df['Start_Date'] = pd.to_datetime(log_df['Start_Date']).dt.date
+                        
+                        client.load_table_from_dataframe(log_df, target_registry, job_config=job_config).result()
+                        
+                    st.success(f"🎉 Success! Asset registry mapping updated for node {selected_node_data.get('NodeNum')}.")
+                    st.cache_data.clear()
+                    time.sleep(1.0)
+                    st.rerun()
+                except Exception as log_err:
+                    st.error(f"❌ Failed to commit node asset updates to registry table: {log_err}")
+
+
+def render_data_checker(client, full_reg_df):
+    """
+    Renders a quality assurance diagnostics matrix highlighting configuration or orphan risks.
+    """
+    st.divider()
+    st.markdown("### 🔍 System Registry Diagnostics Audit")
+    
+    with st.expander("📊 View Discovered Inventory Conflict Logs", expanded=False):
+        # 1. Look for orphan entries (nodes present in registry but missing inside hardware inventory)
+        try:
+            orphan_q = f"""
+                SELECT DISTINCT r.NodeNum, r.Project, r.Location 
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
+                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` i 
+                  ON TRIM(r.NodeNum) = TRIM(i.NodeNum)
+                WHERE i.NodeNum IS NULL AND r.NodeNum IS NOT NULL
+                ORDER BY r.NodeNum ASC
+            """
+            orphan_df = client.query(orphan_q).to_dataframe()
             
-            # --- DYNAMIC GLOBAL SCOPE INTERCEPT (Bypasses sequencing issues) ---
-            try:
-                action_manager_func = globals().get('render_node_action_manager')
-                diagnostic_checker_func = globals().get('render_data_checker')
-                
-                if action_manager_func is None:
-                    st.error("❌ Component Registration Fault: 'render_node_action_manager' was not detected in this file scope context. Ensure it isn't misspelled lower in the file.")
-                else:
-                    action_manager_func(
-                        client=client, 
-                        selected_node_data=active_node_record, 
-                        reg_df=full_reg_df, 
-                        proj_list=available_projects_list, 
-                        target_registry=target_registry_path
-                    )
-                
-                if diagnostic_checker_func is not None:
-                    diagnostic_checker_func(client, full_reg_df)
-                else:
-                    st.caption("ℹ️ Diagnostic Checker Module is currently offline or loading.")
-                    
-            except Exception as routing_err:
-                st.error(f"Internal scope linkage failed: {routing_err}")
-        else:
-            st.info("The specific assignment record could not be parsed. Refresh your selections.")
-    else:
-        st.info("💡 Please specify a valid Project, Location, and Node path above to populate the management editor panels.")
+            if not orphan_df.empty:
+                st.warning("⚠️ **Orphan Sensor Alert:** The following node tags exist in deployment schedules but lack hardware index keys:")
+                st.dataframe(orphan_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("✅ All registered node mappings align cleanly with the Hardware Inventory catalog.")
+        except Exception as e:
+            st.caption(f"Integrity check skipped or loading: {e}")
 
 
 # =============================================================================
