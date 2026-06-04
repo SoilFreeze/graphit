@@ -338,7 +338,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. THEORETICAL REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # Extract the raw project number (e.g., 2541)
+            # Extract the raw project number (e.g., 2538)
             proj_str = str(st.session_state.get('selected_project', ''))
             proj_match = re.findall(r'\d+', proj_str)
             proj_num = proj_match[0] if proj_match else ""
@@ -347,12 +347,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
 
             if proj_num and loc_part:
-                # Build rigid strict string comparison blocks to kill multi-channel cross-talk leaks
+                # Rigid string comparison blocks to eliminate multi-channel cross-talk leaks
                 target_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                     WHERE (CurveID = '{proj_num}-{loc_part}' 
                        OR CurveID = '{proj_num}_{loc_part}'
+                       OR UPPER(CurveID) LIKE UPPER('{proj_num}-%{loc_part}')
                        OR (UPPER(CurveID) LIKE UPPER('%{proj_num}%') AND ENDS_WITH(UPPER(CurveID), UPPER('-{loc_part}'))))
                     ORDER BY Day
                 """
@@ -2662,32 +2663,46 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     # =========================================================================
     # SECTION 1: TOP LEVEL GLOBAL DATA CLEANUP UTILITY
     # =========================================================================
-    st.subheader("🧹 SensorPush/LORD Telemetry Optimization Engine")
-    st.write("Drop outliers outside [-30°F, 120°F] and condense historical datasets into 1-decimal hourly point means.")
+    st.subheader("🧹 Database Cleanup Engine")
+    st.write("Consolidate raw datasets into 1-decimal hourly averages and safely remove all duplicate records.")
     
-    if st.button("⚡ Run SensorPush/LORD Hourly Data Cleanup & Aggregator", use_container_width=True):
-        project_filter_sql = "" if selected_project == "All Projects" else f"WHERE Project = '{selected_project}'"
+    if st.button("⚡ Run Database Cleanup & Duplicate Purge", use_container_width=True):
+        project_filter_where = "" if selected_project == "All Projects" else f"WHERE Project = '{selected_project}'"
         
+        # Hardened query to rebuild the table, keeping only the first record for any duplicate timestamp + node pairing
         cleanup_sql = f"""
-            WITH compacted_hourly_logs AS (
-                SELECT 
-                    Project, NodeNum, Bank, Location, Depth,
-                    TIMESTAMP_TRUNC(timestamp, HOUR) as hourly_timestamp,
-                    ROUND(AVG(temperature), 1) as rounded_avg_temp
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-                {project_filter_sql}
-                GROUP BY Project, NodeNum, Bank, Location, Depth, TIMESTAMP_TRUNC(timestamp, HOUR)
+            BEGIN TRANSACTION;
+            
+            # 1. Clean SensorPush Raw Data
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
+            SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
+            FROM (
+                SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                WHERE temperature >= -30.0 AND temperature <= 120.0
             )
-            SELECT COUNT(*) FROM compacted_hourly_logs WHERE rounded_avg_temp >= -30.0 AND rounded_avg_temp <= 120.0;
+            WHERE rn = 1;
+
+            # 2. Clean Lord Raw Data
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
+            SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
+            FROM (
+                SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                WHERE temperature >= -30.0 AND temperature <= 120.0
+            )
+            WHERE rn = 1;
+
+            COMMIT;
         """
         try:
-            with st.spinner("Processing timeframe vector aggregation mapping rules..."):
+            with st.spinner("Executing structural duplication purge workflows..."):
                 job = client.query(cleanup_sql)
                 job.result()
-            st.success("✅ Telemetry pipeline compaction completed! Outliers removed and frames consolidated to 1 point per hour.")
+            st.success("✅ Database Cleanup successfully completed! All rogue outliers have been dropped and duplicate packets are completely removed.")
             st.cache_data.clear()
         except Exception as e:
-            st.error(f"Compaction Engine Failed: {e}")
+            st.error(f"Cleanup Optimization Engine Failed: {e}")
 
     st.divider()
 
@@ -2935,7 +2950,7 @@ def render_recovery_filters(sp_reg):
 
 
 def handle_recovery_trigger(selected_nodes, start_date, end_date):
-    """Manages the cloud pipeline to execute the data recovery engine and reports on all targeted nodes."""
+    """Manages the cloud pipeline to execute a raw data recovery dump into the database table."""
     import requests
     import numpy as np
     
@@ -2957,13 +2972,9 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
     start_time_iso = datetime.combine(start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
     end_time_iso = datetime.combine(end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    # Seed the stats tracker with ALL selected nodes so they show up even with 0 points
     if selected_nodes:
         for node in selected_nodes:
             node_stats[node] = 0
-    else:
-        # If no nodes were explicitly selected, we will seed them dynamically during the inventory scan
-        pass
 
     with st.status("Executing Cloud Backfill Ingestion Pipeline Run...", expanded=True) as status:
         st.write("🔍 Extracting Translation Mappings from Hardware Inventory...")
@@ -2974,8 +2985,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 clean_db_id = str(row.RawID).split('.')[0].strip()
                 friendly_name = str(row.NodeNum).strip()
                 hardware_map[clean_db_id] = friendly_name
-                
-                # Seed the node in stats if global recovery is running and it matches our active scope
                 if not selected_nodes:
                     node_stats[friendly_name] = 0
         except Exception as e:
@@ -3022,7 +3031,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                     for s in samples:
                         temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                         if temp is not None:
-                            # BOOKMARK REMOVED: Every point found is accepted and tallied
                             node_stats[friendly_name] += 1
                             account_stats[acc['email']] += 1
                             
@@ -3040,15 +3048,15 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             st.info("🔒 Cloud accounts returned 0 points for this window context.")
             status.update(label="Run Finalized (0 Points Found)", state="complete")
         else:
-            st.write(f"📥 Injecting rows directly into `{LOCAL_REC_TABLE}`...")
+            st.write(f"📥 Injecting raw rows directly into `{LOCAL_REC_TABLE}`...")
             try:
                 real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
                 errors = db_client.insert_rows_json(real_table_ref, all_rows)
                 if not errors:
-                    st.success(f"🎉 Success! Appended {total_recovered_appends} rows to storage.")
+                    st.success(f"🎉 Success! Dumped {total_recovered_appends} rows to storage.")
                     summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
                     st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
-                    status.update(label="Recovery Complete!", state="complete")
+                    status.update(label="Recovery Dump Complete!", state="complete")
                     st.cache_data.clear()
                 else:
                     st.error(f"Insertion rejected rows: {errors[:3]}")
@@ -3057,12 +3065,10 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 st.error(f"Stream submission pipeline failure: {bq_err}")
                 status.update(state="error")
 
-    # --- RENDER STATISTICAL BREAKDOWN GRID (SHOWS EVERY TARGETED SENSOR) ---
     if node_stats:
-        st.write("### 📊 Smart Data Recovery Tally Distribution:")
+        st.write("### 📊 Data Recovery Tally Distribution:")
         summary_records = []
         for node, count in node_stats.items():
-            # If a user filtered down to specific nodes, only display those in the report matrix
             if selected_nodes and node not in selected_nodes:
                 continue
             summary_records.append({
@@ -3071,7 +3077,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             })
         summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
-        
         if total_recovered_appends > 0:
             st.balloons()
 
