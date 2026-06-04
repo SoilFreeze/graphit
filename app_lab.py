@@ -3462,14 +3462,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             if not u_locations:
                 u_locations = ["Office"]
                 
-            # Append special marker string for entering a brand new location choice
             location_options = u_locations + ["➕ Add New Location..."]
             selected_log_loc = st.selectbox("Select Physical Location Context:", location_options, key="node_log_location_filter")
             
         loc_filtered_df = proj_filtered_df[proj_filtered_df['Location'] == selected_log_loc] if not proj_filtered_df.empty else pd.DataFrame()
         
         with col_l3:
-            # If we are viewing a filtered location list, extract nodes. Otherwise, look up project nodes.
             node_lookup_df = loc_filtered_df if selected_log_loc != "➕ Add New Location..." else proj_filtered_df
             u_nodes = sorted(node_lookup_df['NodeNum'].dropna().unique().tolist(), key=natural_sort_key) if not node_lookup_df.empty else []
             selected_log_node = st.selectbox(
@@ -3526,10 +3524,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     use_container_width=True,
                     column_config={
                         "Select": st.column_config.CheckboxColumn("Select", default=False),
-                        "start_date_str": "Start Date Mapped",
-                        "end_date_str": "End Date Mapped",
-                        "Depth": "Depth (ft)",
-                        "SensorStatus": "Status Flag"
+                        "start_date_str": "Start Date",
+                        "end_date_str": "End Date",
+                        "Depth": "Depth",
+                        "SensorStatus": "Sensor Status"
                     },
                     disabled=[c for c in display_history_df.columns if c != "Select"],
                     column_order=["Select", "Project", "Location", "Bank", "Depth", "start_date_str", "end_date_str", "SensorStatus"],
@@ -3544,14 +3542,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                 st.divider()
                 
-                # 3. CALL REFACTORED ATTRIBUTES PANEL WITH PROJECTS UNIQUE LOCATION VECTOR
+                # 3. CALL REFACTORED ATTRIBUTES PANEL
                 try:
                     render_lab_node_action_manager(
                         client=client,
                         selected_node_data=chosen_target_record,
                         reg_df=full_reg_df,
                         proj_list=u_projects,
-                        known_project_locations=u_locations, # Pass project unique locations list context down
+                        known_project_locations=u_locations, 
                         target_registry=target_registry_path
                     )
                     render_data_checker(client, full_reg_df)
@@ -4289,7 +4287,7 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
     # 1. ATTRIBUTE FORM ENGINE BLOCK
     with st.form("lab_attribute_form_historical"):
         col1, col2, col3 = st.columns(3)
-        edit_proj = col1.selectbox("Project Space Target Context", proj_list, index=proj_list.index(selected_node_data['Project']) if selected_node_data['Project'] in proj_list else 0)
+        edit_proj = col1.selectbox("Project", proj_list, index=proj_list.index(selected_node_data['Project']) if selected_node_data['Project'] in proj_list else 0)
         
         # LOCATION ARCHITECTURE OVERRIDE
         current_loc_val = str(selected_node_data.get('Location', ''))
@@ -4314,24 +4312,24 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         # Auxiliary text block exposed below dropdown if custom append action is requested
         custom_loc_input = ""
         if chosen_form_loc == "➕ Add Custom Location...":
-            custom_loc_input = st.text_input("Enter New Custom Location String name:", placeholder="e.g., Borehole-12")
+            custom_loc_input = st.text_input("Enter New Custom Location name:", placeholder="e.g., Borehole-12")
             
         status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
         curr_status_str = str(selected_node_data.get('SensorStatus', 'On Project'))
         status_idx = status_options.index(curr_status_str) if curr_status_str in status_options else 0
-        edit_status = col3.selectbox("Sensor Status Flag Designation Parameter", status_options, index=status_idx)
+        edit_status = col3.selectbox("Sensor Status", status_options, index=status_idx)
         
         c4, c5, c6, c7 = st.columns(4)
-        edit_bank = c4.text_input("Bank Field Mapping", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
-        edit_depth = c5.number_input("Depth Metric (ft)", value=float(selected_node_data.get('Depth', 0.0)))
-        edit_start = c6.date_input("Deployment Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date())
+        edit_bank = c4.text_input("Bank", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
+        edit_depth = c5.number_input("Depth", value=float(selected_node_data.get('Depth', 0.0)))
+        edit_start = c6.date_input("Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date())
         
         # END DATE CONTROL OVERRIDE SYSTEM BLOCK
         has_end_date = pd.notnull(selected_node_data.get('End_Date'))
         default_end_date = pd.to_datetime(selected_node_data.get('End_Date')).date() if has_end_date else datetime.now().date()
         
-        use_end_date_toggle = c7.checkbox("Apply Terminated End Date Limits Constraints?", value=has_end_date, key=f"end_dt_toggle_{node_id}_{origin_start_str}")
-        edit_end = c7.date_input("Deployment End Date", value=default_end_date, disabled=not use_end_date_toggle)
+        use_end_date_toggle = c7.checkbox("Apply Terminated End Date Constraints?", value=has_end_date, key=f"end_dt_toggle_{node_id}_{origin_start_str}")
+        edit_end = c7.date_input("End Date", value=default_end_date, disabled=not use_end_date_toggle)
 
         if st.form_submit_button("💾 Overwrite Targeted Assignment Attributes Configuration Row Line", use_container_width=True):
             # Parse which parameter string gets handled
@@ -4354,12 +4352,12 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
                 COMMIT;
             """
             client.query(update_sql).result()
-            st.success("✅ Clean update forced entry modified down into central metadata records!")
+            st.success("✅ Entry updated within the registry layout maps successfully!")
             st.cache_data.clear()
             time.sleep(0.5)
             st.rerun()
 
-    # 2. QUICK TASKS FOOTER MATRICES (Now containing End Assignment, Change Sensor, and Hard Delete)
+    # 2. QUICK TASKS FOOTER MATRICES
     st.markdown("##### Quick Operational Tasks")
     o1, o2, o3, o4 = st.columns(4)
     
