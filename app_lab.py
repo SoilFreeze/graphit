@@ -3433,74 +3433,66 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # SUB-TAB 3: NODE MASTER (FORMERLY NODE LOGISTICS)
     # =========================================================================
     with tab_logistics:
-        # UPDATED THE TITLES AS REQUESTED
         st.title("📋 Node Status and Changes")
         st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
         st.divider()
         
-        # We can dynamically declare the layout logic inline here to eliminate 
-        # any compilation order "not defined" namespace NameErrors permanently!
-        st.subheader("🔍 Select Target Hardware Path")
+        if not proj_reg_df.empty:
+            proj_list_clean = sorted([str(p).strip() for p in proj_reg_df['Project'].unique() if p])
+        else:
+            proj_list_clean = ["Office"]
+
+        selected_node_data = render_node_selector(full_reg_df, proj_list_clean)
         
-        # 1. CASCADING SELECTBOX CONTROLS
-        col_l1, col_l2, col_l3 = st.columns(3)
-        
-        with col_l1:
-            # Safely harvest the current unique projects directly from the registry data matrix 
-            # to prevent any variable name argument NameErrors
-            raw_projects = full_reg_df['Project'].dropna().unique().tolist() if 'full_reg_df' in locals() else []
-            u_projects = sorted(list(set(["Office"] + raw_projects)))
+        if selected_node_data is not None:
+            st.divider()
+            target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+            try:
+                render_node_action_manager(
+                    client=client, 
+                    selected_node_data=selected_node_data, 
+                    reg_df=full_reg_df, 
+                    proj_list=proj_list_clean, 
+                    target_registry=target_registry_path
+                )
+            except Exception as routing_err:
+                st.error(f"Internal workspace linkage failed: {routing_err}")
+        else:
+            st.divider()
+            st.info("💡 **Tip:** Use the checkbox in the active table above to choose a node context to modify.")
             
-            selected_log_proj = st.selectbox(
-                "Select Project Space Context:", 
-                u_projects, 
-                key="node_log_project_filter"
-            )
+        render_data_checker(client, full_reg_df)
+
+    # =========================================================================
+    # NEW INSERTION: SUB-TAB 4: DATA RECOVERY (SensorPush Cloud API Bridge)
+    # =========================================================================
+    with tab_recovery:
+        st.title("📡 SensorPush Data Recovery Service")
+        st.markdown(
+            "Directly query the SensorPush Cloud API using raw security tokens, "
+            "strip trailing decimals on-the-fly, and filter duplicate packets against BigQuery bookmarks."
+        )
+        st.divider()
         
-        with col_l2:
-            u_locations = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
-            if not u_locations:
-                u_locations = ["No Registered Locations"]
-            selected_log_loc = st.selectbox("Select Physical Location Context:", u_locations, key="node_log_location_filter")
-            
-        loc_filtered = proj_filtered[proj_filtered['Location'] == selected_log_loc]
-        
-        with col_l3:
-            u_nodes = sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
-            selected_log_node = st.selectbox(
-                "Select Target Node Number ID:", 
-                u_nodes, 
-                index=0 if u_nodes else None,
-                key="node_log_node_filter",
-                help="Pick the specific hardware tracking record to pull up in the editor."
-            )
+        # Filter down registry for active SensorPush (TP) nodes to populate filters cleanly
+        sp_reg_clean = full_reg_df[
+            (full_reg_df['NodeNum'].str.startswith('TP', na=False)) & 
+            (full_reg_df['End_Date'].isna())
+        ].copy()
+
+        # Render recovery inputs
+        selected_recovery_nodes = render_recovery_filters(sp_reg_clean)
 
         st.divider()
+        rec_c1, rec_c2 = st.columns(2)
+        with rec_c1:
+            start_date = rec_c1.date_input("Recovery Start Date Selection", value=datetime.now() - timedelta(days=3), key="lab_rec_start_dt")
+        with rec_c2:
+            end_date = rec_c2.date_input("Recovery End Date Selection", value=datetime.now(), key="lab_rec_end_dt")
 
-        # 2. IF A VALID NODE IS SELECTED, INJECT THE ENTIRE DATA ENGINE MATRIX
-        if selected_log_node:
-            target_rows = loc_filtered[loc_filtered['NodeNum'] == selected_log_node].sort_values(by='Start_Date', ascending=False)
-            
-            if not target_rows.empty:
-                active_node_record = target_rows.iloc[0].to_dict()
-                target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-                
-                # Directly execute the worker functions without lazy-bound global loops
-                try:
-                    render_node_action_manager(
-                        client=client, 
-                        selected_node_data=active_node_record, 
-                        reg_df=full_reg_df, 
-                        proj_list=available_projects_list, 
-                        target_registry=target_registry_path
-                    )
-                    render_data_checker(client, full_reg_df)
-                except Exception as routing_err:
-                    st.error(f"Internal workspace linkage failed: {routing_err}")
-            else:
-                st.info("The specific assignment record could not be parsed. Refresh your selections.")
-        else:
-            st.info("💡 Please specify a valid Project, Location, and Node path above to populate the management editor panels.")
+        if st.button("🚀 Run Cloud API Recovery Backfill Service", type="primary", use_container_width=True, key="lab_recovery_trigger_btn"):
+            handle_recovery_trigger(selected_recovery_nodes, start_date, end_date)
+
 
     # --- SUB-TAB 5: PROJECT MASTER ---
     with tab_proj_master:
