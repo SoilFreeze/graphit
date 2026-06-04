@@ -4086,29 +4086,41 @@ def render_lab_node_selector(reg_df, proj_list):
     with c3:
         search_term = st.text_input("Global Search (Node ID)", "", key="lab_ns_search_f")
 
-    if f_proj == "Unassigned": df = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office")]
-    elif f_proj != "All": df = df[df['Project'] == f_proj]
-    if f_loc != "All": df = df[df['Location'] == f_loc]
-    if search_term: df = df[df['NodeNum'].str.contains(search_term, case=False, na=False)]
+    if f_proj == "Unassigned": 
+        df = df[df['Project'].isna() | (df['Project'] == "") | (df['Project'] == "Office")]
+    elif f_proj != "All": 
+        df = df[df['Project'] == f_proj]
+        
+    if f_loc != "All": 
+        df = df[df['Location'] == f_loc]
+        
+    if search_term: 
+        df = df[df['NodeNum'].str.contains(search_term, case=False, na=False)]
 
     if df.empty:
         st.info("No matching nodes located under current filter parameters.")
         return None
 
+    # Reset index so that position line up perfectly with st.data_editor keys
+    df = df.reset_index(drop=True)
+
     st.markdown("### 📋 Current Asset Allocation Matrix")
-    if "lab_last_selected_node" not in st.session_state: st.session_state["lab_last_selected_node"] = None
-    if "lab_active_selected_record" not in st.session_state: st.session_state["lab_active_selected_record"] = None
+    if "lab_last_selected_node" not in st.session_state: 
+        st.session_state["lab_last_selected_node"] = None
+    if "lab_active_selected_record" not in st.session_state: 
+        st.session_state["lab_active_selected_record"] = None
 
     ed_key = "lab_node_registry_editor"
     if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
         changed_rows = st.session_state[ed_key]["edited_rows"]
-        newly_checked = [idx for idx, changes in changed_rows.items() if changes.get("Select") == True]
+        newly_checked = [int(idx) for idx, changes in changed_rows.items() if changes.get("Select") == True]
         
         if newly_checked and not df.empty:
             latest_idx = newly_checked[-1]
             if latest_idx != st.session_state["lab_last_selected_node"]:
                 st.session_state["lab_last_selected_node"] = latest_idx
-                rec_dict = df.loc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
+                # FIXED: Change .loc to .iloc to safely fetch via positional editor index array
+                rec_dict = df.iloc[latest_idx].drop(["hours_hidden"], errors='ignore').to_dict()
                 rec_dict["Select"] = True
                 st.session_state["lab_active_selected_record"] = rec_dict
                 st.session_state[ed_key]["edited_rows"] = {}
@@ -4139,9 +4151,11 @@ def render_lab_node_selector(reg_df, proj_list):
             "NodeNum": "Node ID", "Position": "Depth/Bank", "Last Seen": "Last Seen", "Current Temp": "Current Temp"
         },
         disabled=[col for col in df.columns if col != "Select"],
-        column_order=["Select", "Project", "Location", "NodeNum", "Position", "Last Seen", "Current Temp"], key=ed_key
+        column_order=["Select", "Project", "Location", "NodeNum", "Position", "Last Seen", "Current Temp"], 
+        key=ed_key
     )
     return st.session_state["lab_active_selected_record"]
+
 
 def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
     """Displays comparative line charts alongside structural updates metadata forms."""
