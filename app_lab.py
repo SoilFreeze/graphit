@@ -3433,22 +3433,18 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # SUB-TAB 3: NODE MASTER (FORMERLY NODE LOGISTICS)
     # =========================================================================
     with tab_logistics:
-        # UPDATED THE TITLES AS REQUESTED
         st.title("📋 Node Status and Changes")
         st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
         st.divider()
         
-        # We can dynamically declare the layout logic inline here to eliminate 
-        # any compilation order "not defined" namespace NameErrors permanently!
         st.subheader("🔍 Select Target Hardware Path")
         
         # 1. CASCADING SELECTBOX CONTROLS
         col_l1, col_l2, col_l3 = st.columns(3)
         
         with col_l1:
-            # Safely harvest the current unique projects directly from the registry data matrix 
-            # to prevent any variable name argument NameErrors
-            raw_projects = full_reg_df['Project'].dropna().unique().tolist() if 'full_reg_df' in locals() else []
+            # Safely harvest unique project codes directly from full_reg_df
+            raw_projects = full_reg_df['Project'].dropna().unique().tolist() if not full_reg_df.empty else []
             u_projects = sorted(list(set(["Office"] + raw_projects)))
             
             selected_log_proj = st.selectbox(
@@ -3457,16 +3453,21 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 key="node_log_project_filter"
             )
         
+        # Isolate rows matching our sidebar/dropdown project selection
+        proj_filtered_df = full_reg_df[full_reg_df['Project'] == selected_log_proj]
+        
         with col_l2:
-            u_locations = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
+            # Pull unique locations safely out of the project-filtered dataframe
+            u_locations = sorted(proj_filtered_df['Location'].dropna().unique().tolist(), key=natural_sort_key) if not proj_filtered_df.empty else []
             if not u_locations:
                 u_locations = ["No Registered Locations"]
             selected_log_loc = st.selectbox("Select Physical Location Context:", u_locations, key="node_log_location_filter")
             
-        loc_filtered = proj_filtered[proj_filtered['Location'] == selected_log_loc]
+        # Cascading slice matching both Project and Location definitions
+        loc_filtered_df = proj_filtered_df[proj_filtered_df['Location'] == selected_log_loc] if not proj_filtered_df.empty else pd.DataFrame()
         
         with col_l3:
-            u_nodes = sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+            u_nodes = sorted(loc_filtered_df['NodeNum'].dropna().unique().tolist(), key=natural_sort_key) if not loc_filtered_df.empty else []
             selected_log_node = st.selectbox(
                 "Select Target Node Number ID:", 
                 u_nodes, 
@@ -3477,21 +3478,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider()
 
-        # 2. IF A VALID NODE IS SELECTED, INJECT THE ENTIRE DATA ENGINE MATRIX
-        if selected_log_node:
-            target_rows = loc_filtered[loc_filtered['NodeNum'] == selected_log_node].sort_values(by='Start_Date', ascending=False)
+        # 2. IF A VALID NODE IS SELECTED, INJECT THE EDITING COMPONENT MATRIX
+        if selected_log_node and not loc_filtered_df.empty:
+            target_rows = loc_filtered_df[loc_filtered_df['NodeNum'] == selected_log_node].sort_values(by='Start_Date', ascending=False)
             
             if not target_rows.empty:
                 active_node_record = target_rows.iloc[0].to_dict()
                 target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
                 
-                # Directly execute the worker functions without lazy-bound global loops
                 try:
                     render_node_action_manager(
                         client=client, 
                         selected_node_data=active_node_record, 
                         reg_df=full_reg_df, 
-                        proj_list=available_projects_list, 
+                        proj_list=u_projects, # Pass our dynamically parsed project list parameter safely
                         target_registry=target_registry_path
                     )
                     render_data_checker(client, full_reg_df)
