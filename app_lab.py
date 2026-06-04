@@ -3363,17 +3363,26 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         # Fixed execution endpoint to cleanly point to the isolated engine helper
         execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
-    # --- SUB-TAB 3: NODE LOGISTICS ---
+    # =========================================================================
+    # SUB-TAB 3: INDIVIDUAL NODE LOGISTICS ENGINE (USES PRE-DEFINED HELPERS)
+    # =========================================================================
     with tab_logistics:
-        st.header("📋 Node Logistics & Asset Management")
-        st.write("Find and modify individual sensor attributes, review historical timelines, or analyze fleet deployment diagnostics.")
+        st.title("📋 Individual Node Logistics")
+        st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
+        st.divider()
         
-        # Pulls project list context from the central data frame
-        available_projects_list = sorted(proj_reg_df['Project'].dropna().unique().tolist())
-        
-        # Calls the unified frontend interface
-        render_upgraded_node_logistics_tab(client, full_reg_df, available_projects_list)
-
+        try:
+            # Safely invoke your pre-existing helper workflow utility block
+            render_upgraded_node_logistics_tab(
+                client=client, 
+                full_reg_df=full_reg_df, 
+                available_projects_list=available_projects_list
+            )
+        except NameError as ns_err:
+            st.error(f"❌ Structural Execution Error: A required namespace function was missing during compilation: {ns_err}")
+        except Exception as e:
+            st.error(f"❌ Failed rendering administrative node logistics canvas: {e}")
+            
     # --- SUB-TAB 4: DATA RECOVERY ---
     with tab_recovery:
         st.subheader("📡 Operational Cloud Data Backfill Engine")
