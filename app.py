@@ -4420,23 +4420,24 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
                 st.error("❌ Action Rejected: Custom location field string value cannot be blank.")
                 return
 
-            # 🛡️ HARDENED STRING ESCAPING WORKSPACE: Protect single quotes from breaking SQL string borders
+            # 🛡️ HARDENED STRING CLEANER: Protect data fields from tearing query script structures
             final_loc_str = str(raw_loc_str).replace("'", "''").strip()
             safe_proj = str(edit_proj).replace("'", "''").strip()
             safe_status = str(edit_status).replace("'", "''").strip()
             safe_bank = str(edit_bank).strip().replace("'", "''")
 
-            sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
-            sql_bank_val = f"'{safe_bank}'" if safe_bank != "" else "NULL"
-            sql_end_val = f"DATE('{edit_end}')" if use_end_date_toggle else "NULL"
+            # Format database entry fields directly inside clean variables
+            sql_bank_clause = f"'{safe_bank}'" if safe_bank != "" else "NULL"
+            sql_depth_clause = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+            sql_end_clause = f"DATE('{edit_end}')" if use_end_date_toggle else "NULL"
             
-            # Explicit transaction script utilizing clear variable mapping anchors
+            # Formulate the atomic structural query transaction block cleanly
             update_sql = f"""
                 BEGIN TRANSACTION;
                 DELETE FROM `{target_registry}` 
                 WHERE NodeNum = '{node_id}' AND Start_Date = DATE('{selected_node_data['Start_Date']}');
                 INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                VALUES ('{node_id}', '{safe_proj}', '{final_loc_str}', {sql_bank_val}, {sql_depth}, '{safe_status}', DATE('{edit_start}'), {sql_end_val});
+                VALUES ('{node_id}', '{safe_proj}', '{final_loc_str}', {sql_bank_clause}, {sql_depth_clause}, '{safe_status}', DATE('{edit_start}'), {sql_end_clause});
                 COMMIT;
             """
             try:
