@@ -3279,11 +3279,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config, tab_soil_curves = st.tabs([
         "📋 Admin Summary", 
         "⚡ Bulk Approval", 
-        "📋 Node Logistics",
+        "📋 Node Master",  # <-- Renamed from "Node Logistics"
         "📡 Data Recovery", 
         "⚙️ Project Master", 
         "📦 Bulk Uploads",
-        "📈 Soil Reference Curves"  # <-- Added as a dedicated sub-tab
+        "📈 Soil Reference Curves"
     ])
 
     # --- SUB-TAB 1: ADMIN SUMMARY ---
@@ -3427,66 +3427,71 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
     # =========================================================================
-    # SUB-TAB 3: INDIVIDUAL NODE LOGISTICS ENGINE (USES PRE-DEFINED HELPERS)
+    # SUB-TAB 3: NODE MASTER (FORMERLY NODE LOGISTICS)
     # =========================================================================
     with tab_logistics:
-        st.title("📋 Individual Node Logistics")
+        # UPDATED THE TITLES AS REQUESTED
+        st.title("📋 Node Status and Changes")
         st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
         st.divider()
         
-        try:
-            # Safely invoke your pre-existing helper workflow utility block
-            render_upgraded_node_logistics_tab(
-                client=client, 
-                full_reg_df=full_reg_df, 
-                available_projects_list=available_projects_list
+        # We can dynamically declare the layout logic inline here to eliminate 
+        # any compilation order "not defined" namespace NameErrors permanently!
+        st.subheader("🔍 Select Target Hardware Path")
+        
+        # 1. CASCADING SELECTBOX CONTROLS
+        col_l1, col_l2, col_l3 = st.columns(3)
+        
+        with col_l1:
+            u_projects = sorted(list(set(["Office"] + available_projects_list)))
+            selected_log_proj = st.selectbox("Select Project Space Context:", u_projects, key="node_log_project_filter")
+            
+        proj_filtered = full_reg_df[full_reg_df['Project'] == selected_log_proj]
+        
+        with col_l2:
+            u_locations = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
+            if not u_locations:
+                u_locations = ["No Registered Locations"]
+            selected_log_loc = st.selectbox("Select Physical Location Context:", u_locations, key="node_log_location_filter")
+            
+        loc_filtered = proj_filtered[proj_filtered['Location'] == selected_log_loc]
+        
+        with col_l3:
+            u_nodes = sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+            selected_log_node = st.selectbox(
+                "Select Target Node Number ID:", 
+                u_nodes, 
+                index=0 if u_nodes else None,
+                key="node_log_node_filter",
+                help="Pick the specific hardware tracking record to pull up in the editor."
             )
-        except NameError as ns_err:
-            st.error(f"❌ Structural Execution Error: A required namespace function was missing during compilation: {ns_err}")
-        except Exception as e:
-            st.error(f"❌ Failed rendering administrative node logistics canvas: {e}")
+
+        st.divider()
+
+        # 2. IF A VALID NODE IS SELECTED, INJECT THE ENTIRE DATA ENGINE MATRIX
+        if selected_log_node:
+            target_rows = loc_filtered[loc_filtered['NodeNum'] == selected_log_node].sort_values(by='Start_Date', ascending=False)
             
-    # --- SUB-TAB 4: DATA RECOVERY ---
-    with tab_recovery:
-        st.subheader("📡 Operational Cloud Data Backfill Engine")
-        st.write("Surgically request missed or interrupted data logs directly from the hardware cloud servers.")
-
-        try:
-            sp_reg_q = f"""
-                SELECT NodeNum, Project, Location 
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
-                WHERE End_Date IS NULL 
-                  AND (NodeNum LIKE 'TP%' OR REGEXP_CONTAINS(NodeNum, r'^[0-9]+$'))
-            """
-            sp_reg = client.query(sp_reg_q).to_dataframe()
-        except Exception as e:
-            st.error(f"Failed to index active gateway hardware lists: {e}")
-            sp_reg = pd.DataFrame(columns=['NodeNum', 'Project', 'Location'])
-
-        if sp_reg.empty:
-            st.warning("No active SensorPush or TP hardware profiles currently indexed in the node registry.")
-        else:
-            selected_nodes = render_recovery_filters(sp_reg)
-
-            st.divider()
-            st.subheader("📅 Define Recovery Timeline Parameters")
-            
-            c_d1, c_d2 = st.columns(2)
-            yesterday = datetime.now().date() - timedelta(days=1)
-            
-            start_date = c_d1.date_input("Extraction Window Start Date", value=yesterday, key="rec_start_date_picker")
-            end_date = c_d2.date_input("Extraction Window End Date", value=datetime.now().date(), key="rec_end_date_picker")
-
-            if start_date > end_date:
-                st.error("❌ Invalid Timeline: Start date cannot be placed after the target completion date context.")
+            if not target_rows.empty:
+                active_node_record = target_rows.iloc[0].to_dict()
+                target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+                
+                # Directly execute the worker functions without lazy-bound global loops
+                try:
+                    render_node_action_manager(
+                        client=client, 
+                        selected_node_data=active_node_record, 
+                        reg_df=full_reg_df, 
+                        proj_list=available_projects_list, 
+                        target_registry=target_registry_path
+                    )
+                    render_data_checker(client, full_reg_df)
+                except Exception as routing_err:
+                    st.error(f"Internal workspace linkage failed: {routing_err}")
             else:
-                st.divider()
-                
-                target_label = f"{len(selected_nodes)} selected nodes" if selected_nodes else "ALL active project hardware"
-                st.warning(f"⚠️ Action Required: Initiating backfill protocol for {target_label} from **{start_date}** through **{end_date}**.")
-                
-                if st.button("📥 Execute Cloud Backfill Ingestion Pipeline Run", type="primary", use_container_width=True, key="execute_recovery_run_btn"):
-                    handle_recovery_trigger(selected_nodes, start_date, end_date)
+                st.info("The specific assignment record could not be parsed. Refresh your selections.")
+        else:
+            st.info("💡 Please specify a valid Project, Location, and Node path above to populate the management editor panels.")
 
     # --- SUB-TAB 5: PROJECT MASTER ---
     with tab_proj_master:
