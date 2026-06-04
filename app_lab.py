@@ -3018,6 +3018,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
     
     all_rows = []
     hardware_map = {}
+    db_max_timestamps = {}
     node_stats = {}
     account_stats = {}
 
@@ -3054,6 +3055,20 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             st.error(f"Failed to query inventory map tables: {e}")
             st.stop()
 
+        # --- PRE-FLIGHT CHECK: EXTRACT LAST SEEN TIMESTAMPS FROM MASTER VIEW ---
+        st.write("📅 Checking historical system check-in history benchmarks...")
+        try:
+            time_q = f"""
+                SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time 
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` 
+                GROUP BY NodeNum
+            """
+            for row in db_client.query(time_q):
+                if row.max_time:
+                    db_max_timestamps[str(row.NodeNum)] = str(row.max_time)
+        except Exception as e:
+            st.warning(f"Could not calculate maximum timelines: {e}")
+
         for acc in ACCOUNTS:
             st.write(f"🔐 Authenticating token profile for `{acc['email']}`...")
             account_stats[acc['email']] = 0
@@ -3070,7 +3085,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                             device_rssi_map[str(s_id).strip()] = s_meta.get('rssi')
 
                 st.write(f"📥 Pulling raw cloud payload matrix for `{acc['email']}`...")
-                # Fix parameter maps to pull full historical sequences without cloud capping
                 samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso, "limit": 10000}
                 r_samples = requests.post(f"{LOCAL_API_URL}/samples", headers={"Authorization": token}, json=samples_payload, timeout=60).json()
                 
@@ -3113,11 +3127,9 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
         else:
             st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
             try:
-                # Convert immediately to DataFrame to bypass streaming buffer locks completely
                 upload_df = pd.DataFrame(all_rows)
                 real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
                 
-                # Enforce atomic batch write-append configs
                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                 db_client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
                 
@@ -3130,35 +3142,45 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 st.error(f"Batch loading ingestion pipeline failure: {bq_err}")
                 status.update(state="error")
 
-    # --- RENDER STATISTICAL BREAKDOWN GRID WITH UN-CAPPED COUNTS ---
-    if total_recovered_appends > 0:
+    # --- RENDER UPGRADED STATISTICAL BREAKDOWN GRID WITH LAST SEEN BENCHMARKS ---
+    if node_stats:
         st.write("### 📊 Data Recovery Tally Distribution:")
         summary_records = []
         grand_total_tally = 0
         
-        # Pull dynamic unique counts out of the batch dataset
-        for node in sorted(upload_df['NodeNum'].unique()):
-            if selected_nodes and node not in selected_nodes:
+        # Build list of active nodes to display
+        nodes_to_report = selected_nodes if selected_nodes else sorted(list(node_stats.keys()))
+        
+        for node in nodes_to_report:
+            if node not in node_stats:
                 continue
-            
-            true_node_count = sum(1 for row in all_rows if row["NodeNum"] == node)
+                
+            # Count points extracted during this specific execution run
+            true_node_count = sum(1 for row in all_rows if row["NodeNum"] == node) if total_recovered_appends > 0 else 0
             grand_total_tally += true_node_count
+            
+            # Fetch the pre-calculated last seen checkpoint string
+            last_checked_in = db_max_timestamps.get(node, "❌ No Historical Records Found")
             
             summary_records.append({
                 "Node Number": node,
+                "Last Database Check-In": last_checked_in,
                 "Points Extracted & Appended": true_node_count
             })
             
-        summary_df = pd.DataFrame(summary_records)
+        summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
         
         # Append grand total row block to footer canvas
         total_row = pd.DataFrame([{
             "Node Number": "🧮 Combined Total Pool",
+            "Last Database Check-In": "—",
             "Points Extracted & Appended": grand_total_tally
         }])
         summary_df = pd.concat([summary_df, total_row], ignore_index=True)
+        
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
-        st.balloons()
+        if total_recovered_appends > 0:
+            st.balloons()
 
 
 ######################
