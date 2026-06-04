@@ -3115,7 +3115,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                                 "timestamp": pd.to_datetime(s['observed']),
                                 "NodeNum": str(friendly_name),
                                 "temperature": float(temp),
-                                "rssi": int(current_device_rssi) if current_device_rssi is not None else None
+                                "rssi": float(current_device_rssi) if current_device_rssi is not None else None
                             })
             except Exception:
                 continue
@@ -3128,8 +3128,12 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
             try:
                 upload_df = pd.DataFrame(all_rows)
-                real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
                 
+                # FIXED: Force the rssi series to match BigQuery numerical precision expectations
+                if 'rssi' in upload_df.columns:
+                    upload_df['rssi'] = upload_df['rssi'].astype(object).where(upload_df['rssi'].notnull(), None)
+
+                real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                 db_client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
                 
@@ -3142,24 +3146,20 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 st.error(f"Batch loading ingestion pipeline failure: {bq_err}")
                 status.update(state="error")
 
-    # --- RENDER UPGRADED STATISTICAL BREAKDOWN GRID WITH LAST SEEN BENCHMARKS ---
+    # --- RENDER STATISTICAL BREAKDOWN GRID WITH LAST SEEN BENCHMARKS ---
     if node_stats:
         st.write("### 📊 Data Recovery Tally Distribution:")
         summary_records = []
         grand_total_tally = 0
         
-        # Build list of active nodes to display
         nodes_to_report = selected_nodes if selected_nodes else sorted(list(node_stats.keys()))
         
         for node in nodes_to_report:
             if node not in node_stats:
                 continue
                 
-            # Count points extracted during this specific execution run
             true_node_count = sum(1 for row in all_rows if row["NodeNum"] == node) if total_recovered_appends > 0 else 0
             grand_total_tally += true_node_count
-            
-            # Fetch the pre-calculated last seen checkpoint string
             last_checked_in = db_max_timestamps.get(node, "❌ No Historical Records Found")
             
             summary_records.append({
@@ -3170,7 +3170,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             
         summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
         
-        # Append grand total row block to footer canvas
         total_row = pd.DataFrame([{
             "Node Number": "🧮 Combined Total Pool",
             "Last Database Check-In": "—",
@@ -3181,7 +3180,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
         if total_recovered_appends > 0:
             st.balloons()
-
 
 ######################
 # Page: Admin Tools  #
