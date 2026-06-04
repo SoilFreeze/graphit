@@ -3213,13 +3213,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         return
 
     # 2. NAVIGATION TABS (6 slots neatly aligned)
-    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config = st.tabs([
+    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config, tab_soil_curves = st.tabs([
         "📋 Admin Summary", 
         "⚡ Bulk Approval", 
         "📋 Node Logistics",
         "📡 Data Recovery", 
         "⚙️ Project Master", 
-        "📦 Bulk Uploads"  # <-- Changed label string text here
+        "📦 Bulk Uploads",
+        "📈 Soil Reference Curves"  # <-- Added as a dedicated sub-tab
     ])
 
     # --- SUB-TAB 1: ADMIN SUMMARY ---
@@ -3536,13 +3537,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         time.sleep(1)
                         st.rerun()
 
-    # --- SUB-TAB 6: BULK UPLOADS ---
+    # =========================================================================
+    # SUB-TAB 6: BULK UPLOADS (NOW CLEANLY REDUCED TO SPREADSHEETS)
+    # =========================================================================
     with tab_bulk_config:
         st.subheader("📦 Centralized Bulk Ingestion Engine")
         
         cfg_mode = st.radio(
             "Select Allocation Ingestion Target Engine:", 
-            ["Update Hardware Inventory", "Update Node Registry", "Upload Soil Reference Curves"], 
+            ["Update Hardware Inventory", "Update Node Registry"], # Removed soil curves choice
             horizontal=True, 
             key="bulk_uploads_engine_radio"
         )
@@ -3555,12 +3558,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.markdown("### 📡 Update Hardware Inventory")
             st.info("Ingest spreadsheet data to append fresh units onto your inventory master table. Required Fields: `RawID`, `NodeNum`.")
             
-            u_file = st.file_uploader(
-                "Upload Inventory Dataset File", 
-                type=["csv", "xlsx"], 
-                key="bulk_inv_file_uploader"
-            )
-            
+            u_file = st.file_uploader("Upload Inventory Dataset File", type=["csv", "xlsx"], key="bulk_inv_file_uploader")
             if u_file:
                 try:
                     if u_file.name.endswith('.csv'):
@@ -3573,52 +3571,39 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     
                     if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
                         actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
-                        
                         if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
-                            st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields. Spreadsheets must contain both 'RawID' and 'NodeNum' columns.")
+                            st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields.")
                         else:
                             with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
                                 clean_upload_df = pd.DataFrame({
                                     'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
                                     'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
                                 }).dropna()
-                                
                                 staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
-                                load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRANSLATE")
+                                load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_EMPTY")
                                 client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()
                                 
                                 merge_upsert_sql = f"""
                                     INSERT INTO `{target_inventory_path}` (RawID, NodeNum)
-                                    SELECT DISTINCT s.RawID, s.NodeNum
-                                    FROM `{staging_table}` s
-                                    WHERE NOT EXISTS (
-                                        SELECT 1 FROM `{target_inventory_path}` i
-                                        WHERE TRIM(CAST(i.RawID AS STRING)) = TRIM(s.RawID)
-                                    )
+                                    SELECT DISTINCT s.RawID, s.NodeNum FROM `{staging_table}` s
+                                    WHERE NOT EXISTS (SELECT 1 FROM `{target_inventory_path}` i WHERE TRIM(CAST(i.RawID AS STRING)) = TRIM(s.RawID))
                                 """
                                 query_job = client.query(merge_upsert_sql)
                                 query_job.result()
-                                
                                 client.delete_table(staging_table, not_found_ok=True)
                                 
-                            st.success(f"🎉 Inventory synchronization complete! Appended {query_job.num_dml_affected_rows:,} fresh tracking metrics safely onto your hardware catalog.")
+                            st.success(f"🎉 Inventory synchronization complete! Appended {query_job.num_dml_affected_rows:,} fresh rows.")
                             st.cache_data.clear()
                             time.sleep(1)
                             st.rerun()
-                            
                 except Exception as e:
-                    st.error(f"Failed parsing inventory load batch matrix line rules: {e}")
+                    st.error(f"Failed parsing inventory load batch matrix: {e}")
                     
         # --- ENGINE B: UPDATE NODE REGISTRY ---
         elif cfg_mode == "Update Node Registry":
             st.markdown("### 📋 Update Node Registry Maps")
             st.info("Mass register multi-sensor arrays or shift batch deployment settings across timelines using configuration maps.")
-            
-            with st.expander("📊 View Required Registry Template Rules Layout"):
-                st.code("NodeNum,Project,Location,Bank,Depth,Start_Date,SensorStatus")
-            
             u_csv = st.file_uploader("Upload Registry Deployment Map File", type="csv", key="bulk_reg_csv_uploader")
-            
             if u_csv:
                 df_upload = pd.read_csv(u_csv)
                 st.write("### Preview Staged Registry Matrix")
@@ -3635,16 +3620,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                     df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.date
                                 else:
                                     df_upload['Start_Date'] = datetime.now().date()
-                                    
                                 if 'SensorStatus' not in df_upload.columns:
                                     df_upload['SensorStatus'] = 'On Project'
-
                                 if 'PhysicalID' in df_upload.columns:
                                     df_upload = df_upload.drop(columns=['PhysicalID'])
                                     
                                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(df_upload, target_registry_path, job_config=job_config).result()
-                                
                             st.success(f"🎉 Success! Appended {len(df_upload)} nodes onto your asset deployment matrix timeline safely.")
                             st.cache_data.clear()
                             time.sleep(1)
@@ -3652,120 +3634,119 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     except Exception as upload_err:
                         st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
 
-        # --- ENGINE C: UPLOAD SOIL REFERENCE CURVES ---
-        elif cfg_mode == "Upload Soil Reference Curves":
-            st.markdown("### 📈 Upload Soil Reference Curves")
-            
-            st.write("#### 📂 Currently Active Library Curves")
-            try:
-                # 1. Fetch the overall table's last modification time directly from dataset metadata
-                meta_q = f"""
-                    SELECT FORMAT_TIMESTAMP('%m/%d/%Y', last_modified_time, 'America/Los_Angeles') as last_mod
-                    FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
-                    WHERE table_id = 'reference_curves'
-                """
-                meta_df = client.query(meta_q).to_dataframe()
-                table_last_update = meta_df['last_mod'].iloc[0] if not meta_df.empty else "N/A"
+    # =========================================================================
+    # NEW SUB-TAB 7: STANDALONE SOIL REFERENCE CURVES WORKSPACE
+    # =========================================================================
+    with tab_soil_curves:
+        st.subheader("📈 Reference Curve Management Matrix")
+        target_curves_path = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+        
+        st.write("#### 📂 Currently Active Library Curves")
+        try:
+            # Extract last table modification date directly via BigQuery millisecond tracking systems
+            meta_q = f"""
+                SELECT FORMAT_TIMESTAMP('%m/%d/%Y', TIMESTAMP_MILLIS(last_modified_time), 'America/Los_Angeles') as last_mod
+                FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
+                WHERE table_id = 'reference_curves'
+            """
+            meta_df = client.query(meta_q).to_dataframe()
+            table_last_update = meta_df['last_mod'].iloc[0] if not meta_df.empty else "N/A"
 
-                # 2. Extract active curve entries grouped cleanly by ID attributes
-                inv_curves_q = f"""
-                    SELECT 
-                        REGEXP_EXTRACT(CurveID, r'^(\\d+)') as `Project`,
-                        REGEXP_EXTRACT(CurveID, r'-(.+)$') as `File Name`,
-                        CurveID as `Raw_ID`,
-                        COUNT(*) as `Entries`
-                    FROM `{target_curves_path}` 
-                    WHERE CurveID IS NOT NULL
-                    GROUP BY CurveID
-                    ORDER BY `Project` ASC, `File Name` ASC
-                """
-                active_curves_df = client.query(inv_curves_q).to_dataframe()
+            inv_curves_q = f"""
+                SELECT 
+                    REGEXP_EXTRACT(CurveID, r'^(\\d+)') as `Project`,
+                    REGEXP_EXTRACT(CurveID, r'-(.+)$') as `File Name`,
+                    CurveID as `Raw_ID`,
+                    COUNT(*) as `Entries`
+                FROM `{target_curves_path}` 
+                WHERE CurveID IS NOT NULL
+                GROUP BY CurveID
+                ORDER BY `Project` ASC, `File Name` ASC
+            """
+            active_curves_df = client.query(inv_curves_q).to_dataframe()
+            
+            if not active_curves_df.empty:
+                active_curves_df['Project'] = active_curves_df['Project'].fillna("System-Wide")
+                active_curves_df['File Name'] = active_curves_df['File Name'].fillna(active_curves_df['Raw_ID'])
                 
-                if not active_curves_df.empty:
-                    # Clean up missing or mismatched regex fields in pandas
-                    active_curves_df['Project'] = active_curves_df['Project'].fillna("System-Wide")
-                    active_curves_df['File Name'] = active_curves_df['File Name'].fillna(active_curves_df['Raw_ID'])
-                    
-                    # Package into the exact four data columns requested
-                    final_render_df = pd.DataFrame({
-                        "Project": active_curves_df['Project'],
-                        "File Name": active_curves_df['File Name'],
-                        "Number of Entries": active_curves_df['Entries'],
-                        "Date Uploaded": table_last_update  # Uses the metadata system update timestamp
-                    })
+                final_render_df = pd.DataFrame({
+                    "Project": active_curves_df['Project'],
+                    "File Name": active_curves_df['File Name'],
+                    "Number of Entries": active_curves_df['Entries'],
+                    "Date Uploaded": table_last_update
+                })
 
-                    st.dataframe(
-                        final_render_df, 
-                        use_container_width=True, 
-                        hide_index=True,
-                        column_config={
-                            "Number of Entries": st.column_config.NumberColumn("Number of Entries", format="%d")
-                        }
-                    )
-                    st.caption(f"Total reference curve configurations logged: {len(active_curves_df)}")
-                else:
-                    st.info("ℹ️ The reference curve datastore is currently unpopulated.")
-            except Exception as schema_err:
-                st.error(f"❌ Reference catalog compilation error: {schema_err}")
+                st.dataframe(
+                    final_render_df, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={
+                        "Number of Entries": st.column_config.NumberColumn("Number of Entries", format="%d")
+                    }
+                )
+                st.caption(f"Total reference curve configurations logged: {len(active_curves_df)}")
+            else:
+                st.info("ℹ️ The reference curve datastore is currently unpopulated.")
+        except Exception as schema_err:
+            st.error(f"❌ Reference catalog compilation error: {schema_err}")
 
-            st.divider()
+        st.divider()
 
-            st.write("#### 📤 Upload New Dataset Files")
-            st.info("💡 **Overwrite Rule Active:** Uploading files with identifiers that already exist in the system will automatically clear out their old historical data blocks and replace them completely.")
-            st.caption("Expected Format: CSV files (e.g., `2538-T1.csv`). Data should start on Row 3. Col 1: Day, Col 2: Temperature.")
-            
-            u_files = st.file_uploader(
-                "Select Soil Curve CSV Files", 
-                type="csv", 
-                accept_multiple_files=True, 
-                key="bulk_uploads_curves_uploader"
-            )
-            
-            if u_files:
-                if st.button("💾 Commit Curve Files to BigQuery", key="bulk_uploads_curves_commit_btn", use_container_width=True):
-                    progress_bar = st.progress(0)
-                    
-                    for idx, f in enumerate(u_files):
+        st.write("#### 📤 Upload New Dataset Files")
+        st.info("💡 **Overwrite Rule Active:** Uploading files with identifiers that already exist in the system will automatically clear out their old historical data blocks and replace them completely.")
+        st.caption("Expected Format: CSV files (e.g., `2538-T1.csv`). Data should start on Row 3. Col 1: Day, Col 2: Temperature.")
+        
+        u_files = st.file_uploader(
+            "Select Soil Curve CSV Files", 
+            type="csv", 
+            accept_multiple_files=True, 
+            key="standalone_tab_curves_uploader"
+        )
+        
+        if u_files:
+            if st.button("💾 Commit Curve Files to BigQuery", key="bulk_uploads_curves_commit_btn", use_container_width=True):
+                progress_bar = st.progress(0)
+                
+                for idx, f in enumerate(u_files):
+                    try:
+                        curve_id = f.name.replace(".csv", "").strip()
                         try:
-                            curve_id = f.name.replace(".csv", "").strip()
-                            try:
-                                f.seek(0)
-                                ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
-                            except Exception:
-                                f.seek(0)
-                                ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
+                            f.seek(0)
+                            ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
+                        except Exception:
+                            f.seek(0)
+                            ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
 
-                            ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
-                            ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
-                            ref_df = ref_df.dropna(subset=['Day', 'Temp'])
-                            ref_df['CurveID'] = curve_id
+                        ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
+                        ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
+                        ref_df = ref_df.dropna(subset=['Day', 'Temp'])
+                        ref_df['CurveID'] = curve_id
 
-                            if not ref_df.empty:
-                                client.query(f"DELETE FROM `{target_curves_path}` WHERE CurveID='{curve_id}'").result()
-                                
-                                # Use specific schema configuration mapping matching your three native columns
-                                job_config = bigquery.LoadJobConfig(
-                                    schema=[
-                                        bigquery.SchemaField("CurveID", "STRING"),
-                                        bigquery.SchemaField("Day", "INTEGER"),
-                                        bigquery.SchemaField("Temp", "FLOAT"),
-                                    ],
-                                    write_disposition="WRITE_APPEND"
-                                )
-                                client.load_table_from_dataframe(ref_df[['CurveID', 'Day', 'Temp']], target_curves_path, job_config=job_config).result()
-                                st.toast(f"Import Complete: {curve_id}", icon="✅")
-                            else:
-                                st.error(f"❌ {f.name} contained no valid numeric data vectors after row 2.")
-                                
-                            progress_bar.progress((idx + 1) / len(u_files))
+                        if not ref_df.empty:
+                            client.query(f"DELETE FROM `{target_curves_path}` WHERE CurveID='{curve_id}'").result()
                             
-                        except Exception as e:
-                            st.error(f"❌ Error processing reference file {f.name}: {e}")
-                    
-                    st.success("🎉 Soil reference curves successfully processed and saved system-wide.")
-                    st.cache_data.clear()
-                    time.sleep(1.0)
-                    st.rerun()
+                            job_config = bigquery.LoadJobConfig(
+                                schema=[
+                                    bigquery.SchemaField("CurveID", "STRING"),
+                                    bigquery.SchemaField("Day", "INTEGER"),
+                                    bigquery.SchemaField("Temp", "FLOAT"),
+                                ],
+                                write_disposition="WRITE_APPEND"
+                                )
+                            client.load_table_from_dataframe(ref_df[['CurveID', 'Day', 'Temp']], target_curves_path, job_config=job_config).result()
+                            st.toast(f"Import Complete: {curve_id}", icon="✅")
+                        else:
+                            st.error(f"❌ {f.name} contained no valid numeric data vectors after row 2.")
+                            
+                        progress_bar.progress((idx + 1) / len(u_files))
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error processing reference file {f.name}: {e}")
+                
+                st.success("🎉 Soil reference curves successfully processed and saved system-wide.")
+                st.cache_data.clear()
+                time.sleep(1.0)
+                st.rerun()
 
 ###################
 # 12. MAIN ROUTER #
