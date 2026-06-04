@@ -338,48 +338,58 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. THEORETICAL REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            target_q = f"""
-                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%') 
-                AND UPPER(CurveID) LIKE UPPER('%{loc_part}%')
-                ORDER BY Day
-            """
-            target_df = client.query(target_q).to_dataframe()
-            if not target_df.empty:
-                
-                # --- NEW: DESIGN VARIATION MATRICES ---
-                dash_styles = ['dashdot', 'dash', 'dot']
-                
-                gray_shades = [
-                    'rgba(30, 30, 30, 0.8)',   
-                    'rgba(70, 70, 70, 0.75)',  
-                    'rgba(110, 110, 110, 0.7)' 
-                ]
-                
-                for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
-                    c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-                    c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
-                    ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                    soil_label = str(cid).split('-')[-1].strip()
+            # Extract the raw project number (e.g., 2541)
+            proj_str = str(st.session_state.get('selected_project', ''))
+            proj_match = re.findall(r'\d+', proj_str)
+            proj_num = proj_match[0] if proj_match else ""
+            
+            # Extract the exact pipe identifier (e.g., T1, T10)
+            loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
+
+            if proj_num and loc_part:
+                # Build rigid strict string comparison blocks to kill multi-channel cross-talk leaks
+                target_q = f"""
+                    SELECT CurveID, Day, Temp 
+                    FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                    WHERE (CurveID = '{proj_num}-{loc_part}' 
+                       OR CurveID = '{proj_num}_{loc_part}'
+                       OR (UPPER(CurveID) LIKE UPPER('%{proj_num}%') AND ENDS_WITH(UPPER(CurveID), UPPER('-{loc_part}'))))
+                    ORDER BY Day
+                """
+                target_df = client.query(target_q).to_dataframe()
+                if not target_df.empty:
+                    dash_styles = ['dashdot', 'dash', 'dot']
+                    gray_shades = [
+                        'rgba(30, 30, 30, 0.8)',   
+                        'rgba(70, 70, 70, 0.75)',  
+                        'rgba(110, 110, 110, 0.7)' 
+                    ]
                     
-                    selected_dash = dash_styles[c_idx % len(dash_styles)]
-                    selected_gray = gray_shades[c_idx % len(gray_shades)]
-                    
-                    fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], 
-                        y=ref_y, 
-                        name=f"<b>Goal: {soil_label}</b>", 
-                        mode='lines',
-                        line=dict(
-                            color=selected_gray, 
-                            width=3.5, 
-                            dash=selected_dash, 
-                            shape='spline', 
-                            smoothing=1.3
-                        ),
-                        legendrank=1 
-                    ))
-        except: pass
+                    for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
+                        c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                        c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
+                        ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                        soil_label = str(cid).split('-')[-1].strip()
+                        
+                        selected_dash = dash_styles[c_idx % len(dash_styles)]
+                        selected_gray = gray_shades[c_idx % len(gray_shades)]
+                        
+                        fig.add_trace(go.Scatter(
+                            x=c_df['timestamp'], 
+                            y=ref_y, 
+                            name=f"<b>Goal: {soil_label}</b>", 
+                            mode='lines',
+                            line=dict(
+                                color=selected_gray, 
+                                width=3.5, 
+                                dash=selected_dash, 
+                                shape='spline', 
+                                smoothing=1.3
+                            ),
+                            legendrank=1 
+                        ))
+        except Exception as e:
+            pass
 
     # 4. SENSOR DATA (Naturally Sorted Group Loops)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
@@ -2925,13 +2935,12 @@ def render_recovery_filters(sp_reg):
 
 
 def handle_recovery_trigger(selected_nodes, start_date, end_date):
-    """Manages the cloud pipeline to execute the smart delta data recovery engine."""
+    """Manages the cloud pipeline to execute the data recovery engine and reports on all targeted nodes."""
     import requests
     import numpy as np
     
     all_rows = []
     hardware_map = {}
-    db_max_timestamps = {}
     node_stats = {}
     account_stats = {}
 
@@ -2948,6 +2957,14 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
     start_time_iso = datetime.combine(start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
     end_time_iso = datetime.combine(end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
+    # Seed the stats tracker with ALL selected nodes so they show up even with 0 points
+    if selected_nodes:
+        for node in selected_nodes:
+            node_stats[node] = 0
+    else:
+        # If no nodes were explicitly selected, we will seed them dynamically during the inventory scan
+        pass
+
     with st.status("Executing Cloud Backfill Ingestion Pipeline Run...", expanded=True) as status:
         st.write("🔍 Extracting Translation Mappings from Hardware Inventory...")
         try:
@@ -2955,19 +2972,15 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             db_client = get_bq_client()
             for row in db_client.query(inv_q):
                 clean_db_id = str(row.RawID).split('.')[0].strip()
-                hardware_map[clean_db_id] = str(row.NodeNum).strip()
+                friendly_name = str(row.NodeNum).strip()
+                hardware_map[clean_db_id] = friendly_name
+                
+                # Seed the node in stats if global recovery is running and it matches our active scope
+                if not selected_nodes:
+                    node_stats[friendly_name] = 0
         except Exception as e:
             st.error(f"Failed to query inventory map tables: {e}")
             st.stop()
-
-        st.write("📅 Checking existing database timeline bookmarks...")
-        try:
-            time_q = f"SELECT NodeNum, MAX(timestamp) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}` GROUP BY NodeNum"
-            for row in db_client.query(time_q):
-                if row.max_time:
-                    db_max_timestamps[str(row.NodeNum)] = row.max_time.isoformat()
-        except Exception as e:
-            st.warning(f"Could not calculate maximum timelines: {e}")
 
         for acc in ACCOUNTS:
             st.write(f"🔐 Authenticating token profile for `{acc['email']}`...")
@@ -2998,47 +3011,41 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                     
                     if not friendly_name:
                         friendly_name = f"UNMAPPED-{api_root_id}"
+                        if friendly_name not in node_stats:
+                            node_stats[friendly_name] = 0
                         
                     if selected_nodes and friendly_name not in selected_nodes:
                         continue
                         
-                    if friendly_name not in node_stats:
-                        node_stats[friendly_name] = {"Downloaded": 0, "New Unique Appends": 0}
-                        
-                    latest_db_bookmark = db_max_timestamps.get(friendly_name, "")
                     current_device_rssi = device_rssi_map.get(str(s_id).strip())
                     
                     for s in samples:
                         temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                         if temp is not None:
-                            node_stats[friendly_name]["Downloaded"] += 1
-                            observed_time = s['observed']
-                            clean_observed = observed_time.replace('Z', '+00:00')
+                            # BOOKMARK REMOVED: Every point found is accepted and tallied
+                            node_stats[friendly_name] += 1
+                            account_stats[acc['email']] += 1
                             
-                            if not latest_db_bookmark or clean_observed > latest_db_bookmark:
-                                node_stats[friendly_name]["New Unique Appends"] += 1
-                                account_stats[acc['email']] += 1
-                                all_rows.append({
-                                    "timestamp": observed_time,
-                                    "NodeNum": str(friendly_name),
-                                    "temperature": float(temp),
-                                    "rssi": int(current_device_rssi) if current_device_rssi is not None else None
-                                })
+                            all_rows.append({
+                                "timestamp": s['observed'],
+                                "NodeNum": str(friendly_name),
+                                "temperature": float(temp),
+                                "rssi": int(current_device_rssi) if current_device_rssi is not None else None
+                            })
             except Exception:
                 continue
 
         total_recovered_appends = len(all_rows)
         if total_recovered_appends == 0:
-            st.info("🔒 Central database perfectly synchronized. 0 duplicate packets written.")
-            status.update(label="Database Up To Date", state="complete")
+            st.info("🔒 Cloud accounts returned 0 points for this window context.")
+            status.update(label="Run Finalized (0 Points Found)", state="complete")
         else:
-            st.write(f"📥 Injecting unique rows directly into `{LOCAL_REC_TABLE}`...")
+            st.write(f"📥 Injecting rows directly into `{LOCAL_REC_TABLE}`...")
             try:
                 real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
-                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                 errors = db_client.insert_rows_json(real_table_ref, all_rows)
                 if not errors:
-                    st.success(f"🎉 Success! Appended {total_recovered_appends} unique rows to storage.")
+                    st.success(f"🎉 Success! Appended {total_recovered_appends} rows to storage.")
                     summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
                     st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
                     status.update(label="Recovery Complete!", state="complete")
@@ -3050,21 +3057,23 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 st.error(f"Stream submission pipeline failure: {bq_err}")
                 status.update(state="error")
 
+    # --- RENDER STATISTICAL BREAKDOWN GRID (SHOWS EVERY TARGETED SENSOR) ---
     if node_stats:
-        st.write("### 📊 Smart Data Delta Tally Distribution:")
+        st.write("### 📊 Smart Data Recovery Tally Distribution:")
         summary_records = []
-        for node, counts in node_stats.items():
+        for node, count in node_stats.items():
+            # If a user filtered down to specific nodes, only display those in the report matrix
+            if selected_nodes and node not in selected_nodes:
+                continue
             summary_records.append({
                 "Node Number": node,
-                "Total Points in Cloud Window": counts["Downloaded"],
-                "Genuinely New Points Appended": counts["New Unique Appends"]
+                "Points Extracted & Appended": count
             })
         summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        
         if total_recovered_appends > 0:
             st.balloons()
-
-
 
 ######################
 # Page: Admin Tools  #
@@ -3111,7 +3120,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_admin_sum:
         st.subheader("📋 Centralized Infrastructure Status Overview")
         
-        # Table 1: Hardware Inventory Fleet Breakdown (Matches image layout)
+        # Table 1: Hardware Inventory Fleet Breakdown
         st.markdown("### 📡 Hardware Inventory Fleet Breakdown")
         try:
             def classify_hardware_family(node):
@@ -3126,14 +3135,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
             fleet_df['is_active'] = fleet_df['End_Date'].isna()
             
-            # Filter to mirror the live deduplicated overview count matrix precisely
             deduped_units = fleet_df.sort_values(by=['Parent ID', 'is_active'], ascending=[True, False]).drop_duplicates(subset=['Parent ID']).copy()
             
             fleet_pivot = deduped_units.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0)
             desired_order = ["TP", "SP", "Lord", "None of the Above"]
             fleet_pivot = fleet_pivot.reindex(desired_order, fill_value=0)
             
-            # Re-ensure exact status column structures exist to avoid indexing errors
             for stat_col in ["Available", "Dead", "Diagnostic", "On Project"]:
                 if stat_col not in fleet_pivot.columns:
                     fleet_pivot[stat_col] = 0
@@ -3146,7 +3153,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider()
 
-        # Table 2: Upgraded Project Overview Matrix
+        # Table 2: Upgraded Project Overview Matrix (Active Projects only)
         st.markdown("### 🏗️ Active Deployment Overview Matrix")
         summary_summary_q = f"""
             WITH Metrics AS (
@@ -3178,12 +3185,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         try:
             sum_summary_df = client.query(summary_summary_q).to_dataframe()
             
-            # Compute operational day-counters metrics context loops in Python
             rows = []
             for _, r in sum_summary_df.iterrows():
                 p_status = str(r['ProjectStatus']).strip()
                 f_date = r['Date_Freezedown']
-                
                 status_tracking_text = "Not Freezing"
                 
                 if pd.notnull(f_date):
@@ -3212,6 +3217,38 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         except Exception as e:
             st.error(f"Failed to generate upgraded overview matrix: {e}")
 
+        st.divider()
+
+        # Table 3: System-Wide Master Project Directory (All Projects)
+        st.markdown("### 🗄️ Master Project Historical Directory")
+        all_projects_q = f"""
+            WITH NodeCounts AS (
+                SELECT Project, COUNT(DISTINCT NodeNum) as Nodes_Assigned
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
+                WHERE End_Date IS NULL
+                GROUP BY Project
+            )
+            SELECT 
+                p.Project as `Project ID`,
+                COALESCE(p.ProjectName, p.Project) as `Project Name`,
+                p.ProjectStatus as `Project Status`,
+                COALESCE(n.Nodes_Assigned, 0) as `Sensors Assigned`
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` p
+            LEFT JOIN NodeCounts n ON p.Project = n.Project
+            ORDER BY p.ProjectStatus ASC, p.Project ASC
+        """
+        
+        try:
+            with st.spinner("Extracting master systemic tracking history profiles..."):
+                all_proj_df = client.query(all_projects_q).to_dataframe()
+                
+            if not all_proj_df.empty:
+                st.dataframe(all_proj_df, use_container_width=True, hide_index=True)
+                st.caption(f"Total historical lifecycle tracking configurations mapped in system: {len(all_proj_df)}")
+            else:
+                st.info("The system project registry data store is unpopulated.")
+        except Exception as master_err:
+            st.error(f"Failed to build master data log directory: {master_err}")
     # --- SUB-TAB 2: BULK APPROVAL ---
     with tab_bulk_app:
         st.header("⚡ Bulk Approval & Data Maintenance")
