@@ -2668,68 +2668,87 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     
     if st.button("⚡ Run Database Cleanup & Duplicate Purge", use_container_width=True):
         
-        # Hardened sequential staging logic to bypass BigQuery's transaction restrictions 
-        # and provide a precise line-item count of dropped rows.
-        cleanup_sql = f"""
-            -- 1. Create a clean snapshot of unique SensorPush records
-            CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
-            SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
-            FROM (
-                SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
-                FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                WHERE temperature >= -30.0 AND temperature <= 120.0
-            )
-            WHERE rn = 1;
-
-            -- 2. Tally rows being dropped from SensorPush
-            SELECT (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`) - (SELECT COUNT(*) FROM tmp_clean_sensorpush) as sp_dropped;
-
-            -- 3. Overwrite SensorPush production data using an atomic load configuration swap
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
-            SELECT * FROM tmp_clean_sensorpush;
-
-            -- 4. Create a clean snapshot of unique Lord records
-            CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
-            SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
-            FROM (
-                SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
-                FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                WHERE temperature >= -30.0 AND temperature <= 120.0
-            )
-            WHERE rn = 1;
-
-            -- 5. Tally rows being dropped from Lord
-            SELECT (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`) - (SELECT COUNT(*) FROM tmp_clean_lord) as lord_dropped;
-
-            -- 6. Overwrite Lord production data
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
-            SELECT * FROM tmp_clean_lord;
-        """
         try:
-            with st.spinner("Executing structural duplication purge workflows..."):
-                query_job = client.query(cleanup_sql)
-                # Resolve the multi-statement script execution pipeline
-                query_job.result()  
-                
-                # BigQuery returns results for each SELECT statement sequentially in a script execution
-                iterator = query_job.to_dataframe_iterable()
-                results = list(iterator)
-                
-                # Pull the dynamic counts calculated out of steps 2 and 5
-                sp_removed = int(results[0].iloc[0, 0]) if len(results) > 0 else 0
-                lord_removed = int(results[1].iloc[0, 0]) if len(results) > 1 else 0
-                total_removed = sp_removed + lord_removed
+            with st.spinner("Calculating initial database counts..."):
+                # 1. Capture Before Counts
+                count_sp_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
+                count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
             
-            st.success(
-                f"✅ Database Cleanup completed successfully!\n\n"
-                f"* **SensorPush duplicates/outliers removed:** `{sp_removed:,}` points\n"
-                f"* **Lord duplicates/outliers removed:** `{lord_removed:,}` points\n"
-                f"* **Total records purged:** `{total_removed:,}` points"
-            )
-            st.cache_data.clear()
+            with st.spinner("Executing structural duplication purge workflows..."):
+                # 2. Hardened Cleanup Script (Removed rssi from the raw_lord segment)
+                cleanup_sql = f"""
+                    -- A. Clean SensorPush Raw Data
+                    CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
+                    SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
+                    FROM (
+                        SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
+                        FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                        WHERE temperature >= -30.0 AND temperature <= 120.0
+                    )
+                    WHERE rn = 1;
+
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
+                    SELECT * FROM tmp_clean_sensorpush;
+
+                    -- B. Clean Lord Raw Data (No rssi column utilized here)
+                    CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
+                    SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature
+                    FROM (
+                        SELECT timestamp, NodeNum, temperature,
+                               ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
+                        FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                        WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
+                    )
+                    WHERE rn = 1;
+
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
+                    SELECT * FROM tmp_clean_lord;
+                """
+                
+                # Execute the cleanup sequence
+                client.query(cleanup_sql).result()
+                st.cache_data.clear()
+
+            with st.spinner("Calculating post-cleanup metrics..."):
+                # 3. Capture After Counts
+                count_sp_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
+                count_lord_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
+
+            # 4. Math breakdown for the reporting layout
+            sp_removed = count_sp_before - count_sp_after
+            lord_removed = count_lord_before - count_lord_after
+            total_removed = sp_removed + lord_removed
+            
+            # 5. Display wide matrix before/after report
+            st.success("🎉 Database Cleanup successfully completed!")
+            
+            st.markdown("### 📊 Before vs. After Summary Ledger")
+            report_data = [
+                {
+                    "Data Table": "SensorPush (raw_sensorpush)",
+                    "Before Count": f"{count_sp_before:,}",
+                    "After Count": f"{count_sp_after:,}",
+                    "Purged Points": f"{sp_removed:,}"
+                },
+                {
+                    "Data Table": "Lord Wireless (raw_lord)",
+                    "Before Count": f"{count_lord_before:,}",
+                    "After Count": f"{count_lord_after:,}",
+                    "Purged Points": f"{lord_removed:,}"
+                },
+                {
+                    "Combined Total Pool",
+                    f"{count_sp_before + count_lord_before:,}",
+                    f"{count_sp_after + count_lord_after:,}",
+                    f"{total_removed:,}"
+                }
+            ]
+            st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
             
         except Exception as e:
             st.error(f"Cleanup Optimization Engine Failed: {e}")
+
+    st.divider()
     # =========================================================================
     # SECTION 2: BULK UPDATER CONTROLS
     # =========================================================================
