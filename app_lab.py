@@ -3007,7 +3007,7 @@ def render_recovery_filters(sp_reg):
 
 
 def handle_recovery_trigger(selected_nodes, start_date, end_date):
-    """Manages the cloud pipeline to execute a raw data recovery dump into the database table."""
+    """Manages the cloud pipeline to execute a raw data recovery dump into the database table via fast batch loads."""
     import requests
     import numpy as np
     
@@ -3029,7 +3029,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
     start_time_iso = datetime.combine(start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
     end_time_iso = datetime.combine(end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    # Seed the stats tracker with ALL selected nodes so they show up even with 0 points
+    # Seed stats for tracking visual layout fields
     if selected_nodes:
         for node in selected_nodes:
             node_stats[node] = 0
@@ -3043,8 +3043,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 clean_db_id = str(row.RawID).split('.')[0].strip()
                 friendly_name = str(row.NodeNum).strip()
                 hardware_map[clean_db_id] = friendly_name
-                
-                # Seed dynamically if a global recovery run is occurring without precise node filters
                 if not selected_nodes:
                     node_stats[friendly_name] = 0
         except Exception as e:
@@ -3067,7 +3065,8 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                             device_rssi_map[str(s_id).strip()] = s_meta.get('rssi')
 
                 st.write(f"📥 Pulling raw cloud payload matrix for `{acc['email']}`...")
-                samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso}
+                # Fix parameter maps to pull full historical sequences without cloud capping
+                samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso, "limit": 10000}
                 r_samples = requests.post(f"{LOCAL_API_URL}/samples", headers={"Authorization": token}, json=samples_payload, timeout=60).json()
                 
                 sensors_data = r_samples.get('sensors', {})
@@ -3091,11 +3090,10 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                     for s in samples:
                         temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                         if temp is not None:
-                            node_stats[friendly_name] += 1
                             account_stats[acc['email']] += 1
                             
                             all_rows.append({
-                                "timestamp": s['observed'],
+                                "timestamp": pd.to_datetime(s['observed']),
                                 "NodeNum": str(friendly_name),
                                 "temperature": float(temp),
                                 "rssi": int(current_device_rssi) if current_device_rssi is not None else None
@@ -3108,36 +3106,36 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             st.info("🔒 Cloud accounts returned 0 points for this window context.")
             status.update(label="Run Finalized (0 Points Found)", state="complete")
         else:
-            st.write(f"📥 Injecting raw rows directly into `{LOCAL_REC_TABLE}`...")
+            st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
             try:
+                # Convert immediately to DataFrame to bypass streaming buffer locks completely
+                upload_df = pd.DataFrame(all_rows)
                 real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
-                errors = db_client.insert_rows_json(real_table_ref, all_rows)
-                if not errors:
-                    st.success(f"🎉 Success! Dumped {total_recovered_appends:,} rows to storage.")
-                    summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
-                    st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
-                    status.update(label="Recovery Dump Complete!", state="complete")
-                    st.cache_data.clear()
-                else:
-                    st.error(f"Insertion rejected rows: {errors[:3]}")
-                    status.update(state="error")
+                
+                # Enforce atomic batch write-append configs
+                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                db_client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
+                
+                st.success(f"🎉 Success! Appended {total_recovered_appends:,} raw rows to storage.")
+                summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
+                st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
+                status.update(label="Recovery Dump Complete!", state="complete")
+                st.cache_data.clear()
             except Exception as bq_err:
-                st.error(f"Stream submission pipeline failure: {bq_err}")
+                st.error(f"Batch loading ingestion pipeline failure: {bq_err}")
                 status.update(state="error")
 
-    # --- RENDER STATISTICAL BREAKDOWN GRID WITH TOTAL TALLY SUMS ---
-    if node_stats:
+    # --- RENDER STATISTICAL BREAKDOWN GRID WITH UN-CAPPED COUNTS ---
+    if total_recovered_appends > 0:
         st.write("### 📊 Data Recovery Tally Distribution:")
         summary_records = []
         grand_total_tally = 0
         
-        for node, count in node_stats.items():
-            # If a user filtered down to specific nodes, only display those in the report matrix
+        # Pull dynamic unique counts out of the batch dataset
+        for node in sorted(upload_df['NodeNum'].unique()):
             if selected_nodes and node not in selected_nodes:
                 continue
             
-            # Explicitly recalculate the count directly from the compiled array 
-            # to bypass any dictionary iteration dropouts
             true_node_count = sum(1 for row in all_rows if row["NodeNum"] == node)
             grand_total_tally += true_node_count
             
@@ -3146,21 +3144,17 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 "Points Extracted & Appended": true_node_count
             })
             
-        # Convert to DataFrame and sort naturally by Node name
-        summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
+        summary_df = pd.DataFrame(summary_records)
         
-        # APPEND THE COMBINED TOTAL ROW TO THE BOTTOM OF THE MATRIX
+        # Append grand total row block to footer canvas
         total_row = pd.DataFrame([{
             "Node Number": "🧮 Combined Total Pool",
             "Points Extracted & Appended": grand_total_tally
         }])
         summary_df = pd.concat([summary_df, total_row], ignore_index=True)
-        
-        # Display to the user
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
-        
-        if total_recovered_appends > 0:
-            st.balloons()
+        st.balloons()
+
 
 ######################
 # Page: Admin Tools  #
