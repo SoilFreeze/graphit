@@ -2656,9 +2656,10 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
     # =========================================================================
-    # NEW HEADERS & OPERATIONAL INSTRUCTIONS
+    # MAIN WORKSPACE HEADER & OPERATIONAL SUBHEADINGS
     # =========================================================================
-    st.title("⚡ Bulk Approval")
+    st.title("⚡ Bulk Approval and Database Maintenance")
+    st.markdown("### Clean Data and Change Data Status")
     st.info("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides.")
     st.divider()
 
@@ -2668,13 +2669,15 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
         st.session_state.blk_mgmt_total_points = 0
 
     # =========================================================================
-    # SECTION 1: TOP LEVEL GLOBAL DATA CLEANUP UTILITY
+    # UTILITY A: GLOBAL DATABASE CLEANUP ENGINE
     # =========================================================================
-    st.subheader("🧹 Database Cleanup Engine")
-    st.write("Consolidate raw datasets into 1-decimal hourly averages and safely remove all duplicate records system-wide.")
+    st.header("🧹 Global Database Cleanup")
+    st.write(
+        "Consolidate raw datasets into 1-decimal hourly averages and safely remove all duplicate records system-wide. "
+        "**Note:** Running this cleanup automatically marks any rogue data points outside the physical bounds of -30°F and 120°F as `BadData`."
+    )
     
-    if st.button("⚡ Run Database Cleanup & Duplicate Purge", use_container_width=True):
-        
+    if st.button("⚡ Run Global Database Cleanup & Duplicate Purge", use_container_width=True):
         status_box = st.empty()
         
         try:
@@ -2762,8 +2765,10 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
 
     # =========================================================================
-    # SECTION 2: BULK UPDATER CONTROLS
+    # UTILITY B: BULK APPROVAL SYSTEM CONTROLS
     # =========================================================================
+    st.header("⚡ Bulk Approval")
+    
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
 
@@ -2797,7 +2802,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 st.session_state.blk_mgmt_total_points = 0
 
     # =========================================================================
-    # SECTION 3: STEP 1 - THE MASTER VIEW PROFILER
+    # PROFILER VERIFICATION BLOCK (STEP 1)
     # =========================================================================
     if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
         try:
@@ -2816,7 +2821,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
     
     # =========================================================================
-    # SECTION 4: STEP 2 - TRANSMISSION OVERRIDE LEDGER WRITER
+    # TRANSMISSION OVERRIDE EXECUTOR (STEP 2)
     # =========================================================================
     st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
