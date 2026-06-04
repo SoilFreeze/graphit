@@ -3559,7 +3559,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider()
 
-        # 2. IF A NODE IS SPECIFIED, ROUTE RENDER PROCESSING DATA ENGINE
+        # 2. RENDER THE HISTORICAL TIMELINE EXTRACTION GRID
         if selected_log_node:
             history_query = f"""
                 SELECT *, 
@@ -3622,7 +3622,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                 st.divider()
                 
-                # 3. CALL REFACTORED ATTRIBUTES PANEL
+                # 3. CALL ACTION FORM HANDLER COMPONENT WITH CASCADING VARIABLES
                 try:
                     render_lab_node_action_manager(
                         client=client,
@@ -3632,7 +3632,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         known_project_locations=u_locations, 
                         target_registry=target_registry_path
                     )
-                    render_data_checker(client, full_reg_df)
+                    render_lab_data_checker(client, full_reg_df)
                 except Exception as routing_err:
                     st.error(f"Internal workspace linkage failed: {routing_err}")
             else:
@@ -3641,7 +3641,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.info("💡 Please specify a valid Project, Location, and Node path above to populate management components.")
             
     # -------------------------------------------------------------------------
-    # TAB 4: DATA RECOVERY PIPELINE ENGINE
+    # SUB-TAB 4: DATA RECOVERY PIPELINE ENGINE
     # -------------------------------------------------------------------------
     with tab_recovery:
         st.title("📡 Data Recovery Engine")
@@ -4357,7 +4357,7 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
     import time
     from datetime import datetime
     
-    node_id = selected_node_data['NodeNum']
+    node_id = str(selected_node_data['NodeNum']).strip()
     origin_start_str = str(selected_node_data.get('Start_Date'))
     end_label_text = str(selected_node_data.get('End_Date')) if pd.notnull(selected_node_data.get('End_Date')) else "Current Active Window"
     
@@ -4378,10 +4378,8 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
             form_loc_options.append(current_loc_val)
         form_loc_options.append("➕ Add Custom Location...")
         
-        # Default index lookup
         default_loc_idx = form_loc_options.index(current_loc_val) if current_loc_val in form_loc_options else 0
         
-        # Standard Selectbox replacing old raw input field
         chosen_form_loc = col2.selectbox(
             "Location", 
             options=form_loc_options, 
@@ -4389,7 +4387,6 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
             help="Select an existing project location from the drop-down menu, or choose Add Custom Location to enter a new one."
         )
         
-        # Auxiliary text block exposed below dropdown if custom append action is requested
         custom_loc_input = ""
         if chosen_form_loc == "➕ Add Custom Location...":
             custom_loc_input = st.text_input("Enter New Custom Location name:", placeholder="e.g., Borehole-12")
@@ -4404,7 +4401,6 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         edit_depth = c5.number_input("Depth", value=float(selected_node_data.get('Depth', 0.0)))
         edit_start = c6.date_input("Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date())
         
-        # END DATE CONTROL OVERRIDE SYSTEM BLOCK
         has_end_date = pd.notnull(selected_node_data.get('End_Date'))
         default_end_date = pd.to_datetime(selected_node_data.get('End_Date')).date() if has_end_date else datetime.now().date()
         
@@ -4412,30 +4408,39 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         edit_end = c7.date_input("End Date", value=default_end_date, disabled=not use_end_date_toggle)
 
         if st.form_submit_button("💾 Overwrite Targeted Assignment Attributes Configuration Row Line", use_container_width=True):
-            # Parse which parameter string gets handled
-            final_loc_str = custom_loc_input.strip() if chosen_form_loc == "➕ Add Custom Location..." else chosen_form_loc
+            raw_loc_str = custom_loc_input.strip() if chosen_form_loc == "➕ Add Custom Location..." else chosen_form_loc
             
-            if chosen_form_loc == "➕ Add Custom Location..." and not custom_loc_input.strip():
+            if chosen_form_loc == "➕ Add Custom Location..." and not raw_loc_str:
                 st.error("❌ Action Rejected: Custom location field string value cannot be blank.")
                 return
 
-            sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
-            sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
-            sql_end_val = f"DATE('{edit_end}')" if use_end_date_toggle else "NULL"
+            # Sanitize character inputs to defend against script string tears
+            final_loc_str = str(raw_loc_str).replace("'", "''").strip()
+            safe_proj = str(edit_proj).replace("'", "''").strip()
+            safe_status = str(edit_status).replace("'", "''").strip()
+            safe_bank = str(edit_bank).strip().replace("'", "''")
+
+            sql_bank_clause = f"'{safe_bank}'" if safe_bank != "" else "NULL"
+            sql_depth_clause = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
+            sql_end_clause = f"DATE('{edit_end}')" if use_end_date_toggle else "NULL"
             
             update_sql = f"""
                 BEGIN TRANSACTION;
                 DELETE FROM `{target_registry}` 
                 WHERE NodeNum = '{node_id}' AND Start_Date = DATE('{selected_node_data['Start_Date']}');
                 INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
-                VALUES ('{node_id}', '{edit_proj}', '{final_loc_str}', {sql_bank}, {sql_depth}, '{edit_status}', DATE('{edit_start}'), {sql_end_val});
+                VALUES ('{node_id}', '{safe_proj}', '{final_loc_str}', {sql_bank_clause}, {sql_depth_clause}, '{safe_status}', DATE('{edit_start}'), {sql_end_clause});
                 COMMIT;
             """
-            client.query(update_sql).result()
-            st.success("✅ Entry updated within the registry layout maps successfully!")
-            st.cache_data.clear()
-            time.sleep(0.5)
-            st.rerun()
+            try:
+                client.query(update_sql).result()
+                st.success("✅ Entry updated within the registry layout maps successfully!")
+                st.cache_data.clear()
+                time.sleep(0.5)
+                st.rerun()
+            except Exception as bq_exec_err:
+                st.error(f"❌ Database Transaction Failed: {bq_exec_err}")
+                st.code(update_sql, language="sql")
 
     # 2. QUICK TASKS FOOTER MATRICES
     st.markdown("##### Quick Operational Tasks")
@@ -4460,7 +4465,8 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         with st.expander("🔄 Change Sensor ID"):
             swap_target = st.text_input("Replacement Node Tag ID string:", placeholder="e.g., TP-0105")
             if st.button("Execute Change Sensor Protocol", key="btn_swap_task_hist") and swap_target:
-                client.query(f"UPDATE `{target_registry}` SET NodeNum='{swap_target}' WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
+                safe_swap = str(swap_target).strip().replace("'", "''")
+                client.query(f"UPDATE `{target_registry}` SET NodeNum='{safe_swap}' WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
                 st.cache_data.clear()
                 st.rerun()
                 
@@ -4475,7 +4481,6 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
                     client.query(f"DELETE FROM `{target_registry}` WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
                     st.cache_data.clear()
                     st.rerun()
-
 
 
 def render_lab_data_checker(client, reg_df):
