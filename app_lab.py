@@ -3434,8 +3434,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # --- SUB-TAB 2: BULK APPROVAL ---
     with tab_bulk_app:
-        st.header("⚡ Bulk Approval & Data Maintenance")
-        st.write("Surgically override telemetry data point approval designations across your project timelines.")
         execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
     # =========================================================================
