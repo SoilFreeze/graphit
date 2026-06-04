@@ -3437,29 +3437,131 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
     # =========================================================================
-    # SUB-TAB 3: 📋 NODE MASTER
+    # SUB-TAB 3: NODE MASTER
     # =========================================================================
     with tab_logistics:
         st.title("📋 Node Status and Changes")
         st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
         st.divider()
         
-        if not full_reg_df.empty:
-            # Render the Interactive Node Matrix Selection Table
-            selected_node_record = render_lab_node_selector(full_reg_df, available_projects_list)
+        st.subheader("🔍 Select Target Hardware Path")
+        
+        # 1. CASCADING SELECTBOX CONTROLS
+        col_l1, col_l2, col_l3 = st.columns(3)
+        
+        with col_l1:
+            raw_projects = full_reg_df['Project'].dropna().unique().tolist() if not full_reg_df.empty else []
+            u_projects = sorted(list(set(["Office"] + raw_projects)))
+            selected_log_proj = st.selectbox("Select Project Space Context:", u_projects, key="node_log_project_filter")
+        
+        # Isolate rows matching project context
+        proj_filtered_df = full_reg_df[full_reg_df['Project'] == selected_log_proj] if not full_reg_df.empty else pd.DataFrame()
+        
+        with col_l2:
+            u_locations = sorted(proj_filtered_df['Location'].dropna().unique().tolist(), key=natural_sort_key) if not proj_filtered_df.empty else []
+            if not u_locations:
+                u_locations = ["No Registered Locations"]
+            selected_log_loc = st.selectbox("Select Physical Location Context:", u_locations, key="node_log_location_filter")
             
-            if selected_node_record is not None:
-                st.divider()
-                # Populate graph engine, metadata form editor, and quick actions
-                render_lab_node_action_manager(client, selected_node_record, full_reg_df, available_projects_list, target_registry_path)
-            else:
-                st.divider()
-                st.info("💡 **Tip:** Use the checkbox in the active table above to choose a node context to modify.")
+        loc_filtered_df = proj_filtered_df[proj_filtered_df['Location'] == selected_log_loc] if not proj_filtered_df.empty else pd.DataFrame()
+        
+        with col_l3:
+            u_nodes = sorted(loc_filtered_df['NodeNum'].dropna().unique().tolist(), key=natural_sort_key) if not loc_filtered_df.empty else []
+            selected_log_node = st.selectbox(
+                "Select Target Node Number ID:", 
+                u_nodes, 
+                index=0 if u_nodes else None,
+                key="node_log_node_filter"
+            )
+
+        st.divider()
+
+        # 2. IF A NODE IS SPECIFIED, ROUTE RENDER PROCESSING DATA ENGINE
+        if selected_log_node and not loc_filtered_df.empty:
+            # Query the raw records from production database directly to maintain live sorting states
+            history_query = f"""
+                SELECT *, 
+                       CAST(Start_Date AS STRING) as start_date_str,
+                       COALESCE(CAST(End_Date AS STRING), 'Active') as end_date_str
+                FROM `{target_registry_path}`
+                WHERE NodeNum = '{selected_log_node}'
+                ORDER BY Start_Date DESC
+            """
+            try:
+                raw_node_history_df = client.query(history_query).to_dataframe()
+            except Exception as e:
+                st.error(f"Error reading asset timeline lines: {e}")
+                raw_node_history_df = pd.DataFrame()
+
+            if not raw_node_history_df.empty:
+                st.markdown(f"### 🕒 Assignment History Timeline: **{selected_log_node}**")
+                st.caption("💡 **Tip:** Use the checkbox selector in the tracking table below to force loading an archived historical row entry context into the editor panel form matrix.")
                 
-            # Systems Quality Diagnostic Checker Footer
-            render_lab_data_checker(client, full_reg_df)
+                # Initialize custom session states to anchor rows inside history frames
+                hist_ed_key = f"hist_ed_{selected_log_node}"
+                if f"active_hist_idx_{selected_log_node}" not in st.session_state:
+                    st.session_state[f"active_hist_idx_{selected_log_node}"] = 0 # Default seamlessly to row index 0 (Most Current)
+
+                # Process data framework matrix display states 
+                display_history_df = raw_node_history_df.copy()
+                display_history_df.insert(0, "Select", False)
+                
+                # Maintain sticky index checkboxes safely
+                curr_active_idx = st.session_state[f"active_hist_idx_{selected_log_node}"]
+                if curr_active_idx < len(display_history_df):
+                    display_history_df.loc[curr_active_idx, "Select"] = True
+
+                # Interactive user state routing catcher
+                if hist_ed_key in st.session_state and "edited_rows" in st.session_state[hist_ed_key]:
+                    user_changes = st.session_state[hist_ed_key]["edited_rows"]
+                    clicked_indices = [int(idx) for idx, changes in user_changes.items() if changes.get("Select") == True]
+                    if clicked_indices:
+                        st.session_state[f"active_hist_idx_{selected_log_node}"] = clicked_indices[-1]
+                        st.session_state[hist_ed_key]["edited_rows"] = {}
+                        st.rerun()
+
+                # Render history editor framework
+                st.data_editor(
+                    display_history_df,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Select": st.column_config.CheckboxColumn("Select", default=False),
+                        "start_date_str": "Start Date Mapped",
+                        "end_date_str": "End Date Mapped",
+                        "Depth": "Depth (ft)",
+                        "SensorStatus": "Status Flag"
+                    },
+                    disabled=[c for c in display_history_df.columns if c != "Select"],
+                    column_order=["Select", "Project", "Location", "Bank", "Depth", "start_date_str", "end_date_str", "SensorStatus"],
+                    key=hist_ed_key
+                )
+
+                # Route chosen row down to context engine fields
+                target_selected_idx = st.session_state[f"active_hist_idx_{selected_log_node}"]
+                if target_selected_idx >= len(raw_node_history_df):
+                    target_selected_idx = 0
+                
+                chosen_target_record = raw_node_history_df.iloc[target_selected_idx].to_dict()
+
+                st.divider()
+                
+                # 3. CALL REFACTORED ATTRIBUTES PANEL FORCED EDITOR MATRICES
+                try:
+                    render_lab_node_action_manager(
+                        client=client,
+                        selected_node_data=chosen_target_record,
+                        reg_df=full_reg_df,
+                        proj_list=u_projects,
+                        target_registry=target_registry_path
+                    )
+                    render_data_checker(client, full_reg_df)
+                except Exception as routing_err:
+                    st.error(f"Internal workspace linkage failed: {routing_err}")
+            else:
+                st.info("No prior deployment entries found tracked for this hardware tracking context.")
         else:
-            st.warning("No tracking profiles found inside the active Node Registry database layer.")
+            st.info("💡 Please specify a valid Project, Location, and Node path above to populate management components.")
             
             
     # -------------------------------------------------------------------------
@@ -4175,116 +4277,80 @@ def render_lab_node_selector(reg_df, proj_list):
 
 
 def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
-    """Displays comparative line charts, historical assignment timelines, and structural updates metadata forms."""
+    """Displays line graphs alongside transactional metadata forms supporting historical time-series manipulation."""
     import plotly.graph_objects as go
     import time
     
     node_id = selected_node_data['NodeNum']
-    st.markdown(f"### 📈 Historic Data: **{node_id}**")
+    origin_start_str = str(selected_node_data.get('Start_Date'))
     
-    # 1. HISTORICAL TELEMETRY CHART
-    hist_q = f"SELECT timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE NodeNum = '{node_id}' ORDER BY timestamp ASC"
-    try:
-        tel_df = client.query(hist_q).to_dataframe()
-        if not tel_df.empty:
-            fig = go.Figure(go.Scatter(x=tel_df['timestamp'], y=tel_df['temperature'], mode='lines', line=dict(color='#00d4ff', width=2)))
-            fig.update_layout(height=230, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.caption(f"Historical graph generated: {e}")
-
-    # =========================================================================
-    # NEW EXTENSION: COMPLETE NODE ASSIGNMENT HISTORY TIMELINE
-    # =========================================================================
-    st.markdown(f"### 🕒 Assignment History Timeline: **{node_id}**")
-    history_q = f"""
-        SELECT 
-            Project,
-            Location,
-            Bank,
-            Depth,
-            SensorStatus,
-            FORMAT_DATE('%b %d, %Y', Start_Date) as `Start Date`,
-            COALESCE(FORMAT_DATE('%b %d, %Y', End_Date), '🔴 Active / Current') as `End Date`
-        FROM `{target_registry}`
-        WHERE NodeNum = '{node_id}'
-        ORDER BY Start_Date DESC
-    """
-    try:
-        node_history_df = client.query(history_q).to_dataframe()
-        if not node_history_df.empty:
-            # Clean up missing display fields safely
-            node_history_df['Bank'] = node_history_df['Bank'].fillna('—')
-            node_history_df['Depth'] = node_history_df['Depth'].apply(lambda x: f"{x} ft" if pd.notnull(x) and x != 0.0 else '—')
-            
-            st.dataframe(
-                node_history_df,
-                use_container_width=True,
-                hide_index=True,
-                column_order=["Project", "Location", "Bank", "Depth", "Start Date", "End Date", "SensorStatus"]
-            )
-        else:
-            st.info("ℹ️ No prior historical assignment blocks tracked for this asset registration ID.")
-    except Exception as history_err:
-        st.caption(f"Unable to parse historical registry matrix timeline lines: {history_err}")
-
-    st.divider()
-
-    # 2. MODIFY ATTRIBUTES MANAGEMENT ENGINE FORM
-    st.markdown("### 🛠️ Modify Assignment Attributes")
-    with st.form("lab_attribute_form"):
+    # Clean string labels displaying exactly which historical window variant is being edited
+    end_label_text = str(selected_node_data.get('End_Date')) if pd.notnull(selected_node_data.get('End_Date')) else "Current Active Window"
+    st.markdown(f"### 🛠️ Modify Assignment Attributes")
+    st.caption(f"📝 Currently Editing Configuration Path for Node: **{node_id}** | Window Timeline: `({origin_start_str})` ➡️ `({end_label_text})`")
+    
+    # 1. ATTRIBUTE FORM ENGINE BLOCK
+    with st.form("lab_attribute_form_historical"):
         col1, col2, col3 = st.columns(3)
-        edit_proj = col1.selectbox("Project Space", proj_list, index=proj_list.index(selected_node_data['Project']) if selected_node_data['Project'] in proj_list else 0)
-        edit_loc = col2.text_input("Assign to Location", value=str(selected_node_data.get('Location', '')))
-        edit_status = col3.selectbox("SensorStatus", ["On Project", "Available", "Diagnostic", "Dead", "Archived"], index=0)
+        edit_proj = col1.selectbox("Project Space Target Context", proj_list, index=proj_list.index(selected_node_data['Project']) if selected_node_data['Project'] in proj_list else 0)
+        edit_loc = col2.text_input("Assign to Location / Borehole Location", value=str(selected_node_data.get('Location', '')))
         
-        c4, c5, c6 = st.columns(3)
-        edit_bank = c4.text_input("Bank", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
-        edit_depth = c5.number_input("Depth (ft)", value=float(selected_node_data.get('Depth', 0.0)))
-        edit_start = c6.date_input("Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date())
+        status_options = ["On Project", "Available", "Diagnostic", "Dead", "Archived"]
+        curr_status_str = str(selected_node_data.get('SensorStatus', 'On Project'))
+        status_idx = status_options.index(curr_status_str) if curr_status_str in status_options else 0
+        edit_status = col3.selectbox("Sensor Status Flag Designation Parameter", status_options, index=status_idx)
+        
+        c4, c5, c6, c7 = st.columns(4)
+        edit_bank = c4.text_input("Bank Field Mapping", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
+        edit_depth = c5.number_input("Depth Metric (ft)", value=float(selected_node_data.get('Depth', 0.0)))
+        
+        # Safe chronological parameter calculations
+        edit_start = c6.date_input("Deployment Start Date", value=pd.to_datetime(selected_node_data.get('Start_Date')).date())
+        
+        # END DATE CONTROL OVERRIDE SYSTEM BLOCK
+        has_end_date = pd.notnull(selected_node_data.get('End_Date'))
+        default_end_date = pd.to_datetime(selected_node_data.get('End_Date')).date() if has_end_date else datetime.now().date()
+        
+        use_end_date_toggle = c7.checkbox("Apply Terminated End Date Limits Constraints?", value=has_end_date, key=f"end_dt_toggle_{node_id}_{origin_start_str}")
+        edit_end = c7.date_input("Deployment End Date", value=default_end_date, disabled=not use_end_date_toggle)
 
-        if st.form_submit_button("💾 Save Changes", use_container_width=True):
+        if st.form_submit_button("💾 Overwrite Targeted Assignment Attributes Configuration Row Line", use_container_width=True):
             sql_depth = "NULL" if edit_depth == 0.0 else f"{edit_depth}"
             sql_bank = f"'{edit_bank.strip()}'" if edit_bank.strip() != "" else "NULL"
+            sql_end_val = f"DATE('{edit_end}')" if use_end_date_toggle else "NULL"
             
+            # Use multi-statement atomic transactions to wipe old row lines matching historical start markers and re-insert cleanly
             update_sql = f"""
                 BEGIN TRANSACTION;
                 DELETE FROM `{target_registry}` 
                 WHERE NodeNum = '{node_id}' AND Start_Date = DATE('{selected_node_data['Start_Date']}');
-                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date)
-                VALUES ('{node_id}', '{edit_proj}', '{edit_loc}', {sql_bank}, {sql_depth}, '{edit_status}', DATE('{edit_start}'));
+                INSERT INTO `{target_registry}` (NodeNum, Project, Location, Bank, Depth, SensorStatus, Start_Date, End_Date)
+                VALUES ('{node_id}', '{edit_proj}', '{edit_loc}', {sql_bank}, {sql_depth}, '{edit_status}', DATE('{edit_start}'), {sql_end_val});
                 COMMIT;
             """
             client.query(update_sql).result()
-            st.success("✅ Clean update forced entry modified down into central metadata records!")
+            st.success("✅ Historic baseline record properties updated inside telemetry registry schema maps successfully!")
             st.cache_data.clear()
             time.sleep(0.5)
             st.rerun()
 
-    # 3. QUICK OPERATIONS TASK INGESTION BLOCKS
+    # 2. QUICK TASKS FOOTER MATRICES
     st.markdown("##### Quick Operational Tasks")
-    o1, o2, o3, o4 = st.columns(4)
+    o1, o2, o3 = st.columns(3)
     with o1:
-        with st.expander("🔚 End Assignment"):
-            if st.button("Execute End Assignment", key="btn_end_task"):
-                client.query(f"UPDATE `{target_registry}` SET End_Date = CURRENT_DATE() WHERE NodeNum='{node_id}' AND End_Date IS NULL").result()
+        with st.expander("🔄 Change Sensor ID"):
+            swap_target = st.text_input("Replacement Node Tag ID string:", placeholder="e.g., TP-0105")
+            if st.button("Execute Change Sensor Protocol", key="btn_swap_task_hist") and swap_target:
+                client.query(f"UPDATE `{target_registry}` SET NodeNum='{swap_target}' WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
                 st.cache_data.clear()
                 st.rerun()
     with o2:
-        with st.expander("🔄 Change Sensor"):
-            swap_target = st.text_input("Replacement Node ID (NodeNum):", placeholder="e.g., TP-0105")
-            if st.button("Execute Change Sensor", key="btn_swap_task") and swap_target:
-                swap_sql = f"UPDATE `{target_registry}` SET NodeNum='{swap_target}' WHERE NodeNum='{node_id}' AND End_Date IS NULL"
-                client.query(swap_sql).result()
-                st.cache_data.clear()
-                st.rerun()
-    with o3:
         with st.expander("➕ Add New Manual Assignment"):
-            st.caption("Insert manual line logs entries.")
-    with o4:
-        with st.expander("🗑️ Delete Entry"):
-            if st.checkbox("Confirm permanent deletion of this row"):
-                if st.button("Delete Selected Assignment Record", type="primary"):
+            st.caption("Insert manual lines tracking log entries.")
+    with o3:
+        with st.expander("🗑️ Permanent Hard Delete Row Line"):
+            if st.checkbox("Authorize permanent line termination"):
+                if st.button("Delete Selected Historical Row Line Block", type="primary"):
                     client.query(f"DELETE FROM `{target_registry}` WHERE NodeNum='{node_id}' AND Start_Date=DATE('{selected_node_data['Start_Date']}')").result()
                     st.cache_data.clear()
                     st.rerun()
