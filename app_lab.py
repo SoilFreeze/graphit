@@ -3113,7 +3113,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
                 errors = db_client.insert_rows_json(real_table_ref, all_rows)
                 if not errors:
-                    st.success(f"🎉 Success! Dumped {total_recovered_appends} rows to storage.")
+                    st.success(f"🎉 Success! Dumped {total_recovered_appends:,} rows to storage.")
                     summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
                     st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
                     status.update(label="Recovery Dump Complete!", state="complete")
@@ -3125,19 +3125,38 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 st.error(f"Stream submission pipeline failure: {bq_err}")
                 status.update(state="error")
 
-    # --- RENDER STATISTICAL BREAKDOWN GRID (SHOWS EVERY TARGETED SENSOR) ---
+    # --- RENDER STATISTICAL BREAKDOWN GRID WITH TOTAL TALLY SUMS ---
     if node_stats:
         st.write("### 📊 Data Recovery Tally Distribution:")
         summary_records = []
+        grand_total_tally = 0
+        
         for node, count in node_stats.items():
-            # Filter the report overview if the operator specifically limited the backfill scope
+            # If a user filtered down to specific nodes, only display those in the report matrix
             if selected_nodes and node not in selected_nodes:
                 continue
+            
+            # Explicitly recalculate the count directly from the compiled array 
+            # to bypass any dictionary iteration dropouts
+            true_node_count = sum(1 for row in all_rows if row["NodeNum"] == node)
+            grand_total_tally += true_node_count
+            
             summary_records.append({
                 "Node Number": node,
-                "Points Extracted & Appended": count
+                "Points Extracted & Appended": true_node_count
             })
+            
+        # Convert to DataFrame and sort naturally by Node name
         summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
+        
+        # APPEND THE COMBINED TOTAL ROW TO THE BOTTOM OF THE MATRIX
+        total_row = pd.DataFrame([{
+            "Node Number": "🧮 Combined Total Pool",
+            "Points Extracted & Appended": grand_total_tally
+        }])
+        summary_df = pd.concat([summary_df, total_row], ignore_index=True)
+        
+        # Display to the user
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
         
         if total_recovered_appends > 0:
