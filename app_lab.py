@@ -3654,36 +3654,41 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         # --- ENGINE C: UPLOAD SOIL REFERENCE CURVES ---
         elif cfg_mode == "Upload Soil Reference Curves":
-            # REPLACED 'INGEST' FROM THE MAIN HEADER PARAMETERS
             st.markdown("### 📈 Upload Soil Reference Curves")
             
-            # --- NEW FEATURE: LIVE CURVE INVENTORY & UPLOAD DATE LOOKUP ---
             st.write("#### 📂 Currently Active Library Curves")
             try:
-                # Query the unique library curves along with their max days, total points, and historical upload dates
+                # Upgraded query to parse CurveID strings into distinct Project and File Name segments
                 inv_curves_q = f"""
                     SELECT 
-                        CurveID as `Curve Identifier`, 
-                        MAX(upload_date) as `Date Uploaded`,
-                        COUNT(*) as `Total Points Mapped`, 
-                        ROUND(CAST(MAX(Day) AS NUMERIC), 1) as `Max Target Duration (Days)`
+                        SPLIT(CurveID, '-')[SAFE_OFFSET(0)] as `Project`,
+                        COALESCE(SPLIT(CurveID, '-')[SAFE_OFFSET(1)], CurveID) as `File Name`,
+                        COUNT(*) as `Number of Entries`,
+                        MAX(upload_date) as `Date Uploaded`
                     FROM `{target_curves_path}` 
-                    GROUP BY CurveID 
-                    ORDER BY CurveID ASC
+                    GROUP BY CurveID
+                    ORDER BY `Project` ASC, `File Name` ASC
                 """
                 active_curves_df = client.query(inv_curves_q).to_dataframe()
                 
                 if not active_curves_df.empty:
-                    st.dataframe(active_curves_df, use_container_width=True, hide_index=True)
-                    st.caption(f"Total separate reference curve profiles currently active in database: {len(active_curves_df)}")
+                    # Enforce strict column arrangement layout requested
+                    st.dataframe(
+                        active_curves_df[["Project", "File Name", "Number of Entries", "Date Uploaded"]], 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "Number of Entries": st.column_config.NumberColumn("Number of Entries", format="%d")
+                        }
+                    )
+                    st.caption(f"Total reference curve configurations logged: {len(active_curves_df)}")
                 else:
                     st.info("ℹ️ The reference curve datastore is currently unpopulated.")
             except Exception as schema_err:
-                st.caption("ℹ️ Reference catalog inventory view is currently loading or updating.")
+                st.caption("ℹ️ Reference catalog directory is currently loading or updating.")
 
             st.divider()
 
-            # --- FILE UPLOADER UTILITY CONTROLS ---
             st.write("#### 📤 Upload New Dataset Files")
             st.info("💡 **Overwrite Rule Active:** Uploading files with identifiers that already exist in the system will automatically clear out their old historical data blocks and replace them completely.")
             st.caption("Expected Format: CSV files (e.g., `2538-T1.csv`). Data should start on Row 3. Col 1: Day, Col 2: Temperature.")
@@ -3717,7 +3722,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             ref_df['upload_date'] = today_str
 
                             if not ref_df.empty:
-                                # Safe purge conflicting records to support recursive execution
                                 client.query(f"DELETE FROM `{target_curves_path}` WHERE CurveID='{curve_id}'").result()
                                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
                                 client.load_table_from_dataframe(ref_df, target_curves_path, job_config=job_config).result()
