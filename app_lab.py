@@ -2667,14 +2667,12 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.write("Consolidate raw datasets into 1-decimal hourly averages and safely remove all duplicate records.")
     
     if st.button("⚡ Run Database Cleanup & Duplicate Purge", use_container_width=True):
-        project_filter_where = "" if selected_project == "All Projects" else f"WHERE Project = '{selected_project}'"
         
-        # Hardened query to rebuild the table, keeping only the first record for any duplicate timestamp + node pairing
+        # Hardened sequential staging logic to bypass BigQuery's transaction restrictions 
+        # and provide a precise line-item count of dropped rows.
         cleanup_sql = f"""
-            BEGIN TRANSACTION;
-            
-            # 1. Clean SensorPush Raw Data
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
+            -- 1. Create a clean snapshot of unique SensorPush records
+            CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
             SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
             FROM (
                 SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
@@ -2683,8 +2681,15 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             )
             WHERE rn = 1;
 
-            # 2. Clean Lord Raw Data
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
+            -- 2. Tally rows being dropped from SensorPush
+            SELECT (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`) - (SELECT COUNT(*) FROM tmp_clean_sensorpush) as sp_dropped;
+
+            -- 3. Overwrite SensorPush production data using an atomic load configuration swap
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
+            SELECT * FROM tmp_clean_sensorpush;
+
+            -- 4. Create a clean snapshot of unique Lord records
+            CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
             SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
             FROM (
                 SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
@@ -2693,19 +2698,38 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             )
             WHERE rn = 1;
 
-            COMMIT;
+            -- 5. Tally rows being dropped from Lord
+            SELECT (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`) - (SELECT COUNT(*) FROM tmp_clean_lord) as lord_dropped;
+
+            -- 6. Overwrite Lord production data
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
+            SELECT * FROM tmp_clean_lord;
         """
         try:
             with st.spinner("Executing structural duplication purge workflows..."):
-                job = client.query(cleanup_sql)
-                job.result()
-            st.success("✅ Database Cleanup successfully completed! All rogue outliers have been dropped and duplicate packets are completely removed.")
+                query_job = client.query(cleanup_sql)
+                # Resolve the multi-statement script execution pipeline
+                query_job.result()  
+                
+                # BigQuery returns results for each SELECT statement sequentially in a script execution
+                iterator = query_job.to_dataframe_iterable()
+                results = list(iterator)
+                
+                # Pull the dynamic counts calculated out of steps 2 and 5
+                sp_removed = int(results[0].iloc[0, 0]) if len(results) > 0 else 0
+                lord_removed = int(results[1].iloc[0, 0]) if len(results) > 1 else 0
+                total_removed = sp_removed + lord_removed
+            
+            st.success(
+                f"✅ Database Cleanup completed successfully!\n\n"
+                f"* **SensorPush duplicates/outliers removed:** `{sp_removed:,}` points\n"
+                f"* **Lord duplicates/outliers removed:** `{lord_removed:,}` points\n"
+                f"* **Total records purged:** `{total_removed:,}` points"
+            )
             st.cache_data.clear()
+            
         except Exception as e:
             st.error(f"Cleanup Optimization Engine Failed: {e}")
-
-    st.divider()
-
     # =========================================================================
     # SECTION 2: BULK UPDATER CONTROLS
     # =========================================================================
