@@ -2675,7 +2675,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
             
             with st.spinner("Executing structural duplication purge workflows..."):
-                # 2. Hardened Cleanup Script (Removed rssi from the raw_lord segment)
+                # 2. Hardened Cleanup Script (No rssi column utilized on Lord data)
                 cleanup_sql = f"""
                     -- A. Clean SensorPush Raw Data
                     CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
@@ -2690,7 +2690,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
                     SELECT * FROM tmp_clean_sensorpush;
 
-                    -- B. Clean Lord Raw Data (No rssi column utilized here)
+                    -- B. Clean Lord Raw Data
                     CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
                     SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature
                     FROM (
@@ -2737,10 +2737,10 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     "Purged Points": f"{lord_removed:,}"
                 },
                 {
-                    "Combined Total Pool",
-                    f"{count_sp_before + count_lord_before:,}",
-                    f"{count_sp_after + count_lord_after:,}",
-                    f"{total_removed:,}"
+                    "Data Table": "Combined Total Pool",
+                    "Before Count": f"{count_sp_before + count_lord_before:,}",
+                    "After Count": f"{count_sp_after + count_lord_after:,}",
+                    "Purged Points": f"{total_removed:,}"
                 }
             ]
             st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
