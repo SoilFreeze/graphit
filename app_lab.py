@@ -2931,7 +2931,10 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     edit_c1, edit_c2, edit_c3 = st.columns(3)
     
     with edit_c1:
-        u_projects = sorted(list(set(["Office"] + proj_list)))
+        # Pull directly from the data registry series to remain completely independent
+        raw_projects = reg_df['Project'].dropna().unique().tolist() if 'reg_df' in locals() else []
+        u_projects = sorted(list(set(["Office"] + raw_projects)))
+        
         new_node_project = st.selectbox(
             "Target Allocation Project:", 
             options=u_projects, 
@@ -3443,10 +3446,16 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         col_l1, col_l2, col_l3 = st.columns(3)
         
         with col_l1:
-            u_projects = sorted(list(set(["Office"] + available_projects_list)))
-            selected_log_proj = st.selectbox("Select Project Space Context:", u_projects, key="node_log_project_filter")
+            # Safely harvest the current unique projects directly from the registry data matrix 
+            # to prevent any variable name argument NameErrors
+            raw_projects = full_reg_df['Project'].dropna().unique().tolist() if 'full_reg_df' in locals() else []
+            u_projects = sorted(list(set(["Office"] + raw_projects)))
             
-        proj_filtered = full_reg_df[full_reg_df['Project'] == selected_log_proj]
+            selected_log_proj = st.selectbox(
+                "Select Project Space Context:", 
+                u_projects, 
+                key="node_log_project_filter"
+            )
         
         with col_l2:
             u_locations = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
