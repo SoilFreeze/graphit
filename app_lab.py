@@ -1062,6 +1062,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
         # 4. FORMATTING HELPERS
         def get_status_icon(hrs):
+            if hrs == float('inf') or hrs >= 999.0: return "❌ Never"
             if hrs <= 1.0: return f"🟢 {hrs:.1f}h"
             if hrs <= 6.0: return f"🟠 {hrs:.1f}h"
             return f"🔴 {hrs:.1f}h"
@@ -1076,22 +1077,33 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             d = cur - prev
             return f"🔺 +{d:.1f}" if d > 0.1 else f"🔹 {d:.1f}" if d < -0.1 else "➡️ 0.0"
 
-        # 5. LOCATION SUMMARY (High-Resolution Spread with Conditional Color Styler)
+        # 5. LOCATION PERFORMANCE SUMMARY
         st.subheader("📍 Location Performance Summary")
         
-        summary_df = df.groupby('Location').apply(lambda x: pd.Series({
-            'Total Nodes': int(len(x)),
-            'Seen 1h': int(x['seen_1h_f'].sum()),
-            'Seen 6h': int(x['seen_6h_f'].sum()),
-            'Seen 24h': int(x['seen_24h_f'].sum()),
-            '24h Coverage': f"{x['coverage_24h'].mean():.1f}%",
-            '7d Coverage': f"{x['coverage_7d'].mean():.1f}%",
-            'Avg Temp': fmt_t(x['current_temp'].mean()),
-            'Low 24h': fmt_t(x['low_24h'].min()),
-            'High 24h': fmt_t(x['high_24h'].max()),
-            'Best Seen': get_status_icon(x['last_seen_hrs'].min()),
-            'Worst Seen': get_status_icon(x['last_seen_hrs'].max())
-        })).reset_index()
+        # Helper processing block to extract true numerical metrics before parsing text icons
+        summary_rows = []
+        for loc, loc_group in df.groupby('Location'):
+            # Safely grab raw numerical min/max values to calculate true delinquent sensor
+            min_hours_lag = loc_group['last_seen_hrs'].min()
+            max_hours_lag = loc_group['last_seen_hrs'].max() # Represents the actual worst sensor check-in lag
+            
+            summary_rows.append({
+                'Location': loc,
+                'Total Nodes': int(len(loc_group)),
+                'Seen 1h': int(loc_group['seen_1h_f'].sum()),
+                'Seen 6h': int(loc_group['seen_6h_f'].sum()),
+                'Seen 24h': int(loc_group['seen_24h_f'].sum()),
+                '24h Coverage': f"{loc_group['coverage_24h'].mean():.1f}%",
+                '7d Coverage': f"{loc_group['coverage_7d'].mean():.1f}%",
+                'Avg Temp': fmt_t(loc_group['current_temp'].mean()),
+                'Low 24h': fmt_t(loc_group['low_24h'].min()),
+                'High 24h': fmt_t(loc_group['high_24h'].max()),
+                # FIXED: Formats based on true numerical limits so icons don't break sorting logic
+                'Best Seen': get_status_icon(min_hours_lag),
+                'Worst Seen': get_status_icon(max_hours_lag)
+            })
+            
+        summary_df = pd.DataFrame(summary_rows)
 
         # Custom Cell Color Matrix Engine for Hardware Availability Toggles
         def style_missing_counters(val_df):
@@ -1145,7 +1157,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
     except Exception as e:
-        st.error(f"Sensor Status Error: {e}")        
+        st.error(f"Sensor Status Error: {e}")
 
 # ===============================================================
 # Function: Status Dashboard (Setup Node Tool) - Left Unchanged
