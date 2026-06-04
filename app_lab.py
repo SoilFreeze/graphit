@@ -2656,11 +2656,9 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
     # =========================================================================
-    # MAIN WORKSPACE HEADER & OPERATIONAL SUBHEADINGS
+    # MAIN WORKSPACE HEADER
     # =========================================================================
     st.title("⚡ Bulk Approval and Database Maintenance")
-    st.markdown("### Clean Data and Change Data Status")
-    st.info("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides.")
     st.divider()
 
     if "blk_mgmt_profile_df" not in st.session_state:
@@ -2765,9 +2763,10 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
 
     # =========================================================================
-    # UTILITY B: BULK APPROVAL SYSTEM CONTROLS
+    # UTILITY B: BULK APPROVAL AND DATA STATUS CHANGE SYSTEM CONTROLS
     # =========================================================================
-    st.header("⚡ Bulk Approval")
+    st.header("⚡ Bulk Approval and Data Status Change")
+    st.info("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides.")
     
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
@@ -2865,7 +2864,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             except Exception as e:
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
-
 
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
