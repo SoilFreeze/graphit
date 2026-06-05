@@ -2631,8 +2631,8 @@ def render_data_processing_page(selected_project):
         with st.form("comprehensive_site_event_logger_form"):
             col_el1, col_el2, col_el3 = st.columns(3)
             target_proj = col_el1.selectbox("Assign Event to Project Space Phase*", active_projects_list, key="input_ev_proj")
-            event_date = col_el2.date_input("Event Log Date Entry", value=datetime.now().date(), key="input_ev_date")
-            event_time = col_el3.time_input("Event Log Time Entry (UTC)", value=datetime.now().time(), key="input_ev_time")
+            event_date = col_el2.date_input("Event Log Start Date*", value=datetime.now().date(), key="input_ev_date")
+            event_time = col_el3.time_input("Event Log Start Time (UTC)*", value=datetime.now().time(), key="input_ev_time")
             
             col_el4, col_el5, col_el6 = st.columns(3)
             event_type = col_el4.selectbox("Type of Event*", ["Chiller Turn On", "Chiller Turn Off", "Power Source Transition", "Generator Fault / Outage", "Equipment Repair / Maintenance", "Other Site Anomaly"], key="input_ev_type")
@@ -2646,6 +2646,15 @@ def render_data_processing_page(selected_project):
             event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Emergency technician callout to replace blown primary fuse block.")
             root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Electrical spike from main line transformer grid drop.")
             
+            # --- FLEXIBLE END TIME OPTION ---
+            st.write("##### ⏱️ Duration / Resolution Tracking")
+            c_has_end = st.checkbox("Toggle this to specify when the event ended / resolved", value=False)
+            
+            end_col1, end_col2 = st.columns(2)
+            if c_has_end:
+                end_date = end_col1.date_input("Resolution Date", value=event_date)
+                end_time = end_col2.time_input("Resolution Time (UTC)", value=event_time)
+            
             c_bool1 = st.checkbox("Timestamp registration is approximate (Estimated time block record flag)", value=False)
             
             if st.form_submit_button("💾 Save Event Entry to Database", use_container_width=True):
@@ -2653,7 +2662,13 @@ def render_data_processing_page(selected_project):
                     st.error("❌ Submission Rejected: Event Description tracking summary text notes are required.")
                 else:
                     generated_uuid = str(uuid.uuid4())
-                    combined_ts = datetime.combine(event_date, event_time).strftime('%Y-%m-%d %H:%M:%S')
+                    combined_start = datetime.combine(event_date, event_time).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Parse out resolution time if checked, otherwise pass NULL cleanly to BigQuery
+                    if c_has_end:
+                        combined_end = f"TIMESTAMP('{datetime.combine(end_date, end_time).strftime('%Y-%m-%d %H:%M:%S')}')"
+                    else:
+                        combined_end = "NULL"
                     
                     system_prefix = f"[System: {proj_system.strip()}] " if proj_system.strip() else ""
                     safe_desc = f"{system_prefix}[{event_type} | Power: {power_type}] " + event_desc.strip().replace("'", "''")
@@ -2662,7 +2677,7 @@ def render_data_processing_page(selected_project):
                     
                     insert_sql = f"""
                         INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate, event_cost)
-                        VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_ts}'), NULL, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()}, {float(event_cost_val)})
+                        VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_start}'), {combined_end}, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()}, {float(event_cost_val)})
                     """
                     try:
                         with st.spinner("Streaming event logging data to BigQuery table..."):
@@ -2677,7 +2692,7 @@ def render_data_processing_page(selected_project):
 
         st.divider()
         
-        # --- RE-NAMED EVENT REGISTRY HISTORICAL SYSTEM WITH DROP-DOWN FILTERS ---
+        # --- EVENT REGISTRY WITH START & END TIMESTAMPS ---
         st.write("#### 📂 Event Registry")
         f_col1, f_col2 = st.columns(2)
         filter_proj = f_col1.selectbox("Filter Logs by Project Space Context:", ["All"] + active_projects_list, key="evt_log_filter_project")
@@ -2692,9 +2707,9 @@ def render_data_processing_page(selected_project):
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
-            # 🛡️ HARDENED FIX: Changed SQL alias to follow pure alpha characters to pass compilation rules
             logs_q = f"""
-                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Time,
+                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Start_Time,
+                       COALESCE(FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', resolution_timestamp), 'Ongoing / N/A') as End_Time,
                        project_id as Project,
                        event_description as Chiller_Event,
                        COALESCE(event_cost, 0.0) as event_cost
@@ -2705,12 +2720,13 @@ def render_data_processing_page(selected_project):
             """
             logs_df = client.query(logs_q).to_dataframe()
             if not logs_df.empty:
-                # Use Streamlit column configs to format the numeric values cleanly as money on the display grid
                 st.dataframe(
                     logs_df, 
                     use_container_width=True, 
                     hide_index=True,
                     column_config={
+                        "Start_Time": st.column_config.TextColumn("Start Time"),
+                        "End_Time": st.column_config.TextColumn("End / Resolution Time"),
                         "Chiller_Event": st.column_config.TextColumn("Chiller Event"),
                         "event_cost": st.column_config.NumberColumn("Cost ($)", format="$%.2f")
                     }
