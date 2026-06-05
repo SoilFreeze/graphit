@@ -2368,8 +2368,6 @@ def render_data_processing_page(selected_project):
                         
                         # Apply strict industrial limit filtering rules right during ingestion
                         bad_mask = (df_processed['temperature'] > 120) | (df_processed['temperature'] < -30)
-                        df_processed['approve'] = 'TRUE'
-                        df_processed.loc[bad_mask, 'approve'] = 'BADDATA'
                         
                         bad_count = bad_mask.sum()
                         if bad_count > 0:
@@ -2389,16 +2387,19 @@ def render_data_processing_page(selected_project):
                                     from decimal import Decimal
                                     df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
                                 
+                                # 🛡️ HARDENED FIX: Isolate data structure payload strictly matching existing database schema fields
+                                columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
+                                upload_payload_df = df_processed[columns_to_upload].copy()
+                                
                                 job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
                                         bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
-                                        bigquery.SchemaField("approve", "STRING"),
                                     ],
                                     write_disposition="WRITE_APPEND"
                                 )
-                                client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
+                                client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
                                 st.cache_data.clear() 
 
