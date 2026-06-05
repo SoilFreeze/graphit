@@ -2343,13 +2343,12 @@ def render_data_processing_page(selected_project):
         st.error("Database connection unavailable.")
         return
         
-    # Reordered tabs: "Register Chiller" is now placed as the absolute last tab
-    tab_upload, tab_chiller_inv, tab_event_log, tab_ref_library, tab_export, tab_chiller_reg = st.tabs([
+    # Reordered tabs matching exact blueprint specification
+    tab_upload, tab_export, tab_ref_library, tab_event_log, tab_chiller_reg = st.tabs([
         "📄 Upload Telemetry", 
-        "❄️ Chiller Inventory",
-        "🚨 Log Site Event",
-        "📈 Ref Curve Library", 
         "📥 Export Report",
+        "📈 Ref Curve Library", 
+        "🚨 Log Site Event",
         "❄️ Register Chiller"
     ])
     
@@ -2464,180 +2463,52 @@ def render_data_processing_page(selected_project):
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
 
-    # --- TAB 2: CHILLER INVENTORY (WITH OVERWRITE CAPABILITIES) ---
-    with tab_chiller_inv:
-        st.subheader("❄️ Chiller Fleet Asset Inventory")
-        st.write("Track runtime efficiencies, localized deployment metrics, operational statuses, and cost distributions.")
-        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
-        
-        try:
-            inventory_q = f"""
-                WITH TimelineState AS (
-                    SELECT 
-                        project_id, chiller_id, event_timestamp, event_description,
-                        REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN ON') as is_on,
-                        REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN OFF') as is_off,
-                        LEAD(event_timestamp) OVER(PARTITION BY chiller_id ORDER BY event_timestamp ASC) as next_evt
-                    FROM `{EVENTS_TABLE}`
-                    WHERE chiller_id IS NOT NULL
-                ),
-                Durations AS (
-                    SELECT 
-                        chiller_id,
-                        MAX_BY(project_id, event_timestamp) as current_location,
-                        ARRAY_AGG(is_on ORDER BY event_timestamp DESC LIMIT 1)[OFFSET(0)] as currently_chilling,
-                        SUM(CASE WHEN is_on THEN TIMESTAMP_DIFF(COALESCE(next_evt, CURRENT_TIMESTAMP()), event_timestamp, HOUR) ELSE 0 END) as total_chill_hours,
-                        MAX(CASE WHEN is_on AND next_evt IS NULL THEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), event_timestamp, HOUR) END) as active_run_hours
-                    FROM TimelineState
-                    GROUP BY chiller_id
-                )
-                SELECT 
-                    c.chiller_id, 
-                    c.chiller_type, 
-                    c.purchase_date,
-                    c.initial_price,
-                    c.acquired_status,
-                    COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
-                    COALESCE(d.currently_chilling, FALSE) as is_chilling,
-                    COALESCE(d.total_chill_hours, 0) as cumulative_hours,
-                    COALESCE(d.active_run_hours, 0) as current_run_hours
-                FROM `{CHILLER_REG_TABLE}` c
-                LEFT JOIN Durations d ON c.chiller_id = d.chiller_id
-                ORDER BY c.chiller_id ASC
-            """
-            inv_df = client.query(inventory_q).to_dataframe()
+    # --- TAB 2: EXPORT LOGIC ---
+    with tab_export:
+        st.subheader("📥 Wide-Format Data Export")
+        if not selected_project or selected_project == "All Projects":
+            st.warning("⚠️ Select a specific project in the sidebar to export data.")
+        else:
+            c1, c2 = st.columns(2)
+            e_start = c1.date_input("Start Date", value=datetime.now() - timedelta(days=30))
+            e_end = c2.date_input("End Date", value=datetime.now())
             
-            if not inv_df.empty:
-                inv_df['Associated Costs'] = inv_df['cumulative_hours'] * 4.50
-                
-                # Format a working dataframe optimized for interactive editing
-                editable_rows = []
-                for _, r in inv_df.iterrows():
-                    status_text = "🔵 Active Chilling Loop" if r['is_chilling'] else "⚪ Standby / Off"
-                    duration_text = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total runtime"
-                    
-                    editable_rows.append({
-                        "Chiller Name": r['chiller_id'],
-                        "Current Location": r['current_location'],
-                        "Operational Status": status_text,
-                        "Chill Duration": duration_text,
-                        "Equipment Type": r['chiller_type'],
-                        "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else None,
-                        "Condition When Acquired": str(r['acquired_status']).upper() if pd.notnull(r['acquired_status']) else "NEW",
-                        "Initial Cost": float(r['initial_price']) if pd.notnull(r['initial_price']) else 0.0,
-                        "Accumulated Operating Costs": f"${r['Associated Costs']:,.2f}"
-                    })
-                
-                base_edit_df = pd.DataFrame(editable_rows)
-                ed_key = "chiller_live_inventory_editor"
-                
-                edited_output_df = st.data_editor(
-                    base_edit_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
-                    column_config={
-                        "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
-                        "Condition When Acquired": st.column_config.SelectColumn("Condition When Acquired", options=["NEW", "USED"]),
-                        "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
-                    },
-                    key=ed_key
-                )
-                
-                # Process structural cell changes saved to state maps
-                if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
-                    changes = st.session_state[ed_key]["edited_rows"]
-                    if changes:
-                        if st.button("💾 Save Inventory Modifications", use_container_width=True, type="primary"):
-                            with st.spinner("Overwriting registry values..."):
-                                for row_idx_str, col_deltas in changes.items():
-                                    row_idx = int(row_idx_str)
-                                    target_cid = base_edit_df.loc[row_idx, "Chiller Name"]
-                                    
-                                    # Dynamically assemble the SQL update expression based on modified columns
-                                    set_clauses = []
-                                    if "Equipment Type" in col_deltas:
-                                        set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
-                                    if "Initial Cost" in col_deltas:
-                                        set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
-                                    if "Condition When Acquired" in col_deltas:
-                                        set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
-                                    if "Date Acquired" in col_deltas:
-                                        set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
-                                        
-                                    if set_clauses:
-                                        update_sql = f"UPDATE `{CHILLER_REG_TABLE}` SET {', '.join(set_clauses)} WHERE chiller_id = '{target_cid}'"
-                                        client.query(update_sql).result()
-                                        
-                            st.success("✅ Fleet inventory data logs updated successfully!")
-                            st.cache_data.clear()
-                            time.sleep(0.5)
-                            st.rerun()
-            else:
-                st.info("ℹ️ Chiller registry metadata catalog stores are currently unpopulated.")
-        except Exception as e:
-            st.caption(f"Asset ledger synchronization processing: {e}")
+            with st.spinner("Processing engineering records..."):
+                full_df = get_universal_portal_data(selected_project, view_mode="engineering")
+            
+            if not full_df.empty:
+                all_locs = sorted(full_df['Location'].unique().tolist())
+                selected_locs = st.multiselect("Filter by Location (Leave empty for ALL)", options=all_locs)
 
-    # --- TAB 3: SITE EVENT LOGGING ENGINE ---
-    with tab_event_log:
-        st.subheader("🚨 Log New Site Event Entry")
-        st.write("Track power transitions, compressor cycles, and generator behaviors relative to active freeze down operations.")
-        
-        try:
-            proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived' ORDER BY Project"
-            active_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
-        except Exception:
-            active_projects_list = ["Office"]
-            
-        try:
-            active_chillers_list = sorted(client.query(f"SELECT chiller_id FROM `{CHILLER_REG_TABLE}`").to_dataframe()['chiller_id'].tolist())
-        except Exception:
-            active_chillers_list = []
-
-        import uuid
-        with st.form("comprehensive_site_event_logger_form"):
-            col_el1, col_el2, col_el3 = st.columns(3)
-            target_proj = col_el1.selectbox("Assign Event to Project Space Phase*", active_projects_list, key="input_ev_proj")
-            event_date = col_el2.date_input("Event Log Date Entry", value=datetime.now().date(), key="input_ev_date")
-            event_time = col_el3.time_input("Event Log Time Entry (UTC)", value=datetime.now().time(), key="input_ev_time")
-            
-            col_el4, col_el5, col_el6 = st.columns(3)
-            event_type = col_el4.selectbox("Type of Event*", ["Chiller Turn On", "Chiller Turn Off", "Power Source Transition", "Generator Fault / Outage", "Other Site Anomaly"], key="input_ev_type")
-            power_type = col_el5.selectbox("Active Power Type Source*", ["Line Power", "Generator", "None / Outage State"], key="input_ev_power")
-            assoc_chiller = col_el6.selectbox("Associated Chiller Loop (Optional)", ["None"] + active_chillers_list, key="input_ev_chiller")
-            
-            event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Generator 2 ran out of fuel causing Chiller unit A power dropout for 45 minutes.")
-            root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Refueling delivery delay window shift.")
-            
-            c_bool1 = st.checkbox("Timestamp registration is approximate (Estimated time block record flag)", value=False)
-            
-            if st.form_submit_button("💾 Save Event Entry to Database", use_container_width=True):
-                if not event_desc.strip():
-                    st.error("制造❌ Submission Rejected: Event Description tracking summary text notes are required.")
+                mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
+                if selected_locs:
+                    mask = mask & (full_df['Location'].isin(selected_locs))
+                
+                export_df = full_df.loc[mask].copy()
+                
+                if export_df.empty:
+                    st.warning("No data found for the selected criteria.")
                 else:
-                    generated_uuid = str(uuid.uuid4())
-                    combined_ts = datetime.combine(event_date, event_time).strftime('%Y-%m-%d %H:%M:%S')
+                    export_df['Sensor'] = export_df['Location'] + " (" + export_df['NodeNum'].astype(str) + ")"
                     
-                    safe_desc = f"[{event_type} | Power: {power_type}] " + event_desc.strip().replace("'", "''")
-                    safe_cause = root_cause.strip().replace("'", "''")
-                    chiller_val_str = f"'{assoc_chiller}'" if assoc_chiller != "None" else "NULL"
-                    
-                    insert_sql = f"""
-                        INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate)
-                        VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_ts}'), NULL, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()})
-                    """
-                    try:
-                        with st.spinner("Streaming event logging data to BigQuery table..."):
-                            client.query(insert_sql).result()
-                        st.success(f"🎉 Success! Event tracking record committed cleanly under transaction code snapshot: `{generated_uuid[:8]}`")
-                        st.cache_data.clear()
-                        time.sleep(0.5)
-                        st.rerun()
-                    except Exception as err:
-                        st.error(f"Database insertion failed: {err}")
-                        st.code(insert_sql, language="sql")
+                    wide_df = export_df.pivot_table(
+                        index='timestamp', columns='Sensor', values='temperature', aggfunc='first'
+                    ).reset_index()
 
-    # --- TAB 4: REFERENCE CURVE LIBRARY ---
+                    wide_df['timestamp'] = wide_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                    st.success(f"Report Ready: {len(wide_df.columns)-1} columns generated.")
+                    csv_data = wide_df.to_csv(index=False).encode('utf-8')
+                    
+                    st.download_button(
+                        label="💾 Download Custom CSV Export",
+                        data=csv_data,
+                        file_name=f"{selected_project}_Export_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+
+    # --- TAB 3: REFERENCE CURVE LIBRARY ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
         st.write("Manage the target temperature curves used for visual goal-tracking on graphs.")
@@ -2739,62 +2610,185 @@ def render_data_processing_page(selected_project):
         except Exception:
             st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
 
-    # --- TAB 5: EXPORT LOGIC ---
-    with tab_export:
-        st.subheader("📥 Wide-Format Data Export")
-        if not selected_project or selected_project == "All Projects":
-            st.warning("⚠️ Select a specific project in the sidebar to export data.")
-        else:
-            c1, c2 = st.columns(2)
-            e_start = c1.date_input("Start Date", value=datetime.now() - timedelta(days=30))
-            e_end = c2.date_input("End Date", value=datetime.now())
-            
-            with st.spinner("Processing engineering records..."):
-                full_df = get_universal_portal_data(selected_project, view_mode="engineering")
-            
-            if not full_df.empty:
-                all_locs = sorted(full_df['Location'].unique().tolist())
-                selected_locs = st.multiselect("Filter by Location (Leave empty for ALL)", options=all_locs)
-
-                mask = (full_df['timestamp'].dt.date >= e_start) & (full_df['timestamp'].dt.date <= e_end)
-                if selected_locs:
-                    mask = mask & (full_df['Location'].isin(selected_locs))
-                
-                export_df = full_df.loc[mask].copy()
-                
-                if export_df.empty:
-                    st.warning("No data found for the selected criteria.")
-                else:
-                    export_df['Sensor'] = export_df['Location'] + " (" + export_df['NodeNum'].astype(str) + ")"
-                    
-                    wide_df = export_df.pivot_table(
-                        index='timestamp', columns='Sensor', values='temperature', aggfunc='first'
-                    ).reset_index()
-
-                    wide_df['timestamp'] = wide_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-                    st.success(f"Report Ready: {len(wide_df.columns)-1} columns generated.")
-                    csv_data = wide_df.to_csv(index=False).encode('utf-8')
-                    
-                    st.download_button(
-                        label="💾 Download Custom CSV Export",
-                        data=csv_data,
-                        file_name=f"{selected_project}_Export_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-
-    # --- TAB 6: REDEFINED REGISTER CHILLER MODULE (NOW ABSOLUTE LAST TAB) ---
-    with tab_chiller_reg:
-        st.subheader("📋 Register Plant Chillers")
-        st.write("Maintain clear records of available cooling inventory assets system-wide.")
+    # --- TAB 4: SITE EVENT LOGGING ENGINE (NEXT TO LAST) ---
+    with tab_event_log:
+        st.subheader("🚨 Log New Site Event Entry")
+        st.write("Track power transitions, compressor cycles, and generator behaviors relative to active freeze down operations.")
         
+        try:
+            proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived' ORDER BY Project"
+            active_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
+        except Exception:
+            active_projects_list = ["Office"]
+            
+        try:
+            active_chillers_list = sorted(client.query(f"SELECT chiller_id FROM `{CHILLER_REG_TABLE}`").to_dataframe()['chiller_id'].tolist())
+        except Exception:
+            active_chillers_list = []
+
+        import uuid
+        with st.form("comprehensive_site_event_logger_form"):
+            col_el1, col_el2, col_el3 = st.columns(3)
+            target_proj = col_el1.selectbox("Assign Event to Project Space Phase*", active_projects_list, key="input_ev_proj")
+            event_date = col_el2.date_input("Event Log Date Entry", value=datetime.now().date(), key="input_ev_date")
+            event_time = col_el3.time_input("Event Log Time Entry (UTC)", value=datetime.now().time(), key="input_ev_time")
+            
+            col_el4, col_el5, col_el6 = st.columns(3)
+            event_type = col_el4.selectbox("Type of Event*", ["Chiller Turn On", "Chiller Turn Off", "Power Source Transition", "Generator Fault / Outage", "Other Site Anomaly"], key="input_ev_type")
+            power_type = col_el5.selectbox("Active Power Type Source*", ["Line Power", "Generator", "None / Outage State"], key="input_ev_power")
+            assoc_chiller = col_el6.selectbox("Associated Chiller Loop (Optional)", ["None"] + active_chillers_list, key="input_ev_chiller")
+            
+            event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Generator 2 ran out of fuel causing Chiller unit A power dropout for 45 minutes.")
+            root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Refueling delivery delay window shift.")
+            
+            c_bool1 = st.checkbox("Timestamp registration is approximate (Estimated time block record flag)", value=False)
+            
+            if st.form_submit_button("💾 Save Event Entry to Database", use_container_width=True):
+                if not event_desc.strip():
+                    st.error("❌ Submission Rejected: Event Description tracking summary text notes are required.")
+                else:
+                    generated_uuid = str(uuid.uuid4())
+                    combined_ts = datetime.combine(event_date, event_time).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    safe_desc = f"[{event_type} | Power: {power_type}] " + event_desc.strip().replace("'", "''")
+                    safe_cause = root_cause.strip().replace("'", "''")
+                    chiller_val_str = f"'{assoc_chiller}'" if assoc_chiller != "None" else "NULL"
+                    
+                    insert_sql = f"""
+                        INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate)
+                        VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_ts}'), NULL, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()})
+                    """
+                    try:
+                        with st.spinner("Streaming event logging data to BigQuery table..."):
+                            client.query(insert_sql).result()
+                        st.success(f"🎉 Success! Event tracking record committed cleanly under transaction code snapshot: `{generated_uuid[:8]}`")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Database insertion failed: {err}")
+                        st.code(insert_sql, language="sql")
+
+    # --- TAB 5: REGISTER CHILLER MASTER CONTROLS (UNIFIED WITH LIVE INVENTORY INTERFACE) ---
+    with tab_chiller_reg:
+        st.subheader("❄️ Chiller Infrastructure Master Control")
+        
+        # Section A: Live Dynamic Inventory Ledger
+        st.write("#### 📂 Current Fleet Asset Ledger")
+        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
+        try:
+            inventory_q = f"""
+                WITH TimelineState AS (
+                    SELECT 
+                        project_id, chiller_id, event_timestamp, event_description,
+                        REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN ON') as is_on,
+                        REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN OFF') as is_off,
+                        LEAD(event_timestamp) OVER(PARTITION BY chiller_id ORDER BY event_timestamp ASC) as next_evt
+                    FROM `{EVENTS_TABLE}`
+                    WHERE chiller_id IS NOT NULL
+                ),
+                Durations AS (
+                    SELECT 
+                        chiller_id,
+                        MAX_BY(project_id, event_timestamp) as current_location,
+                        ARRAY_AGG(is_on ORDER BY event_timestamp DESC LIMIT 1)[OFFSET(0)] as currently_chilling,
+                        SUM(CASE WHEN is_on THEN TIMESTAMP_DIFF(COALESCE(next_evt, CURRENT_TIMESTAMP()), event_timestamp, HOUR) ELSE 0 END) as total_chill_hours,
+                        MAX(CASE WHEN is_on AND next_evt IS NULL THEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), event_timestamp, HOUR) END) as active_run_hours
+                    FROM TimelineState
+                    GROUP BY chiller_id
+                )
+                SELECT 
+                    c.chiller_id, 
+                    c.chiller_type, 
+                    c.purchase_date,
+                    c.initial_price,
+                    c.acquired_status,
+                    COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
+                    COALESCE(d.currently_chilling, FALSE) as is_chilling,
+                    COALESCE(d.total_chill_hours, 0) as cumulative_hours,
+                    COALESCE(d.active_run_hours, 0) as current_run_hours
+                FROM `{CHILLER_REG_TABLE}` c
+                LEFT JOIN Durations d ON c.chiller_id = d.chiller_id
+                ORDER BY c.chiller_id ASC
+            """
+            inv_df = client.query(inventory_q).to_dataframe()
+            
+            if not inv_df.empty:
+                inv_df['Associated Costs'] = inv_df['cumulative_hours'] * 4.50
+                
+                editable_rows = []
+                for _, r in inv_df.iterrows():
+                    status_text = "🔵 Active Chilling Loop" if r['is_chilling'] else "⚪ Standby / Off"
+                    duration_text = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total runtime"
+                    
+                    editable_rows.append({
+                        "Chiller Name": r['chiller_id'],
+                        "Current Location": r['current_location'],
+                        "Operational Status": status_text,
+                        "Chill Duration": duration_text,
+                        "Equipment Type": r['chiller_type'],
+                        "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else None,
+                        "Condition When Acquired": str(r['acquired_status']).upper() if pd.notnull(r['acquired_status']) else "NEW",
+                        "Initial Cost": float(r['initial_price']) if pd.notnull(r['initial_price']) else 0.0,
+                        "Accumulated Operating Costs": f"${r['Associated Costs']:,.2f}"
+                    })
+                
+                base_edit_df = pd.DataFrame(editable_rows)
+                ed_key = "chiller_live_inventory_editor"
+                
+                st.data_editor(
+                    base_edit_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
+                    column_config={
+                        "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
+                        "Condition When Acquired": st.column_config.SelectColumn("Condition When Acquired", options=["NEW", "USED"]),
+                        "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
+                    },
+                    key=ed_key
+                )
+                
+                if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
+                    changes = st.session_state[ed_key]["edited_rows"]
+                    if changes:
+                        if st.button("💾 Save Inventory Modifications", use_container_width=True, type="primary"):
+                            with st.spinner("Overwriting registry values..."):
+                                for row_idx_str, col_deltas in changes.items():
+                                    row_idx = int(row_idx_str)
+                                    target_cid = base_edit_df.loc[row_idx, "Chiller Name"]
+                                    
+                                    set_clauses = []
+                                    if "Equipment Type" in col_deltas:
+                                        set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
+                                    if "Initial Cost" in col_deltas:
+                                        set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
+                                    if "Condition When Acquired" in col_deltas:
+                                        set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
+                                    if "Date Acquired" in col_deltas:
+                                        set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
+                                        
+                                    if set_clauses:
+                                        update_sql = f"UPDATE `{CHILLER_REG_TABLE}` SET {', '.join(set_clauses)} WHERE chiller_id = '{target_cid}'"
+                                        client.query(update_sql).result()
+                                        
+                            st.success("✅ Fleet inventory data logs updated successfully!")
+                            st.cache_data.clear()
+                            time.sleep(0.5)
+                            st.rerun()
+            else:
+                st.info("ℹ️ Chiller registry metadata catalog stores are currently unpopulated.")
+        except Exception as e:
+            st.caption(f"Asset ledger synchronization processing: {e}")
+
+        st.divider()
+
+        # Section B: Registration Entry Form
+        st.write("#### ➕ Register New Chiller Asset Entry")
         with st.form("manual_chiller_inventory_registration_form"):
             col_cr1, col_cr2, col_cr3 = st.columns(3)
             c_name = col_cr1.text_input("Chiller Name / ID Serial*", placeholder="e.g., CH-20-01, CH-53-02")
             c_type = col_cr2.text_input("Chiller Mechanical Type / Spec", placeholder="e.g., 53-Ton Logue, 20-Ton Industrial")
-            
-            # HARDENED FIX: Set absolute min_value boundary constraint to 30 years ago (1996) to clear calendar limitations
             c_acquired = col_cr3.date_input(
                 "Date Acquired*", 
                 value=datetime.now().date(),
@@ -2826,6 +2820,7 @@ def render_data_processing_page(selected_project):
                     except Exception as err:
                         st.error(f"Database insertion failed: {err}")
                         st.code(insert_chiller_sql, language="sql")
+
 
 ######################
 # Page: Admin Tool Helpers  #
