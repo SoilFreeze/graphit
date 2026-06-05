@@ -2646,7 +2646,6 @@ def render_data_processing_page(selected_project):
             event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Emergency technician callout to replace blown primary fuse block.")
             root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Electrical spike from main line transformer grid drop.")
             
-            # --- FLEXIBLE END TIME OPTION ---
             st.write("##### ⏱️ Duration / Resolution Tracking")
             c_has_end = st.checkbox("Toggle this to specify when the event ended / resolved", value=False)
             
@@ -2664,7 +2663,6 @@ def render_data_processing_page(selected_project):
                     generated_uuid = str(uuid.uuid4())
                     combined_start = datetime.combine(event_date, event_time).strftime('%Y-%m-%d %H:%M:%S')
                     
-                    # Parse out resolution time if checked, otherwise pass NULL cleanly to BigQuery
                     if c_has_end:
                         combined_end = f"TIMESTAMP('{datetime.combine(end_date, end_time).strftime('%Y-%m-%d %H:%M:%S')}')"
                     else:
@@ -2692,9 +2690,13 @@ def render_data_processing_page(selected_project):
 
         st.divider()
         
-        # --- EVENT REGISTRY WITH START & END TIMESTAMPS ---
+        # =====================================================================
+        # --- EVENT REGISTRY MANAGEMENT LEDGER (WITH BULK REMOVALS CAPABILITY) ---
+        # =====================================================================
         st.write("#### 📂 Event Registry")
-        f_col1, f_col2 = st.columns(2)
+        st.caption("💡 **Tip:** To clear out double postings or bad copies, select the row(s) and click the **Remove Selected Entries** button below.")
+        
+        f_col1, f_col2 = f_col1, f_col2 = st.columns(2)
         filter_proj = f_col1.selectbox("Filter Logs by Project Space Context:", ["All"] + active_projects_list, key="evt_log_filter_project")
         filter_chiller = f_col2.selectbox("Filter Logs by Associated Chiller Asset:", ["All"] + active_chillers_list, key="evt_log_filter_chiller")
         
@@ -2707,8 +2709,10 @@ def render_data_processing_page(selected_project):
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
+            # Pull event_id so we have a completely bulletproof primary key handle for targeting direct deletions
             logs_q = f"""
-                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Start_Time,
+                SELECT event_id,
+                       FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Start_Time,
                        COALESCE(FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', resolution_timestamp), 'Ongoing / N/A') as End_Time,
                        project_id as Project,
                        event_description as Chiller_Event,
@@ -2719,22 +2723,50 @@ def render_data_processing_page(selected_project):
                 LIMIT 200
             """
             logs_df = client.query(logs_q).to_dataframe()
+            
             if not logs_df.empty:
-                st.dataframe(
+                # Add a selection tracker mapping layer to the memory frame
+                logs_df.insert(0, "Select to Remove", False)
+                
+                ev_key = "live_event_registry_interactive_editor"
+                
+                # Render using st.data_editor to easily capture checkbox selection events
+                edited_logs_df = st.data_editor(
                     logs_df, 
                     use_container_width=True, 
                     hide_index=True,
+                    disabled=["event_id", "Start_Time", "End_Time", "Project", "Chiller_Event", "event_cost"],
                     column_config={
+                        "Select to Remove": st.column_config.CheckboxColumn("Remove?", help="Check this box to target a duplicate row for extraction"),
+                        "event_id": None, # Kept hidden from the engineering UI view
                         "Start_Time": st.column_config.TextColumn("Start Time"),
                         "End_Time": st.column_config.TextColumn("End / Resolution Time"),
                         "Chiller_Event": st.column_config.TextColumn("Chiller Event"),
                         "event_cost": st.column_config.NumberColumn("Cost ($)", format="$%.2f")
-                    }
+                    },
+                    key=ev_key
                 )
+                
+                # Filter out exactly which event rows have been targeted for database removal
+                targeted_deletions = edited_logs_df[edited_logs_df["Select to Remove"] == True]
+                
+                if not targeted_deletions.empty:
+                    st.warning(f"⚠️ Warning: You have targeted {len(targeted_deletions)} event log record(s) for extraction.")
+                    if st.button("🗑️ Remove Selected Entries From Registry", use_container_width=True, type="primary"):
+                        with st.spinner("Purging records from BigQuery array storage..."):
+                            for _, target_row in targeted_deletions.iterrows():
+                                target_uuid = target_row["event_id"]
+                                purge_sql = f"DELETE FROM `{EVENTS_TABLE}` WHERE event_id = '{target_uuid}'"
+                                client.query(purge_sql).result()
+                                
+                        st.success("🎉 Registry cleaned up! Duplicate items removed successfully.")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
             else:
                 st.info("No historical event entries log files match your selected parameter options.")
         except Exception as e:
-            st.caption(f"Log viewer pipeline suspended: {e}")
+            st.error(f"⚠️ Event Registry Fault: {e}")
 
 
     # --- TAB 5: REGISTER CHILLER CONTROLS ---
