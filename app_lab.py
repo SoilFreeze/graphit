@@ -2714,9 +2714,9 @@ def render_data_processing_page(selected_project):
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
-        # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
+        # Section A: Live Dynamic Inventory Ledger (At the Top)
         st.write("#### 📂 Current Fleet Asset Ledger")
-        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, then click Save below.")
+        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
         try:
             inventory_q = f"""
                 WITH TimelineState AS (
@@ -2754,6 +2754,8 @@ def render_data_processing_page(selected_project):
                     c.chiller_id, 
                     c.chiller_type, 
                     c.purchase_date,
+                    c.initial_price,
+                    c.acquired_status,
                     COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
                     COALESCE(d.active_system, '') as active_system,
                     COALESCE(d.currently_chilling, FALSE) as is_chilling,
@@ -2788,6 +2790,8 @@ def render_data_processing_page(selected_project):
                         "Live Loop Brine Temp": temp_display,
                         "Equipment Type": r['chiller_type'],
                         "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else None,
+                        "Condition When Acquired": str(r['acquired_status']).upper() if pd.notnull(r['acquired_status']) else "NEW",
+                        "Initial Cost": float(r['initial_price']) if pd.notnull(r['initial_price']) else 0.0,
                         "Accumulated Operating Costs": f"${r['Associated Costs']:,.2f}"
                     })
                 
@@ -2800,6 +2804,8 @@ def render_data_processing_page(selected_project):
                     hide_index=True,
                     disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Live Loop Brine Temp", "Accumulated Operating Costs"],
                     column_config={
+                        "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
+                        "Condition When Acquired": st.column_config.SelectColumn("Condition When Acquired", options=["NEW", "USED"]),
                         "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
                     },
                     key=ed_key
@@ -2817,6 +2823,10 @@ def render_data_processing_page(selected_project):
                                     set_clauses = []
                                     if "Equipment Type" in col_deltas:
                                         set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
+                                    if "Initial Cost" in col_deltas:
+                                        set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
+                                    if "Condition When Acquired" in col_deltas:
+                                        set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
                                     if "Date Acquired" in col_deltas:
                                         set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
                                         
@@ -2835,17 +2845,21 @@ def render_data_processing_page(selected_project):
 
         st.divider()
 
-        # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
+        # Section B: Registration Entry Form (At the Bottom)
         st.write("#### ➕ Register New Chiller Asset Entry")
         with st.form("manual_chiller_inventory_registration_form"):
             col_cr1, col_cr2, col_cr3 = st.columns(3)
             c_name = col_cr1.text_input("Chiller Name / ID Serial*", placeholder="e.g., CH-20-01, CH-53-02")
-            c_type = col_cr2.text_input("Chiller Mechanical Type / Spec", placeholder="e.g., 53-Ton Logue, 20-Ton Industrial")
+            c_type = col_cr2.text_input("Chiller Mechanical Type / Spec", placeholder="e.g., 53-Ton Logue")
             c_acquired = col_cr3.date_input(
                 "Date Acquired*", 
                 value=datetime.now().date(),
                 min_value=datetime.now().date() - timedelta(days=365*30)
             )
+            
+            col_cr4, col_cr5 = st.columns(2)
+            c_price = col_cr4.number_input("Initial Purchase Price ($)", min_value=0.0, value=0.0, step=1000.0, format="%.2f")
+            c_condition = col_cr5.selectbox("Condition Status When Acquired", ["New", "Used"])
             
             if st.form_submit_button("🚀 Commit Chiller Asset to Registry", use_container_width=True):
                 if not c_name.strip():
@@ -2855,8 +2869,8 @@ def render_data_processing_page(selected_project):
                     safe_ctype = c_type.strip().replace("'", "''")
                     
                     insert_chiller_sql = f"""
-                        INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, chiller_type, purchase_date)
-                        VALUES ('{safe_cname}', '{safe_ctype}', DATE('{c_acquired.strftime('%Y-%m-%d')}'))
+                        INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, chiller_type, purchase_date, initial_price, acquired_status)
+                        VALUES ('{safe_cname}', '{safe_ctype}', DATE('{c_acquired.strftime('%Y-%m-%d')}'), {float(c_price)}, '{c_condition.lower()}')
                     """
                     try:
                         with st.spinner("Writing to chiller catalog manifest..."):
@@ -2868,7 +2882,6 @@ def render_data_processing_page(selected_project):
                     except Exception as err:
                         st.error(f"Database insertion failed: {err}")
                         st.code(insert_chiller_sql, language="sql")
-
 ######################
 # Page: Admin Tool Helpers  #
 ######################
