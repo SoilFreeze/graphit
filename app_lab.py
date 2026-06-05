@@ -4093,29 +4093,28 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.write("### Preview Staged Inventory Matrix")
                     st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
                     
-                    # Find this section inside tab_bulk_config:
-if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
-    actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
-    if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
-        st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields.")
-    else:
-        with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
-            clean_upload_df = pd.DataFrame({
-                'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
-                'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
-            }).dropna()
-            
-            staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
-            
-            # HARDENED FIX: Force BigQuery to expect explicit string types to match 16-byte signatures
-            load_job_config = bigquery.LoadJobConfig(
-                schema=[
-                    bigquery.SchemaField("RawID", "STRING"),
-                    bigquery.SchemaField("NodeNum", "STRING"),
-                ],
-                write_disposition="WRITE_TRUNCATE" # Safe drop/replace for temporary staging table
-            )
-            client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()                                
+                    if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
+                        actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
+                        if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
+                            st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields.")
+                        else:
+                            with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
+                                clean_upload_df = pd.DataFrame({
+                                    'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
+                                    'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
+                                }).dropna()
+                                staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
+                                
+                                # 🛡️ HARDENED FIX: Explicitly enforce string formatting types on the staging environment
+                                load_job_config = bigquery.LoadJobConfig(
+                                    schema=[
+                                        bigquery.SchemaField("RawID", "STRING"),
+                                        bigquery.SchemaField("NodeNum", "STRING"),
+                                    ],
+                                    write_disposition="WRITE_TRUNCATE"
+                                )
+                                client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()
+                                
                                 merge_upsert_sql = f"""
                                     INSERT INTO `{target_inventory_path}` (RawID, NodeNum)
                                     SELECT DISTINCT s.RawID, s.NodeNum FROM `{staging_table}` s
