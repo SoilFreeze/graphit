@@ -2717,15 +2717,15 @@ def render_data_processing_page(selected_project):
         # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
         st.write("#### 📂 Current Inventory of Chillers")
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
+        
         try:
-            # 🛡️ HARDENED FIX: Uses explicit column handles mapped to your absolute database schema properties
+            # 🛡️ HARDENED PLUG: Query directly strips out the missing sensor map table to resolve hidden 404 blockages
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
                         project_id, chiller_id, event_timestamp, event_description,
                         REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN ON') as is_on,
                         REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN OFF') as is_off,
-                        REGEXP_EXTRACT(event_description, r'\\[System:\\s*(.*?)\\]') as system_loop,
                         LEAD(event_timestamp) OVER(PARTITION BY chiller_id ORDER BY event_timestamp ASC) as next_evt
                     FROM `{EVENTS_TABLE}`
                     WHERE chiller_id IS NOT NULL
@@ -2734,22 +2734,11 @@ def render_data_processing_page(selected_project):
                     SELECT 
                         chiller_id,
                         MAX_BY(project_id, event_timestamp) as current_location,
-                        MAX_BY(system_loop, event_timestamp) as active_system,
                         ARRAY_AGG(is_on ORDER BY event_timestamp DESC LIMIT 1)[OFFSET(0)] as currently_chilling,
                         SUM(CASE WHEN is_on THEN TIMESTAMP_DIFF(COALESCE(next_evt, CURRENT_TIMESTAMP()), event_timestamp, HOUR) ELSE 0 END) as total_chill_hours,
                         MAX(CASE WHEN is_on AND next_evt IS NULL THEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), event_timestamp, HOUR) END) as active_run_hours
                     FROM TimelineState
                     GROUP BY chiller_id
-                ),
-                TelemMetrics AS (
-                    SELECT 
-                        m.chiller_id,
-                        ROUND(AVG(d.temperature), 1) as avg_brine_temp
-                    FROM `{CHILLER_MAP_TABLE}` m
-                    JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` d 
-                      ON m.project_id = d.Project AND m.Location = d.Location
-                    WHERE d.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
-                    GROUP BY m.chiller_id
                 )
                 SELECT 
                     c.chiller_id, 
@@ -2758,14 +2747,11 @@ def render_data_processing_page(selected_project):
                     c.initial_price,
                     c.acquired_status,
                     COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
-                    COALESCE(d.active_system, '') as active_system,
                     COALESCE(d.currently_chilling, FALSE) as is_chilling,
                     COALESCE(d.total_chill_hours, 0) as cumulative_hours,
-                    COALESCE(d.active_run_hours, 0) as current_run_hours,
-                    t.avg_brine_temp
+                    COALESCE(d.active_run_hours, 0) as current_run_hours
                 FROM `{CHILLER_REG_TABLE}` c
                 LEFT JOIN Durations d ON c.chiller_id = d.chiller_id
-                LEFT JOIN TelemMetrics t ON c.chiller_id = t.chiller_id
                 ORDER BY c.chiller_id ASC
             """
             inv_df = client.query(inventory_q).to_dataframe()
@@ -2775,20 +2761,14 @@ def render_data_processing_page(selected_project):
                 
                 editable_rows = []
                 for _, r in inv_df.iterrows():
-                    status_text = "🔵 Active Chilling Loop" if r['is_chilling'] else "⚪ Standby / Off"
+                    status_text = "🔵 Active Chilling" if r['is_chilling'] else "⚪ Standby / Off"
                     duration_text = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total runtime"
-                    
-                    system_suffix = f" ({r['active_system']})" if r['active_system'] else ""
-                    location_label = f"{r['current_location']}{system_suffix}"
-                    
-                    temp_display = f"{r['avg_brine_temp']}°F" if pd.notnull(r['avg_brine_temp']) else "No Active Pings"
                     
                     editable_rows.append({
                         "Chiller Name": r['chiller_id'],
-                        "Current Location": location_label,
+                        "Current Location": r['current_location'],
                         "Operational Status": status_text,
                         "Chill Duration": duration_text,
-                        "Live Loop Brine Temp": temp_display,
                         "Equipment Type": r['chiller_type'],
                         "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else None,
                         "Condition When Acquired": str(r['acquired_status']).upper() if pd.notnull(r['acquired_status']) else "NEW",
@@ -2803,7 +2783,7 @@ def render_data_processing_page(selected_project):
                     base_edit_df,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Live Loop Brine Temp", "Accumulated Operating Costs"],
+                    disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
                     column_config={
                         "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
                         "Condition When Acquired": st.column_config.SelectColumn("Condition When Acquired", options=["NEW", "USED"]),
@@ -2840,9 +2820,9 @@ def render_data_processing_page(selected_project):
                             time.sleep(0.5)
                             st.rerun()
             else:
-                st.info("ℹ| Chiller registry metadata catalog stores are currently unpopulated.")
+                st.info("ℹ️ Chiller registry metadata catalog stores are currently unpopulated.")
         except Exception as e:
-            st.caption(f"Asset ledger synchronization processing: {e}")
+            st.error(f"⚠️ Inventory Ledger Render Fault: {e}")
 
         st.divider()
 
@@ -2851,7 +2831,7 @@ def render_data_processing_page(selected_project):
         with st.form("manual_chiller_inventory_registration_form"):
             col_cr1, col_cr2, col_cr3 = st.columns(3)
             c_name = col_cr1.text_input("Chiller Name / ID Serial*", placeholder="e.g., CH-20-01, CH-53-02")
-            c_type = col_cr2.text_input("Chiller Mechanical Type / Spec", placeholder="e.g., 53-Ton Logue, 20-Ton Industrial")
+            c_type = col_cr2.text_input("Chiller Mechanical Type / Spec", placeholder="e.g., 53-Ton Logue")
             c_acquired = col_cr3.date_input(
                 "Date Acquired*", 
                 value=datetime.now().date(),
@@ -2882,7 +2862,6 @@ def render_data_processing_page(selected_project):
                         st.rerun()
                     except Exception as err:
                         st.error(f"Database insertion failed: {err}")
-                        st.code(insert_chiller_sql, language="sql")
 
 
 ######################
