@@ -2343,7 +2343,7 @@ def render_data_processing_page(selected_project):
         st.error("Database connection unavailable.")
         return
         
-    # Reordered tabs matching exact blueprint specification
+    # Standardized 5-tab layout order matching blueprint specifications
     tab_upload, tab_export, tab_ref_library, tab_event_log, tab_chiller_reg = st.tabs([
         "📄 Upload Telemetry", 
         "📥 Export Report",
@@ -2611,7 +2611,7 @@ def render_data_processing_page(selected_project):
         except Exception:
             st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
 
-    # --- TAB 4: SITE EVENT LOGGING ENGINE & INTEGRATED HISTORY LOG ---
+    # --- TAB 4: SITE EVENT LOGGING ENGINE ---
     with tab_event_log:
         st.subheader("🚨 Log New Site Event Entry")
         st.write("Track power transitions, compressor cycles, and generator behaviors relative to active freeze down operations.")
@@ -2635,11 +2635,11 @@ def render_data_processing_page(selected_project):
             event_time = col_el3.time_input("Event Log Time Entry (UTC)", value=datetime.now().time(), key="input_ev_time")
             
             col_el4, col_el5, col_el6 = st.columns(3)
+            # Custom event types added matching requirements
             event_type = col_el4.selectbox("Type of Event*", ["Chiller Turn On", "Chiller Turn Off", "Power Source Transition", "Generator Fault / Outage", "Other Site Anomaly"], key="input_ev_type")
             power_type = col_el5.selectbox("Active Power Type Source*", ["Line Power", "Generator", "None / Outage State"], key="input_ev_power")
             assoc_chiller = col_el6.selectbox("Associated Chiller Loop (Optional)", ["None"] + active_chillers_list, key="input_ev_chiller")
             
-            # Form expansion: Added optional system loops to map chillers in a series
             proj_system = st.text_input("Project System Loop Identifier (Optional)", placeholder="e.g., Loop A, Loop B (Leave blank if project uses only one system)")
             
             event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Generator 2 ran out of fuel causing Chiller unit A power dropout for 45 minutes.")
@@ -2676,7 +2676,7 @@ def render_data_processing_page(selected_project):
 
         st.divider()
         
-        # --- DYNAMIC HISTORICAL ENTRIES TABLE LAYER WITH FILTER BOXES ---
+        # --- DYNAMIC RECONFIGURED HISTORICAL ENTRIES TABLE ---
         st.write("#### 📂 Historical Site Log Registry")
         
         f_col1, f_col2 = st.columns(2)
@@ -2692,12 +2692,11 @@ def render_data_processing_page(selected_project):
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
+            # Simplified columns structure layout pulling strictly: Time, Project, Chiller Event
             logs_q = f"""
-                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Timestamp,
+                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Time,
                        project_id as Project,
-                       COALESCE(chiller_id, '—') as Chiller,
-                       event_description as Description,
-                       COALESCE(NULLIF(root_cause, ''), '—') as `Root Cause`
+                       event_description as `Chiller Event`
                 FROM `{EVENTS_TABLE}`
                 {where_stmt}
                 ORDER BY event_timestamp DESC
@@ -2711,11 +2710,11 @@ def render_data_processing_page(selected_project):
         except Exception as e:
             st.caption(f"Log viewer pipeline suspended: {e}")
 
-    # --- TAB 5: REGISTER CHILLER MASTER CONTROLS (UNIFIED WITH LIVE INVENTORY INTERFACE) ---
+    # --- TAB 5: REGISTER CHILLER CONTROLS ---
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
-        # Section A: Live Dynamic Inventory Ledger
+        # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
         st.write("#### 📂 Current Fleet Asset Ledger")
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, then click Save below.")
         try:
@@ -2742,7 +2741,6 @@ def render_data_processing_page(selected_project):
                     GROUP BY chiller_id
                 ),
                 TelemMetrics AS (
-                    -- Correlate analytical temperatures by joining matching project loop coordinates
                     SELECT 
                         m.chiller_id,
                         ROUND(AVG(d.temperature), 1) as avg_brine_temp
@@ -2774,7 +2772,7 @@ def render_data_processing_page(selected_project):
                 
                 editable_rows = []
                 for _, r in inv_df.iterrows():
-                    status_text = "季 Active Chilling Loop" if r['is_chilling'] else "⚪ Standby / Off"
+                    status_text = "🔵 Active Chilling Loop" if r['is_chilling'] else "⚪ Standby / Off"
                     duration_text = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total runtime"
                     
                     system_suffix = f" ({r['active_system']})" if r['active_system'] else ""
@@ -2837,7 +2835,7 @@ def render_data_processing_page(selected_project):
 
         st.divider()
 
-        # Section B: Registration Entry Form
+        # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
         st.write("#### ➕ Register New Chiller Asset Entry")
         with st.form("manual_chiller_inventory_registration_form"):
             col_cr1, col_cr2, col_cr3 = st.columns(3)
@@ -2870,7 +2868,6 @@ def render_data_processing_page(selected_project):
                     except Exception as err:
                         st.error(f"Database insertion failed: {err}")
                         st.code(insert_chiller_sql, language="sql")
-
 
 ######################
 # Page: Admin Tool Helpers  #
