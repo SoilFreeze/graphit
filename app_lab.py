@@ -3282,7 +3282,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 continue
 
         # Find this section inside the tab_recovery button click action:
-total_recovered_appends = len(all_rows)
+                total_recovered_appends = len(all_rows)
                 if total_recovered_appends == 0:
                     st.info("🔒 Cloud accounts returned 0 points for this window context.")
                     status_box.update(label="Run Finalized (0 Points Found)", state="complete")
