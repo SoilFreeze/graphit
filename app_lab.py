@@ -4141,17 +4141,42 @@ if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", 
                             st.error(f"Missing required allocation column labels: {required - set(df_upload.columns)}")
                         else:
                             with st.spinner("Streaming spatial allocations into active registry view..."):
+                                # 🛡️ HARDENED FIX: Force explicit string formatting to guarantee 16-byte API safety
                                 if 'Start_Date' in df_upload.columns:
-                                    df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.date
+                                    df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.strftime('%Y-%m-%d')
                                 else:
-                                    df_upload['Start_Date'] = datetime.now().date()
+                                    df_upload['Start_Date'] = datetime.now().strftime('%Y-%m-%d')
+                                    
                                 if 'SensorStatus' not in df_upload.columns:
                                     df_upload['SensorStatus'] = 'On Project'
+                                    
                                 if 'PhysicalID' in df_upload.columns:
                                     df_upload = df_upload.drop(columns=['PhysicalID'])
                                     
-                                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+                                # Standardize field types to strings to avoid floating-point conversion errors
+                                df_upload['NodeNum'] = df_upload['NodeNum'].astype(str).str.strip()
+                                df_upload['Project'] = df_upload['Project'].astype(str).str.strip()
+                                df_upload['Location'] = df_upload['Location'].astype(str).str.strip()
+                                if 'Bank' in df_upload.columns:
+                                    df_upload['Bank'] = df_upload['Bank'].fillna('').astype(str).str.strip()
+                                if 'Depth' in df_upload.columns:
+                                    df_upload['Depth'] = pd.to_numeric(df_upload['Depth'], errors='coerce').fillna(0.0)
+
+                                # 🛡️ HARDENED FIX: Explicitly enforce the table layout schema configuration
+                                job_config = bigquery.LoadJobConfig(
+                                    schema=[
+                                        bigquery.SchemaField("NodeNum", "STRING"),
+                                        bigquery.SchemaField("Project", "STRING"),
+                                        bigquery.SchemaField("Location", "STRING"),
+                                        bigquery.SchemaField("Bank", "STRING"),
+                                        bigquery.SchemaField("Depth", "FLOAT"),
+                                        bigquery.SchemaField("SensorStatus", "STRING"),
+                                        bigquery.SchemaField("Start_Date", "DATE"),
+                                    ],
+                                    write_disposition="WRITE_APPEND"
+                                )
                                 client.load_table_from_dataframe(df_upload, target_registry_path, job_config=job_config).result()
+                                
                             st.success(f"🎉 Success! Appended {len(df_upload)} nodes onto your asset deployment matrix timeline safely.")
                             st.cache_data.clear()
                             time.sleep(1)
