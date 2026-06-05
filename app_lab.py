@@ -2611,10 +2611,10 @@ def render_data_processing_page(selected_project):
         except Exception:
             st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
 
-    # --- TAB 4: SITE EVENT LOGGING ENGINE ---
+    # --- TAB 4: SITE EVENT LOGGING ENGINE & INTEGRATED HISTORY LOG ---
     with tab_event_log:
         st.subheader("🚨 Log New Site Event Entry")
-        st.write("Track power transitions, compressor cycles, and generator behaviors relative to active freeze down operations.")
+        st.write("Track power transitions, compressor cycles, repair costs, and generator behaviors relative to active freeze down operations.")
         
         try:
             proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived' ORDER BY Project"
@@ -2635,15 +2635,17 @@ def render_data_processing_page(selected_project):
             event_time = col_el3.time_input("Event Log Time Entry (UTC)", value=datetime.now().time(), key="input_ev_time")
             
             col_el4, col_el5, col_el6 = st.columns(3)
-            # Custom event types added matching requirements
-            event_type = col_el4.selectbox("Type of Event*", ["Chiller Turn On", "Chiller Turn Off", "Power Source Transition", "Generator Fault / Outage", "Other Site Anomaly"], key="input_ev_type")
+            event_type = col_el4.selectbox("Type of Event*", ["Chiller Turn On", "Chiller Turn Off", "Power Source Transition", "Generator Fault / Outage", "Equipment Repair / Maintenance", "Other Site Anomaly"], key="input_ev_type")
             power_type = col_el5.selectbox("Active Power Type Source*", ["Line Power", "Generator", "None / Outage State"], key="input_ev_power")
             assoc_chiller = col_el6.selectbox("Associated Chiller Loop (Optional)", ["None"] + active_chillers_list, key="input_ev_chiller")
             
-            proj_system = st.text_input("Project System Loop Identifier (Optional)", placeholder="e.g., Loop A, Loop B (Leave blank if project uses only one system)")
+            # Form additions: Added optional loop tracking text input and a dedicated numeric cost slot
+            col_el7, col_el8 = st.columns(2)
+            proj_system = col_el7.text_input("Project System Loop Identifier (Optional)", placeholder="e.g., Loop A, Loop B")
+            event_cost_val = col_el8.number_input("Associated Event / Repair Cost ($)", min_value=0.0, value=0.0, step=50.0, format="%.2f")
             
-            event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Generator 2 ran out of fuel causing Chiller unit A power dropout for 45 minutes.")
-            root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Refueling delivery delay window shift.")
+            event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Emergency technician callout to replace blown primary fuse block.")
+            root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Electrical spike from main line transformer grid drop.")
             
             c_bool1 = st.checkbox("Timestamp registration is approximate (Estimated time block record flag)", value=False)
             
@@ -2659,14 +2661,15 @@ def render_data_processing_page(selected_project):
                     safe_cause = root_cause.strip().replace("'", "''")
                     chiller_val_str = f"'{assoc_chiller}'" if assoc_chiller != "None" else "NULL"
                     
+                    # 🛡️ HARDENED PLUG: Streams the physical event_cost numeric directly into your extended table schema
                     insert_sql = f"""
-                        INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate)
-                        VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_ts}'), NULL, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()})
+                        INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate, event_cost)
+                        VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_ts}'), NULL, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()}, {float(event_cost_val)})
                     """
                     try:
                         with st.spinner("Streaming event logging data to BigQuery table..."):
                             client.query(insert_sql).result()
-                        st.success(f"🎉 Success! Event tracking record committed cleanly under transaction code snapshot: `{generated_uuid[:8]}`")
+                        st.success(f"🎉 Success! Event tracking record committed cleanly under code: `{generated_uuid[:8]}`")
                         st.cache_data.clear()
                         time.sleep(0.5)
                         st.rerun()
@@ -2676,9 +2679,8 @@ def render_data_processing_page(selected_project):
 
         st.divider()
         
-        # --- DYNAMIC RECONFIGURED HISTORICAL ENTRIES TABLE ---
+        # --- HISTORICAL SITE LOG REGISTRY WITH FILTER BOXES ---
         st.write("#### 📂 Historical Site Log Registry")
-        
         f_col1, f_col2 = st.columns(2)
         filter_proj = f_col1.selectbox("Filter Logs by Project Space Context:", ["All"] + active_projects_list, key="evt_log_filter_project")
         filter_chiller = f_col2.selectbox("Filter Logs by Associated Chiller Asset:", ["All"] + active_chillers_list, key="evt_log_filter_chiller")
@@ -2692,11 +2694,11 @@ def render_data_processing_page(selected_project):
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
-            # Simplified columns structure layout pulling strictly: Time, Project, Chiller Event
             logs_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Time,
                        project_id as Project,
-                       event_description as `Chiller Event`
+                       event_description as `Chiller Event`,
+                       COALESCE(event_cost, 0.0) as `Cost ($)`
                 FROM `{EVENTS_TABLE}`
                 {where_stmt}
                 ORDER BY event_timestamp DESC
@@ -2710,21 +2712,20 @@ def render_data_processing_page(selected_project):
         except Exception as e:
             st.caption(f"Log viewer pipeline suspended: {e}")
 
-    # --- TAB 5: MASTER CHILLER INTERFACE CONTROLS ---
+
+    # --- TAB 5: REGISTER CHILLER CONTROLS ---
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
-        # =====================================================================
-        # SECTION 1: GLOBAL FLEET INVENTORY STATUS DISPLAY
-        # =====================================================================
+        # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
         st.write("#### 📂 Current Inventory of Chillers")
-        
+        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
         try:
-            # Enhanced query dynamically unpacking your newly introduced 'status' attribute
+            # 🛡️ HARDENED PLUG: Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
-                        project_id, chiller_id, event_timestamp, event_description,
+                        project_id, chiller_id, event_timestamp, event_description, event_cost,
                         REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN ON') as is_on,
                         REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN OFF') as is_off,
                         LEAD(event_timestamp) OVER(PARTITION BY chiller_id ORDER BY event_timestamp ASC) as next_evt
@@ -2737,7 +2738,8 @@ def render_data_processing_page(selected_project):
                         MAX_BY(project_id, event_timestamp) as current_location,
                         ARRAY_AGG(is_on ORDER BY event_timestamp DESC LIMIT 1)[OFFSET(0)] as currently_chilling,
                         SUM(CASE WHEN is_on THEN TIMESTAMP_DIFF(COALESCE(next_evt, CURRENT_TIMESTAMP()), event_timestamp, HOUR) ELSE 0 END) as total_chill_hours,
-                        MAX(CASE WHEN is_on AND next_evt IS NULL THEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), event_timestamp, HOUR) END) as active_run_hours
+                        MAX(CASE WHEN is_on AND next_evt IS NULL THEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), event_timestamp, HOUR) END) as active_run_hours,
+                        SUM(COALESCE(event_cost, 0.0)) as total_logged_costs
                     FROM TimelineState
                     GROUP BY chiller_id
                 )
@@ -2746,7 +2748,8 @@ def render_data_processing_page(selected_project):
                     COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
                     COALESCE(d.currently_chilling, FALSE) as is_chilling,
                     COALESCE(d.total_chill_hours, 0) as cumulative_hours,
-                    COALESCE(d.active_run_hours, 0) as current_run_hours
+                    COALESCE(d.active_run_hours, 0) as current_run_hours,
+                    COALESCE(d.total_logged_costs, 0.0) as total_operating_costs
                 FROM `{CHILLER_REG_TABLE}` c
                 LEFT JOIN Durations d ON c.chiller_id = d.chiller_id
                 ORDER BY c.chiller_id ASC
@@ -2754,62 +2757,88 @@ def render_data_processing_page(selected_project):
             inv_raw_df = client.query(inventory_q).to_dataframe()
             
             if not inv_raw_df.empty:
-                inv_raw_df['Associated Costs'] = inv_raw_df['cumulative_hours'] * 4.50
-                
-                display_rows = []
+                editable_rows = []
                 for _, r in inv_raw_df.iterrows():
-                    status_flag = "🔵 Actively Running" if r['is_chilling'] else "⚪ Off/Standby"
-                    duration_label = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total"
+                    status_text = "🔵 Active Chilling" if r['is_chilling'] else "⚪ Standby / Off"
+                    duration_text = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total runtime"
                     
-                    display_rows.append({
+                    editable_rows.append({
                         "Chiller Name": r['chiller_id'],
                         "Asset Status": str(r['status']).upper(),
-                        "Location Deployment": r['current_location'],
-                        "Operational State": status_flag,
-                        "Chill Duration": duration_label,
-                        "Equipment Type": r['chiller_type'] if pd.notnull(r['chiller_type']) else "—",
-                        "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else "—",
-                        "Condition": str(r['acquired_status']).upper() if pd.notnull(r['acquired_status']) else "NEW",
-                        "Initial Cost": f"${float(r['initial_price']):,.2f}" if pd.notnull(r['initial_price']) else "$0.00",
-                        "Operating Costs": f"${r['Associated Costs']:,.2f}"
+                        "Current Location": r['current_location'],
+                        "Operational Status": status_text,
+                        "Chill Duration": duration_text,
+                        "Equipment Type": r['chiller_type'],
+                        "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else None,
+                        "Condition When Acquired": str(r['acquired_status']).upper() if pd.notnull(r['acquired_status']) else "NEW",
+                        "Initial Cost": float(r['initial_price']) if pd.notnull(r['initial_price']) else 0.0,
+                        "Accumulated Operating Costs": f"${r['total_operating_costs']:,.2f}"
                     })
                 
-                st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+                base_edit_df = pd.DataFrame(editable_rows)
+                ed_key = "chiller_live_inventory_editor"
+                
+                st.data_editor(
+                    base_edit_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["Chiller Name", "Asset Status", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
+                    column_config={
+                        "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
+                        "Condition When Acquired": st.column_config.SelectboxColumn("Condition When Acquired", options=["NEW", "USED"]),
+                        "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
+                    },
+                    key=ed_key
+                )
+                
+                if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key] and st.session_state[ed_key]["edited_rows"]:
+                    if st.button("💾 Save Inventory Modifications", use_container_width=True, type="secondary"):
+                        with st.spinner("Overwriting registry values..."):
+                            for row_idx_str, col_deltas in st.session_state[ed_key]["edited_rows"].items():
+                                row_idx = int(row_idx_str)
+                                target_cid = base_edit_df.loc[row_idx, "Chiller Name"]
+                                
+                                set_clauses = []
+                                if "Equipment Type" in col_deltas:
+                                    set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
+                                if "Initial Cost" in col_deltas:
+                                    set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
+                                if "Condition When Acquired" in col_deltas:
+                                    set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
+                                if "Date Acquired" in col_deltas:
+                                    set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
+                                    
+                                if set_clauses:
+                                    update_sql = f"UPDATE `{CHILLER_REG_TABLE}` SET {', '.join(set_clauses)} WHERE chiller_id = '{target_cid}'"
+                                    client.query(update_sql).result()
+                                    
+                        st.success("✅ Fleet inventory data logs updated successfully!")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
             else:
-                st.info("ℹ️ Fleet infrastructure database registry is currently unpopulated.")
+                st.info("ℹ️ Chiller registry metadata catalog stores are currently unpopulated.")
         except Exception as e:
-            st.error(f"⚠️ Inventory View Synchronization Error: {e}")
+            st.error(f"⚠️ Inventory Ledger Render Fault: {e}")
 
         st.divider()
 
-        # =====================================================================
-        # SECTION 2: DYNAMIC UPDATE STATUS & REGISTRATION CONTROL CONSOLE
-        # =====================================================================
-        st.write("#### ⚙️ Update Chiller Status & Asset Records")
-        
-        # Checkbox mode routing logic to easily swap form context
+        # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
+        st.write("#### ➕ Update Chiller Status & Asset Records")
         is_brand_new_asset = st.checkbox("➕ Check this box to register a completely NEW chiller asset to the fleet", value=False)
-        
-        # Build master fleet arrays to fuel update dropdown targets
         fleet_options = sorted(inv_raw_df['chiller_id'].tolist()) if not inv_raw_df.empty else []
         
         with st.form("hardened_unified_chiller_asset_management_form"):
             if is_brand_new_asset or not fleet_options:
-                # Fresh entry registration display mode
                 st.info("Form mode: Registering a brand new hardware asset block to BigQuery.")
                 target_c_name = st.text_input("Chiller Name / Unique Serial ID*", placeholder="e.g., CH-53-03")
-                
-                # Setup default base fields for fresh objects
                 current_type_val = ""
                 current_date_val = datetime.now().date()
                 current_cost_val = 0.0
                 current_cond_idx = 0
-                current_stat_idx = 1  # Defaults new items to 'Yard'
+                current_stat_idx = 1
             else:
-                # Dynamic update selection menu mode
                 target_c_name = st.selectbox("Select Target Chiller to Edit/Update*", options=fleet_options)
-                
-                # Fetch target record array variables directly from memory frame to populate context fields
                 matched_record = inv_raw_df[inv_raw_df['chiller_id'] == target_c_name].iloc[0]
                 
                 current_type_val = matched_record['chiller_type'] if pd.notnull(matched_record['chiller_type']) else ""
@@ -2823,7 +2852,6 @@ def render_data_processing_page(selected_project):
                 stat_options_list = ["On Project", "Yard", "Need Repair", "Scrap"]
                 current_stat_idx = stat_options_list.index(stat_str) if stat_str in stat_options_list else 1
 
-            # Input form matrix layout fields
             form_col1, form_col2, form_col3 = st.columns(3)
             f_type = form_col1.text_input("Chiller Mechanical Type / Spec", value=current_type_val, placeholder="e.g., 53-Ton Logue")
             f_acquired = form_col2.date_input("Date Acquired", value=current_date_val, min_value=datetime.now().date() - timedelta(days=365*30))
@@ -2837,20 +2865,18 @@ def render_data_processing_page(selected_project):
             
             if st.form_submit_button(submit_action_label, use_container_width=True, type="primary"):
                 if not target_c_name.strip():
-                    st.error("❌ Action Rejected: Chiller identifier name/token string cannot be blank.")
+                    st.error("❌ Action Rejected: Chiller identifier name string cannot be blank.")
                 else:
                     safe_cid = target_c_name.strip().replace("'", "''")
                     safe_type = f_type.strip().replace("'", "''")
                     
                     if is_brand_new_asset:
-                        # Transaction block routing pathway A: Insert fresh records
                         execution_sql = f"""
                             INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, chiller_type, purchase_date, initial_price, acquired_status, status)
                             VALUES ('{safe_cid}', '{safe_type}', DATE('{f_acquired.strftime('%Y-%m-%d')}'), {float(f_price)}, '{f_condition.lower()}', '{f_status}')
                         """
                         success_alert = f"🎉 Success! Asset block **{safe_cid}** has been written to the production registry."
                     else:
-                        # Transaction block routing pathway B: Rewrite existing fields
                         execution_sql = f"""
                             UPDATE `{CHILLER_REG_TABLE}`
                             SET chiller_type = '{safe_type}',
@@ -2872,7 +2898,6 @@ def render_data_processing_page(selected_project):
                     except Exception as bq_fault:
                         st.error(f"❌ BigQuery Database Rejected Entry: {bq_fault}")
                         st.code(execution_sql, language="sql")
-
 ######################
 # Page: Admin Tool Helpers  #
 ######################
