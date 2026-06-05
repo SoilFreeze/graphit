@@ -2639,7 +2639,6 @@ def render_data_processing_page(selected_project):
             power_type = col_el5.selectbox("Active Power Type Source*", ["Line Power", "Generator", "None / Outage State"], key="input_ev_power")
             assoc_chiller = col_el6.selectbox("Associated Chiller Loop (Optional)", ["None"] + active_chillers_list, key="input_ev_chiller")
             
-            # Form additions: Added optional loop tracking text input and a dedicated numeric cost slot
             col_el7, col_el8 = st.columns(2)
             proj_system = col_el7.text_input("Project System Loop Identifier (Optional)", placeholder="e.g., Loop A, Loop B")
             event_cost_val = col_el8.number_input("Associated Event / Repair Cost ($)", min_value=0.0, value=0.0, step=50.0, format="%.2f")
@@ -2661,7 +2660,6 @@ def render_data_processing_page(selected_project):
                     safe_cause = root_cause.strip().replace("'", "''")
                     chiller_val_str = f"'{assoc_chiller}'" if assoc_chiller != "None" else "NULL"
                     
-                    # 🛡️ HARDENED PLUG: Streams the physical event_cost numeric directly into your extended table schema
                     insert_sql = f"""
                         INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate, event_cost)
                         VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_ts}'), NULL, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()}, {float(event_cost_val)})
@@ -2679,8 +2677,8 @@ def render_data_processing_page(selected_project):
 
         st.divider()
         
-        # --- HISTORICAL SITE LOG REGISTRY WITH FILTER BOXES ---
-        st.write("#### 📂 Historical Site Log Registry")
+        # --- RE-NAMED EVENT REGISTRY HISTORICAL SYSTEM WITH DROP-DOWN FILTERS ---
+        st.write("#### 📂 Event Registry")
         f_col1, f_col2 = st.columns(2)
         filter_proj = f_col1.selectbox("Filter Logs by Project Space Context:", ["All"] + active_projects_list, key="evt_log_filter_project")
         filter_chiller = f_col2.selectbox("Filter Logs by Associated Chiller Asset:", ["All"] + active_chillers_list, key="evt_log_filter_chiller")
@@ -2694,11 +2692,12 @@ def render_data_processing_page(selected_project):
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
+            # 🛡️ HARDENED FIX: Changed SQL alias to follow pure alpha characters to pass compilation rules
             logs_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Time,
                        project_id as Project,
-                       event_description as `Chiller Event`,
-                       COALESCE(event_cost, 0.0) as `Cost ($)`
+                       event_description as Chiller_Event,
+                       COALESCE(event_cost, 0.0) as event_cost
                 FROM `{EVENTS_TABLE}`
                 {where_stmt}
                 ORDER BY event_timestamp DESC
@@ -2706,7 +2705,16 @@ def render_data_processing_page(selected_project):
             """
             logs_df = client.query(logs_q).to_dataframe()
             if not logs_df.empty:
-                st.dataframe(logs_df, use_container_width=True, hide_index=True)
+                # Use Streamlit column configs to format the numeric values cleanly as money on the display grid
+                st.dataframe(
+                    logs_df, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={
+                        "Chiller_Event": st.column_config.TextColumn("Chiller Event"),
+                        "event_cost": st.column_config.NumberColumn("Cost ($)", format="$%.2f")
+                    }
+                )
             else:
                 st.info("No historical event entries log files match your selected parameter options.")
         except Exception as e:
