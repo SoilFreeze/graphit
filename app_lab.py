@@ -3283,38 +3283,47 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
 
         # Find this section inside the tab_recovery button click action:
 total_recovered_appends = len(all_rows)
-if total_recovered_appends == 0:
-    st.info("🔒 Cloud accounts returned 0 points for this window context.")
-    status_box.update(label="Run Finalized (0 Points Found)", state="complete")
-else:
-    st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
-    try:
-        upload_df = pd.DataFrame(all_rows)
-        if 'rssi' in upload_df.columns:
-            upload_df['rssi'] = upload_df['rssi'].astype(object).where(upload_df['rssi'].notnull(), None)
+                if total_recovered_appends == 0:
+                    st.info("🔒 Cloud accounts returned 0 points for this window context.")
+                    status_box.update(label="Run Finalized (0 Points Found)", state="complete")
+                else:
+                    st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
+                    try:
+                        upload_df = pd.DataFrame(all_rows)
+                        
+                        # 🛡️ HARDENED FIX: Convert timestamp objects to explicit ISO format strings so BigQuery reads them as 16 bytes
+                        upload_df['timestamp'] = upload_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
+                        
+                        # Force numerical data types to match schema layouts exactly
+                        if 'rssi' in upload_df.columns:
+                            upload_df['rssi'] = pd.to_numeric(upload_df['rssi'], errors='coerce').astype(object).where(upload_df['rssi'].notnull(), None)
+                        if 'temperature' in upload_df.columns:
+                            upload_df['temperature'] = pd.to_numeric(upload_df['temperature'], errors='coerce')
+                        
+                        df_upload['NodeNum'] = df_upload['NodeNum'].astype(str).str.strip()
 
-        # HARDENED FIX: Convert timestamp objects to explicit ISO format strings so BigQuery converts them to 16 bytes
-        upload_df['timestamp'] = upload_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
+                        real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
+                        
+                        # 🛡️ HARDENED FIX: Explicitly define schema constraints for the load job configuration
+                        job_config = bigquery.LoadJobConfig(
+                            schema=[
+                                bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                bigquery.SchemaField("NodeNum", "STRING"),
+                                bigquery.SchemaField("temperature", "FLOAT"),
+                                bigquery.SchemaField("rssi", "FLOAT"),
+                            ],
+                            write_disposition="WRITE_APPEND"
+                        )
+                        
+                        client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
+                        
+                        st.success(f"🎉 Success! Appended {total_recovered_appends:,} raw rows to storage.")
+                        summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
+                        st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
+                        status_box.update(label="Recovery Dump Complete!", state="complete")
+                        st.cache_data.clear()
 
-        real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
-        
-        # Enforce exact Schema configurations matching the BigQuery table definitions
-        job_config = bigquery.LoadJobConfig(
-            schema=[
-                bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                bigquery.SchemaField("NodeNum", "STRING"),
-                bigquery.SchemaField("temperature", "FLOAT"),
-                bigquery.SchemaField("rssi", "FLOAT"),
-            ],
-            write_disposition="WRITE_APPEND"
-        )
-        client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
-                
-                st.success(f"🎉 Success! Appended {total_recovered_appends:,} raw rows to storage.")
-                summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
-                st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
-                status.update(label="Recovery Dump Complete!", state="complete")
-                st.cache_data.clear()
+
             except Exception as bq_err:
                 st.error(f"Batch loading ingestion pipeline failure: {bq_err}")
                 status.update(state="error")
