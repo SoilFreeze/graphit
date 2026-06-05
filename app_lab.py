@@ -159,9 +159,9 @@ if sidebar_client is not None:
         st.sidebar.error(f"Registry Link Offline: {e}")
 
 # =============================================================================
-# SYSTEM PULSE & DYNAMIC REFRESH ENGINE (PLACED SAFELY AFTER SELECTION BOX)
+# CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
 # =============================================================================
-st.sidebar.subheader("⏱️ System Pulse")
+st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
     try:
@@ -171,7 +171,7 @@ if sidebar_client is not None:
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
             """
-            scope_label = "Fleet Age"
+            scope_label = "Last Data"
         else:
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
@@ -205,7 +205,7 @@ if sidebar_client is not None:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
 
 # INTERACTIVE REFRESH TRIGGER
-if st.sidebar.button("🔄 Force Refresh System Cache", use_container_width=True):
+if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
     with st.sidebar.spinner("Purging cache maps..."):
         st.cache_data.clear()
         st.toast("System cache completely cleared!", icon="🔄")
