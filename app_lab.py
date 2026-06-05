@@ -2300,6 +2300,7 @@ def render_data_processing_page(selected_project):
         
         if u_file is not None:
             try:
+                # 1. FORMAT DETECTION
                 is_sensorconnect, skip_rows = False, 0
                 if u_file.name.endswith('.csv'):
                     u_file.seek(0)
@@ -2309,6 +2310,7 @@ def render_data_processing_page(selected_project):
                             break
                     u_file.seek(0)
 
+                # 2. DATA READING
                 if is_sensorconnect:
                     st.info("Detected Format: Lord SensorConnect (Wide)")
                     df_raw = pd.read_csv(u_file, encoding='latin1', skiprows=skip_rows, dtype=str)
@@ -2318,7 +2320,7 @@ def render_data_processing_page(selected_project):
                     df_raw = pd.read_excel(u_file, dtype=str)
 
                 if not df_raw.empty:
-                    upload_df = pd.DataFrame()
+                    df_processed = pd.DataFrame()
                     actual_headers = list(df_raw.columns)
                     clean_headers = [str(h).strip().lower() for h in actual_headers]
                     
@@ -2328,10 +2330,10 @@ def render_data_processing_page(selected_project):
                         value_vars = [h for h in actual_headers if h != time_col]
                         df_melted = df_raw.melt(id_vars=[time_col], value_vars=value_vars, var_name='NodeNum', value_name='temperature')
                         
-                        raw_ts = pd.to_datetime(df_melted[time_col], format='mixed')
-                        upload_df['timestamp'] = raw_ts.dt.tz_localize('UTC') if raw_ts.dt.tz is None else raw_ts.dt.tz_convert('UTC')
-                        upload_df['NodeNum'] = df_melted['NodeNum'].str.strip().str.replace(':', '-')
-                        upload_df['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
+                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
+                        df_processed['timestamp'] = pd.to_datetime(df_melted[time_col], errors='coerce', utc=True)
+                        df_processed['NodeNum'] = df_melted['NodeNum'].str.strip().str.replace(':', '-')
+                        df_processed['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
 
                     # BRANCH B: Lord SensorCloud (Standard Long Format)
                     elif any(k in clean_headers for k in ['channel', 'node']) and any('time' in h for h in clean_headers):
@@ -2340,10 +2342,10 @@ def render_data_processing_page(selected_project):
                         node_h = actual_headers[next(i for i, h in enumerate(clean_headers) if 'channel' in h or 'node' in h)]
                         temp_h = [h for h in actual_headers if 'temp' in h.lower()][0]
                         
-                        raw_ts = pd.to_datetime(df_raw[time_h], format='mixed')
-                        upload_df['timestamp'] = raw_ts.dt.tz_localize('UTC') if raw_ts.dt.tz is None else raw_ts.dt.tz_convert('UTC')
-                        upload_df['NodeNum'] = df_raw[node_h].str.strip().str.replace(':', '-')
-                        upload_df['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
+                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
+                        df_processed['timestamp'] = pd.to_datetime(df_raw[time_h], errors='coerce', utc=True)
+                        df_processed['NodeNum'] = df_raw[node_h].str.strip().str.replace(':', '-')
+                        df_processed['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
 
                     # BRANCH C: SensorPush
                     else:
@@ -2354,43 +2356,45 @@ def render_data_processing_page(selected_project):
                         clean_name = u_file.name.replace(".csv", "").replace(".xlsx", "")
                         match = re.search(r'^([^ \(\)]+)', clean_name)
                         
-                        raw_ts = pd.to_datetime(df_raw[t_match], format='mixed')
-                        upload_df['timestamp'] = raw_ts.dt.tz_localize('UTC') if raw_ts.dt.tz is None else raw_ts.dt.tz_convert('UTC')
-                        upload_df['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
-                        upload_df['NodeNum'] = match.group(1).strip() if match else "Unknown"
+                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
+                        df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
+                        df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
+                        df_processed['NodeNum'] = match.group(1).strip() if match else "Unknown"
 
+                    
                     # 3. AUTOMATED LIMITS FILTER RUNROOM
-                    if not upload_df.empty:
-                        upload_df = upload_df.dropna(subset=['timestamp', 'temperature'])
+                    if not df_processed.empty:
+                        df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        bad_mask = (upload_df['temperature'] > 120) | (upload_df['temperature'] < -30)
-                        upload_df['approve'] = 'TRUE'
-                        upload_df.loc[bad_mask, 'approve'] = 'BADDATA'
+                        # Apply strict industrial limit filtering rules right during ingestion
+                        bad_mask = (df_processed['temperature'] > 120) | (df_processed['temperature'] < -30)
+                        df_processed['approve'] = 'TRUE'
+                        df_processed.loc[bad_mask, 'approve'] = 'BADDATA'
                         
                         bad_count = bad_mask.sum()
                         if bad_count > 0:
                             st.warning(f"⚠️ Sanity Filter: Flagged {bad_count} records exceeding -30°F to 120°F boundary lines as BADDATA.")
                         
-                        st.success(f"✅ Prepared {len(upload_df)} records for Node(s): {', '.join(upload_df['NodeNum'].unique())}")
+                        st.success(f"✅ Prepared {len(df_processed)} records for Node(s): {', '.join(df_processed['NodeNum'].unique())}")
                         
-                        is_lord = "-" in str(upload_df['NodeNum'].iloc[0])
+                        is_lord = "-" in str(df_processed['NodeNum'].iloc[0])
                         target_table = "raw_lord" if is_lord else "raw_sensorpush"
                         
                         if st.button(f"🚀 Upload to {target_table}"):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
+                                
+                                # 🛡️ HARDENED FIX: Define explicit schema matching configurations to guide the pyarrow destination write
                                 job_config = bigquery.LoadJobConfig(
-                                    write_disposition="WRITE_APPEND",
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
                                         bigquery.SchemaField("temperature", "FLOAT"),
-                                        bigquery.SchemaField("approve", "STRING")
-                                    ]
+                                        bigquery.SchemaField("approve", "STRING"),
+                                    ],
+                                    write_disposition="WRITE_APPEND"
                                 )
-                                # Formatted datetimes to standard 16-byte tracking records strings for explicit ingestion
-                                upload_df['timestamp'] = upload_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
-                                client.load_table_from_dataframe(upload_df, table_id, job_config=job_config).result()
+                                client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
                                 st.cache_data.clear() 
 
