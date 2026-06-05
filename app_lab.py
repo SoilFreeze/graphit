@@ -3336,14 +3336,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         return
 
     # 2. NAVIGATION TABS (Aligned matching your exact blueprint)
-    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config, tab_soil_curves = st.tabs([
+    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config, tab_chillers = st.tabs([
         "📋 Admin Summary", 
         "⚡ Bulk Approval", 
         "📋 Node Master",  
         "📡 Data Recovery", 
         "⚙️ Project Master", 
         "📦 Bulk Uploads",
-        "📈 Soil Reference Curves"
+        "❄️ Chiller Operations"
     ])
 
     
@@ -4130,8 +4130,135 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         
 
 # =========================================================================
-# NEW SUB-TAB 7: STANDALONE SOIL REFERENCE CURVES WORKSPACE
-# =========================================================================
+    # SUB-TAB 7: CHILLER OPERATIONS & SYSTEM MANIFEST
+    # =========================================================================
+    with tab_chillers:
+        st.subheader("❄️ Chiller Plant Infrastructure & Event Logging")
+        
+        c_mode = st.radio("Management Context", ["📋 Plant Manifest", "🚨 Log Chiller Event"], horizontal=True, key="chiller_mgmt_mode_radio")
+        
+        CHILLER_REG_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_registry"
+        CHILLER_MAP_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_sensor_mapping"
+        EVENTS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.freezedown_events"
+        
+        # --- VIEW MANIFESTS ---
+        if c_mode == "📋 Plant Manifest":
+            st.markdown("### 📡 Registered Cooling Infrastructure")
+            try:
+                manifest_q = f"""
+                    SELECT c.chiller_id, c.project_id, c.chiller_type,
+                           STRING_AGG(m.Location, ', ' ORDER BY m.Location) as mapped_locations
+                    FROM `{CHILLER_REG_TABLE}` c
+                    LEFT JOIN `{CHILLER_MAP_TABLE}` m ON c.chiller_id = m.chiller_id AND c.project_id = m.project_id
+                    GROUP BY c.chiller_id, c.project_id, c.chiller_type
+                    ORDER BY c.project_id ASC, c.chiller_id ASC
+                """
+                manifest_df = client.query(manifest_q).to_dataframe()
+                if not manifest_df.empty:
+                    st.dataframe(manifest_df, use_container_width=True, hide_index=True, column_config={
+                        "chiller_id": "Chiller ID", "project_id": "Assigned Phase ID", 
+                        "chiller_type": "Chiller Specifications", "mapped_locations": "Chilled Ground Assets"
+                    })
+                else:
+                    st.info("No mechanical chiller plant assets registered in system catalog yet.")
+            except Exception as e:
+                st.caption(f"Manifest offline or initializing: {e}")
+                
+            # Quick Infrastructure Insertion Form
+            with st.expander("➕ Register New Mechanical Chiller Unit"):
+                with st.form("register_chiller_unit_form"):
+                    col_c1, col_c2, col_c3 = st.columns(3)
+                    new_c_id = col_c1.text_input("Chiller Serial ID (Unique)*", placeholder="e.g., CH-2541-A")
+                    new_c_proj = col_c2.selectbox("Assign to Project Space Phase*", available_projects_list)
+                    new_c_type = col_c3.text_input("Chiller Type Specifications", placeholder="e.g., 53-Ton Logue")
+                    
+                    # Pull current available unique locations for that specific project phase
+                    possible_locations = sorted(full_reg_df[full_reg_df['Project'] == new_c_proj]['Location'].dropna().unique().tolist())
+                    selected_assigned_locs = st.multiselect("Chilled Pipe Group Assignments", options=possible_locations)
+                    
+                    if st.form_submit_button("🚀 Save Unit Settings"):
+                        if not new_c_id.strip():
+                            st.error("Unique Chiller Serial ID validation token required.")
+                        else:
+                            safe_cid = new_c_id.strip().replace("'", "''")
+                            safe_ctype = new_c_type.strip().replace("'", "''")
+                            
+                            insert_chiller_sql = f"""
+                                INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, project_id, chiller_type, purchase_date)
+                                VALUES ('{safe_cid}', '{new_c_proj}', '{safe_ctype}', CURRENT_DATE());
+                            """
+                            try:
+                                client.query(insert_chiller_sql).result()
+                                
+                                if selected_assigned_locs:
+                                    map_rows = [f"('{new_c_proj}', '{safe_cid}', '{loc.replace("'", "''")}')" for loc in selected_assigned_locs]
+                                    insert_maps_sql = f"INSERT INTO `{CHILLER_MAP_TABLE}` (project_id, chiller_id, Location) VALUES {', '.join(map_rows)};"
+                                    client.query(insert_maps_sql).result()
+                                    
+                                st.success(f"Successfully registered machine asset {safe_cid} system-wide.")
+                                st.cache_data.clear()
+                                time.sleep(0.5)
+                                st.rerun()
+                            except Exception as err:
+                                st.error(f"Database insertion failed: {err}")
+
+        # --- LOG FREEZEDOWN EVENT HANDLER ---
+        elif c_mode == "🚨 Log Chiller Event":
+            st.markdown("### 🚨 Append Diagnostic Event Record")
+            
+            # Fetch active chillers to populate picker dropdown dynamically
+            try:
+                active_chillers_list = sorted(client.query(f"SELECT chiller_id FROM `{CHILLER_REG_TABLE}`").to_dataframe()['chiller_id'].tolist())
+            except Exception:
+                active_chillers_list = []
+                
+            if not active_chillers_list:
+                st.warning("⚠️ No active chillers registered. Please add a mechanical plant unit under the manifest tab first.")
+            else:
+                import uuid
+                with st.form("manual_chiller_event_logger_form"):
+                    e_col1, e_col2, e_col3 = st.columns(3)
+                    chosen_chiller = e_col1.selectbox("Select Target Chiller Loop ID*", active_chillers_list)
+                    
+                    # Fetch corresponding project_id dynamically
+                    try:
+                        chosen_proj = client.query(f"SELECT project_id FROM `{CHILLER_REG_TABLE}` WHERE chiller_id='{chosen_chiller}' LIMIT 1").to_dataframe()['project_id'].iloc[0]
+                    except Exception:
+                        chosen_proj = selected_project
+                        
+                    e_date = e_col2.date_input("Event Log Date Entry", value=datetime.now().date())
+                    e_time = e_col3.time_input("Event Log Time Entry (UTC/Local)", value=datetime.now().time())
+                    
+                    e_desc = st.text_input("Operational Event Description / Alert Message*", placeholder="e.g., Compressor trip down due to unexpected mechanical oil pressure bypass fault.")
+                    e_cause = st.text_input("Determined Root Cause Diagnostics", placeholder="e.g., Blocked primary filter screen.")
+                    
+                    is_approx = st.checkbox("Timestamp registration is approximate?", value=False)
+                    is_resolved = st.checkbox("Event issue was resolved immediately?", value=False)
+                    
+                    if st.form_submit_button("💾 Commit Diagnostic Event to Storage"):
+                        if not e_desc.strip():
+                            st.error("Operational Event Description summary strings are required.")
+                        else:
+                            generated_uuid = str(uuid.uuid4())
+                            combined_event_ts = datetime.combine(e_date, e_time).strftime('%Y-%m-%d %H:%M:%S')
+                            resolution_ts_val = f"TIMESTAMP('{combined_event_ts}')" if is_resolved else "NULL"
+                            
+                            safe_desc = e_desc.strip().replace("'", "''")
+                            safe_cause = e_cause.strip().replace("'", "''")
+                            
+                            event_insert_sql = f"""
+                                INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate)
+                                VALUES ('{generated_uuid}', '{chosen_proj}', '{chosen_chiller}', TIMESTAMP('{combined_event_ts}'), {resolution_ts_val}, '{safe_desc}', '{safe_cause}', {str(is_approx).upper()})
+                            """
+                            try:
+                                client.query(event_insert_sql).result()
+                                st.success("🎉 Event successfully injected into production analytics dataset tables.")
+                                st.cache_data.clear()
+                                time.sleep(0.5)
+                                st.rerun()
+                            except Exception as bq_err:
+                                st.error(f"BigQuery tracking write rejected: {bq_err}")
+                                st.code(event_insert_sql, language="sql")
 
 # =============================================================================
 # 🛠️ REUSABLE LAB ENGINE ASSIGNMENT PIPELINES
