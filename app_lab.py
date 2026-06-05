@@ -2719,7 +2719,7 @@ def render_data_processing_page(selected_project):
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
         
         try:
-            # 🛡️ HARDENED PLUG: Query directly strips out the missing sensor map table to resolve hidden 404 blockages
+            # Uses explicit column handles mapped to your absolute database schema properties
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2786,7 +2786,8 @@ def render_data_processing_page(selected_project):
                     disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
                     column_config={
                         "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
-                        "Condition When Acquired": st.column_config.SelectColumn("Condition When Acquired", options=["NEW", "USED"]),
+                        # 🛡️ HARDENED FIX: Changed SelectColumn to SelectboxColumn to match Streamlit API constraints
+                        "Condition When Acquired": st.column_config.SelectboxColumn("Condition When Acquired", options=["NEW", "USED"]),
                         "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
                     },
                     key=ed_key
