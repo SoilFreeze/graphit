@@ -3086,32 +3086,67 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
 
 
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
-    """Main administrative execution module managing bulk data approval modification routines."""
+    """
+    Main administrative execution module managing bulk data approval modification routines,
+    system deduplication, boundary sanity scrubs, and text string standardization.
+    
+    Parameters:
+    -----------
+    client : bigquery.Client
+        Authenticated Google Cloud BigQuery client instance.
+    full_reg_df : pandas.DataFrame
+        The full sensor node registry dataset mapping nodes to active hardware configurations.
+    selected_project : str
+        The current active project context token filtered out of the sidebar app menu.
+    tab_logistics : streamlit.tabs
+        Bubble handle routing to pass downstream context states across layouts.
+    """
+    # Establish explicit table paths mapped directly out of your data view catalog
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
     st.title("⚡ Bulk Approval and Database Maintenance")
     st.divider()
 
-    if "blk_mgmt_profile_df" not in st.session_state: st.session_state.blk_mgmt_profile_df = None
-    if "blk_mgmt_total_points" not in st.session_state: st.session_state.blk_mgmt_total_points = 0
+    # Initialize application state memory footprints to prevent unintended app re-runs during data scans
+    if "blk_mgmt_profile_df" not in st.session_state: 
+        st.session_state.blk_mgmt_profile_df = None
+    if "blk_mgmt_total_points" not in st.session_state: 
+        st.session_state.blk_mgmt_total_points = 0
 
     # =========================================================================
     # UTILITY A: GLOBAL DATABASE CLEANUP ENGINE
     # =========================================================================
     st.header("🧹 Global Database Cleanup")
     st.write(
-        "Consolidate raw datasets into 1-decimal hourly averages and safely remove all duplicate records system-wide. "
+        "Consolidate raw datasets into 1-decimal hourly averages, safely remove duplicate records, "
+        "and clean casing discrepancies system-wide. "
         "**Note:** Running this cleanup automatically marks any rogue data points outside the physical bounds of -30°F and 120°F as `BadData`."
     )
     
-    if st.button("⚡ Run Global Database Cleanup & Duplicate Purge", use_container_width=True):
+    # Split utilities into clean side-by-side management columns
+    clean_col1, clean_col2 = st.columns(2)
+    
+    with clean_col1:
+        st.write("##### 📊 Telemetry Deduplication & Bounds Scan")
+        st.caption("Processes raw sensor streams, resets physics boundaries, and strips duplicate entries.")
+        run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Duplicate Purge", use_container_width=True)
+        
+    with clean_col2:
+        st.write("##### 🧼 Approval String Casing Standardization")
+        st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
+        run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
+
+    # --- PATHWAY A: TELEMETRY CLEANUP & BOUNDARY SCAVENGER ---
+    if run_telemetry_cleanup:
         status_box = st.empty()
         try:
+            # 1. Audit active data rows before applying modifications to map the exact purge count
             status_box.markdown("⏳ **[1/4] Calculating initial database row baselines...**")
             count_sp_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
             
+            # 2. Run case-cast and timeline row partitioning to filter out exact duplicates from the SensorPush stream
             status_box.markdown("🧹 **[2/4] Initializing temporary staging pools and filtering SensorPush duplicates...**")
             sp_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
@@ -3128,6 +3163,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             """
             client.query(sp_cleanup_sql).result()
             
+            # 3. Apply matching row-partition deduplication to your Lord Wireless telemetry streams
             status_box.markdown("🛰️ **[3/4] Running row-deduplication matrices on Lord Wireless tables...**")
             lord_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
@@ -3146,6 +3182,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             client.query(lord_cleanup_sql).result()
             st.cache_data.clear()
 
+            # 4. Pull database row summaries to document the data cleanup audit trail
             status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling post-cleanup tallies...**")
             count_sp_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
@@ -3157,7 +3194,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             status_box.empty()
             st.success("🎉 Global Database Cleanup successfully completed!")
             
-            st.markdown("### 📊 Before vs. After Summary Ledger")
+            # Print comparative ledger results matrix
             report_data = [
                 {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged Points": f"{sp_removed:,}"},
                 {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged Points": f"{lord_removed:,}"},
@@ -3169,6 +3206,31 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             status_box.empty()
             st.error(f"Global Database Cleanup Failed: {e}")
 
+    # --- PATHWAY B: REJECTIONS ENGINE STRING CASING CLEANUP ---
+    if run_string_cleanup:
+        status_box_str = st.empty()
+        try:
+            status_box_str.markdown("🧼 **Standardizing mixed-case manual override parameters...**")
+            
+            # Targets the data override source table directly (`manual_rejections`)
+            # Converts lower or mixed-case string variants safely into standard uppercase 'TRUE' or 'FALSE'
+            str_cleanup_sql = f"""
+                UPDATE `{target_table}`
+                SET approve = UPPER(TRIM(approve))
+                WHERE LOWER(approve) IN ('true', 'false')
+            """
+            job = client.query(str_cleanup_sql)
+            job.result()
+            
+            status_box_str.empty()
+            st.success(f"🎉 Text standardization complete! Successfully cleaned {job.num_dml_affected_rows:,} records inside the rejections ledger.")
+            st.cache_data.clear()
+            time.sleep(0.5)
+            st.rerun()
+        except Exception as e:
+            status_box_str.empty()
+            st.error(f"Text String Cleanup Operation Failed: {e}")
+
     st.divider()
 
     # =========================================================================
@@ -3177,17 +3239,21 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.header("⚡ Bulk Approval and Data Status Change")
     st.info("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides.")
     
+    # Render user selection widgets to grab Target Scope (Project/All), Filtering Criteria, and New Status Value
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
 
+    # Build active project logic constraints by pulling down matching query string blocks
     filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
     where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
     
+    # Map raw field strings to match the proper table aliases used inside the Master analytical query view
     aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
                               .replace("timestamp", "t.timestamp")
                               .replace("temperature", "t.temperature")
                               .replace("r.approve", "t.approval_status"))
     
+    # Internal function to map and verify exactly how many data rows will be changed before saving
     def run_profile_audit():
         status_q = f"""
             SELECT 
@@ -3209,12 +3275,14 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 st.session_state.blk_mgmt_profile_df = pd.DataFrame()
                 st.session_state.blk_mgmt_total_points = 0
 
+    # Step 1 Button: Verification Routine
     if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
         try:
             run_profile_audit()
         except Exception as e:
             st.error(f"Verification Matrix Compilation Failed: {e}")
 
+    # Render results grid if data profile calculations are actively held in app cache states
     if st.session_state.blk_mgmt_profile_df is not None:
         if not st.session_state.blk_mgmt_profile_df.empty:
             st.subheader("📊 Current Node Status")
@@ -3225,8 +3293,12 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
 
     st.divider()
     st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
+    
+    # Step 2: Form Checkbox and Execution Engine Block
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
+            
+            # PATH A: If target override is TRUE, drop tracking tokens entirely out of the rejections table so they re-approve
             if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
@@ -3236,6 +3308,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         WHERE {aliased_where}
                     )
                 """
+            # PATH B: If target override is a custom flag (FALSE, BADDATA, MASK), merge row coordinates into manual_rejections
             else:
                 sql = f"""
                     MERGE `{target_table}` T
@@ -3258,14 +3331,13 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 
                 st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records inside the registry ledger.")
                 st.cache_data.clear()
-                run_profile_audit()
+                run_profile_audit() # Refresh data metrics locally
                 st.balloons()
                 time.sleep(1.0)
                 st.rerun()
             except Exception as e:
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
-
 
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
