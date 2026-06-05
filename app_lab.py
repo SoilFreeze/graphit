@@ -2382,7 +2382,11 @@ def render_data_processing_page(selected_project):
                         time_col = [h for h in actual_headers if 'time' in h.lower()][0]
                         value_vars = [h for h in actual_headers if h != time_col]
                         df_melted = df_raw.melt(id_vars=[time_col], value_vars=value_vars, var_name='NodeNum', value_name='temperature')
-                        df_processed['timestamp'] = pd.to_datetime(df_melted[time_col], format='mixed')
+                        
+                        # Type-Hardened Timestamp Conversion: Force to UTC to fix the bytestring length 8 error
+                        raw_ts = pd.to_datetime(df_melted[time_col], format='mixed')
+                        df_processed['timestamp'] = raw_ts.dt.tz_localize('UTC') if raw_ts.dt.tz is None else raw_ts.dt.tz_convert('UTC')
+                        
                         df_processed['NodeNum'] = df_melted['NodeNum'].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
 
@@ -2392,7 +2396,11 @@ def render_data_processing_page(selected_project):
                         time_h = actual_headers[next(i for i, h in enumerate(clean_headers) if 'time' in h)]
                         node_h = actual_headers[next(i for i, h in enumerate(clean_headers) if 'channel' in h or 'node' in h)]
                         temp_h = [h for h in actual_headers if 'temp' in h.lower()][0]
-                        df_processed['timestamp'] = pd.to_datetime(df_raw[time_h], format='mixed')
+                        
+                        # Type-Hardened Timestamp Conversion: Force to UTC
+                        raw_ts = pd.to_datetime(df_raw[time_h], format='mixed')
+                        df_processed['timestamp'] = raw_ts.dt.tz_localize('UTC') if raw_ts.dt.tz is None else raw_ts.dt.tz_convert('UTC')
+                        
                         df_processed['NodeNum'] = df_raw[node_h].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
 
@@ -2405,7 +2413,10 @@ def render_data_processing_page(selected_project):
                         clean_name = u_file.name.replace(".csv", "").replace(".xlsx", "")
                         match = re.search(r'^([^ \(\)]+)', clean_name)
                         
-                        df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], format='mixed')
+                        # Type-Hardened Timestamp Conversion: Force to UTC
+                        raw_ts = pd.to_datetime(df_raw[t_match], format='mixed')
+                        df_processed['timestamp'] = raw_ts.dt.tz_localize('UTC') if raw_ts.dt.tz is None else raw_ts.dt.tz_convert('UTC')
+                        
                         df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
                         df_processed['NodeNum'] = match.group(1).strip() if match else "Unknown"
 
