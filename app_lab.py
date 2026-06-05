@@ -2690,64 +2690,62 @@ def render_data_processing_page(selected_project):
 
         st.divider()
         
-        # =====================================================================
-        # --- EVENT REGISTRY MANAGEMENT LEDGER (WITH BULK REMOVALS CAPABILITY) ---
-        # =====================================================================
+        # --- EVENT REGISTRY MANAGEMENT LEDGER WITH ASSET & PROJECT FILTERS ---
         st.write("#### 📂 Event Registry")
         st.caption("💡 **Tip:** To clear out double postings or bad copies, select the row(s) and click the **Remove Selected Entries** button below.")
         
-        f_col1, f_col2 = f_col1, f_col2 = st.columns(2)
+        f_col1, f_col2 = st.columns(2)
         filter_proj = f_col1.selectbox("Filter Logs by Project Space Context:", ["All"] + active_projects_list, key="evt_log_filter_project")
         filter_chiller = f_col2.selectbox("Filter Logs by Associated Chiller Asset:", ["All"] + active_chillers_list, key="evt_log_filter_chiller")
         
         try:
             where_clauses = []
             if filter_proj != "All":
-                where_clauses.append(f"project_id = '{filter_proj}'")
+                where_clauses.append(f"e.project_id = '{filter_proj}'")
             if filter_chiller != "All":
-                where_clauses.append(f"chiller_id = '{filter_chiller}'")
+                where_clauses.append(f"e.chiller_id = '{filter_chiller}'")
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
-            # Pull event_id so we have a completely bulletproof primary key handle for targeting direct deletions
+            # 🛡️ HARDENED FIX: Incorporated a clean database join mapping handle to display explicit Chiller Names
             logs_q = f"""
-                SELECT event_id,
-                       FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Start_Time,
-                       COALESCE(FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', resolution_timestamp), 'Ongoing / N/A') as End_Time,
-                       project_id as Project,
-                       event_description as Chiller_Event,
-                       COALESCE(event_cost, 0.0) as event_cost
-                FROM `{EVENTS_TABLE}`
+                SELECT e.event_id,
+                       FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', e.event_timestamp) as Start_Time,
+                       COALESCE(FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', e.resolution_timestamp), 'Ongoing / N/A') as End_Time,
+                       e.project_id as Project,
+                       COALESCE(c.chiller_id, '—') as Chiller_Name,
+                       e.event_description as Chiller_Event,
+                       COALESCE(e.event_cost, 0.0) as event_cost
+                FROM `{EVENTS_TABLE}` e
+                LEFT JOIN `{CHILLER_REG_TABLE}` c ON e.chiller_id = c.chiller_id
                 {where_stmt}
-                ORDER BY event_timestamp DESC
+                ORDER BY e.event_timestamp DESC
                 LIMIT 200
             """
             logs_df = client.query(logs_q).to_dataframe()
             
             if not logs_df.empty:
-                # Add a selection tracker mapping layer to the memory frame
                 logs_df.insert(0, "Select to Remove", False)
-                
                 ev_key = "live_event_registry_interactive_editor"
                 
-                # Render using st.data_editor to easily capture checkbox selection events
                 edited_logs_df = st.data_editor(
                     logs_df, 
                     use_container_width=True, 
                     hide_index=True,
-                    disabled=["event_id", "Start_Time", "End_Time", "Project", "Chiller_Event", "event_cost"],
+                    disabled=["event_id", "Start_Time", "End_Time", "Project", "Chiller_Name", "Chiller_Event", "event_cost"],
                     column_config={
-                        "Select to Remove": st.column_config.CheckboxColumn("Remove?", help="Check this box to target a duplicate row for extraction"),
-                        "event_id": None, # Kept hidden from the engineering UI view
+                        "Select to Remove": st.column_config.CheckboxColumn("Remove?"),
+                        "event_id": None, 
                         "Start_Time": st.column_config.TextColumn("Start Time"),
                         "End_Time": st.column_config.TextColumn("End / Resolution Time"),
+                        "Project": st.column_config.TextColumn("Project"),
+                        "Chiller_Name": st.column_config.TextColumn("Chiller Name"),
                         "Chiller_Event": st.column_config.TextColumn("Chiller Event"),
                         "event_cost": st.column_config.NumberColumn("Cost ($)", format="$%.2f")
                     },
                     key=ev_key
                 )
                 
-                # Filter out exactly which event rows have been targeted for database removal
                 targeted_deletions = edited_logs_df[edited_logs_df["Select to Remove"] == True]
                 
                 if not targeted_deletions.empty:
@@ -2767,7 +2765,6 @@ def render_data_processing_page(selected_project):
                 st.info("No historical event entries log files match your selected parameter options.")
         except Exception as e:
             st.error(f"⚠️ Event Registry Fault: {e}")
-
 
     # --- TAB 5: REGISTER CHILLER CONTROLS ---
     with tab_chiller_reg:
