@@ -3201,7 +3201,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
         for node in selected_nodes:
             node_stats[node] = 0
 
-    with st.status("Executing Cloud Backfill Ingestion Pipeline Run...", expanded=True) as status:
+    with st.status("Executing Cloud Backfill Ingestion Pipeline Run...", expanded=True) as status_box:
         st.write("🔍 Extracting Translation Mappings from Hardware Inventory...")
         try:
             inv_q = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{LOCAL_INV_TABLE}` WHERE RawID IS NOT NULL"
@@ -3281,55 +3281,52 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             except Exception:
                 continue
 
-                total_recovered_appends = len(all_rows)
-                if total_recovered_appends == 0:
-                    st.info("🔒 Cloud accounts returned 0 points for this window context.")
-                    status_box.update(label="Run Finalized (0 Points Found)", state="complete")
-                else:
-                    st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
-                    try:
-                        upload_df = pd.DataFrame(all_rows)
-                        
-                        # 🛡️ HARDENED FIX: Convert timestamp objects to explicit ISO format strings so BigQuery reads them as 16 bytes
-                        upload_df['timestamp'] = upload_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
-                        
-                        # Force numerical data types to match schema layouts exactly
-                        if 'rssi' in upload_df.columns:
-                            upload_df['rssi'] = pd.to_numeric(upload_df['rssi'], errors='coerce').astype(object).where(upload_df['rssi'].notnull(), None)
-                        if 'temperature' in upload_df.columns:
-                            upload_df['temperature'] = pd.to_numeric(upload_df['temperature'], errors='coerce')
-                        
-                        upload_df['NodeNum'] = upload_df['NodeNum'].astype(str).str.strip()
+        # Unified Batch Ingestion Layer (Safely placed outside account loops)
+        total_recovered_appends = len(all_rows)
+        if total_recovered_appends == 0:
+            st.info("🔒 Cloud accounts returned 0 points for this window context.")
+            status_box.update(label="Run Finalized (0 Points Found)", state="complete")
+        else:
+            st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
+            try:
+                upload_df = pd.DataFrame(all_rows)
+                
+                # 🛡️ HARDENED FIX: Convert timestamp objects to explicit ISO format strings so BigQuery reads them as 16 bytes
+                upload_df['timestamp'] = upload_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
+                
+                # Force numerical data types to match schema layouts exactly
+                if 'rssi' in upload_df.columns:
+                    upload_df['rssi'] = pd.to_numeric(upload_df['rssi'], errors='coerce').astype(object).where(upload_df['rssi'].notnull(), None)
+                if 'temperature' in upload_df.columns:
+                    upload_df['temperature'] = pd.to_numeric(upload_df['temperature'], errors='coerce')
+                
+                upload_df['NodeNum'] = upload_df['NodeNum'].astype(str).str.strip()
 
-                        real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
-                        
-                        # 🛡️ HARDENED FIX: Explicitly define schema constraints for the load job configuration
-                        job_config = bigquery.LoadJobConfig(
-                            schema=[
-                                bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                bigquery.SchemaField("NodeNum", "STRING"),
-                                bigquery.SchemaField("temperature", "FLOAT"),
-                                bigquery.SchemaField("rssi", "FLOAT"),
-                            ],
-                            write_disposition="WRITE_APPEND"
-                        )
-                        
-                        client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
-                        
-                        st.success(f"🎉 Success! Appended {total_recovered_appends:,} raw rows to storage.")
-                        summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
-                        st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
-                        status_box.update(label="Recovery Dump Complete!", state="complete")
-                        st.cache_data.clear()
-                    except Exception as bq_err:
-                        st.error(f"Batch loading Ingestion pipeline failure: {bq_err}")
-                        status_box.update(state="error")
-
-
+                real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
+                
+                # 🛡️ HARDENED FIX: Explicitly define schema constraints for the load job configuration
+                job_config = bigquery.LoadJobConfig(
+                    schema=[
+                        bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                        bigquery.SchemaField("NodeNum", "STRING"),
+                        bigquery.SchemaField("temperature", "FLOAT"),
+                        bigquery.SchemaField("rssi", "FLOAT"),
+                    ],
+                    write_disposition="WRITE_APPEND"
+                )
+                
+                client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
+                
+                st.success(f"🎉 Success! Appended {total_recovered_appends:,} raw rows to storage.")
+                summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
+                st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
+                status_box.update(label="Recovery Dump Complete!", state="complete")
+                st.cache_data.clear()
             except Exception as bq_err:
-                st.error(f"Batch loading ingestion pipeline failure: {bq_err}")
-                status.update(state="error")
+                st.error(f"Batch loading Ingestion pipeline failure: {bq_err}")
+                status_box.update(state="error")
 
+    
     # --- RENDER STATISTICAL BREAKDOWN GRID WITH LAST SEEN BENCHMARKS ---
     if node_stats:
         st.write("### 📊 Data Recovery Tally Distribution:")
