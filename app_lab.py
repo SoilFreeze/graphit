@@ -2610,7 +2610,7 @@ def render_data_processing_page(selected_project):
         except Exception:
             st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
 
-    # --- TAB 4: SITE EVENT LOGGING ENGINE (NEXT TO LAST) ---
+    # --- TAB 4: SITE EVENT LOGGING ENGINE ---
     with tab_event_log:
         st.subheader("🚨 Log New Site Event Entry")
         st.write("Track power transitions, compressor cycles, and generator behaviors relative to active freeze down operations.")
@@ -2669,14 +2669,15 @@ def render_data_processing_page(selected_project):
                         st.error(f"Database insertion failed: {err}")
                         st.code(insert_sql, language="sql")
 
-    # --- TAB 5: REGISTER CHILLER MASTER CONTROLS (UNIFIED WITH LIVE INVENTORY INTERFACE) ---
+    # --- TAB 5: REGISTER CHILLER MASTER CONTROLS (UNIFIED WITH DYNAMIC INVENTORY INFRASTRUCTURE) ---
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
         # Section A: Live Dynamic Inventory Ledger
         st.write("#### 📂 Current Fleet Asset Ledger")
-        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
+        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, then click Save below.")
         try:
+            # 🛡️ FIX: Removed references to initial_price and acquired_status to prevent BQ compilation faults
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2701,8 +2702,6 @@ def render_data_processing_page(selected_project):
                     c.chiller_id, 
                     c.chiller_type, 
                     c.purchase_date,
-                    c.initial_price,
-                    c.acquired_status,
                     COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
                     COALESCE(d.currently_chilling, FALSE) as is_chilling,
                     COALESCE(d.total_chill_hours, 0) as cumulative_hours,
@@ -2728,8 +2727,6 @@ def render_data_processing_page(selected_project):
                         "Chill Duration": duration_text,
                         "Equipment Type": r['chiller_type'],
                         "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else None,
-                        "Condition When Acquired": str(r['acquired_status']).upper() if pd.notnull(r['acquired_status']) else "NEW",
-                        "Initial Cost": float(r['initial_price']) if pd.notnull(r['initial_price']) else 0.0,
                         "Accumulated Operating Costs": f"${r['Associated Costs']:,.2f}"
                     })
                 
@@ -2742,8 +2739,6 @@ def render_data_processing_page(selected_project):
                     hide_index=True,
                     disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
                     column_config={
-                        "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
-                        "Condition When Acquired": st.column_config.SelectColumn("Condition When Acquired", options=["NEW", "USED"]),
                         "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
                     },
                     key=ed_key
@@ -2761,10 +2756,6 @@ def render_data_processing_page(selected_project):
                                     set_clauses = []
                                     if "Equipment Type" in col_deltas:
                                         set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
-                                    if "Initial Cost" in col_deltas:
-                                        set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
-                                    if "Condition When Acquired" in col_deltas:
-                                        set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
                                     if "Date Acquired" in col_deltas:
                                         set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
                                         
@@ -2795,10 +2786,6 @@ def render_data_processing_page(selected_project):
                 min_value=datetime.now().date() - timedelta(days=365*30)
             )
             
-            col_cr4, col_cr5 = st.columns(2)
-            c_price = col_cr4.number_input("Initial Purchase Price ($)", min_value=0.0, value=0.0, step=1000.0, format="%.2f")
-            c_condition = col_cr5.selectbox("Condition Status When Acquired", ["New", "Used"])
-            
             if st.form_submit_button("🚀 Commit Chiller Asset to Registry", use_container_width=True):
                 if not c_name.strip():
                     st.error("❌ Submission Rejected: Unique Chiller Name token field is required.")
@@ -2806,9 +2793,10 @@ def render_data_processing_page(selected_project):
                     safe_cname = c_name.strip().replace("'", "''")
                     safe_ctype = c_type.strip().replace("'", "''")
                     
+                    # 🛡️ FIX: Removed parameters matching non-existent initial_price and acquired_status columns
                     insert_chiller_sql = f"""
-                        INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, chiller_type, purchase_date, initial_price, acquired_status)
-                        VALUES ('{safe_cname}', '{safe_ctype}', DATE('{c_acquired.strftime('%Y-%m-%d')}'), {float(c_price)}, '{c_condition.lower()}')
+                        INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, chiller_type, purchase_date)
+                        VALUES ('{safe_cname}', '{safe_ctype}', DATE('{c_acquired.strftime('%Y-%m-%d')}'))
                     """
                     try:
                         with st.spinner("Writing to chiller catalog manifest..."):
