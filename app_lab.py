@@ -2715,10 +2715,10 @@ def render_data_processing_page(selected_project):
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
         # =====================================================================
-        # SECTION 1: GLOBAL FLEET ASSET INVENTORY
+        # SECTION 1: GLOBAL FLEET ASSET INVENTORY (FULLY EDITABLE)
         # =====================================================================
         st.write("#### 📂 Current Inventory of Chillers")
-        st.caption("💡 **Tip:** Double-click cells to update permanent machine profiles (Type, Date, Cost, Condition), then click Save below.")
+        st.caption("💡 **Tip:** Double-click *any* cell—including Chiller Name—to fix typos. To delete a chiller permanently, check the box on the right and click Save.")
         
         try:
             inventory_q = f"""
@@ -2776,12 +2776,15 @@ def render_data_processing_page(selected_project):
                 fleet_edit_df = pd.DataFrame(fleet_rows)
                 fl_key = "chiller_global_fleet_editor_key"
                 
+                # 🛡️ HARDENED FIX: Removed "Chiller Name" from disabled list and enabled num_rows="dynamic" for deletions
                 st.data_editor(
                     fleet_edit_df,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
+                    num_rows="dynamic",
+                    disabled=["Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
                     column_config={
+                        "Chiller Name": st.column_config.TextColumn("Chiller Name", required=True),
                         "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
                         "Condition When Acquired": st.column_config.SelectboxColumn("Condition When Acquired", options=["NEW", "USED"]),
                         "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
@@ -2789,27 +2792,51 @@ def render_data_processing_page(selected_project):
                     key=fl_key
                 )
                 
-                if fl_key in st.session_state and "edited_rows" in st.session_state[fl_key] and st.session_state[fl_key]["edited_rows"]:
-                    if st.button("💾 Save Global Fleet Updates", use_container_width=True, type="secondary"):
-                        with st.spinner("Overwriting registry values..."):
-                            for row_idx_str, col_deltas in st.session_state[fl_key]["edited_rows"].items():
-                                target_cid = fleet_edit_df.loc[int(row_idx_str), "Chiller Name"]
-                                set_clauses = []
-                                if "Equipment Type" in col_deltas:
-                                    set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
-                                if "Initial Cost" in col_deltas:
-                                    set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
-                                if "Condition When Acquired" in col_deltas:
-                                    set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
-                                if "Date Acquired" in col_deltas:
-                                    set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
-                                    
-                                if set_clauses:
-                                    client.query(f"UPDATE `{CHILLER_REG_TABLE}` SET {', '.join(set_clauses)} WHERE chiller_id = '{target_cid}'").result()
-                        st.success("✅ Fleet catalog synchronized.")
-                        st.cache_data.clear()
-                        time.sleep(0.5)
-                        st.rerun()
+                # Process changes when the user modifies or drops entries
+                if fl_key in st.session_state:
+                    state_changes = st.session_state[fl_key]
+                    has_edits = bool(state_changes.get("edited_rows"))
+                    has_deletes = bool(state_changes.get("deleted_rows"))
+                    
+                    if has_edits or has_deletes:
+                        if st.button("💾 Save Fleet Modifications", use_container_width=True, type="secondary"):
+                            with st.spinner("Synchronizing modifications with database..."):
+                                
+                                # A. PROCESS BULK INLINE CELL EDITS
+                                if has_edits:
+                                    for row_idx_str, col_deltas in state_changes["edited_rows"].items():
+                                        row_idx = int(row_idx_str)
+                                        # Store the old baseline ID so we can look it up even if they changed the name cell!
+                                        old_cid = fleet_edit_df.loc[row_idx, "Chiller Name"]
+                                        
+                                        set_clauses = []
+                                        if "Chiller Name" in col_deltas:
+                                            set_clauses.append(f"chiller_id = '{col_deltas['Chiller Name'].replace("'", "''")}'")
+                                        if "Equipment Type" in col_deltas:
+                                            set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
+                                        if "Initial Cost" in col_deltas:
+                                            set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
+                                        if "Condition When Acquired" in col_deltas:
+                                            set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
+                                        if "Date Acquired" in col_deltas:
+                                            set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
+                                            
+                                        if set_clauses:
+                                            update_sql = f"UPDATE `{CHILLER_REG_TABLE}` SET {', '.join(set_clauses)} WHERE chiller_id = '{old_cid}'"
+                                            client.query(update_sql).result()
+                                
+                                # B. PROCESS BULK INLINE ROW DELETIONS
+                                if has_deletes:
+                                    for delete_idx in state_changes["deleted_rows"]:
+                                        target_delete_cid = fleet_edit_df.loc[delete_idx, "Chiller Name"]
+                                        delete_sql = f"DELETE FROM `{CHILLER_REG_TABLE}` WHERE chiller_id = '{target_delete_cid}'"
+                                        client.query(delete_sql).result()
+                                        
+                            st.success("✅ Fleet inventory completely synchronized!")
+                            st.cache_data.clear()
+                            time.sleep(0.5)
+                            st.rerun()
+                            
         except Exception as e:
             st.error(f"⚠️ Fleet Inventory Error: {e}")
 
