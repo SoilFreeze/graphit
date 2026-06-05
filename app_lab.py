@@ -2334,7 +2334,7 @@ def render_data_processing_page(selected_project):
     """
     Page Name: Data Processing
     Handles manual file ingestion, data masking limits filters, wide-format engineering exports,
-    and houses the Theoretical Reference Curve Library engine components.
+    and houses the Theoretical Reference Curve Library, Chiller Asset Registry, and Site Event entries.
     """
     st.header("⚙️ Data Processing & Reference Engine")
     
@@ -2343,7 +2343,13 @@ def render_data_processing_page(selected_project):
         st.error("Database connection unavailable.")
         return
         
-    tab_upload, tab_ref_library, tab_export = st.tabs(["📄 Upload Telemetry", "📈 Ref Curve Library", "📥 Export Report"])
+    tab_upload, tab_chiller_reg, tab_event_log, tab_ref_library, tab_export = st.tabs([
+        "📄 Upload Telemetry", 
+        "❄️ Register Chiller",
+        "🚨 Log Site Event",
+        "📈 Ref Curve Library", 
+        "📥 Export Report"
+    ])
     
     # --- TAB 1: UPLOAD LOGIC ---
     with tab_upload:
@@ -2384,7 +2390,6 @@ def render_data_processing_page(selected_project):
                         value_vars = [h for h in actual_headers if h != time_col]
                         df_melted = df_raw.melt(id_vars=[time_col], value_vars=value_vars, var_name='NodeNum', value_name='temperature')
                         
-                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
                         df_processed['timestamp'] = pd.to_datetime(df_melted[time_col], errors='coerce', utc=True)
                         df_processed['NodeNum'] = df_melted['NodeNum'].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
@@ -2396,7 +2401,6 @@ def render_data_processing_page(selected_project):
                         node_h = actual_headers[next(i for i, h in enumerate(clean_headers) if 'channel' in h or 'node' in h)]
                         temp_h = [h for h in actual_headers if 'temp' in h.lower()][0]
                         
-                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
                         df_processed['timestamp'] = pd.to_datetime(df_raw[time_h], errors='coerce', utc=True)
                         df_processed['NodeNum'] = df_raw[node_h].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
@@ -2410,17 +2414,14 @@ def render_data_processing_page(selected_project):
                         clean_name = u_file.name.replace(".csv", "").replace(".xlsx", "")
                         match = re.search(r'^([^ \(\)]+)', clean_name)
                         
-                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
                         df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
                         df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
                         df_processed['NodeNum'] = match.group(1).strip() if match else "Unknown"
 
-                    
                     # 3. AUTOMATED LIMITS FILTER RUNROOM
                     if not df_processed.empty:
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # Apply strict industrial limit filtering rules right during ingestion
                         bad_mask = (df_processed['temperature'] > 120) | (df_processed['temperature'] < -30)
                         
                         bad_count = bad_mask.sum()
@@ -2436,12 +2437,10 @@ def render_data_processing_page(selected_project):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
-                                # 🛡️ HARDENED FIX: Convert floats to Python Decimal objects so PyArrow passes exactly 16 bytes for BigQuery NUMERIC
                                 if is_lord:
                                     from decimal import Decimal
                                     df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
                                 
-                                # 🛡️ HARDENED FIX: Isolate data structure payload strictly matching existing database schema fields
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
                                 upload_payload_df = df_processed[columns_to_upload].copy()
                                 
@@ -2460,7 +2459,115 @@ def render_data_processing_page(selected_project):
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
 
-    # --- TAB 2: REFERENCE CURVE LIBRARY ---
+    # --- TAB 2: CHILLER REGISTRY MANAGEMENT ---
+    with tab_chiller_reg:
+        st.subheader("📋 Register Plant Chillers")
+        st.write("Maintain clear records of available cooling inventory assets system-wide.")
+        
+        CHILLER_REG_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_registry"
+        
+        with st.form("manual_chiller_inventory_registration_form"):
+            col_cr1, col_cr2, col_cr3 = st.columns(3)
+            c_name = col_cr1.text_input("Chiller Name / ID Serial*", placeholder="e.g., CH-20-01, CH-53-02")
+            c_type = col_cr2.text_input("Chiller Mechanical Type / Spec", placeholder="e.g., 53-Ton Logue, 20-Ton Industrial")
+            c_purchased = col_cr3.date_input("Date Purchased", value=datetime.now().date())
+            
+            if st.form_submit_button("🚀 Commit Chiller Asset to Registry", use_container_width=True):
+                if not c_name.strip():
+                    st.error("❌ Submission Rejected: Unique Chiller Name token field is required.")
+                else:
+                    safe_cname = c_name.strip().replace("'", "''")
+                    safe_ctype = c_type.strip().replace("'", "''")
+                    
+                    insert_chiller_sql = f"""
+                        INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, chiller_type, purchase_date)
+                        VALUES ('{safe_cname}', '{safe_ctype}', DATE('{c_purchased.strftime('%Y-%m-%d')}'))
+                    """
+                    try:
+                        with st.spinner("Writing to chiller catalog manifest..."):
+                            client.query(insert_chiller_sql).result()
+                        st.success(f"🎉 Success! Asset unit **{safe_cname}** successfully indexed in the registry.")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Database insertion failed: {err}")
+                        st.code(insert_chiller_sql, language="sql")
+                        
+        st.divider()
+        st.write("#### 📂 Currently Registered Fleet Equipment")
+        try:
+            current_fleet_df = client.query(f"SELECT chiller_id as `Chiller Name`, chiller_type as `Equipment Type`, purchase_date as `Purchase Date` FROM `{CHILLER_REG_TABLE}` ORDER BY chiller_id").to_dataframe()
+            if not current_fleet_df.empty:
+                st.dataframe(current_fleet_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No mechanical chiller assets registered in database catalog yet.")
+        except Exception as e:
+            st.caption(f"Inventory loading: {e}")
+
+    # --- TAB 3: SITE EVENT LOGGING ENGINE ---
+    with tab_event_log:
+        st.subheader("🚨 Log New Site Event Entry")
+        st.write("Track power transitions, compressor cycles, and generator behaviors relative to active freeze down operations.")
+        
+        EVENTS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.freezedown_events"
+        
+        # Gather full list of active projects out of database registry to populate dropdown
+        try:
+            proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived' ORDER BY Project"
+            active_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
+        except Exception:
+            active_projects_list = ["Office"]
+            
+        try:
+            active_chillers_list = sorted(client.query(f"SELECT chiller_id FROM `{CHILLER_REG_TABLE}`").to_dataframe()['chiller_id'].tolist())
+        except Exception:
+            active_chillers_list = []
+
+        import uuid
+        with st.form("comprehensive_site_event_logger_form"):
+            col_el1, col_el2, col_el3 = st.columns(3)
+            target_proj = col_el1.selectbox("Assign Event to Project Space Phase*", active_projects_list, key="input_ev_proj")
+            event_date = col_el2.date_input("Event Log Date Entry", value=datetime.now().date(), key="input_ev_date")
+            event_time = col_el3.time_input("Event Log Time Entry (UTC)", value=datetime.now().time(), key="input_ev_time")
+            
+            col_el4, col_el5, col_el6 = st.columns(3)
+            event_type = col_el4.selectbox("Type of Event*", ["Chiller Turn On", "Chiller Turn Off", "Power Source Transition", "Generator Fault / Outage", "Other Site Anomaly"], key="input_ev_type")
+            power_type = col_el5.selectbox("Active Power Type Source*", ["Line Power", "Generator", "None / Outage State"], key="input_ev_power")
+            assoc_chiller = col_el6.selectbox("Associated Chiller Loop (Optional)", ["None"] + active_chillers_list, key="input_ev_chiller")
+            
+            event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Generator 2 ran out of fuel causing Chiller unit A power dropout for 45 minutes.")
+            root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Refueling delivery delay window shift.")
+            
+            c_bool1 = st.checkbox("Timestamp registration is approximate (Estimated time block record flag)", value=False)
+            
+            if st.form_submit_button("💾 Save Event Entry to Database", use_container_width=True):
+                if not event_desc.strip():
+                    st.error("举❌ Submission Rejected: Event Description tracking summary text notes are required.")
+                else:
+                    generated_uuid = str(uuid.uuid4())
+                    combined_ts = datetime.combine(event_date, event_time).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    safe_desc = f"[{event_type} | Power: {power_type}] " + event_desc.strip().replace("'", "''")
+                    safe_cause = root_cause.strip().replace("'", "''")
+                    chiller_val_str = f"'{assoc_chiller}'" if assoc_chiller != "None" else "NULL"
+                    
+                    insert_sql = f"""
+                        INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate)
+                        VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_ts}'), NULL, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()})
+                    """
+                    try:
+                        with st.spinner("Streaming event logging data to BigQuery table..."):
+                            client.query(insert_sql).result()
+                        st.success(f"🎉 Success! Event tracking record committed cleanly under transaction code snapshot: `{generated_uuid[:8]}`")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Database insertion failed: {err}")
+                        st.code(insert_sql, language="sql")
+
+    # --- TAB 4: REFERENCE CURVE LIBRARY ---
     with tab_ref_library:
         st.subheader("📚 Theoretical Curve Library")
         st.write("Manage the target temperature curves used for visual goal-tracking on graphs.")
@@ -2484,6 +2591,7 @@ def render_data_processing_page(selected_project):
                 st.info("Reference table is empty or not yet initialized.")
 
             st.divider()
+
             st.error("Danger: This wipes the entire reference database.")
             confirm_purge = st.checkbox("I confirm I want to DELETE ALL curves in the library.", key="confirm_purge_check")
             if st.button("🧨 PURGE ENTIRE LIBRARY", type="primary", disabled=not confirm_purge, key="nuclear_purge_btn"):
@@ -2497,10 +2605,16 @@ def render_data_processing_page(selected_project):
                     st.error(f"Purge failed: {e}")
 
         st.divider()
+
         st.write("### 📤 Upload New Curves")
-        st.caption("Expected Format: CSV files (e.g., `2538-T1.csv`). Data starts on Row 3. Col 1: Day, Col 2: Temp.")
+        st.caption("Expected Format: CSV files (e.g., `2527-TP1.csv`). Data should start on Row 3. Col 1: Day, Col 2: Temp.")
         
-        u_files = st.file_uploader("Select CSV Files", type="csv", accept_multiple_files=True, key="ref_uploader_v6")
+        u_files = st.file_uploader(
+            "Select CSV Files", 
+            type="csv", 
+            accept_multiple_files=True, 
+            key="ref_uploader_v6" 
+        )
         
         if u_files:
             if st.button("💾 Commit Files to BigQuery", key="commit_ref_btn_final", use_container_width=True):
@@ -2524,15 +2638,7 @@ def render_data_processing_page(selected_project):
                         if not ref_df.empty:
                             client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
                             table_ref = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
-                            
-                            job_config = bigquery.LoadJobConfig(
-                                schema=[
-                                    bigquery.SchemaField("Day", "INTEGER"),
-                                    bigquery.SchemaField("Temp", "FLOAT"),
-                                    bigquery.SchemaField("CurveID", "STRING")
-                                ]
-                            )
-                            client.load_table_from_dataframe(ref_df, table_ref, job_config=job_config).result()
+                            client.load_table_from_dataframe(ref_df, table_ref).result()
                             st.toast(f"Success: {curve_id}", icon="✅")
                         else:
                             st.error(f"❌ {f.name} contained no valid numeric data after row 2.")
@@ -2563,7 +2669,7 @@ def render_data_processing_page(selected_project):
         except Exception:
             st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
 
-    # --- TAB 3: EXPORT LOGIC ---
+    # --- TAB 5: EXPORT LOGIC ---
     with tab_export:
         st.subheader("📥 Wide-Format Data Export")
         if not selected_project or selected_project == "All Projects":
