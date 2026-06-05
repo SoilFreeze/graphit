@@ -2714,10 +2714,11 @@ def render_data_processing_page(selected_project):
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
-        # Section A: Live Dynamic Inventory Ledger (At the Top)
-        st.write("#### 📂 Current Fleet Asset Ledger")
+        # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
+        st.write("#### 📂 Current Inventory of Chillers")
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
         try:
+            # 🛡️ HARDENED FIX: Uses explicit column handles mapped to your absolute database schema properties
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2839,18 +2840,18 @@ def render_data_processing_page(selected_project):
                             time.sleep(0.5)
                             st.rerun()
             else:
-                st.info("ℹ️ Chiller registry metadata catalog stores are currently unpopulated.")
+                st.info("ℹ| Chiller registry metadata catalog stores are currently unpopulated.")
         except Exception as e:
             st.caption(f"Asset ledger synchronization processing: {e}")
 
         st.divider()
 
-        # Section B: Registration Entry Form (At the Bottom)
+        # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
         st.write("#### ➕ Register New Chiller Asset Entry")
         with st.form("manual_chiller_inventory_registration_form"):
             col_cr1, col_cr2, col_cr3 = st.columns(3)
             c_name = col_cr1.text_input("Chiller Name / ID Serial*", placeholder="e.g., CH-20-01, CH-53-02")
-            c_type = col_cr2.text_input("Chiller Mechanical Type / Spec", placeholder="e.g., 53-Ton Logue")
+            c_type = col_cr2.text_input("Chiller Mechanical Type / Spec", placeholder="e.g., 53-Ton Logue, 20-Ton Industrial")
             c_acquired = col_cr3.date_input(
                 "Date Acquired*", 
                 value=datetime.now().date(),
@@ -2882,6 +2883,8 @@ def render_data_processing_page(selected_project):
                     except Exception as err:
                         st.error(f"Database insertion failed: {err}")
                         st.code(insert_chiller_sql, language="sql")
+
+
 ######################
 # Page: Admin Tool Helpers  #
 ######################
