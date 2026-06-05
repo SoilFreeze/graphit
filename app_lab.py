@@ -2714,12 +2714,13 @@ def render_data_processing_page(selected_project):
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
-        # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
+        # =====================================================================
+        # SECTION 1: GLOBAL FLEET ASSET INVENTORY
+        # =====================================================================
         st.write("#### 📂 Current Inventory of Chillers")
-        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
+        st.caption("💡 **Tip:** Double-click cells to update permanent machine profiles (Type, Date, Cost, Condition), then click Save below.")
         
         try:
-            # Uses explicit column handles mapped to your absolute database schema properties
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2741,11 +2742,7 @@ def render_data_processing_page(selected_project):
                     GROUP BY chiller_id
                 )
                 SELECT 
-                    c.chiller_id, 
-                    c.chiller_type, 
-                    c.purchase_date,
-                    c.initial_price,
-                    c.acquired_status,
+                    c.chiller_id, c.chiller_type, c.purchase_date, c.initial_price, c.acquired_status,
                     COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
                     COALESCE(d.currently_chilling, FALSE) as is_chilling,
                     COALESCE(d.total_chill_hours, 0) as cumulative_hours,
@@ -2759,12 +2756,12 @@ def render_data_processing_page(selected_project):
             if not inv_df.empty:
                 inv_df['Associated Costs'] = inv_df['cumulative_hours'] * 4.50
                 
-                editable_rows = []
+                fleet_rows = []
                 for _, r in inv_df.iterrows():
                     status_text = "🔵 Active Chilling" if r['is_chilling'] else "⚪ Standby / Off"
                     duration_text = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total runtime"
                     
-                    editable_rows.append({
+                    fleet_rows.append({
                         "Chiller Name": r['chiller_id'],
                         "Current Location": r['current_location'],
                         "Operational Status": status_text,
@@ -2776,58 +2773,161 @@ def render_data_processing_page(selected_project):
                         "Accumulated Operating Costs": f"${r['Associated Costs']:,.2f}"
                     })
                 
-                base_edit_df = pd.DataFrame(editable_rows)
-                ed_key = "chiller_live_inventory_editor"
+                fleet_edit_df = pd.DataFrame(fleet_rows)
+                fl_key = "chiller_global_fleet_editor_key"
                 
                 st.data_editor(
-                    base_edit_df,
+                    fleet_edit_df,
                     use_container_width=True,
                     hide_index=True,
                     disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
                     column_config={
                         "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
-                        # 🛡️ HARDENED FIX: Changed SelectColumn to SelectboxColumn to match Streamlit API constraints
                         "Condition When Acquired": st.column_config.SelectboxColumn("Condition When Acquired", options=["NEW", "USED"]),
                         "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
                     },
-                    key=ed_key
+                    key=fl_key
                 )
                 
-                if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key]:
-                    changes = st.session_state[ed_key]["edited_rows"]
-                    if changes:
-                        if st.button("💾 Save Inventory Modifications", use_container_width=True, type="primary"):
-                            with st.spinner("Overwriting registry values..."):
-                                for row_idx_str, col_deltas in changes.items():
-                                    row_idx = int(row_idx_str)
-                                    target_cid = base_edit_df.loc[row_idx, "Chiller Name"]
+                if fl_key in st.session_state and "edited_rows" in st.session_state[fl_key] and st.session_state[fl_key]["edited_rows"]:
+                    if st.button("💾 Save Global Fleet Updates", use_container_width=True, type="secondary"):
+                        with st.spinner("Overwriting registry values..."):
+                            for row_idx_str, col_deltas in st.session_state[fl_key]["edited_rows"].items():
+                                target_cid = fleet_edit_df.loc[int(row_idx_str), "Chiller Name"]
+                                set_clauses = []
+                                if "Equipment Type" in col_deltas:
+                                    set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
+                                if "Initial Cost" in col_deltas:
+                                    set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
+                                if "Condition When Acquired" in col_deltas:
+                                    set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
+                                if "Date Acquired" in col_deltas:
+                                    set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
                                     
-                                    set_clauses = []
-                                    if "Equipment Type" in col_deltas:
-                                        set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
-                                    if "Initial Cost" in col_deltas:
-                                        set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
-                                    if "Condition When Acquired" in col_deltas:
-                                        set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
-                                    if "Date Acquired" in col_deltas:
-                                        set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
-                                        
-                                    if set_clauses:
-                                        update_sql = f"UPDATE `{CHILLER_REG_TABLE}` SET {', '.join(set_clauses)} WHERE chiller_id = '{target_cid}'"
-                                        client.query(update_sql).result()
-                                        
-                            st.success("✅ Fleet inventory data logs updated successfully!")
-                            st.cache_data.clear()
-                            time.sleep(0.5)
-                            st.rerun()
-            else:
-                st.info("ℹ️ Chiller registry metadata catalog stores are currently unpopulated.")
+                                if set_clauses:
+                                    client.query(f"UPDATE `{CHILLER_REG_TABLE}` SET {', '.join(set_clauses)} WHERE chiller_id = '{target_cid}'").result()
+                        st.success("✅ Fleet catalog synchronized.")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
         except Exception as e:
-            st.error(f"⚠️ Inventory Ledger Render Fault: {e}")
+            st.error(f"⚠️ Fleet Inventory Error: {e}")
 
         st.divider()
 
-        # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
+        # =====================================================================
+        # SECTION 2: EDITABLE PROJECT-SPECIFIC ASSIGNMENT PARAMETERS
+        # =====================================================================
+        st.write("#### 📋 Project-Chiller Engineering Parameters")
+        st.caption("⚡ **Live Updates:** Edit project loops, bank layouts, linear footage metrics, and project timelines below.")
+        
+        ASSIGN_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_chiller_assignments"
+        
+        try:
+            assign_q = f"""
+                SELECT assignment_id, project_id, chiller_id, project_system, 
+                       number_of_banks, pipes_per_bank, linear_feet_per_bank, banks_are_even,
+                       start_freezedown, end_freezedown, project_chiller_cost, chiller_downtime_hours
+                FROM `{ASSIGN_TABLE}`
+                ORDER BY project_id ASC, chiller_id ASC
+            """
+            assign_df = client.query(assign_q).to_dataframe()
+            
+            if not assign_df.empty:
+                # Prepare a clean display name copy for editing visualization
+                edit_assign_df = assign_df.copy()
+                as_key = "project_chiller_parameters_editor_key"
+                
+                edited_assign_output = st.data_editor(
+                    edit_assign_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["assignment_id", "project_id", "chiller_id"],
+                    column_config={
+                        "assignment_id": None, # Hide tracking IDs completely
+                        "project_id": st.column_config.TextColumn("Project Scope", disabled=True),
+                        "chiller_id": st.column_config.TextColumn("Chiller ID", disabled=True),
+                        "project_system": st.column_config.TextColumn("System Loop"),
+                        "number_of_banks": st.column_config.NumberColumn("No. Banks", min_value=0, step=1),
+                        "pipes_per_bank": st.column_config.NumberColumn("Pipes/Bank", min_value=0, step=1),
+                        "linear_feet_per_bank": st.column_config.NumberColumn("Lin. Feet/Bank", min_value=0.0, format="%.1f"),
+                        "banks_are_even": st.column_config.CheckboxColumn("Banks Even?"),
+                        "start_freezedown": st.column_config.DatetimeColumn("Start Freezedown", format="MM/DD/YYYY HH:mm"),
+                        "end_freezedown": st.column_config.DatetimeColumn("End Freezedown", format="MM/DD/YYYY HH:mm"),
+                        "project_chiller_cost": st.column_config.NumberColumn("Project Cost ($)", format="$%.2f", min_value=0.0),
+                        "chiller_downtime_hours": st.column_config.NumberColumn("Downtime (Hours)", min_value=0.0, format="%.1f")
+                    },
+                    key=as_key
+                )
+                
+                # Check for updates and process back to BigQuery
+                if as_key in st.session_state and "edited_rows" in st.session_state[as_key] and st.session_state[as_key]["edited_rows"]:
+                    if st.button("💾 Save Project Assignment Modifications", use_container_width=True, type="primary"):
+                        with st.spinner("Committing parameter log updates..."):
+                            for row_idx_str, deltas in st.session_state[as_key]["edited_rows"].items():
+                                row_idx = int(row_idx_str)
+                                target_aid = edit_assign_df.loc[row_idx, "assignment_id"]
+                                
+                                set_clauses = []
+                                if "project_system" in deltas:
+                                    set_clauses.append(f"project_system = '{deltas['project_system'].replace("'", "''")}'")
+                                if "number_of_banks" in deltas:
+                                    set_clauses.append(f"number_of_banks = {int(deltas['number_of_banks'])}")
+                                if "pipes_per_bank" in deltas:
+                                    set_clauses.append(f"pipes_per_bank = {int(deltas['pipes_per_bank'])}")
+                                if "linear_feet_per_bank" in deltas:
+                                    set_clauses.append(f"linear_feet_per_bank = {float(deltas['linear_feet_per_bank'])}")
+                                if "banks_are_even" in deltas:
+                                    set_clauses.append(f"banks_are_even = {str(deltas['banks_are_even']).upper()}")
+                                if "project_chiller_cost" in deltas:
+                                    set_clauses.append(f"project_chiller_cost = {float(deltas['project_chiller_cost'])}")
+                                if "chiller_downtime_hours" in deltas:
+                                    set_clauses.append(f"chiller_downtime_hours = {float(deltas['chiller_downtime_hours'])}")
+                                if "start_freezedown" in deltas:
+                                    ts_val = f"TIMESTAMP('{deltas['start_freezedown']}')" if deltas['start_freezedown'] else "NULL"
+                                    set_clauses.append(f"start_freezedown = {ts_val}")
+                                if "end_freezedown" in deltas:
+                                    ts_val = f"TIMESTAMP('{deltas['end_freezedown']}')" if deltas['end_freezedown'] else "NULL"
+                                    set_clauses.append(f"end_freezedown = {ts_val}")
+                                    
+                                if set_clauses:
+                                    client.query(f"UPDATE `{ASSIGN_TABLE}` SET {', '.join(set_clauses)} WHERE assignment_id = '{target_aid}'").result()
+                        st.success("✅ Operational parameters updated successfully!")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+            else:
+                st.info("ℹ️ No chiller allocations logged to specific project scopes yet. Link an asset below to begin tracking.")
+        except Exception as e:
+            st.error(f"⚠️ Project Assignment View Error: {e}")
+
+        # Quick Form: Deploy/Link Chiller to a Project
+        with st.expander("🔗 Link Chiller to Project Scope"):
+            with st.form("deploy_chiller_to_project_form"):
+                col_dp1, col_dp2, col_dp3 = st.columns(3)
+                dp_proj = col_dp1.selectbox("Target Project*", active_projects_list, key="dp_form_proj")
+                dp_chil = col_dp2.selectbox("Chiller Unit*", active_chillers_list, key="dp_form_chiller")
+                dp_sys = col_dp3.text_input("System Designation (Optional)", placeholder="e.g., Loop A, Series 1")
+                
+                if st.form_submit_button("🚀 Deploy Asset Link", use_container_width=True):
+                    import uuid
+                    new_aid = str(uuid.uuid4())
+                    safe_sys = dp_sys.strip().replace("'", "''")
+                    insert_assign_sql = f"""
+                        INSERT INTO `{ASSIGN_TABLE}` (assignment_id, project_id, chiller_id, project_system)
+                        VALUES ('{new_aid}', '{dp_proj}', '{dp_chil}', '{safe_sys}')
+                    """
+                    client.query(insert_assign_sql).result()
+                    st.success("🎉 Asset successfully linked to project configuration!")
+                    st.cache_data.clear()
+                    time.sleep(0.5)
+                    st.rerun()
+
+        st.divider()
+
+        # =====================================================================
+        # SECTION 3: REGISTER NEW CHILLER HARDWARE
+        # =====================================================================
         st.write("#### ➕ Register New Chiller Asset Entry")
         with st.form("manual_chiller_inventory_registration_form"):
             col_cr1, col_cr2, col_cr3 = st.columns(3)
@@ -2863,7 +2963,6 @@ def render_data_processing_page(selected_project):
                         st.rerun()
                     except Exception as err:
                         st.error(f"Database insertion failed: {err}")
-
 
 ######################
 # Page: Admin Tool Helpers  #
