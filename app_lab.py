@@ -3281,7 +3281,6 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             except Exception:
                 continue
 
-        # Find this section inside the tab_recovery button click action:
                 total_recovered_appends = len(all_rows)
                 if total_recovered_appends == 0:
                     st.info("🔒 Cloud accounts returned 0 points for this window context.")
@@ -3300,7 +3299,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                         if 'temperature' in upload_df.columns:
                             upload_df['temperature'] = pd.to_numeric(upload_df['temperature'], errors='coerce')
                         
-                        df_upload['NodeNum'] = df_upload['NodeNum'].astype(str).str.strip()
+                        upload_df['NodeNum'] = upload_df['NodeNum'].astype(str).str.strip()
 
                         real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
                         
@@ -3322,6 +3321,9 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                         st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
                         status_box.update(label="Recovery Dump Complete!", state="complete")
                         st.cache_data.clear()
+                    except Exception as bq_err:
+                        st.error(f"Batch loading Ingestion pipeline failure: {bq_err}")
+                        status_box.update(state="error")
 
 
             except Exception as bq_err:
