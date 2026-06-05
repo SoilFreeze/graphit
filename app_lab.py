@@ -98,6 +98,56 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 
 st.sidebar.title("❄️ SoilFreeze Lab")
 
+# =============================================================================
+# SYSTEM PULSE & DYNAMIC REFRESH ENGINE
+# =============================================================================
+st.sidebar.subheader("⏱️ System Pulse")
+
+sidebar_bq_client = get_bq_client()
+if sidebar_bq_client is not None:
+    try:
+        # Single-pass metadata query targeting the maximum timestamp logged across active fields
+        pulse_q = f"""
+            SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+        """
+        pulse_df = sidebar_bq_client.query(pulse_q).to_dataframe()
+        
+        if not pulse_df.empty and pulse_df['last_sync'].iloc[0]:
+            last_sync_str = str(pulse_df['last_sync'].iloc[0])
+            
+            # Calculate human-readable minutes delta from current system time
+            last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
+            now_utc = pd.Timestamp.now(tz='UTC')
+            elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
+            
+            # Contextual color coding based on data age benchmarks
+            if elapsed_mins <= 60:
+                pulse_status = f"🟢 **Live** ({elapsed_mins}m ago)"
+            elif elapsed_mins <= 180:
+                pulse_status = f"🟠 **Delayed** ({elapsed_mins}m ago)"
+            else:
+                pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
+                
+            st.sidebar.markdown(f"**Data Age:** {pulse_status}")
+            st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
+        else:
+            st.sidebar.markdown("**Data Age:** ❌ No Sync Records")
+            
+    except Exception as pulse_err:
+        st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
+
+# INTERACTIVE REFRESH TRIGGER
+# Streamlit clears data cache structures natively when st.cache_data.clear() is invoked
+if st.sidebar.button("🔄 Force Refresh System Cache", use_container_width=True, help="Clears local cache matrices and forces a direct connection pull against BigQuery."):
+    with st.sidebar.spinner("Purging cache maps..."):
+        st.cache_data.clear()
+        st.toast("System cache completely cleared! Reloading fresh metrics...", icon="🔄")
+        time.sleep(0.5)
+        st.rerun()
+
+st.sidebar.divider()
+
 # 1. PAGE NAVIGATION
 page = st.sidebar.selectbox(
     "Navigation", 
