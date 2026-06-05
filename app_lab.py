@@ -3155,6 +3155,7 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
                 continue
 
         # Unified Batch Ingestion Layer (Safely placed outside account loops)
+        # Unified Batch Ingestion Layer (Safely placed outside account loops)
         total_recovered_appends = len(all_rows)
         if total_recovered_appends == 0:
             st.info("🔒 Cloud accounts returned 0 points for this window context.")
@@ -3164,8 +3165,8 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             try:
                 upload_df = pd.DataFrame(all_rows)
                 
-                # 🛡️ HARDENED FIX: Convert timestamp objects to explicit ISO format strings so BigQuery reads them as 16 bytes
-                upload_df['timestamp'] = upload_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
+                # 🛡️ HARDENED FIX: Convert to explicit timezone-aware datetimes so pyarrow passes accurate offsets to BigQuery
+                upload_df['timestamp'] = pd.to_datetime(upload_df['timestamp'], utc=True)
                 
                 # Force numerical data types to match schema layouts exactly
                 if 'rssi' in upload_df.columns:
