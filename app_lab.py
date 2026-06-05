@@ -2353,6 +2353,7 @@ def render_data_processing_page(selected_project):
     ])
     
     CHILLER_REG_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_registry"
+    CHILLER_MAP_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_sensor_mapping"
     EVENTS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.freezedown_events"
     
     # --- TAB 1: UPLOAD LOGIC ---
@@ -2610,7 +2611,7 @@ def render_data_processing_page(selected_project):
         except Exception:
             st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
 
-    # --- TAB 4: SITE EVENT LOGGING ENGINE ---
+    # --- TAB 4: SITE EVENT LOGGING ENGINE & INTEGRATED HISTORY LOG ---
     with tab_event_log:
         st.subheader("🚨 Log New Site Event Entry")
         st.write("Track power transitions, compressor cycles, and generator behaviors relative to active freeze down operations.")
@@ -2638,6 +2639,9 @@ def render_data_processing_page(selected_project):
             power_type = col_el5.selectbox("Active Power Type Source*", ["Line Power", "Generator", "None / Outage State"], key="input_ev_power")
             assoc_chiller = col_el6.selectbox("Associated Chiller Loop (Optional)", ["None"] + active_chillers_list, key="input_ev_chiller")
             
+            # Form expansion: Added optional system loops to map chillers in a series
+            proj_system = st.text_input("Project System Loop Identifier (Optional)", placeholder="e.g., Loop A, Loop B (Leave blank if project uses only one system)")
+            
             event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Generator 2 ran out of fuel causing Chiller unit A power dropout for 45 minutes.")
             root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Refueling delivery delay window shift.")
             
@@ -2650,7 +2654,8 @@ def render_data_processing_page(selected_project):
                     generated_uuid = str(uuid.uuid4())
                     combined_ts = datetime.combine(event_date, event_time).strftime('%Y-%m-%d %H:%M:%S')
                     
-                    safe_desc = f"[{event_type} | Power: {power_type}] " + event_desc.strip().replace("'", "''")
+                    system_prefix = f"[System: {proj_system.strip()}] " if proj_system.strip() else ""
+                    safe_desc = f"{system_prefix}[{event_type} | Power: {power_type}] " + event_desc.strip().replace("'", "''")
                     safe_cause = root_cause.strip().replace("'", "''")
                     chiller_val_str = f"'{assoc_chiller}'" if assoc_chiller != "None" else "NULL"
                     
@@ -2669,7 +2674,44 @@ def render_data_processing_page(selected_project):
                         st.error(f"Database insertion failed: {err}")
                         st.code(insert_sql, language="sql")
 
-    # --- TAB 5: REGISTER CHILLER MASTER CONTROLS (UNIFIED WITH DYNAMIC INVENTORY INFRASTRUCTURE) ---
+        st.divider()
+        
+        # --- DYNAMIC HISTORICAL ENTRIES TABLE LAYER WITH FILTER BOXES ---
+        st.write("#### 📂 Historical Site Log Registry")
+        
+        f_col1, f_col2 = st.columns(2)
+        filter_proj = f_col1.selectbox("Filter Logs by Project Space Context:", ["All"] + active_projects_list, key="evt_log_filter_project")
+        filter_chiller = f_col2.selectbox("Filter Logs by Associated Chiller Asset:", ["All"] + active_chillers_list, key="evt_log_filter_chiller")
+        
+        try:
+            where_clauses = []
+            if filter_proj != "All":
+                where_clauses.append(f"project_id = '{filter_proj}'")
+            if filter_chiller != "All":
+                where_clauses.append(f"chiller_id = '{filter_chiller}'")
+                
+            where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            
+            logs_q = f"""
+                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', event_timestamp) as Timestamp,
+                       project_id as Project,
+                       COALESCE(chiller_id, '—') as Chiller,
+                       event_description as Description,
+                       COALESCE(NULLIF(root_cause, ''), '—') as `Root Cause`
+                FROM `{EVENTS_TABLE}`
+                {where_stmt}
+                ORDER BY event_timestamp DESC
+                LIMIT 200
+            """
+            logs_df = client.query(logs_q).to_dataframe()
+            if not logs_df.empty:
+                st.dataframe(logs_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No historical event entries log files match your selected parameter options.")
+        except Exception as e:
+            st.caption(f"Log viewer pipeline suspended: {e}")
+
+    # --- TAB 5: REGISTER CHILLER MASTER CONTROLS (UNIFIED WITH LIVE INVENTORY INTERFACE) ---
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
@@ -2677,13 +2719,13 @@ def render_data_processing_page(selected_project):
         st.write("#### 📂 Current Fleet Asset Ledger")
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, then click Save below.")
         try:
-            # 🛡️ FIX: Removed references to initial_price and acquired_status to prevent BQ compilation faults
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
                         project_id, chiller_id, event_timestamp, event_description,
                         REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN ON') as is_on,
                         REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN OFF') as is_off,
+                        REGEXP_EXTRACT(event_description, r'\\[System:\\s*(.*?)\\]') as system_loop,
                         LEAD(event_timestamp) OVER(PARTITION BY chiller_id ORDER BY event_timestamp ASC) as next_evt
                     FROM `{EVENTS_TABLE}`
                     WHERE chiller_id IS NOT NULL
@@ -2692,22 +2734,37 @@ def render_data_processing_page(selected_project):
                     SELECT 
                         chiller_id,
                         MAX_BY(project_id, event_timestamp) as current_location,
+                        MAX_BY(system_loop, event_timestamp) as active_system,
                         ARRAY_AGG(is_on ORDER BY event_timestamp DESC LIMIT 1)[OFFSET(0)] as currently_chilling,
                         SUM(CASE WHEN is_on THEN TIMESTAMP_DIFF(COALESCE(next_evt, CURRENT_TIMESTAMP()), event_timestamp, HOUR) ELSE 0 END) as total_chill_hours,
                         MAX(CASE WHEN is_on AND next_evt IS NULL THEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), event_timestamp, HOUR) END) as active_run_hours
                     FROM TimelineState
                     GROUP BY chiller_id
+                ),
+                TelemMetrics AS (
+                    -- Correlate analytical temperatures by joining matching project loop coordinates
+                    SELECT 
+                        m.chiller_id,
+                        ROUND(AVG(d.temperature), 1) as avg_brine_temp
+                    FROM `{CHILLER_MAP_TABLE}` m
+                    JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` d 
+                      ON m.project_id = d.Project AND m.Location = d.Location
+                    WHERE d.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
+                    GROUP BY m.chiller_id
                 )
                 SELECT 
                     c.chiller_id, 
                     c.chiller_type, 
                     c.purchase_date,
                     COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
+                    COALESCE(d.active_system, '') as active_system,
                     COALESCE(d.currently_chilling, FALSE) as is_chilling,
                     COALESCE(d.total_chill_hours, 0) as cumulative_hours,
-                    COALESCE(d.active_run_hours, 0) as current_run_hours
+                    COALESCE(d.active_run_hours, 0) as current_run_hours,
+                    t.avg_brine_temp
                 FROM `{CHILLER_REG_TABLE}` c
                 LEFT JOIN Durations d ON c.chiller_id = d.chiller_id
+                LEFT JOIN TelemMetrics t ON c.chiller_id = t.chiller_id
                 ORDER BY c.chiller_id ASC
             """
             inv_df = client.query(inventory_q).to_dataframe()
@@ -2717,14 +2774,20 @@ def render_data_processing_page(selected_project):
                 
                 editable_rows = []
                 for _, r in inv_df.iterrows():
-                    status_text = "🔵 Active Chilling Loop" if r['is_chilling'] else "⚪ Standby / Off"
+                    status_text = "季 Active Chilling Loop" if r['is_chilling'] else "⚪ Standby / Off"
                     duration_text = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total runtime"
+                    
+                    system_suffix = f" ({r['active_system']})" if r['active_system'] else ""
+                    location_label = f"{r['current_location']}{system_suffix}"
+                    
+                    temp_display = f"{r['avg_brine_temp']}°F" if pd.notnull(r['avg_brine_temp']) else "No Active Pings"
                     
                     editable_rows.append({
                         "Chiller Name": r['chiller_id'],
-                        "Current Location": r['current_location'],
+                        "Current Location": location_label,
                         "Operational Status": status_text,
                         "Chill Duration": duration_text,
+                        "Live Loop Brine Temp": temp_display,
                         "Equipment Type": r['chiller_type'],
                         "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else None,
                         "Accumulated Operating Costs": f"${r['Associated Costs']:,.2f}"
@@ -2737,7 +2800,7 @@ def render_data_processing_page(selected_project):
                     base_edit_df,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
+                    disabled=["Chiller Name", "Current Location", "Operational Status", "Chill Duration", "Live Loop Brine Temp", "Accumulated Operating Costs"],
                     column_config={
                         "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
                     },
@@ -2793,7 +2856,6 @@ def render_data_processing_page(selected_project):
                     safe_cname = c_name.strip().replace("'", "''")
                     safe_ctype = c_type.strip().replace("'", "''")
                     
-                    # 🛡️ FIX: Removed parameters matching non-existent initial_price and acquired_status columns
                     insert_chiller_sql = f"""
                         INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, chiller_type, purchase_date)
                         VALUES ('{safe_cname}', '{safe_ctype}', DATE('{c_acquired.strftime('%Y-%m-%d')}'))
