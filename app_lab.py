@@ -2384,12 +2384,12 @@ def render_data_processing_page(selected_project):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
-                                # 🛡️ HARDENED FIX: Define explicit schema matching configurations to guide the pyarrow destination write
+                                # 🛡️ HARDENED FIX: Explicitly match BigQuery's schema column types to avoid type mismatches
                                 job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "FLOAT"),
+                                        bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
                                         bigquery.SchemaField("approve", "STRING"),
                                     ],
                                     write_disposition="WRITE_APPEND"
