@@ -2384,7 +2384,11 @@ def render_data_processing_page(selected_project):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
-                                # 🛡️ HARDENED FIX: Explicitly match BigQuery's schema column types to avoid type mismatches
+                                # 🛡️ HARDENED FIX: Convert floats to Python Decimal objects so PyArrow passes exactly 16 bytes for BigQuery NUMERIC
+                                if is_lord:
+                                    from decimal import Decimal
+                                    df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
+                                
                                 job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
