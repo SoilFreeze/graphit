@@ -3088,7 +3088,7 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
     """
     Main administrative execution module managing bulk data approval modification routines,
-    system deduplication, boundary sanity scrubs, and text string standardization.
+    hourly table consolidation aggregates, and manual rejection string standardization.
     
     Parameters:
     -----------
@@ -3119,25 +3119,25 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     # =========================================================================
     st.header("🧹 Global Database Cleanup")
     st.write(
-        "Consolidate raw datasets into 1-decimal hourly averages, safely remove duplicate records, "
-        "and clean casing discrepancies system-wide. "
-        "**Note:** Running this cleanup automatically marks any rogue data points outside the physical bounds of -30°F and 120°F as `BadData`."
+        "Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency "
+        "and duplicate records system-wide. "
+        "**Note:** Running this cleanup automatically drops any rogue data points outside the physical bounds of -30°F and 120°F."
     )
     
     # Split utilities into clean side-by-side management columns
     clean_col1, clean_col2 = st.columns(2)
     
     with clean_col1:
-        st.write("##### 📊 Telemetry Deduplication & Bounds Scan")
-        st.caption("Processes raw sensor streams, resets physics boundaries, and strips duplicate entries.")
-        run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Duplicate Purge", use_container_width=True)
+        st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
+        st.caption("Truncates raw timestamps to the hour, filters bad logs, and collapses records to an average value.")
+        run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Hourly Consolidation", use_container_width=True)
         
     with clean_col2:
         st.write("##### 🧼 Approval String Casing Standardization")
         st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
         run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
 
-    # --- PATHWAY A: TELEMETRY CLEANUP & BOUNDARY SCAVENGER ---
+    # --- PATHWAY A: COMPREHENSIVE HOURLY HOOD CONSOLIDATION ENGINE ---
     if run_telemetry_cleanup:
         status_box = st.empty()
         try:
@@ -3146,44 +3146,44 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             count_sp_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
             
-            # 2. Run case-cast and timeline row partitioning to filter out exact duplicates from the SensorPush stream
-            status_box.markdown("🧹 **[2/4] Initializing temporary staging pools and filtering SensorPush duplicates...**")
+            # 2. Upgraded SensorPush: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
+            status_box.markdown("🧹 **[2/4] Consolidating and averaging SensorPush timelines to the hour...**")
             sp_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
-                SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
-                FROM (
-                    SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
-                    FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                    WHERE temperature >= -30.0 AND temperature <= 120.0
-                )
-                WHERE rn = 1;
+                SELECT 
+                    TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                    NodeNum, 
+                    ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature,
+                    MAX(rssi) as rssi
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                WHERE temperature >= -30.0 AND temperature <= 120.0
+                GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), NodeNum;
 
                 CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
-                SELECT * FROM tmp_clean_sensorpush;
+                SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature, rssi FROM tmp_clean_sensorpush;
             """
             client.query(sp_cleanup_sql).result()
             
-            # 3. Apply matching row-partition deduplication to your Lord Wireless telemetry streams
-            status_box.markdown("🛰️ **[3/4] Running row-deduplication matrices on Lord Wireless tables...**")
+            # 3. Upgraded Lord: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
+            status_box.markdown("🛰️ **[3/4] Consolidating and averaging Lord Wireless timelines to the hour...**")
             lord_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
-                SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature
-                FROM (
-                    SELECT timestamp, NodeNum, temperature,
-                           ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
-                    FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                    WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
-                )
-                WHERE rn = 1;
+                SELECT 
+                    TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                    NodeNum, 
+                    ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
+                GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), NodeNum;
 
                 CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
-                SELECT * FROM tmp_clean_lord;
+                SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature FROM tmp_clean_lord;
             """
             client.query(lord_cleanup_sql).result()
             st.cache_data.clear()
 
             # 4. Pull database row summaries to document the data cleanup audit trail
-            status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling post-cleanup tallies...**")
+            status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling consolidated tallies...**")
             count_sp_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
 
@@ -3192,19 +3192,19 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             total_removed = sp_removed + lord_removed
             
             status_box.empty()
-            st.success("🎉 Global Database Cleanup successfully completed!")
+            st.success("🎉 Global Database Consolidation successfully completed!")
             
             # Print comparative ledger results matrix
             report_data = [
-                {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged Points": f"{sp_removed:,}"},
-                {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged Points": f"{lord_removed:,}"},
-                {"Data Table": "Combined Total Pool", "Before Count": f"{count_sp_before + count_lord_before:,}", "After Count": f"{count_sp_after + count_lord_after:,}", "Purged Points": f"{total_removed:,}"}
+                {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged High-Freq Points": f"{sp_removed:,}"},
+                {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged High-Freq Points": f"{lord_removed:,}"},
+                {"Data Table": "Combined Total Pool", "Before Count": f"{count_sp_before + count_lord_before:,}", "After Count": f"{count_sp_after + count_lord_after:,}", "Purged High-Freq Points": f"{total_removed:,}"}
             ]
             st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
             
         except Exception as e:
             status_box.empty()
-            st.error(f"Global Database Cleanup Failed: {e}")
+            st.error(f"Global Database Consolidation Failed: {e}")
 
     # --- PATHWAY B: REJECTIONS ENGINE STRING CASING CLEANUP ---
     if run_string_cleanup:
@@ -3256,7 +3256,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     # Internal function to map and verify exactly how many data rows will be changed before saving
     def run_profile_audit():
         status_q = f"""
-            SELECT 
+            SELECT  
                 COALESCE(t.approval_status, 'NULL (Streaming / Unreviewed)') as Current_Designation_Status,
                 COUNT(*) as Total_Captured_Points,
                 FORMAT_TIMESTAMP('%m/%d/%Y', MIN(t.timestamp)) as Oldest_Log_Entry,
