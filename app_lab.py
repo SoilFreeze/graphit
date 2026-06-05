@@ -3281,22 +3281,34 @@ def handle_recovery_trigger(selected_nodes, start_date, end_date):
             except Exception:
                 continue
 
-        total_recovered_appends = len(all_rows)
-        if total_recovered_appends == 0:
-            st.info("🔒 Cloud accounts returned 0 points for this window context.")
-            status.update(label="Run Finalized (0 Points Found)", state="complete")
-        else:
-            st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
-            try:
-                upload_df = pd.DataFrame(all_rows)
-                
-                # FIXED: Force the rssi series to match BigQuery numerical precision expectations
-                if 'rssi' in upload_df.columns:
-                    upload_df['rssi'] = upload_df['rssi'].astype(object).where(upload_df['rssi'].notnull(), None)
+        # Find this section inside the tab_recovery button click action:
+total_recovered_appends = len(all_rows)
+if total_recovered_appends == 0:
+    st.info("🔒 Cloud accounts returned 0 points for this window context.")
+    status_box.update(label="Run Finalized (0 Points Found)", state="complete")
+else:
+    st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
+    try:
+        upload_df = pd.DataFrame(all_rows)
+        if 'rssi' in upload_df.columns:
+            upload_df['rssi'] = upload_df['rssi'].astype(object).where(upload_df['rssi'].notnull(), None)
 
-                real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
-                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-                db_client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
+        # HARDENED FIX: Convert timestamp objects to explicit ISO format strings so BigQuery converts them to 16 bytes
+        upload_df['timestamp'] = upload_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
+
+        real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
+        
+        # Enforce exact Schema configurations matching the BigQuery table definitions
+        job_config = bigquery.LoadJobConfig(
+            schema=[
+                bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                bigquery.SchemaField("NodeNum", "STRING"),
+                bigquery.SchemaField("temperature", "FLOAT"),
+                bigquery.SchemaField("rssi", "FLOAT"),
+            ],
+            write_disposition="WRITE_APPEND"
+        )
+        client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
                 
                 st.success(f"🎉 Success! Appended {total_recovered_appends:,} raw rows to storage.")
                 summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
@@ -4073,20 +4085,29 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.write("### Preview Staged Inventory Matrix")
                     st.dataframe(df_upload.head(), use_container_width=True, hide_index=True)
                     
-                    if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
-                        actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
-                        if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
-                            st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields.")
-                        else:
-                            with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
-                                clean_upload_df = pd.DataFrame({
-                                    'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
-                                    'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
-                                }).dropna()
-                                staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
-                                load_job_config = bigquery.LoadJobConfig(write_disposition="WRITE_EMPTY")
-                                client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()
-                                
+                    # Find this section inside tab_bulk_config:
+if st.button("🚀 Commit Inventory Changes", key="bulk_inv_upload_commit_btn", use_container_width=True):
+    actual_cols = {str(c).strip().lower(): str(c) for c in df_upload.columns}
+    if 'rawid' not in actual_cols or 'nodenum' not in actual_cols:
+        st.error("❌ Ingestion Rejected: Missing required spreadsheet target fields.")
+    else:
+        with st.spinner("Analyzing delta thresholds and updating inventory catalog..."):
+            clean_upload_df = pd.DataFrame({
+                'RawID': df_upload[actual_cols['rawid']].astype(str).str.strip().str.split('.').str[0],
+                'NodeNum': df_upload[actual_cols['nodenum']].astype(str).str.strip()
+            }).dropna()
+            
+            staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
+            
+            # HARDENED FIX: Force BigQuery to expect explicit string types to match 16-byte signatures
+            load_job_config = bigquery.LoadJobConfig(
+                schema=[
+                    bigquery.SchemaField("RawID", "STRING"),
+                    bigquery.SchemaField("NodeNum", "STRING"),
+                ],
+                write_disposition="WRITE_TRUNCATE" # Safe drop/replace for temporary staging table
+            )
+            client.load_table_from_dataframe(clean_upload_df, staging_table, job_config=load_job_config).result()                                
                                 merge_upsert_sql = f"""
                                     INSERT INTO `{target_inventory_path}` (RawID, NodeNum)
                                     SELECT DISTINCT s.RawID, s.NodeNum FROM `{staging_table}` s
