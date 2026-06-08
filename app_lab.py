@@ -3833,8 +3833,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.info("💡 Please specify a valid Project, Location, and Node path above to populate management components.")
             
     # -------------------------------------------------------------------------
-            
-    # -------------------------------------------------------------------------
     # SUB-TAB 4: DATA RECOVERY PIPELINE ENGINE
     # -------------------------------------------------------------------------
     with tab_recovery:
