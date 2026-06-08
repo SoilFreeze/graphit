@@ -2438,25 +2438,33 @@ def render_data_processing_page(selected_project):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
-                                # 🛡️ HARDENED TIMESTAMP FIX: Use trailing 'Z' offset with no spaces to satisfy Arrow's Parquet parser requirements
+                                # Standardize types and strings for Apache Arrow storage engines
                                 df_processed['timestamp'] = pd.to_datetime(df_processed['timestamp']).dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
                                 df_processed['NodeNum'] = df_processed['NodeNum'].astype(str).str.strip()
                                 df_processed['temperature'] = df_processed['temperature'].astype(float)
                                 
-                                # Declare explicit schemas matching destination types perfectly
-                                schema_fields = [
-                                    bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                    bigquery.SchemaField("NodeNum", "STRING"),
-                                    bigquery.SchemaField("temperature", "FLOAT"),
-                                    bigquery.SchemaField("approve", "STRING")
-                                ]
-                                
-                                # Add the RSSI column schema if we are uploading to raw_sensorpush
-                                if not is_lord:
-                                    if 'rssi' in df_processed.columns:
-                                        df_processed['rssi'] = pd.to_numeric(df_processed['rssi'], errors='coerce')
+                                # 🛡️ SCHEMA ALIGNMENT FIX: Dynamic column selection and matching job schemas
+                                if is_lord:
+                                    # raw_lord expects exactly three columns. We strip out the internal 'approve' column payload.
+                                    upload_payload = df_processed[['timestamp', 'NodeNum', 'temperature']].copy()
+                                    schema_fields = [
+                                        bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                        bigquery.SchemaField("NodeNum", "STRING"),
+                                        bigquery.SchemaField("temperature", "FLOAT"),
+                                    ]
+                                else:
+                                    # raw_sensorpush retains the verification status and maps optional RSSI
+                                    upload_payload = df_processed.copy()
+                                    schema_fields = [
+                                        bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                        bigquery.SchemaField("NodeNum", "STRING"),
+                                        bigquery.SchemaField("temperature", "FLOAT"),
+                                        bigquery.SchemaField("approve", "STRING")
+                                    ]
+                                    if 'rssi' in upload_payload.columns:
+                                        upload_payload['rssi'] = pd.to_numeric(upload_payload['rssi'], errors='coerce')
                                     else:
-                                        df_processed['rssi'] = None
+                                        upload_payload['rssi'] = None
                                     schema_fields.append(bigquery.SchemaField("rssi", "FLOAT"))
                                 
                                 job_config = bigquery.LoadJobConfig(
@@ -2464,9 +2472,12 @@ def render_data_processing_page(selected_project):
                                     write_disposition="WRITE_APPEND"
                                 )
                                 
-                                client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
+                                # Load the filtered, correctly matched layout variant payload dataframe
+                                client.load_table_from_dataframe(upload_payload, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
                                 st.cache_data.clear()
+
+            
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
 
