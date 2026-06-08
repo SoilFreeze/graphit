@@ -3892,6 +3892,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             
             all_rows = []
             hardware_map = {}
+            reverse_hardware_map = {}
             db_max_timestamps = {}
             node_stats = {}
             account_stats = {}
@@ -3920,6 +3921,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         clean_db_id = str(row.RawID).split('.')[0].strip()
                         friendly_name = str(row.NodeNum).strip()
                         hardware_map[clean_db_id] = friendly_name
+                        reverse_hardware_map[friendly_name] = clean_db_id
                         if friendly_name in node_stats:
                             node_stats[friendly_name] = 0
                 except Exception as e:
@@ -3962,13 +3964,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             api_root_id = str(s_id).split('.')[0].strip()
                             friendly_name = hardware_map.get(api_root_id)
                             
-                            if not friendly_name:
-                                friendly_name = f"UNMAPPED-{api_root_id}"
-                                if final_target_nodes and not any(node in friendly_name for node in final_target_nodes):
-                                    continue
+                            # 🛡️ HARDENED MATCH GUARD FIX: Check both friendly name maps and Raw ID listings
+                            is_target_match = False
+                            if friendly_name and friendly_name in final_target_nodes:
+                                is_target_match = True
                             else:
-                                if final_target_nodes and friendly_name not in final_target_nodes:
-                                    continue
+                                # Fallback check: look up if the raw API tracking reference maps back to our targeted assets list
+                                for target_node in final_target_nodes:
+                                    if reverse_hardware_map.get(target_node) == api_root_id:
+                                        friendly_name = target_node
+                                        is_target_match = True
+                                        break
+                                        
+                            if not is_target_match:
+                                continue
                                 
                             if friendly_name not in node_stats:
                                 node_stats[friendly_name] = 0
