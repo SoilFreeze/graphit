@@ -4068,6 +4068,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.info("💡 Please specify a valid Project, Location, and Node path above to populate management components.")
             
     # -------------------------------------------------------------------------
+            
+    # -------------------------------------------------------------------------
     # SUB-TAB 4: DATA RECOVERY PIPELINE ENGINE
     # -------------------------------------------------------------------------
     with tab_recovery:
@@ -4260,7 +4262,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
                         status_box.update(label="Recovery Dump Complete!", state="complete")
                         
-                        # Cache results to state to prevent UnboundLocalError crashes on subsequent updates
                         st.session_state['recovery_cached_rows'] = all_rows
                         st.session_state['recovery_cached_stats'] = db_max_timestamps
                         st.session_state['recovery_run_complete'] = True
@@ -4270,7 +4271,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.error(f"Batch loading Ingestion pipeline failure: {bq_err}")
                         status_box.update(state="error")
 
-        # 🛡️ CHRONOLOGICAL GUARD WRAPPER: Ensures distribution grids only compile if memory exists
         if st.session_state.get('recovery_run_complete'):
             st.write("### 📊 Data Recovery Tally Distribution:")
             summary_records = []
