@@ -2438,14 +2438,12 @@ def render_data_processing_page(selected_project):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
-                                # 🛡️ HARDENED TYPE CASTING FIX: Reformat data values to guarantee 16-byte API safety
-                                df_processed['timestamp'] = pd.to_datetime(df_processed['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
+                                # 🛡️ HARDENED TIMESTAMP FIX: Use trailing 'Z' offset with no spaces to satisfy Arrow's Parquet parser requirements
+                                df_processed['timestamp'] = pd.to_datetime(df_processed['timestamp']).dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
                                 df_processed['NodeNum'] = df_processed['NodeNum'].astype(str).str.strip()
-                                
-                                # CRITICAL: Explicitly map temperature as a standard Python float to align schema layout constraints
                                 df_processed['temperature'] = df_processed['temperature'].astype(float)
                                 
-                                # Declare explicit schemas matching destination types perfectly (FLOAT prevents the NUMERIC error)
+                                # Declare explicit schemas matching destination types perfectly
                                 schema_fields = [
                                     bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                     bigquery.SchemaField("NodeNum", "STRING"),
@@ -2469,7 +2467,6 @@ def render_data_processing_page(selected_project):
                                 client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
                                 st.cache_data.clear()
-
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
 
