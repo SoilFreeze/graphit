@@ -3955,6 +3955,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.write(f"📥 Pulling raw cloud payload matrix for `{acc['email']}`...")
                         samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso, "limit": 100000}
                         r_samples = requests.post(f"{LOCAL_API_URL}/samples", headers={"Authorization": token}, json=samples_payload, timeout=60).json()
+
+                        st.write(f"DEBUG [{acc['email']}]: Found {len(r_samples.get('sensors', {}))} raw sensor payloads in API response.")
                         
                         sensors_data = r_samples.get('sensors', {})
                         if not sensors_data:
