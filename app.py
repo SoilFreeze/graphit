@@ -2421,7 +2421,9 @@ def render_data_processing_page(selected_project):
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
                         # Apply strict industrial limit filtering rules right during ingestion
-                        bad_mask = (df_processed['temperature'] > 120) | (df_processed['temperature'] < -30)
+                        bad_mask = (df_processed['temperature'].astype(float) > 120.0) | (df_processed['temperature'].astype(float) < -30.0)
+                        df_processed['approve'] = 'TRUE'
+                        df_processed.loc[bad_mask, 'approve'] = 'BADDATA'
                         
                         bad_count = bad_mask.sum()
                         if bad_count > 0:
@@ -2436,26 +2438,37 @@ def render_data_processing_page(selected_project):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
-                                # 🛡️ HARDENED FIX: Convert floats to Python Decimal objects so PyArrow passes exactly 16 bytes for BigQuery NUMERIC
-                                if is_lord:
-                                    from decimal import Decimal
-                                    df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
+                                # 🛡️ HARDENED TYPE CASTING FIX: Reformat data values to guarantee 16-byte API safety
+                                df_processed['timestamp'] = pd.to_datetime(df_processed['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
+                                df_processed['NodeNum'] = df_processed['NodeNum'].astype(str).str.strip()
                                 
-                                # 🛡️ HARDENED FIX: Isolate data structure payload strictly matching existing database schema fields
-                                columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
-                                upload_payload_df = df_processed[columns_to_upload].copy()
+                                # CRITICAL: Explicitly map temperature as a standard Python float to align schema layout constraints
+                                df_processed['temperature'] = df_processed['temperature'].astype(float)
+                                
+                                # Declare explicit schemas matching destination types perfectly (FLOAT prevents the NUMERIC error)
+                                schema_fields = [
+                                    bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                    bigquery.SchemaField("NodeNum", "STRING"),
+                                    bigquery.SchemaField("temperature", "FLOAT"),
+                                    bigquery.SchemaField("approve", "STRING")
+                                ]
+                                
+                                # Add the RSSI column schema if we are uploading to raw_sensorpush
+                                if not is_lord:
+                                    if 'rssi' in df_processed.columns:
+                                        df_processed['rssi'] = pd.to_numeric(df_processed['rssi'], errors='coerce')
+                                    else:
+                                        df_processed['rssi'] = None
+                                    schema_fields.append(bigquery.SchemaField("rssi", "FLOAT"))
                                 
                                 job_config = bigquery.LoadJobConfig(
-                                    schema=[
-                                        bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                        bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
-                                    ],
+                                    schema=schema_fields,
                                     write_disposition="WRITE_APPEND"
                                 )
-                                client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
+                                
+                                client.load_table_from_dataframe(df_processed, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
-                                st.cache_data.clear() 
+                                st.cache_data.clear()
 
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
