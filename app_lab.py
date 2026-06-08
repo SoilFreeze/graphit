@@ -3948,7 +3948,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                     device_rssi_map[str(s_id).strip()] = s_meta.get('rssi')
 
                         st.write(f"📥 Pulling raw cloud payload matrix for `{acc['email']}`...")
-                        # FIX: Raised limit buffer boundary to 100,000 points to capture the full fleet dataset
                         samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso, "limit": 100000}
                         r_samples = requests.post(f"{LOCAL_API_URL}/samples", headers={"Authorization": token}, json=samples_payload, timeout=60).json()
                         
@@ -3960,12 +3959,16 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             api_root_id = str(s_id).split('.')[0].strip()
                             friendly_name = hardware_map.get(api_root_id)
                             
+                            # 🛡️ HARDENED MATCH GUARD: If not found in our translation dictionary, check if the raw ID matches
                             if not friendly_name:
                                 friendly_name = f"UNMAPPED-{api_root_id}"
-                                
-                            # FIX: Hardened lookup comparison check against your target listing records
-                            if final_target_nodes and friendly_name not in final_target_nodes:
-                                continue
+                                # If we are filtering by specific nodes and both friendly name and raw ID don't match, skip
+                                if final_target_nodes and not any(node in friendly_name for node in final_target_nodes):
+                                    continue
+                            else:
+                                # Standard cross-reference filter check for verified friendly names
+                                if final_target_nodes and friendly_name not in final_target_nodes:
+                                    continue
                                 
                             if friendly_name not in node_stats:
                                 node_stats[friendly_name] = 0
