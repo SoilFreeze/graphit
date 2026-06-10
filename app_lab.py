@@ -4759,6 +4759,9 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         edit_end = c7.date_input("End Date", value=default_end_date, disabled=not use_end_date_toggle)
 
         if st.form_submit_button("💾 Overwrite Targeted Assignment Attributes Configuration Row Line"):
+            # Add these strings right below your other string sanitization lines:
+            safe_phase = str(edit_phase).replace("'", "''").strip()
+            safe_system = str(edit_system).replace("'", "''").strip()
             raw_loc_str = custom_loc_input.strip() if chosen_form_loc == "➕ Add Custom Location..." else chosen_form_loc
             
             if chosen_form_loc == "➕ Add Custom Location..." and not raw_loc_str:
