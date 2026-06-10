@@ -2334,7 +2334,7 @@ def render_data_processing_page(selected_project):
     """
     Page Name: Data Processing
     Handles manual file ingestion, data masking limits filters, wide-format engineering exports,
-    and houses the Theoretical Reference Curve Library engine components.
+    Theoretical Reference Curve Library, Chiller Asset Inventory, and Site Event entries.
     """
     st.header("⚙️ Data Processing & Reference Engine")
     
@@ -2343,7 +2343,18 @@ def render_data_processing_page(selected_project):
         st.error("Database connection unavailable.")
         return
         
-    tab_upload, tab_ref_library, tab_export = st.tabs(["📄 Upload Telemetry", "📈 Ref Curve Library", "📥 Export Report"])
+    # Standardized 5-tab layout order matching blueprint specifications
+    tab_upload, tab_export, tab_ref_library, tab_event_log, tab_chiller_reg = st.tabs([
+        "📄 Upload Telemetry", 
+        "📥 Export Report",
+        "📈 Ref Curve Library", 
+        "🚨 Log Site Event",
+        "❄️ Register Chiller"
+    ])
+    
+    CHILLER_REG_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_registry"
+    CHILLER_MAP_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_sensor_mapping"
+    EVENTS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.freezedown_events"
     
     # --- TAB 1: UPLOAD LOGIC ---
     with tab_upload:
@@ -2384,7 +2395,6 @@ def render_data_processing_page(selected_project):
                         value_vars = [h for h in actual_headers if h != time_col]
                         df_melted = df_raw.melt(id_vars=[time_col], value_vars=value_vars, var_name='NodeNum', value_name='temperature')
                         
-                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
                         df_processed['timestamp'] = pd.to_datetime(df_melted[time_col], errors='coerce', utc=True)
                         df_processed['NodeNum'] = df_melted['NodeNum'].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
@@ -2396,7 +2406,6 @@ def render_data_processing_page(selected_project):
                         node_h = actual_headers[next(i for i, h in enumerate(clean_headers) if 'channel' in h or 'node' in h)]
                         temp_h = [h for h in actual_headers if 'temp' in h.lower()][0]
                         
-                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
                         df_processed['timestamp'] = pd.to_datetime(df_raw[time_h], errors='coerce', utc=True)
                         df_processed['NodeNum'] = df_raw[node_h].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
@@ -2410,20 +2419,15 @@ def render_data_processing_page(selected_project):
                         clean_name = u_file.name.replace(".csv", "").replace(".xlsx", "")
                         match = re.search(r'^([^ \(\)]+)', clean_name)
                         
-                        # HARDENED TIMESTAMPS: Force parsing to absolute timezone-aware UTC datetime types
                         df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
                         df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
                         df_processed['NodeNum'] = match.group(1).strip() if match else "Unknown"
 
-                    
                     # 3. AUTOMATED LIMITS FILTER RUNROOM
                     if not df_processed.empty:
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                         
-                        # Apply strict industrial limit filtering rules right during ingestion
-                        bad_mask = (df_processed['temperature'].astype(float) > 120.0) | (df_processed['temperature'].astype(float) < -30.0)
-                        df_processed['approve'] = 'TRUE'
-                        df_processed.loc[bad_mask, 'approve'] = 'BADDATA'
+                        bad_mask = (df_processed['temperature'] > 120) | (df_processed['temperature'] < -30)
                         
                         bad_count = bad_mask.sum()
                         if bad_count > 0:
@@ -2438,153 +2442,29 @@ def render_data_processing_page(selected_project):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
-                                # Standardize types and strings for Apache Arrow storage engines
-                                df_processed['timestamp'] = pd.to_datetime(df_processed['timestamp']).dt.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
-                                df_processed['NodeNum'] = df_processed['NodeNum'].astype(str).str.strip()
-                                df_processed['temperature'] = df_processed['temperature'].astype(float)
-                                
-                                # 🛡️ SCHEMA ALIGNMENT FIX: Dynamic column selection and matching job schemas
                                 if is_lord:
-                                    # raw_lord expects exactly three columns. We strip out the internal 'approve' column payload.
-                                    upload_payload = df_processed[['timestamp', 'NodeNum', 'temperature']].copy()
-                                    schema_fields = [
-                                        bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                        bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "FLOAT"),
-                                    ]
-                                else:
-                                    # raw_sensorpush retains the verification status and maps optional RSSI
-                                    upload_payload = df_processed.copy()
-                                    schema_fields = [
-                                        bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                        bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "FLOAT"),
-                                        bigquery.SchemaField("approve", "STRING")
-                                    ]
-                                    if 'rssi' in upload_payload.columns:
-                                        upload_payload['rssi'] = pd.to_numeric(upload_payload['rssi'], errors='coerce')
-                                    else:
-                                        upload_payload['rssi'] = None
-                                    schema_fields.append(bigquery.SchemaField("rssi", "FLOAT"))
+                                    from decimal import Decimal
+                                    df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
+                                
+                                columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
+                                upload_payload_df = df_processed[columns_to_upload].copy()
                                 
                                 job_config = bigquery.LoadJobConfig(
-                                    schema=schema_fields,
+                                    schema=[
+                                        bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                        bigquery.SchemaField("NodeNum", "STRING"),
+                                        bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
+                                    ],
                                     write_disposition="WRITE_APPEND"
                                 )
-                                
-                                # Load the filtered, correctly matched layout variant payload dataframe
-                                client.load_table_from_dataframe(upload_payload, table_id, job_config=job_config).result()
+                                client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
-                                st.cache_data.clear()
+                                st.cache_data.clear() 
 
-            
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
 
-    # --- TAB 2: REFERENCE CURVE LIBRARY ---
-    with tab_ref_library:
-        st.subheader("📚 Theoretical Curve Library")
-        st.write("Manage the target temperature curves used for visual goal-tracking on graphs.")
-        
-        with st.expander("🗑️ Library Management (Delete/Purge)", expanded=False):
-            st.warning("Action is permanent. Purging will remove curves from all graphs.")
-            
-            try:
-                lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
-                if not lib_df.empty:
-                    to_delete = st.selectbox("Select Curve to Remove", sorted(lib_df['CurveID'].tolist()), key="delete_curve_picker")
-                    if st.button(f"🗑️ Delete {to_delete}", type="secondary", key="delete_single_curve_btn"):
-                        client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{to_delete}'").result()
-                        st.success(f"Removed {to_delete} from library.")
-                        st.cache_data.clear()
-                        time.sleep(0.5)
-                        st.rerun()
-                else:
-                    st.info("No curves available to delete.")
-            except Exception:
-                st.info("Reference table is empty or not yet initialized.")
-
-            st.divider()
-            st.error("Danger: This wipes the entire reference database.")
-            confirm_purge = st.checkbox("I confirm I want to DELETE ALL curves in the library.", key="confirm_purge_check")
-            if st.button("🧨 PURGE ENTIRE LIBRARY", type="primary", disabled=not confirm_purge, key="nuclear_purge_btn"):
-                try:
-                    client.query(f"TRUNCATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
-                    st.success("Library has been completely purged.")
-                    st.cache_data.clear()
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Purge failed: {e}")
-
-        st.divider()
-        st.write("### 📤 Upload New Curves")
-        st.caption("Expected Format: CSV files (e.g., `2538-T1.csv`). Data starts on Row 3. Col 1: Day, Col 2: Temp.")
-        
-        u_files = st.file_uploader("Select CSV Files", type="csv", accept_multiple_files=True, key="ref_uploader_v6")
-        
-        if u_files:
-            if st.button("💾 Commit Files to BigQuery", key="commit_ref_btn_final", use_container_width=True):
-                progress_bar = st.progress(0)
-                
-                for idx, f in enumerate(u_files):
-                    try:
-                        curve_id = f.name.replace(".csv", "")
-                        try:
-                            f.seek(0)
-                            ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
-                        except Exception:
-                            f.seek(0)
-                            ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
-
-                        ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
-                        ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
-                        ref_df = ref_df.dropna(subset=['Day', 'Temp'])
-                        ref_df['CurveID'] = curve_id
-
-                        if not ref_df.empty:
-                            client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
-                            table_ref = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
-                            
-                            job_config = bigquery.LoadJobConfig(
-                                schema=[
-                                    bigquery.SchemaField("Day", "INTEGER"),
-                                    bigquery.SchemaField("Temp", "FLOAT"),
-                                    bigquery.SchemaField("CurveID", "STRING")
-                                ]
-                            )
-                            client.load_table_from_dataframe(ref_df, table_ref, job_config=job_config).result()
-                            st.toast(f"Success: {curve_id}", icon="✅")
-                        else:
-                            st.error(f"❌ {f.name} contained no valid numeric data after row 2.")
-                            
-                        progress_bar.progress((idx + 1) / len(u_files))
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error processing {f.name}: {e}")
-                
-                st.success("Library Processing Complete.")
-                st.cache_data.clear()
-                time.sleep(1)
-                st.rerun()
-
-        st.divider()
-        st.write("### 📂 Current Library Inventory")
-        try:
-            inventory_df = client.query(
-                f"SELECT CurveID, COUNT(*) as Data_Points, MIN(Day) as Start_Day, MAX(Day) as End_Day "
-                f"FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` "
-                f"GROUP BY CurveID ORDER BY CurveID"
-            ).to_dataframe()
-            
-            if not inventory_df.empty:
-                st.dataframe(inventory_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("The library table is currently empty.")
-        except Exception:
-            st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
-
-    # --- TAB 3: EXPORT LOGIC ---
+    # --- TAB 2: EXPORT LOGIC ---
     with tab_export:
         st.subheader("📥 Wide-Format Data Export")
         if not selected_project or selected_project == "All Projects":
@@ -2629,6 +2509,448 @@ def render_data_processing_page(selected_project):
                         use_container_width=True
                     )
 
+    # --- TAB 3: REFERENCE CURVE LIBRARY ---
+    with tab_ref_library:
+        st.subheader("📚 Theoretical Curve Library")
+        st.write("Manage the target temperature curves used for visual goal-tracking on graphs.")
+        
+        with st.expander("🗑️ Library Management (Delete/Purge)", expanded=False):
+            st.warning("Action is permanent. Purging will remove curves from all graphs.")
+            
+            try:
+                lib_df = client.query(f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves`").to_dataframe()
+                if not lib_df.empty:
+                    to_delete = st.selectbox("Select Curve to Remove", sorted(lib_df['CurveID'].tolist()), key="delete_curve_picker")
+                    if st.button(f"🗑️ Delete {to_delete}", type="secondary", key="delete_single_curve_btn"):
+                        client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{to_delete}'").result()
+                        st.success(f"Removed {to_delete} from library.")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+                else:
+                    st.info("No curves available to delete.")
+            except Exception:
+                st.info("Reference table is empty or not yet initialized.")
+
+            st.divider()
+
+            st.error("Danger: This wipes the entire reference database.")
+            confirm_purge = st.checkbox("I confirm I want to DELETE ALL curves in the library.", key="confirm_purge_check")
+            if st.button("🧨 PURGE ENTIRE LIBRARY", type="primary", disabled=not confirm_purge, key="nuclear_purge_btn"):
+                try:
+                    client.query(f"TRUNCATE TABLE `{PROJECT_ID}.{DATASET_ID}.reference_curves`").result()
+                    st.success("Library has been completely purged.")
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Purge failed: {e}")
+
+        st.divider()
+
+        st.write("### 📤 Upload New Curves")
+        st.caption("Expected Format: CSV files (e.g., `2527-TP1.csv`). Data should start on Row 3. Col 1: Day, Col 2: Temp.")
+        
+        u_files = st.file_uploader(
+            "Select CSV Files", 
+            type="csv", 
+            accept_multiple_files=True, 
+            key="ref_uploader_v6" 
+        )
+        
+        if u_files:
+            if st.button("💾 Commit Files to BigQuery", key="commit_ref_btn_final", use_container_width=True):
+                progress_bar = st.progress(0)
+                
+                for idx, f in enumerate(u_files):
+                    try:
+                        curve_id = f.name.replace(".csv", "")
+                        try:
+                            f.seek(0)
+                            ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
+                        except Exception:
+                            f.seek(0)
+                            ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
+
+                        ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
+                        ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
+                        ref_df = ref_df.dropna(subset=['Day', 'Temp'])
+                        ref_df['CurveID'] = curve_id
+
+                        if not ref_df.empty:
+                            client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
+                            table_ref = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+                            client.load_table_from_dataframe(ref_df, table_ref).result()
+                            st.toast(f"Success: {curve_id}", icon="✅")
+                        else:
+                            st.error(f"❌ {f.name} contained no valid numeric data after row 2.")
+                            
+                        progress_bar.progress((idx + 1) / len(u_files))
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error processing {f.name}: {e}")
+                
+                st.success("Library Processing Complete.")
+                st.cache_data.clear()
+                time.sleep(1)
+                st.rerun()
+
+        st.divider()
+        st.write("### 📂 Current Library Inventory")
+        try:
+            inventory_df = client.query(
+                f"SELECT CurveID, COUNT(*) as Data_Points, MIN(Day) as Start_Day, MAX(Day) as End_Day "
+                f"FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` "
+                f"GROUP BY CurveID ORDER BY CurveID"
+            ).to_dataframe()
+            
+            if not inventory_df.empty:
+                st.dataframe(inventory_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("The library table is currently empty.")
+        except Exception:
+            st.warning("⚠️ Reference table (`reference_curves`) not found in BigQuery.")
+
+    # --- TAB 4: SITE EVENT LOGGING ENGINE & INTEGRATED HISTORY LOG ---
+    with tab_event_log:
+        st.subheader("🚨 Log New Site Event Entry")
+        st.write("Track power transitions, compressor cycles, repair costs, and generator behaviors relative to active freeze down operations.")
+        
+        try:
+            proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived' ORDER BY Project"
+            active_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
+        except Exception:
+            active_projects_list = ["Office"]
+            
+        try:
+            active_chillers_list = sorted(client.query(f"SELECT chiller_id FROM `{CHILLER_REG_TABLE}`").to_dataframe()['chiller_id'].tolist())
+        except Exception:
+            active_chillers_list = []
+
+        import uuid
+        with st.form("comprehensive_site_event_logger_form"):
+            col_el1, col_el2, col_el3 = st.columns(3)
+            target_proj = col_el1.selectbox("Assign Event to Project Space Phase*", active_projects_list, key="input_ev_proj")
+            event_date = col_el2.date_input("Event Log Start Date*", value=datetime.now().date(), key="input_ev_date")
+            event_time = col_el3.time_input("Event Log Start Time (UTC)*", value=datetime.now().time(), key="input_ev_time")
+            
+            col_el4, col_el5, col_el6 = st.columns(3)
+            event_type = col_el4.selectbox("Type of Event*", ["Chiller Turn On", "Chiller Turn Off", "Power Source Transition", "Generator Fault / Outage", "Equipment Repair / Maintenance", "Other Site Anomaly"], key="input_ev_type")
+            power_type = col_el5.selectbox("Active Power Type Source*", ["Line Power", "Generator", "None / Outage State"], key="input_ev_power")
+            assoc_chiller = col_el6.selectbox("Associated Chiller Loop (Optional)", ["None"] + active_chillers_list, key="input_ev_chiller")
+            
+            col_el7, col_el8 = st.columns(2)
+            proj_system = col_el7.text_input("Project System Loop Identifier (Optional)", placeholder="e.g., Loop A, Loop B")
+            event_cost_val = col_el8.number_input("Associated Event / Repair Cost ($)", min_value=0.0, value=0.0, step=50.0, format="%.2f")
+            
+            event_desc = st.text_input("Operational Event Description / Detailed Log Alert Notes*", placeholder="e.g., Emergency technician callout to replace blown primary fuse block.")
+            root_cause = st.text_input("Determined Root Cause Analysis / Notes", placeholder="e.g., Electrical spike from main line transformer grid drop.")
+            
+            st.write("##### ⏱️ Duration / Resolution Tracking")
+            c_has_end = st.checkbox("Toggle this to specify when the event ended / resolved", value=False)
+            
+            end_col1, end_col2 = st.columns(2)
+            if c_has_end:
+                end_date = end_col1.date_input("Resolution Date", value=event_date)
+                end_time = end_col2.time_input("Resolution Time (UTC)", value=event_time)
+            
+            c_bool1 = st.checkbox("Timestamp registration is approximate (Estimated time block record flag)", value=False)
+            
+            if st.form_submit_button("💾 Save Event Entry to Database", use_container_width=True):
+                if not event_desc.strip():
+                    st.error("❌ Submission Rejected: Event Description tracking summary text notes are required.")
+                else:
+                    generated_uuid = str(uuid.uuid4())
+                    combined_start = datetime.combine(event_date, event_time).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    if c_has_end:
+                        combined_end = f"TIMESTAMP('{datetime.combine(end_date, end_time).strftime('%Y-%m-%d %H:%M:%S')}')"
+                    else:
+                        combined_end = "NULL"
+                    
+                    system_prefix = f"[System: {proj_system.strip()}] " if proj_system.strip() else ""
+                    safe_desc = f"{system_prefix}[{event_type} | Power: {power_type}] " + event_desc.strip().replace("'", "''")
+                    safe_cause = root_cause.strip().replace("'", "''")
+                    chiller_val_str = f"'{assoc_chiller}'" if assoc_chiller != "None" else "NULL"
+                    
+                    insert_sql = f"""
+                        INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate, event_cost)
+                        VALUES ('{generated_uuid}', '{target_proj}', {chiller_val_str}, TIMESTAMP('{combined_start}'), {combined_end}, '{safe_desc}', '{safe_cause}', {str(c_bool1).upper()}, {float(event_cost_val)})
+                    """
+                    try:
+                        with st.spinner("Streaming event logging data to BigQuery table..."):
+                            client.query(insert_sql).result()
+                        st.success(f"🎉 Success! Event tracking record committed cleanly under code: `{generated_uuid[:8]}`")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Database insertion failed: {err}")
+                        st.code(insert_sql, language="sql")
+
+        st.divider()
+        
+        # --- EVENT REGISTRY MANAGEMENT LEDGER WITH ASSET & PROJECT FILTERS ---
+        st.write("#### 📂 Event Registry")
+        st.caption("💡 **Tip:** To clear out double postings or bad copies, select the row(s) and click the **Remove Selected Entries** button below.")
+        
+        f_col1, f_col2 = st.columns(2)
+        filter_proj = f_col1.selectbox("Filter Logs by Project Space Context:", ["All"] + active_projects_list, key="evt_log_filter_project")
+        filter_chiller = f_col2.selectbox("Filter Logs by Associated Chiller Asset:", ["All"] + active_chillers_list, key="evt_log_filter_chiller")
+        
+        try:
+            where_clauses = []
+            if filter_proj != "All":
+                where_clauses.append(f"e.project_id = '{filter_proj}'")
+            if filter_chiller != "All":
+                where_clauses.append(f"e.chiller_id = '{filter_chiller}'")
+                
+            where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            
+            # 🛡️ HARDENED FIX: Incorporated a clean database join mapping handle to display explicit Chiller Names
+            logs_q = f"""
+                SELECT e.event_id,
+                       FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', e.event_timestamp) as Start_Time,
+                       COALESCE(FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', e.resolution_timestamp), 'Ongoing / N/A') as End_Time,
+                       e.project_id as Project,
+                       COALESCE(c.chiller_id, '—') as Chiller_Name,
+                       e.event_description as Chiller_Event,
+                       COALESCE(e.event_cost, 0.0) as event_cost
+                FROM `{EVENTS_TABLE}` e
+                LEFT JOIN `{CHILLER_REG_TABLE}` c ON e.chiller_id = c.chiller_id
+                {where_stmt}
+                ORDER BY e.event_timestamp DESC
+                LIMIT 200
+            """
+            logs_df = client.query(logs_q).to_dataframe()
+            
+            if not logs_df.empty:
+                logs_df.insert(0, "Select to Remove", False)
+                ev_key = "live_event_registry_interactive_editor"
+                
+                edited_logs_df = st.data_editor(
+                    logs_df, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    disabled=["event_id", "Start_Time", "End_Time", "Project", "Chiller_Name", "Chiller_Event", "event_cost"],
+                    column_config={
+                        "Select to Remove": st.column_config.CheckboxColumn("Remove?"),
+                        "event_id": None, 
+                        "Start_Time": st.column_config.TextColumn("Start Time"),
+                        "End_Time": st.column_config.TextColumn("End / Resolution Time"),
+                        "Project": st.column_config.TextColumn("Project"),
+                        "Chiller_Name": st.column_config.TextColumn("Chiller Name"),
+                        "Chiller_Event": st.column_config.TextColumn("Chiller Event"),
+                        "event_cost": st.column_config.NumberColumn("Cost ($)", format="$%.2f")
+                    },
+                    key=ev_key
+                )
+                
+                targeted_deletions = edited_logs_df[edited_logs_df["Select to Remove"] == True]
+                
+                if not targeted_deletions.empty:
+                    st.warning(f"⚠️ Warning: You have targeted {len(targeted_deletions)} event log record(s) for extraction.")
+                    if st.button("🗑️ Remove Selected Entries From Registry", use_container_width=True, type="primary"):
+                        with st.spinner("Purging records from BigQuery array storage..."):
+                            for _, target_row in targeted_deletions.iterrows():
+                                target_uuid = target_row["event_id"]
+                                purge_sql = f"DELETE FROM `{EVENTS_TABLE}` WHERE event_id = '{target_uuid}'"
+                                client.query(purge_sql).result()
+                                
+                        st.success("🎉 Registry cleaned up! Duplicate items removed successfully.")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+            else:
+                st.info("No historical event entries log files match your selected parameter options.")
+        except Exception as e:
+            st.error(f"⚠️ Event Registry Fault: {e}")
+
+    # --- TAB 5: REGISTER CHILLER CONTROLS ---
+    with tab_chiller_reg:
+        st.subheader("❄️ Chiller Infrastructure Master Control")
+        
+        # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
+        st.write("#### 📂 Current Inventory of Chillers")
+        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
+        try:
+            # 🛡️ HARDENED PLUG: Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
+            inventory_q = f"""
+                WITH TimelineState AS (
+                    SELECT 
+                        project_id, chiller_id, event_timestamp, event_description, event_cost,
+                        REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN ON') as is_on,
+                        REGEXP_CONTAINS(UPPER(event_description), 'CHILLER TURN OFF') as is_off,
+                        LEAD(event_timestamp) OVER(PARTITION BY chiller_id ORDER BY event_timestamp ASC) as next_evt
+                    FROM `{EVENTS_TABLE}`
+                    WHERE chiller_id IS NOT NULL
+                ),
+                Durations AS (
+                    SELECT 
+                        chiller_id,
+                        MAX_BY(project_id, event_timestamp) as current_location,
+                        ARRAY_AGG(is_on ORDER BY event_timestamp DESC LIMIT 1)[OFFSET(0)] as currently_chilling,
+                        SUM(CASE WHEN is_on THEN TIMESTAMP_DIFF(COALESCE(next_evt, CURRENT_TIMESTAMP()), event_timestamp, HOUR) ELSE 0 END) as total_chill_hours,
+                        MAX(CASE WHEN is_on AND next_evt IS NULL THEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), event_timestamp, HOUR) END) as active_run_hours,
+                        SUM(COALESCE(event_cost, 0.0)) as total_logged_costs
+                    FROM TimelineState
+                    GROUP BY chiller_id
+                )
+                SELECT 
+                    c.chiller_id, c.chiller_type, c.purchase_date, c.initial_price, c.acquired_status, COALESCE(c.status, 'Yard') as status,
+                    COALESCE(d.current_location, 'Unassigned (Shop)') as current_location,
+                    COALESCE(d.currently_chilling, FALSE) as is_chilling,
+                    COALESCE(d.total_chill_hours, 0) as cumulative_hours,
+                    COALESCE(d.active_run_hours, 0) as current_run_hours,
+                    COALESCE(d.total_logged_costs, 0.0) as total_operating_costs
+                FROM `{CHILLER_REG_TABLE}` c
+                LEFT JOIN Durations d ON c.chiller_id = d.chiller_id
+                ORDER BY c.chiller_id ASC
+            """
+            inv_raw_df = client.query(inventory_q).to_dataframe()
+            
+            if not inv_raw_df.empty:
+                editable_rows = []
+                for _, r in inv_raw_df.iterrows():
+                    status_text = "🔵 Active Chilling" if r['is_chilling'] else "⚪ Standby / Off"
+                    duration_text = f"{int(r['current_run_hours'])}h ongoing" if r['is_chilling'] else f"{int(r['cumulative_hours'])}h total runtime"
+                    
+                    editable_rows.append({
+                        "Chiller Name": r['chiller_id'],
+                        "Asset Status": str(r['status']).upper(),
+                        "Current Location": r['current_location'],
+                        "Operational Status": status_text,
+                        "Chill Duration": duration_text,
+                        "Equipment Type": r['chiller_type'],
+                        "Date Acquired": pd.to_datetime(r['purchase_date']).date() if pd.notnull(r['purchase_date']) else None,
+                        "Condition When Acquired": str(r['acquired_status']).upper() if pd.notnull(r['acquired_status']) else "NEW",
+                        "Initial Cost": float(r['initial_price']) if pd.notnull(r['initial_price']) else 0.0,
+                        "Accumulated Operating Costs": f"${r['total_operating_costs']:,.2f}"
+                    })
+                
+                base_edit_df = pd.DataFrame(editable_rows)
+                ed_key = "chiller_live_inventory_editor"
+                
+                st.data_editor(
+                    base_edit_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["Chiller Name", "Asset Status", "Current Location", "Operational Status", "Chill Duration", "Accumulated Operating Costs"],
+                    column_config={
+                        "Initial Cost": st.column_config.NumberColumn("Initial Cost", format="$%.2f", min_value=0.0),
+                        "Condition When Acquired": st.column_config.SelectboxColumn("Condition When Acquired", options=["NEW", "USED"]),
+                        "Date Acquired": st.column_config.DateColumn("Date Acquired", format="MM/DD/YYYY")
+                    },
+                    key=ed_key
+                )
+                
+                if ed_key in st.session_state and "edited_rows" in st.session_state[ed_key] and st.session_state[ed_key]["edited_rows"]:
+                    if st.button("💾 Save Inventory Modifications", use_container_width=True, type="secondary"):
+                        with st.spinner("Overwriting registry values..."):
+                            for row_idx_str, col_deltas in st.session_state[ed_key]["edited_rows"].items():
+                                row_idx = int(row_idx_str)
+                                target_cid = base_edit_df.loc[row_idx, "Chiller Name"]
+                                
+                                set_clauses = []
+                                if "Equipment Type" in col_deltas:
+                                    set_clauses.append(f"chiller_type = '{col_deltas['Equipment Type'].replace("'", "''")}'")
+                                if "Initial Cost" in col_deltas:
+                                    set_clauses.append(f"initial_price = {float(col_deltas['Initial Cost'])}")
+                                if "Condition When Acquired" in col_deltas:
+                                    set_clauses.append(f"acquired_status = '{col_deltas['Condition When Acquired'].lower()}'")
+                                if "Date Acquired" in col_deltas:
+                                    set_clauses.append(f"purchase_date = DATE('{col_deltas['Date Acquired']}')")
+                                    
+                                if set_clauses:
+                                    update_sql = f"UPDATE `{CHILLER_REG_TABLE}` SET {', '.join(set_clauses)} WHERE chiller_id = '{target_cid}'"
+                                    client.query(update_sql).result()
+                                    
+                        st.success("✅ Fleet inventory data logs updated successfully!")
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+            else:
+                st.info("ℹ️ Chiller registry metadata catalog stores are currently unpopulated.")
+        except Exception as e:
+            st.error(f"⚠️ Inventory Ledger Render Fault: {e}")
+
+        st.divider()
+
+        # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
+        st.write("#### ➕ Update Chiller Status & Asset Records")
+        is_brand_new_asset = st.checkbox("➕ Check this box to register a completely NEW chiller asset to the fleet", value=False)
+        fleet_options = sorted(inv_raw_df['chiller_id'].tolist()) if not inv_raw_df.empty else []
+        
+        with st.form("hardened_unified_chiller_asset_management_form"):
+            if is_brand_new_asset or not fleet_options:
+                st.info("Form mode: Registering a brand new hardware asset block to BigQuery.")
+                target_c_name = st.text_input("Chiller Name / Unique Serial ID*", placeholder="e.g., CH-53-03")
+                current_type_val = ""
+                current_date_val = datetime.now().date()
+                current_cost_val = 0.0
+                current_cond_idx = 0
+                current_stat_idx = 1
+            else:
+                target_c_name = st.selectbox("Select Target Chiller to Edit/Update*", options=fleet_options)
+                matched_record = inv_raw_df[inv_raw_df['chiller_id'] == target_c_name].iloc[0]
+                
+                current_type_val = matched_record['chiller_type'] if pd.notnull(matched_record['chiller_type']) else ""
+                current_date_val = pd.to_datetime(matched_record['purchase_date']).date() if pd.notnull(matched_record['purchase_date']) else datetime.now().date()
+                current_cost_val = float(matched_record['initial_price']) if pd.notnull(matched_record['initial_price']) else 0.0
+                
+                cond_str = str(matched_record['acquired_status']).upper()
+                current_cond_idx = 1 if cond_str == "USED" else 0
+                
+                stat_str = str(matched_record['status']).strip().title()
+                stat_options_list = ["On Project", "Yard", "Need Repair", "Scrap"]
+                current_stat_idx = stat_options_list.index(stat_str) if stat_str in stat_options_list else 1
+
+            form_col1, form_col2, form_col3 = st.columns(3)
+            f_type = form_col1.text_input("Chiller Mechanical Type / Spec", value=current_type_val, placeholder="e.g., 53-Ton Logue")
+            f_acquired = form_col2.date_input("Date Acquired", value=current_date_val, min_value=datetime.now().date() - timedelta(days=365*30))
+            f_status = form_col3.selectbox("Asset Management Status*", ["On Project", "Yard", "Need Repair", "Scrap"], index=current_stat_idx)
+            
+            form_col4, form_col5 = st.columns(2)
+            f_price = form_col4.number_input("Initial Purchase Cost ($)", min_value=0.0, value=current_cost_val, step=1000.0, format="%.2f")
+            f_condition = form_col5.selectbox("Hardware Condition Status When Acquired", ["New", "Used"], index=current_cond_idx)
+            
+            submit_action_label = "🚀 Register Brand New Chiller Asset" if is_brand_new_asset else "💾 Save Chiller Record Updates"
+            
+            if st.form_submit_button(submit_action_label, use_container_width=True, type="primary"):
+                if not target_c_name.strip():
+                    st.error("❌ Action Rejected: Chiller identifier name string cannot be blank.")
+                else:
+                    safe_cid = target_c_name.strip().replace("'", "''")
+                    safe_type = f_type.strip().replace("'", "''")
+                    
+                    if is_brand_new_asset:
+                        execution_sql = f"""
+                            INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, chiller_type, purchase_date, initial_price, acquired_status, status)
+                            VALUES ('{safe_cid}', '{safe_type}', DATE('{f_acquired.strftime('%Y-%m-%d')}'), {float(f_price)}, '{f_condition.lower()}', '{f_status}')
+                        """
+                        success_alert = f"🎉 Success! Asset block **{safe_cid}** has been written to the production registry."
+                    else:
+                        execution_sql = f"""
+                            UPDATE `{CHILLER_REG_TABLE}`
+                            SET chiller_type = '{safe_type}',
+                                purchase_date = DATE('{f_acquired.strftime('%Y-%m-%d')}'),
+                                initial_price = {float(f_price)},
+                                acquired_status = '{f_condition.lower()}',
+                                status = '{f_status}'
+                            WHERE chiller_id = '{safe_cid}'
+                        """
+                        success_alert = f"✅ Success! Asset parameter values for **{safe_cid}** updated cleanly."
+                        
+                    try:
+                        with st.spinner("Streaming data transactions to BigQuery storage arrays..."):
+                            client.query(execution_sql).result()
+                        st.success(success_alert)
+                        st.cache_data.clear()
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception as bq_fault:
+                        st.error(f"❌ BigQuery Database Rejected Entry: {bq_fault}")
+                        st.code(execution_sql, language="sql")
 ######################
 # Page: Admin Tool Helpers  #
 ######################
@@ -2764,67 +3086,104 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
 
 
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
-    """Main administrative execution module managing bulk data approval modification routines."""
+    """
+    Main administrative execution module managing bulk data approval modification routines,
+    hourly table consolidation aggregates, and manual rejection string standardization.
+    
+    Parameters:
+    -----------
+    client : bigquery.Client
+        Authenticated Google Cloud BigQuery client instance.
+    full_reg_df : pandas.DataFrame
+        The full sensor node registry dataset mapping nodes to active hardware configurations.
+    selected_project : str
+        The current active project context token filtered out of the sidebar app menu.
+    tab_logistics : streamlit.tabs
+        Bubble handle routing to pass downstream context states across layouts.
+    """
+    # Establish explicit table paths mapped directly out of your data view catalog
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
     st.title("⚡ Bulk Approval and Database Maintenance")
     st.divider()
 
-    if "blk_mgmt_profile_df" not in st.session_state: st.session_state.blk_mgmt_profile_df = None
-    if "blk_mgmt_total_points" not in st.session_state: st.session_state.blk_mgmt_total_points = 0
+    # Initialize application state memory footprints to prevent unintended app re-runs during data scans
+    if "blk_mgmt_profile_df" not in st.session_state: 
+        st.session_state.blk_mgmt_profile_df = None
+    if "blk_mgmt_total_points" not in st.session_state: 
+        st.session_state.blk_mgmt_total_points = 0
 
     # =========================================================================
     # UTILITY A: GLOBAL DATABASE CLEANUP ENGINE
     # =========================================================================
     st.header("🧹 Global Database Cleanup")
     st.write(
-        "Consolidate raw datasets into 1-decimal hourly averages and safely remove all duplicate records system-wide. "
-        "**Note:** Running this cleanup automatically marks any rogue data points outside the physical bounds of -30°F and 120°F as `BadData`."
+        "Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency "
+        "and duplicate records system-wide. "
+        "**Note:** Running this cleanup automatically drops any rogue data points outside the physical bounds of -30°F and 120°F."
     )
     
-    if st.button("⚡ Run Global Database Cleanup & Duplicate Purge", use_container_width=True):
+    # Split utilities into clean side-by-side management columns
+    clean_col1, clean_col2 = st.columns(2)
+    
+    with clean_col1:
+        st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
+        st.caption("Truncates raw timestamps to the hour, filters bad logs, and collapses records to an average value.")
+        run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Hourly Consolidation", use_container_width=True)
+        
+    with clean_col2:
+        st.write("##### 🧼 Approval String Casing Standardization")
+        st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
+        run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
+
+    # --- PATHWAY A: COMPREHENSIVE HOURLY HOOD CONSOLIDATION ENGINE ---
+    if run_telemetry_cleanup:
         status_box = st.empty()
         try:
+            # 1. Audit active data rows before applying modifications to map the exact purge count
             status_box.markdown("⏳ **[1/4] Calculating initial database row baselines...**")
             count_sp_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
             
-            status_box.markdown("🧹 **[2/4] Initializing temporary staging pools and filtering SensorPush duplicates...**")
+            # 2. Upgraded SensorPush: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
+            status_box.markdown("🧹 **[2/4] Consolidating and averaging SensorPush timelines to the hour...**")
             sp_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
-                SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature, rssi
-                FROM (
-                    SELECT *, ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
-                    FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                    WHERE temperature >= -30.0 AND temperature <= 120.0
-                )
-                WHERE rn = 1;
+                SELECT 
+                    TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                    NodeNum, 
+                    ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature,
+                    MAX(rssi) as rssi
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                WHERE temperature >= -30.0 AND temperature <= 120.0
+                GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), NodeNum;
 
                 CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
-                SELECT * FROM tmp_clean_sensorpush;
+                SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature, rssi FROM tmp_clean_sensorpush;
             """
             client.query(sp_cleanup_sql).result()
             
-            status_box.markdown("🛰️ **[3/4] Running row-deduplication matrices on Lord Wireless tables...**")
+            # 3. Upgraded Lord: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
+            status_box.markdown("🛰️ **[3/4] Consolidating and averaging Lord Wireless timelines to the hour...**")
             lord_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
-                SELECT timestamp, NodeNum, ROUND(CAST(temperature AS NUMERIC), 1) as temperature
-                FROM (
-                    SELECT timestamp, NodeNum, temperature,
-                           ROW_NUMBER() OVER(PARTITION BY NodeNum, timestamp ORDER BY timestamp DESC) as rn
-                    FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                    WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
-                )
-                WHERE rn = 1;
+                SELECT 
+                    TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                    NodeNum, 
+                    ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
+                GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), NodeNum;
 
                 CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
-                SELECT * FROM tmp_clean_lord;
+                SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature FROM tmp_clean_lord;
             """
             client.query(lord_cleanup_sql).result()
             st.cache_data.clear()
 
-            status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling post-cleanup tallies...**")
+            # 4. Pull database row summaries to document the data cleanup audit trail
+            status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling consolidated tallies...**")
             count_sp_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
 
@@ -2833,19 +3192,44 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             total_removed = sp_removed + lord_removed
             
             status_box.empty()
-            st.success("🎉 Global Database Cleanup successfully completed!")
+            st.success("🎉 Global Database Consolidation successfully completed!")
             
-            st.markdown("### 📊 Before vs. After Summary Ledger")
+            # Print comparative ledger results matrix
             report_data = [
-                {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged Points": f"{sp_removed:,}"},
-                {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged Points": f"{lord_removed:,}"},
-                {"Data Table": "Combined Total Pool", "Before Count": f"{count_sp_before + count_lord_before:,}", "After Count": f"{count_sp_after + count_lord_after:,}", "Purged Points": f"{total_removed:,}"}
+                {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged High-Freq Points": f"{sp_removed:,}"},
+                {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged High-Freq Points": f"{lord_removed:,}"},
+                {"Data Table": "Combined Total Pool", "Before Count": f"{count_sp_before + count_lord_before:,}", "After Count": f"{count_sp_after + count_lord_after:,}", "Purged High-Freq Points": f"{total_removed:,}"}
             ]
             st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
             
         except Exception as e:
             status_box.empty()
-            st.error(f"Global Database Cleanup Failed: {e}")
+            st.error(f"Global Database Consolidation Failed: {e}")
+
+    # --- PATHWAY B: REJECTIONS ENGINE STRING CASING CLEANUP ---
+    if run_string_cleanup:
+        status_box_str = st.empty()
+        try:
+            status_box_str.markdown("🧼 **Standardizing mixed-case manual override parameters...**")
+            
+            # Targets the data override source table directly (`manual_rejections`)
+            # Converts lower or mixed-case string variants safely into standard uppercase 'TRUE' or 'FALSE'
+            str_cleanup_sql = f"""
+                UPDATE `{target_table}`
+                SET approve = UPPER(TRIM(approve))
+                WHERE LOWER(approve) IN ('true', 'false')
+            """
+            job = client.query(str_cleanup_sql)
+            job.result()
+            
+            status_box_str.empty()
+            st.success(f"🎉 Text standardization complete! Successfully cleaned {job.num_dml_affected_rows:,} records inside the rejections ledger.")
+            st.cache_data.clear()
+            time.sleep(0.5)
+            st.rerun()
+        except Exception as e:
+            status_box_str.empty()
+            st.error(f"Text String Cleanup Operation Failed: {e}")
 
     st.divider()
 
@@ -2855,20 +3239,24 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.header("⚡ Bulk Approval and Data Status Change")
     st.info("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides.")
     
+    # Render user selection widgets to grab Target Scope (Project/All), Filtering Criteria, and New Status Value
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
 
+    # Build active project logic constraints by pulling down matching query string blocks
     filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
     where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
     
+    # Map raw field strings to match the proper table aliases used inside the Master analytical query view
     aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
                               .replace("timestamp", "t.timestamp")
                               .replace("temperature", "t.temperature")
                               .replace("r.approve", "t.approval_status"))
     
+    # Internal function to map and verify exactly how many data rows will be changed before saving
     def run_profile_audit():
         status_q = f"""
-            SELECT 
+            SELECT  
                 COALESCE(t.approval_status, 'NULL (Streaming / Unreviewed)') as Current_Designation_Status,
                 COUNT(*) as Total_Captured_Points,
                 FORMAT_TIMESTAMP('%m/%d/%Y', MIN(t.timestamp)) as Oldest_Log_Entry,
@@ -2887,12 +3275,14 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 st.session_state.blk_mgmt_profile_df = pd.DataFrame()
                 st.session_state.blk_mgmt_total_points = 0
 
+    # Step 1 Button: Verification Routine
     if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
         try:
             run_profile_audit()
         except Exception as e:
             st.error(f"Verification Matrix Compilation Failed: {e}")
 
+    # Render results grid if data profile calculations are actively held in app cache states
     if st.session_state.blk_mgmt_profile_df is not None:
         if not st.session_state.blk_mgmt_profile_df.empty:
             st.subheader("📊 Current Node Status")
@@ -2903,8 +3293,12 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
 
     st.divider()
     st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
+    
+    # Step 2: Form Checkbox and Execution Engine Block
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
+            
+            # PATH A: If target override is TRUE, drop tracking tokens entirely out of the rejections table so they re-approve
             if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
@@ -2914,6 +3308,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         WHERE {aliased_where}
                     )
                 """
+            # PATH B: If target override is a custom flag (FALSE, BADDATA, MASK), merge row coordinates into manual_rejections
             else:
                 sql = f"""
                     MERGE `{target_table}` T
@@ -2936,14 +3331,13 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 
                 st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records inside the registry ledger.")
                 st.cache_data.clear()
-                run_profile_audit()
+                run_profile_audit() # Refresh data metrics locally
                 st.balloons()
                 time.sleep(1.0)
                 st.rerun()
             except Exception as e:
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
-
 
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
@@ -3127,7 +3521,7 @@ def render_recovery_filters(sp_reg):
             help="Choose the specific sensors to backfill. Leave empty to pull all filtered assets."
         )
     return selected_nodes
-    
+
 ######################
 # Page: Admin Tools  #
 ######################
@@ -3165,14 +3559,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         return
 
     # 2. NAVIGATION TABS (Aligned matching your exact blueprint)
-    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config, tab_soil_curves = st.tabs([
+    tab_admin_sum, tab_bulk_app, tab_logistics, tab_recovery, tab_proj_master, tab_bulk_config, tab_chillers = st.tabs([
         "📋 Admin Summary", 
         "⚡ Bulk Approval", 
         "📋 Node Master",  
         "📡 Data Recovery", 
         "⚙️ Project Master", 
         "📦 Bulk Uploads",
-        "📈 Soil Reference Curves"
+        "❄️ Chiller Operations"
     ])
 
     
@@ -3468,7 +3862,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         if dropdown_selected_nodes:
             final_target_nodes = dropdown_selected_nodes
         else:
-            # FIX: Ensure we safely capture keys from the state map directly
             active_proj_context = st.session_state.get('rec_proj_sel_isolated', 'All')
             active_loc_context = st.session_state.get('rec_loc_sel_isolated', 'All')
             
@@ -3484,15 +3877,22 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         scope_text = f"{len(final_target_nodes)} selected nodes" if final_target_nodes else "ALL registered fleet nodes"
         st.warning(f"⚠️ **Action Required:** Initiating backfill protocol for {scope_text} from **{rec_start_date}** through **{rec_end_date}**.")
 
+        # Initialize tracking flags inside session state to survive reruns safely
+        if 'recovery_run_complete' not in st.session_state:
+            st.session_state['recovery_run_complete'] = False
+        if 'recovery_cached_rows' not in st.session_state:
+            st.session_state['recovery_cached_rows'] = []
+        if 'recovery_cached_stats' not in st.session_state:
+            st.session_state['recovery_cached_stats'] = {}
+
         # 5. TRIGGER EXECUTION PIPELINE BUTTON
         if st.button("🚀 Execute Cloud Backfill Ingestion Pipeline Run", use_container_width=True, key="btn_trigger_recovery_run"):
-            
-            # --- START HARDENED WORKER LOGIC ---
             import requests
             import numpy as np
             
             all_rows = []
             hardware_map = {}
+            reverse_hardware_map = {}
             db_max_timestamps = {}
             node_stats = {}
             account_stats = {}
@@ -3510,7 +3910,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             start_time_iso = datetime.combine(rec_start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
             end_time_iso = datetime.combine(rec_end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-            # Seed data status tracker parameters safely
             for node in final_target_nodes:
                 node_stats[node] = 0
 
@@ -3522,13 +3921,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         clean_db_id = str(row.RawID).split('.')[0].strip()
                         friendly_name = str(row.NodeNum).strip()
                         hardware_map[clean_db_id] = friendly_name
+                        reverse_hardware_map[friendly_name] = clean_db_id
                         if friendly_name in node_stats:
                             node_stats[friendly_name] = 0
                 except Exception as e:
                     st.error(f"Failed to query inventory map tables: {e}")
                     st.stop()
 
-                # --- PRE-FLIGHT CHECK: EXTRACT LAST SEEN TIMESTAMPS ---
                 st.write("📅 Checking historical system check-in history benchmarks...")
                 try:
                     time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` GROUP BY NodeNum"
@@ -3554,9 +3953,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                     device_rssi_map[str(s_id).strip()] = s_meta.get('rssi')
 
                         st.write(f"📥 Pulling raw cloud payload matrix for `{acc['email']}`...")
-                        # FIX: Raised limit buffer boundary to 100,000 points to capture the full fleet dataset
                         samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso, "limit": 100000}
                         r_samples = requests.post(f"{LOCAL_API_URL}/samples", headers={"Authorization": token}, json=samples_payload, timeout=60).json()
+
+                        st.write(f"DEBUG [{acc['email']}]: Found {len(r_samples.get('sensors', {}))} raw sensor payloads in API response.")
                         
                         sensors_data = r_samples.get('sensors', {})
                         if not sensors_data:
@@ -3566,11 +3966,19 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             api_root_id = str(s_id).split('.')[0].strip()
                             friendly_name = hardware_map.get(api_root_id)
                             
-                            if not friendly_name:
-                                friendly_name = f"UNMAPPED-{api_root_id}"
-                                
-                            # FIX: Hardened lookup comparison check against your target listing records
-                            if final_target_nodes and friendly_name not in final_target_nodes:
+                            # 🛡️ HARDENED MATCH GUARD FIX: Check both friendly name maps and Raw ID listings
+                            is_target_match = False
+                            if friendly_name and friendly_name in final_target_nodes:
+                                is_target_match = True
+                            else:
+                                # Fallback check: look up if the raw API tracking reference maps back to our targeted assets list
+                                for target_node in final_target_nodes:
+                                    if reverse_hardware_map.get(target_node) == api_root_id:
+                                        friendly_name = target_node
+                                        is_target_match = True
+                                        break
+                                        
+                            if not is_target_match:
                                 continue
                                 
                             if friendly_name not in node_stats:
@@ -3582,7 +3990,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
                                 if temp is not None:
                                     account_stats[acc['email']] += 1
-                                    
                                     all_rows.append({
                                         "timestamp": pd.to_datetime(s['observed']),
                                         "NodeNum": str(friendly_name),
@@ -3592,17 +3999,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     except Exception:
                         continue
 
-                # Unified Batch Ingestion Layer
                 total_recovered_appends = len(all_rows)
                 if total_recovered_appends == 0:
                     st.info("🔒 Cloud accounts returned 0 points for this window context.")
                     status_box.update(label="Run Finalized (0 Points Found)", state="complete")
+                    st.session_state['recovery_run_complete'] = False
                 else:
                     st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
                     try:
                         upload_df = pd.DataFrame(all_rows)
-                        
-                        # Hardened timezone formatting for BigQuery's Arrow stream loader
                         upload_df['timestamp'] = pd.to_datetime(upload_df['timestamp'], utc=True)
                         
                         if 'rssi' in upload_df.columns:
@@ -3630,23 +4035,29 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
                         st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
                         status_box.update(label="Recovery Dump Complete!", state="complete")
+                        
+                        st.session_state['recovery_cached_rows'] = all_rows
+                        st.session_state['recovery_cached_stats'] = db_max_timestamps
+                        st.session_state['recovery_run_complete'] = True
                         st.cache_data.clear()
+                        st.rerun()
                     except Exception as bq_err:
                         st.error(f"Batch loading Ingestion pipeline failure: {bq_err}")
                         status_box.update(state="error")
 
-        # --- RENDER STATISTICAL BREAKDOWN SUMMARY LEDGER ---
-        if final_target_nodes or all_rows:
+        if st.session_state.get('recovery_run_complete'):
             st.write("### 📊 Data Recovery Tally Distribution:")
             summary_records = []
             grand_total_tally = 0
             
-            nodes_to_report = final_target_nodes if final_target_nodes else sorted(list(node_stats.keys()))
+            cached_rows = st.session_state['recovery_cached_rows']
+            cached_benchmarks = st.session_state['recovery_cached_stats']
+            nodes_to_report = final_target_nodes
             
             for node in nodes_to_report:
-                true_node_count = sum(1 for row in all_rows if row["NodeNum"] == node)
+                true_node_count = sum(1 for row in cached_rows if row["NodeNum"] == node)
                 grand_total_tally += true_node_count
-                last_checked_in = db_max_timestamps.get(node, "❌ No Historical Records Found")
+                last_checked_in = cached_benchmarks.get(node, "❌ No Historical Records Found")
                 
                 summary_records.append({
                     "Node Number": node,
@@ -3975,8 +4386,135 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         
 
 # =========================================================================
-# NEW SUB-TAB 7: STANDALONE SOIL REFERENCE CURVES WORKSPACE
-# =========================================================================
+    # SUB-TAB 7: CHILLER OPERATIONS & SYSTEM MANIFEST
+    # =========================================================================
+    with tab_chillers:
+        st.subheader("❄️ Chiller Plant Infrastructure & Event Logging")
+        
+        c_mode = st.radio("Management Context", ["📋 Plant Manifest", "🚨 Log Chiller Event"], horizontal=True, key="chiller_mgmt_mode_radio")
+        
+        CHILLER_REG_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_registry"
+        CHILLER_MAP_TABLE = f"{PROJECT_ID}.{DATASET_ID}.chiller_sensor_mapping"
+        EVENTS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.freezedown_events"
+        
+        # --- VIEW MANIFESTS ---
+        if c_mode == "📋 Plant Manifest":
+            st.markdown("### 📡 Registered Cooling Infrastructure")
+            try:
+                manifest_q = f"""
+                    SELECT c.chiller_id, c.project_id, c.chiller_type,
+                           STRING_AGG(m.Location, ', ' ORDER BY m.Location) as mapped_locations
+                    FROM `{CHILLER_REG_TABLE}` c
+                    LEFT JOIN `{CHILLER_MAP_TABLE}` m ON c.chiller_id = m.chiller_id AND c.project_id = m.project_id
+                    GROUP BY c.chiller_id, c.project_id, c.chiller_type
+                    ORDER BY c.project_id ASC, c.chiller_id ASC
+                """
+                manifest_df = client.query(manifest_q).to_dataframe()
+                if not manifest_df.empty:
+                    st.dataframe(manifest_df, use_container_width=True, hide_index=True, column_config={
+                        "chiller_id": "Chiller ID", "project_id": "Assigned Phase ID", 
+                        "chiller_type": "Chiller Specifications", "mapped_locations": "Chilled Ground Assets"
+                    })
+                else:
+                    st.info("No mechanical chiller plant assets registered in system catalog yet.")
+            except Exception as e:
+                st.caption(f"Manifest offline or initializing: {e}")
+                
+            # Quick Infrastructure Insertion Form
+            with st.expander("➕ Register New Mechanical Chiller Unit"):
+                with st.form("register_chiller_unit_form"):
+                    col_c1, col_c2, col_c3 = st.columns(3)
+                    new_c_id = col_c1.text_input("Chiller Serial ID (Unique)*", placeholder="e.g., CH-2541-A")
+                    new_c_proj = col_c2.selectbox("Assign to Project Space Phase*", available_projects_list)
+                    new_c_type = col_c3.text_input("Chiller Type Specifications", placeholder="e.g., 53-Ton Logue")
+                    
+                    # Pull current available unique locations for that specific project phase
+                    possible_locations = sorted(full_reg_df[full_reg_df['Project'] == new_c_proj]['Location'].dropna().unique().tolist())
+                    selected_assigned_locs = st.multiselect("Chilled Pipe Group Assignments", options=possible_locations)
+                    
+                    if st.form_submit_button("🚀 Save Unit Settings"):
+                        if not new_c_id.strip():
+                            st.error("Unique Chiller Serial ID validation token required.")
+                        else:
+                            safe_cid = new_c_id.strip().replace("'", "''")
+                            safe_ctype = new_c_type.strip().replace("'", "''")
+                            
+                            insert_chiller_sql = f"""
+                                INSERT INTO `{CHILLER_REG_TABLE}` (chiller_id, project_id, chiller_type, purchase_date)
+                                VALUES ('{safe_cid}', '{new_c_proj}', '{safe_ctype}', CURRENT_DATE());
+                            """
+                            try:
+                                client.query(insert_chiller_sql).result()
+                                
+                                if selected_assigned_locs:
+                                    map_rows = [f"('{new_c_proj}', '{safe_cid}', '{loc.replace("'", "''")}')" for loc in selected_assigned_locs]
+                                    insert_maps_sql = f"INSERT INTO `{CHILLER_MAP_TABLE}` (project_id, chiller_id, Location) VALUES {', '.join(map_rows)};"
+                                    client.query(insert_maps_sql).result()
+                                    
+                                st.success(f"Successfully registered machine asset {safe_cid} system-wide.")
+                                st.cache_data.clear()
+                                time.sleep(0.5)
+                                st.rerun()
+                            except Exception as err:
+                                st.error(f"Database insertion failed: {err}")
+
+        # --- LOG FREEZEDOWN EVENT HANDLER ---
+        elif c_mode == "🚨 Log Chiller Event":
+            st.markdown("### 🚨 Append Diagnostic Event Record")
+            
+            # Fetch active chillers to populate picker dropdown dynamically
+            try:
+                active_chillers_list = sorted(client.query(f"SELECT chiller_id FROM `{CHILLER_REG_TABLE}`").to_dataframe()['chiller_id'].tolist())
+            except Exception:
+                active_chillers_list = []
+                
+            if not active_chillers_list:
+                st.warning("⚠️ No active chillers registered. Please add a mechanical plant unit under the manifest tab first.")
+            else:
+                import uuid
+                with st.form("manual_chiller_event_logger_form"):
+                    e_col1, e_col2, e_col3 = st.columns(3)
+                    chosen_chiller = e_col1.selectbox("Select Target Chiller Loop ID*", active_chillers_list)
+                    
+                    # Fetch corresponding project_id dynamically
+                    try:
+                        chosen_proj = client.query(f"SELECT project_id FROM `{CHILLER_REG_TABLE}` WHERE chiller_id='{chosen_chiller}' LIMIT 1").to_dataframe()['project_id'].iloc[0]
+                    except Exception:
+                        chosen_proj = selected_project
+                        
+                    e_date = e_col2.date_input("Event Log Date Entry", value=datetime.now().date())
+                    e_time = e_col3.time_input("Event Log Time Entry (UTC/Local)", value=datetime.now().time())
+                    
+                    e_desc = st.text_input("Operational Event Description / Alert Message*", placeholder="e.g., Compressor trip down due to unexpected mechanical oil pressure bypass fault.")
+                    e_cause = st.text_input("Determined Root Cause Diagnostics", placeholder="e.g., Blocked primary filter screen.")
+                    
+                    is_approx = st.checkbox("Timestamp registration is approximate?", value=False)
+                    is_resolved = st.checkbox("Event issue was resolved immediately?", value=False)
+                    
+                    if st.form_submit_button("💾 Commit Diagnostic Event to Storage"):
+                        if not e_desc.strip():
+                            st.error("Operational Event Description summary strings are required.")
+                        else:
+                            generated_uuid = str(uuid.uuid4())
+                            combined_event_ts = datetime.combine(e_date, e_time).strftime('%Y-%m-%d %H:%M:%S')
+                            resolution_ts_val = f"TIMESTAMP('{combined_event_ts}')" if is_resolved else "NULL"
+                            
+                            safe_desc = e_desc.strip().replace("'", "''")
+                            safe_cause = e_cause.strip().replace("'", "''")
+                            
+                            event_insert_sql = f"""
+                                INSERT INTO `{EVENTS_TABLE}` (event_id, project_id, chiller_id, event_timestamp, resolution_timestamp, event_description, root_cause, is_time_approximate)
+                                VALUES ('{generated_uuid}', '{chosen_proj}', '{chosen_chiller}', TIMESTAMP('{combined_event_ts}'), {resolution_ts_val}, '{safe_desc}', '{safe_cause}', {str(is_approx).upper()})
+                            """
+                            try:
+                                client.query(event_insert_sql).result()
+                                st.success("🎉 Event successfully injected into production analytics dataset tables.")
+                                st.cache_data.clear()
+                                time.sleep(0.5)
+                                st.rerun()
+                            except Exception as bq_err:
+                                st.error(f"BigQuery tracking write rejected: {bq_err}")
+                                st.code(event_insert_sql, language="sql")
 
 # =============================================================================
 # 🛠️ REUSABLE LAB ENGINE ASSIGNMENT PIPELINES
