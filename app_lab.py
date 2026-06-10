@@ -424,17 +424,19 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. THEORETICAL REFERENCE CURVES (Granular Phase/System Regex Fallbacks)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            proj_str = str(st.session_state.get('selected_project', ''))
+            proj_str = str(st.session_state.get('selected_project', '')).strip()
             proj_match = re.findall(r'\d+', proj_str)
             proj_num = proj_match[0] if proj_match else ""
-            loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
+            
+            # Defensive cleansing against rogue spreadsheet padding
+            loc_part = str(curve_id).split('-')[-1].strip()
 
             if proj_num and loc_part:
-                # Upgraded query using regex to look inside complex text strings
+                # Hardened query parsing text strings defensively 
                 target_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE REGEXP_CONTAINS(CurveID, r'^{proj_num}.*{loc_part}$')
+                    WHERE REGEXP_CONTAINS(TRIM(CurveID), r'^{proj_num}.*{loc_part}$')
                     ORDER BY Day
                 """
                 target_df = client.query(target_q).to_dataframe()
@@ -447,8 +449,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                         ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                         
-                        # Extract the descriptive midsection (Phase/System info) for the graph label
-                        label_clean = str(cid).replace(f"{proj_num}-", "").replace(f"-{loc_part}", "")
+                        # Extract descriptive midsection for label
+                        label_clean = str(cid).replace(f"{proj_num}-", "").replace(f"-{loc_part}", "").strip()
                         display_label = f"Goal: {label_clean}" if label_clean != loc_part else f"Goal: {loc_part}"
                         
                         selected_dash = dash_styles[c_idx % len(dash_styles)]
