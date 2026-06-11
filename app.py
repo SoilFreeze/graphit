@@ -716,6 +716,13 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         if df is None or df.empty:
             st.info("No currently active projects tracking data stream windows.")
             return
+            
+        # 🛡️ FIX: Instantly drop safe values into empty summary metrics to stop integer conversion crashes
+        count_cols = ['checkins_1h', 'checkins_24h', 'supply_kpi', 'return_kpi', 'freeze_kpi']
+        for col in count_cols:
+            if col in df.columns:
+                df[col] = df[col].fillna(0)
+                
         df[['Bank', 'Location']] = df[['Bank', 'Location']].fillna('')
     except Exception as e:
         st.error(f"Dashboard Summary Extraction Error: {e}")
@@ -744,10 +751,10 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 portal_url = f"https://sf{job_number}.streamlit.app"
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link]({portal_url})")
             
-            # --- PROTECTED MASK: ACCURATE SYSTEM COUNTERS ---
-            active_1h = p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()
-            active_24h = p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()
-            total_nodes = p_df['NodeNum'].dropna().nunique()
+            # --- ACCURATE SYSTEM COUNTERS ---
+            active_1h = int(p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique())
+            active_24h = int(p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique())
+            total_nodes = int(p_df['NodeNum'].dropna().nunique())
             
             st.markdown(
                 f"📡 **Hardware Status:** `{active_1h}` nodes pinged in the last hour | "
@@ -760,7 +767,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
             
-            # 🛡️ FIXED: Enclosed in full outer parentheses to handle multi-line bitwise operations safely
             is_tp = (
                 p_df['Depth'].notnull() & 
                 (p_df['Depth'].astype(str).str.strip() != '') & 
@@ -769,6 +775,75 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 ~is_amb
             )
 
+            groups_data = [
+                ("📥 Supply", p_df[is_s], "supply_kpi", -10), 
+                ("📤 Return", p_df[is_r], "return_kpi", 0), 
+                ("📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
+                ("☁️ Ambient", p_df[is_amb], None, None)
+            ]
+
+            if mobile_mode:
+                for title, g_df, kpi_col, kpi_val in groups_data:
+                    render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
+                    st.markdown("<hr style='border: 1px dashed #ccc; margin: 15px 0;'>", unsafe_allow_html=True)
+            else:
+                cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
+                col_mappings = [0, 2, 4, 6]
+                spacer_mappings = [1, 3, 5]
+                
+                for s_idx in spacer_mappings:
+                    cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 320px; margin: auto;'></div>", unsafe_allow_html=True)
+                
+                for idx, (title, g_df, kpi_col, kpi_val) in enumerate(groups_data):
+                    with cols[col_mappings[idx]]:
+                        render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
+
+
+def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
+    """Helper layout compiler to handle repeating column metric sets."""
+    st.markdown(f"**{title}**")
+    if g_df is None or g_df.empty or 'latest_temp' not in g_df.columns or g_df['latest_temp'].isnull().all():
+        st.caption("No recent data")
+        return
+    
+    latest_val = g_df['latest_temp'].mean()
+    c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
+    m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
+
+    def convert(v):
+        if pd.isnull(v) or pd.isna(v): return None
+        return (v - 32) * 5/9 if unit_mode == "Celsius" else v
+
+    l_conv, c_min, c_max, m24, x24 = map(convert, [latest_val, c_min, c_max, m24, x24])
+
+    st.metric("Avg (Latest)", f"{l_conv:.1f}{unit_label}")
+    
+    if kpi_col and not g_df[kpi_col].isnull().all():
+        pct = g_df[kpi_col].dropna().iloc[0]
+        color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
+        st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
+
+    range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'><b>Normal Ranges:</b><br>"
+    if c_min is not None and c_max is not None:
+        range_html += f"Current: {c_min:.1f} to {c_max:.1f}{unit_label}<br>"
+    else:
+        range_html += "Current: No Data<br>"
+    
+    if m24 is not None and x24 is not None:
+        range_html += f"24h Range: {m24:.1f} to {x24:.1f}{unit_label}"
+    else:
+        range_html += "24h Range: No Data"
+    range_html += "</div>"
+    st.markdown(range_html, unsafe_allow_html=True)
+
+
+def get_trend_arrow(current, previous):
+    """Helper to generate trend icons with updated blue downward arrow."""
+    if pd.isnull(current) or pd.isnull(previous): return "N/A"
+    delta = current - previous
+    if delta > 0.1: return f"🔺 +{delta:.1f}"
+    if delta < -0.1: return f"🔹 {delta:.1f}"
+    return "➡️ 0.0"
 #############################
 # - 2. PAGE: TIME vs TEMP - #
 #############################
