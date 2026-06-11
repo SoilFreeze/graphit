@@ -155,9 +155,9 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # 🛡️ FIX: Direct connection to your live project_registry_backup & dropped dead SoilType parameter
+        # SQL fix: Exclude empty strings and force inclusion of 'Office'
         proj_q = f"""
-            SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown 
+            SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
             FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` 
             WHERE Project IS NOT NULL 
               AND TRIM(Project) != ''
@@ -214,22 +214,33 @@ if sidebar_client is not None:
 
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
-        if not pulse_df.empty and pulse_df['last_sync'].iloc[0]:
-            last_sync_str = str(pulse_df['last_sync'].iloc[0])
+        # 🛡️ FIX 1: Enhanced checks to completely reject NaT string placeholders from dead projects
+        if not pulse_df.empty and pd.notnull(pulse_df['last_sync'].iloc[0]):
+            last_sync_str = str(pulse_df['last_sync'].iloc[0]).strip()
             
-            last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
-            now_utc = pd.Timestamp.now(tz='UTC')
-            elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
-            
-            if elapsed_mins <= 60:
-                pulse_status = f"🟢 **Live** ({elapsed_mins}m ago)"
-            elif elapsed_mins <= 180:
-                pulse_status = f"🟠 **Delayed** ({elapsed_mins}m ago)"
-            else:
-                pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
+            if last_sync_str.lower() not in ['none', 'nan', 'null', 'nat', '']:
+                last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
+                now_utc = pd.Timestamp.now(tz='UTC')
                 
-            st.sidebar.markdown(f"**{scope_label}:** {pulse_status}")
-            st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
+                # 🛡️ FIX 2: Check total seconds separately before running the integer conversion macro
+                total_seconds = (now_utc - last_sync_ts).total_seconds()
+                
+                if pd.isna(total_seconds) or np.isnan(total_seconds):
+                    st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
+                else:
+                    elapsed_mins = int(total_seconds / 60)
+                    
+                    if elapsed_mins <= 60:
+                        pulse_status = f"🟢 **Live** ({elapsed_mins}m ago)"
+                    elif elapsed_mins <= 180:
+                        pulse_status = f"🟠 **Delayed** ({elapsed_mins}m ago)"
+                    else:
+                        pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
+                        
+                    st.sidebar.markdown(f"**{scope_label}:** {pulse_status}")
+                    st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
+            else:
+                st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
         else:
             st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
             
