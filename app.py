@@ -24,7 +24,7 @@ DATASET_ID = "Temperature"
 PROJECT_ID = "sensorpush-export"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 # 🛡️ FIX: Anchor the registry table directly to your live configuration sheet
-REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
+REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
 
 @st.cache_resource
 def get_bq_client():
@@ -85,7 +85,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         WITH filtered_base AS (
             SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             -- 🛡️ Pointing directly to your clean, live Google Sheet table
-            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON p.Project = @project_id
+            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p ON p.Project = @project_id
             WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
@@ -155,10 +155,10 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # 🛡️ FIX: Direct connection to your live project_registry & dropped dead SoilType parameter
+        # 🛡️ FIX: Direct connection to your live project_registry_backup & dropped dead SoilType parameter
         proj_q = f"""
             SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown 
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` 
             WHERE Project IS NOT NULL 
               AND TRIM(Project) != ''
               AND (ProjectStatus != 'Archived' OR UPPER(Project) LIKE '%OFFICE%')
@@ -660,11 +660,11 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # 🛡️ FIX: Point directly to live project_registry table instead of obsolete backup view
+    # 🛡️ FIX: Point directly to live project_registry_backup table instead of obsolete backup view
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup`
             WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze', 'Active', 'Initialized')
               AND UPPER(Project) NOT LIKE '%OFFICE%'
         ),
@@ -4081,7 +4081,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
         
         # 🛡️ FIX 1: Point directly to your clean live table instead of the old backup table!
-        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
+        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
     
         if action == "📋 Project List":
             st.subheader("📋 Complete Project Registry Table")
