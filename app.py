@@ -94,25 +94,26 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
 
+    # EXTRACT BASE JOB NUMBER OR CLEAN PRESETS (e.g., "2538-Ferndale" -> "2538")
+    base_job_num = str(project_id).split('-')[0].strip()
     is_office = "OFFICE" in str(project_id).upper()
 
     if view_mode == "client":
         filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
     else:
-        # If Office, show everything except BadData. If regular project, hide False/0.
         if is_office:
             filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
         else:
             filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
 
+    # UPGRADED FILTER MAPPING: Matches base strings, full string, or fuzzy base arrays
     query = f"""
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
-        WHERE m.Project = @project_id
+        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON p.Project = @project_id
+        WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
         {filter_sql}
         ORDER BY m.timestamp ASC
     """
-    # ... rest of function
     
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -126,7 +127,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     except Exception as e:
         st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
-
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
