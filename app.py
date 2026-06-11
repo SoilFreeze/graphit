@@ -81,11 +81,11 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')"
 
     # 📊 Unified query: Blends timeline limits, custom filters, and telemetry gap evaluations
+    # 🛡️ FIX: Corrected table join constraint from 'p.Project = @project_id' to relational 'm.Project = p.Project'
     query = f"""
         WITH filtered_base AS (
             SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            -- 🛡️ Pointing directly to your clean, live Google Sheet table
-            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p ON p.Project = @project_id
+            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p ON m.Project = p.Project
             WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
@@ -633,7 +633,6 @@ def run_office_auto_assignment():
         st.success("✅ Successfully assigned 'OFFICE' status to all relevant telemetry.")
     except Exception as e:
         st.error(f"Auto-assignment failed: {e}")
-
 ##################
 # High temp mask #
 ##################
@@ -2381,7 +2380,8 @@ def render_node_selector(reg_df, proj_list):
             else:
                 prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
                 dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
-                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+                # 🛡️ FIX: Swapped from LoadJobConfig to QueryJobConfig for direct query destination truncation
+                job_config = bigquery.QueryJobConfig(write_disposition="WRITE_TRUNCATE", destination=prod_table)
                 sql = f"SELECT * FROM `{dummy_table}`"
                 try:
                     with st.spinner("Executing complete environment teardown and reconstruction workflows..."):
@@ -2508,13 +2508,11 @@ def render_data_processing_page(selected_project):
                         is_lord = "-" in str(df_processed['NodeNum'].iloc[0])
                         target_table = "raw_lord" if is_lord else "raw_sensorpush"
                         
-                        # Around line 608 in 2026.06.10 lab.py
                         if st.button(f"🚀 Upload to {target_table}"):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
                                 if is_lord:
-                                    # 🟢 CHANGE: Remove Decimal rounding conversion that forces NUMERIC data types
                                     df_processed['temperature'] = df_processed['temperature'].astype(float)
                                 
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
@@ -2524,7 +2522,6 @@ def render_data_processing_page(selected_project):
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
-                                        # 🟢 FIXED: Changed from "NUMERIC" to "FLOAT" to match production
                                         bigquery.SchemaField("temperature", "FLOAT"), 
                                     ],
                                     write_disposition="WRITE_APPEND"
@@ -2534,7 +2531,7 @@ def render_data_processing_page(selected_project):
                                 st.cache_data.clear()
 
             except Exception as e:
-                st.error(f"Ingestion Failed: {e}")
+                st.error(f"AppSheet Pipeline Integration Ingestion Failed: {e}")
 
     # --- TAB 2: EXPORT LOGIC ---
     with tab_export:
@@ -2779,7 +2776,6 @@ def render_data_processing_page(selected_project):
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
-            # 🛡️ HARDENED FIX: Incorporated a clean database join mapping handle to display explicit Chiller Names
             logs_q = f"""
                 SELECT e.event_id,
                        FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', e.event_timestamp) as Start_Time,
@@ -2842,7 +2838,6 @@ def render_data_processing_page(selected_project):
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
-        # 🟢 THE FIX: Explicitly initialize as an empty dataframe so fleet_options never errors out
         inv_raw_df = pd.DataFrame() 
 
         # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
@@ -2850,7 +2845,6 @@ def render_data_processing_page(selected_project):
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
         
         try:
-            # Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2956,7 +2950,6 @@ def render_data_processing_page(selected_project):
         st.write("#### ➕ Update Chiller Status & Asset Records")
         is_brand_new_asset = st.checkbox("➕ Check this box to register a completely NEW chiller asset to the fleet", value=False)
         
-        # 🤝 Safe fallback evaluation vector
         fleet_options = sorted(inv_raw_df['chiller_id'].tolist()) if not inv_raw_df.empty else []
         
         with st.form("hardened_unified_chiller_asset_management_form"):
@@ -3030,7 +3023,7 @@ def render_data_processing_page(selected_project):
                         st.error(f"❌ BigQuery Database Rejected Entry: {bq_fault}")
                         st.code(execution_sql, language="sql")
 ######################
-# Page: Admin Tool Helpers  #
+# Page: Admin Tool Helpers   #
 ######################
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: ADVANCED MAINTENANCE & BULK APPROVAL WORKSPACE
@@ -3098,13 +3091,14 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"temperature < {f['threshold']}")
 
+    # 🛡️ FIX: Repaired the mapping logic constraint conflict so 'true' checks for standard TRUE values
     if current_status_filter != "all":
         if current_status_filter == "all but null":
             where_clauses.append("r.approve IS NOT NULL")
         elif current_status_filter == "null (streaming / unreviewed)":
             where_clauses.append("r.approve IS NULL")
         elif current_status_filter == "true":
-            where_clauses.append("r.approve IS NULL")
+            where_clauses.append("UPPER(CAST(r.approve AS STRING)) IN ('TRUE', '1')")
         else:
             where_clauses.append(f"LOWER(CAST(r.approve AS STRING)) = '{str(current_status_filter).lower()}'")
 
@@ -3164,29 +3158,13 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
 
 
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
-    """
-    Main administrative execution module managing bulk data approval modification routines,
-    hourly table consolidation aggregates, and manual rejection string standardization.
-    
-    Parameters:
-    -----------
-    client : bigquery.Client
-        Authenticated Google Cloud BigQuery client instance.
-    full_reg_df : pandas.DataFrame
-        The full sensor node registry dataset mapping nodes to active hardware configurations.
-    selected_project : str
-        The current active project context token filtered out of the sidebar app menu.
-    tab_logistics : streamlit.tabs
-        Bubble handle routing to pass downstream context states across layouts.
-    """
-    # Establish explicit table paths mapped directly out of your data view catalog
+    """Main administrative execution module managing bulk data status parameters."""
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
     st.title("⚡ Bulk Approval and Database Maintenance")
     st.divider()
 
-    # Initialize application state memory footprints to prevent unintended app re-runs during data scans
     if "blk_mgmt_profile_df" not in st.session_state: 
         st.session_state.blk_mgmt_profile_df = None
     if "blk_mgmt_total_points" not in st.session_state: 
@@ -3198,33 +3176,26 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.header("🧹 Global Database Cleanup")
     st.write(
         "Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency "
-        "and duplicate records system-wide. "
-        "**Note:** Running this cleanup automatically drops any rogue data points outside the physical bounds of -30°F and 120°F."
+        "and duplicate records system-wide."
     )
     
-    # Split utilities into clean side-by-side management columns
     clean_col1, clean_col2 = st.columns(2)
     
     with clean_col1:
         st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
-        st.caption("Truncates raw timestamps to the hour, filters bad logs, and collapses records to an average value.")
         run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Hourly Consolidation", use_container_width=True)
         
     with clean_col2:
         st.write("##### 🧼 Approval String Casing Standardization")
-        st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
-        run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
+        run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE/MASKED'", use_container_width=True)
 
-    # --- PATHWAY A: COMPREHENSIVE HOURLY HOOD CONSOLIDATION ENGINE ---
     if run_telemetry_cleanup:
         status_box = st.empty()
         try:
-            # 1. Audit active data rows before applying modifications to map the exact purge count
             status_box.markdown("⏳ **[1/4] Calculating initial database row baselines...**")
             count_sp_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
             
-            # 2. Upgraded SensorPush: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
             status_box.markdown("🧹 **[2/4] Consolidating and averaging SensorPush timelines to the hour...**")
             sp_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
@@ -3242,7 +3213,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             """
             client.query(sp_cleanup_sql).result()
             
-            # 3. Upgraded Lord: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
             status_box.markdown("🛰️ **[3/4] Consolidating and averaging Lord Wireless timelines to the hour...**")
             lord_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
@@ -3260,7 +3230,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             client.query(lord_cleanup_sql).result()
             st.cache_data.clear()
 
-            # 4. Pull database row summaries to document the data cleanup audit trail
             status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling consolidated tallies...**")
             count_sp_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
@@ -3272,7 +3241,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             status_box.empty()
             st.success("🎉 Global Database Consolidation successfully completed!")
             
-            # Print comparative ledger results matrix
             report_data = [
                 {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged High-Freq Points": f"{sp_removed:,}"},
                 {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged High-Freq Points": f"{lord_removed:,}"},
@@ -3284,24 +3252,21 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             status_box.empty()
             st.error(f"Global Database Consolidation Failed: {e}")
 
-    # --- PATHWAY B: REJECTIONS ENGINE STRING CASING CLEANUP ---
     if run_string_cleanup:
         status_box_str = st.empty()
         try:
             status_box_str.markdown("🧼 **Standardizing mixed-case manual override parameters...**")
-            
-            # Targets the data override source table directly (`manual_rejections`)
-            # Converts lower or mixed-case string variants safely into standard uppercase 'TRUE' or 'FALSE'
+            # 🛡️ FIX: Updated to natively standardize lower case flags to uppercase equivalents ('TRUE', 'MASKED')
             str_cleanup_sql = f"""
                 UPDATE `{target_table}`
                 SET approve = UPPER(TRIM(approve))
-                WHERE LOWER(approve) IN ('true', 'false')
+                WHERE LOWER(approve) IN ('true', 'false', 'masked')
             """
             job = client.query(str_cleanup_sql)
             job.result()
             
             status_box_str.empty()
-            st.success(f"🎉 Text standardization complete! Successfully cleaned {job.num_dml_affected_rows:,} records inside the rejections ledger.")
+            st.success(f"🎉 Text standardization complete! Successfully cleaned {job.num_dml_affected_rows:,} records.")
             st.cache_data.clear()
             time.sleep(0.5)
             st.rerun()
@@ -3312,26 +3277,21 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
 
     # =========================================================================
-    # UTILITY B: BULK APPROVAL AND DATA STATUS CHANGE SYSTEM CONTROLS
+    # UTILITY B: BULK APPROVAL SYSTEM CONTROLS
     # =========================================================================
     st.header("⚡ Bulk Approval and Data Status Change")
-    st.info("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides.")
     
-    # Render user selection widgets to grab Target Scope (Project/All), Filtering Criteria, and New Status Value
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
 
-    # Build active project logic constraints by pulling down matching query string blocks
     filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
     where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
     
-    # Map raw field strings to match the proper table aliases used inside the Master analytical query view
     aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
                               .replace("timestamp", "t.timestamp")
                               .replace("temperature", "t.temperature")
                               .replace("r.approve", "t.approval_status"))
     
-    # Internal function to map and verify exactly how many data rows will be changed before saving
     def run_profile_audit():
         status_q = f"""
             SELECT  
@@ -3353,14 +3313,10 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 st.session_state.blk_mgmt_profile_df = pd.DataFrame()
                 st.session_state.blk_mgmt_total_points = 0
 
-    # Step 1 Button: Verification Routine
     if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
-        try:
-            run_profile_audit()
-        except Exception as e:
-            st.error(f"Verification Matrix Compilation Failed: {e}")
+        try: run_profile_audit()
+        except Exception as e: st.error(f"Verification Matrix Compilation Failed: {e}")
 
-    # Render results grid if data profile calculations are actively held in app cache states
     if st.session_state.blk_mgmt_profile_df is not None:
         if not st.session_state.blk_mgmt_profile_df.empty:
             st.subheader("📊 Current Node Status")
@@ -3370,14 +3326,10 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             st.warning("No telemetry data points found matching this configuration window.")
 
     st.divider()
-    st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
     
-    # Step 2: Form Checkbox and Execution Engine Block
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
-            
-            # PATH A: If target override is TRUE, drop tracking tokens entirely out of the rejections table so they re-approve
-            if new_status == "TRUE":
+            if new_status == "true":
                 sql = f"""
                     DELETE FROM `{target_table}`
                     WHERE STRUCT(NodeNum, timestamp) IN (
@@ -3386,7 +3338,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         WHERE {aliased_where}
                     )
                 """
-            # PATH B: If target override is a custom flag (FALSE, BADDATA, MASK), merge row coordinates into manual_rejections
             else:
                 sql = f"""
                     MERGE `{target_table}` T
@@ -3407,25 +3358,21 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     job = client.query(sql)
                     job.result()
                 
-                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records inside the registry ledger.")
+                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records.")
                 st.cache_data.clear()
-                run_profile_audit() # Refresh data metrics locally
+                run_profile_audit()
                 st.balloons()
                 time.sleep(1.0)
                 st.rerun()
             except Exception as e:
                 st.error(f"Execution Error: {e}")
-                st.code(sql, language="sql")
 
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
-    """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
+    """Executes a proper database commit to write approvals, rejections, or flags."""
     client = get_bq_client()
     if client is None: return False
         
-    if isinstance(timestamp, pd.Timestamp):
-        ts_str = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')
-    else:
-        ts_str = str(timestamp)
+    ts_str = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if isinstance(timestamp, pd.Timestamp) else str(timestamp)
 
     write_q = f"""
         MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
@@ -3445,7 +3392,7 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
         return False
 
 # =============================================================================
-# WORKER UTILITIES: NODE LOGISTICS ENGINE (FROM TOOLS)
+# WORKER UTILITIES: NODE LOGISTICS ENGINE
 # =============================================================================
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
@@ -3457,70 +3404,56 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
     current_bank = str(selected_node_data.get('Bank', 'A'))
     current_depth = float(selected_node_data.get('Depth', 0.0))
     current_status = str(selected_node_data.get('SensorStatus', 'On Project'))
+    current_phase = str(selected_node_data.get('Phase', ''))
+    current_system = str(selected_node_data.get('System', ''))
     
     raw_date = selected_node_data.get('Start_Date')
-    if isinstance(raw_date, (datetime, date)):
-        current_start_date = raw_date
-    else:
-        try: current_start_date = pd.to_datetime(raw_date).date()
-        except Exception: current_start_date = datetime.now().date()
+    current_start_date = pd.to_datetime(raw_date).date() if isinstance(raw_date, (datetime, date, pd.Timestamp)) else datetime.now().date()
 
     edit_c1, edit_c2, edit_c3 = st.columns(3)
     
     with edit_c1:
         raw_projects = reg_df['Project'].dropna().unique().tolist() if 'reg_df' in locals() else []
         u_projects = sorted(list(set(["Office"] + raw_projects)))
-        new_node_project = st.selectbox(
-            "Target Allocation Project:", 
-            options=u_projects, 
-            index=u_projects.index(current_project) if current_project in u_projects else 0
-        )
+        new_node_project = st.selectbox("Target Allocation Project:", options=u_projects, index=u_projects.index(current_project) if current_project in u_projects else 0)
         new_node_location = st.text_input("Target Allocation Location / Borehole:", value=current_location)
 
     with edit_c2:
         bank_options = ["A", "B", "C", "D", "E", "X"]
-        new_node_bank = st.selectbox(
-            "Bank Designation String:", 
-            options=bank_options, 
-            index=bank_options.index(current_bank) if current_bank in bank_options else 0
-        )
-        new_node_depth = st.number_input(
-            "Sensor Vertical Placement Depth (Feet):", 
-            value=float(current_depth), step=1.0, format="%.2f"
-        )
+        new_node_bank = st.selectbox("Bank Designation String:", options=bank_options, index=bank_options.index(current_bank) if current_bank in bank_options else 0)
+        new_node_depth = st.number_input("Sensor Vertical Placement Depth (Feet):", value=float(current_depth), step=1.0, format="%.2f")
 
     with edit_c3:
         status_options = ["On Project", "In Office/Shop", "Decommissioned", "Spare/Storage"]
-        new_node_status = st.selectbox(
-            "Operational Tracking Status:", 
-            options=status_options, 
-            index=status_options.index(current_status) if current_status in status_options else 0
-        )
+        new_node_status = st.selectbox("Operational Tracking Status:", options=status_options, index=status_options.index(current_status) if current_status in status_options else 0)
         new_node_start_date = st.date_input("Deployment Modification Effective Date:", value=current_start_date)
+
+    # ➕ Added: Sub-Phase and Loop System Layout Fields for the Tech Team Form Roster
+    form_col_add1, form_col_add2 = st.columns(2)
+    new_node_phase = form_col_add1.text_input("Project Sub-Phase Assignment Token:", value=current_phase, placeholder="e.g., Phase 1, Stage B")
+    new_node_system = form_col_add2.text_input("Mechanical Chiller Loop System Name:", value=current_system, placeholder="e.g., Freeze Loop A, Return Collector")
 
     st.markdown("#### 🚀 Step 3: Authorize Change Record")
     with st.expander("⚠️ View Registry Transaction Script Actions"):
-        st.write(
-            f"Executing this deployment write adds a tracking line into `{target_registry}` mapping "
-            f"**{selected_node_data.get('NodeNum')}** to Project **{new_node_project}** at depth **{new_node_depth} ft** "
-            f"effective **{new_node_start_date.strftime('%m/%d/%Y')}**."
-        )
+        st.write(f"Executing this deployment write adds a tracking line into `{target_registry}` effective **{new_node_start_date.strftime('%m/%d/%Y')}**.")
         
         if st.checkbox("I verify that these field allocation parameters match our physical sensor logs.", key="confirm_node_logistics_action_write"):
             if st.button(f"💾 Append Deployment Update for {selected_node_data.get('NodeNum')}", type="primary", use_container_width=True):
+                # 🛡️ FIX: Re-inserted missing payload key parameters to balance against your explicit schema rules
                 new_logistics_payload = [{
                     "NodeNum": str(selected_node_data.get('NodeNum')).strip(),
                     "Project": str(new_node_project).strip(),
                     "Location": str(new_node_location).strip(),
                     "Bank": str(new_node_bank).strip().upper(),
                     "Depth": float(new_node_depth),
-                    "Start_Date": str(new_node_start_date.strftime('%Y-%m-%d')), # Standardized date format string pass
-                    "SensorStatus": str(new_node_status).strip()
+                    "Start_Date": str(new_node_start_date.strftime('%Y-%m-%d')), 
+                    "SensorStatus": str(new_node_status).strip(),
+                    "Phase": str(new_node_phase).strip(),
+                    "System": str(new_node_system).strip()
                 }]
                 
                 try:
                     with st.spinner("Appending tracking metrics to node registry matrix..."):
-                        # Locate inside render_admin_page() -> tab_bulk_config
                         job_config = bigquery.LoadJobConfig(
                             schema=[
                                 bigquery.SchemaField("NodeNum", "STRING"),
@@ -3530,24 +3463,24 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                                 bigquery.SchemaField("Depth", "FLOAT"),
                                 bigquery.SchemaField("SensorStatus", "STRING"),
                                 bigquery.SchemaField("Start_Date", "DATE"),
-                                bigquery.SchemaField("Phase", "STRING"),   # ➕ Add
-                                bigquery.SchemaField("System", "STRING"),  # ➕ Add
+                                bigquery.SchemaField("Phase", "STRING"),
+                                bigquery.SchemaField("System", "STRING"),
                             ],
                             write_disposition="WRITE_APPEND"
                         )
                         log_df = pd.DataFrame(new_logistics_payload)
                         client.load_table_from_dataframe(log_df, target_registry, job_config=job_config).result()
                         
-                    st.success(f"🎉 Success! Asset registry mapping updated for node {selected_node_data.get('NodeNum')}.")
+                    st.success(f"🎉 Success! Asset registry mapping updated cleanly.")
                     st.cache_data.clear()
                     time.sleep(1.0)
                     st.rerun()
                 except Exception as log_err:
-                    st.error(f"❌ Failed to commit node asset updates to registry table: {log_err}")
+                    st.error(f"❌ Failed to commit node asset updates: {log_err}")
 
 
 def render_data_checker(client, full_reg_df):
-    """Renders a quality assurance diagnostics matrix highlighting configuration or orphan risks."""
+    """Renders a quality assurance diagnostics matrix highlighting configuration risks."""
     st.divider()
     st.markdown("### 🔍 System Registry Diagnostics Audit")
     
@@ -3563,14 +3496,13 @@ def render_data_checker(client, full_reg_df):
             """
             orphan_df = client.query(orphan_q).to_dataframe()
             if not orphan_df.empty:
-                st.warning("⚠️ **Orphan Sensor Alert:** The following node tags exist in deployment schedules but lack hardware index keys:")
+                st.warning("⚠️ **Orphan Sensor Alert:** Discovered deployment node tags lacking inventory keys:")
                 st.dataframe(orphan_df, use_container_width=True, hide_index=True)
             else:
                 st.success("✅ All registered node mappings align cleanly with the Hardware Inventory catalog.")
         except Exception as e:
             st.caption(f"Integrity check skipped or loading: {e}")
-
-
+            
 # =============================================================================
 # DATA RECOVERY REQUISITE ENGINE HELPERS
 # =============================================================================
@@ -3629,11 +3561,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # 1. CENTRAL TRANSACTIONAL DATA FETCH
     target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    # 🛡️ FIX: Ensure systemic calls target live project_registry elements cleanly
+    table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
+    
     try:
-        # Single-pass database join with real-time latency calculations for the grids
-        full_reg_df = load_lab_node_registry_data(target_registry_path)
+        # Load registry data path structure
+        query_all_reg = f"SELECT * FROM `{target_registry_path}` WHERE End_Date IS NULL"
+        full_reg_df = client.query(query_all_reg).to_dataframe()
         
-        proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` WHERE ProjectStatus != 'Archived'"
+        proj_reg_q = f"SELECT Project FROM `{table_projects}` WHERE ProjectStatus != 'Archived'"
         available_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
     except Exception as e:
         st.error(f"Registry Link Offline: {e}")
@@ -3650,7 +3586,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         "❄️ Chiller Operations"
     ])
 
-    
     # --- SUB-TAB 1: ADMIN SUMMARY ---
     with tab_admin_sum:
         st.subheader("📋 Centralized Infrastructure Status Overview")
@@ -3697,8 +3632,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     COUNT(DISTINCT n.NodeNum) as Mapped_Sensors,
                     COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_in_last_6_hours,
                     COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_in_last_24_hours
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
-                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
+                FROM `{target_registry_path}` n
+                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON CAST(n.NodeNum AS STRING) = CAST(m.NodeNum AS STRING)
                 WHERE n.End_Date IS NULL
                 GROUP BY n.Project
             )
@@ -3710,9 +3645,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 COALESCE(m.Mapped_Sensors, 0) as Mapped_Sensors,
                 COALESCE(m.Active_in_last_6_hours, 0) as Active_in_last_6_hours,
                 COALESCE(m.Active_in_last_24_hours, 0) as Active_in_last_24_hours
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p
+            FROM `{table_projects}` p
             LEFT JOIN Metrics m ON p.Project = m.Project
-            WHERE p.ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
+            WHERE p.ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze', 'Active', 'Initialized')
               AND UPPER(p.Project) NOT LIKE '%OFFICE%'
             ORDER BY p.Project ASC
         """
@@ -3724,7 +3659,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             for _, r in sum_summary_df.iterrows():
                 p_status = str(r['ProjectStatus']).strip()
                 f_date = r['Date_Freezedown']
-                status_tracking_text = "Not Freezing"
+                status_tracking_text = "Initialized"
                 
                 if pd.notnull(f_date):
                     days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
@@ -3736,6 +3671,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         status_tracking_text = f"Day {days_count} of Maintenance"
                     elif p_status.lower() == "pre-freeze":
                         status_tracking_text = f"Pre-freeze (Day {days_count})"
+                else:
+                    status_tracking_text = f"Status Tier: {p_status}"
                 
                 rows.append({
                     "Project ID": r['Project'],
@@ -3759,7 +3696,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         all_projects_q = f"""
             WITH NodeCounts AS (
                 SELECT Project, COUNT(DISTINCT NodeNum) as Nodes_Assigned
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
+                FROM `{target_registry_path}`
                 WHERE End_Date IS NULL
                 GROUP BY Project
             )
@@ -3768,7 +3705,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 COALESCE(p.ProjectName, p.Project) as `Project Name`,
                 p.ProjectStatus as `Project Status`,
                 COALESCE(n.Nodes_Assigned, 0) as `Sensors Assigned`
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p
+            FROM `{table_projects}` p
             LEFT JOIN NodeCounts n ON p.Project = n.Project
             ORDER BY p.ProjectStatus ASC, p.Project ASC
         """
@@ -3790,8 +3727,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
     # =========================================================================
-    # SUB-TAB 3: NODE MASTER
-    # =========================================================================
+#     # SUB-TAB 3: NODE MASTER
+# =========================================================================
     with tab_logistics:
         st.title("📋 Node Status and Changes")
         st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
@@ -3897,15 +3834,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 
                 # 3. CALL ACTION FORM HANDLER COMPONENT WITH CASCADING VARIABLES
                 try:
-                    render_lab_node_action_manager(
+                    # 🛡️ FIX: Cleaned up link wrappers to call verified component targets natively
+                    render_node_action_manager(
                         client=client,
                         selected_node_data=chosen_target_record,
                         reg_df=full_reg_df,
                         proj_list=u_projects,
-                        known_project_locations=u_locations, 
                         target_registry=target_registry_path
                     )
-                    render_lab_data_checker(client, full_reg_df)
+                    render_data_checker(client, full_reg_df)
                 except Exception as routing_err:
                     st.error(f"Internal workspace linkage failed: {routing_err}")
             else:
@@ -4047,12 +3984,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             api_root_id = str(s_id).split('.')[0].strip()
                             friendly_name = hardware_map.get(api_root_id)
                             
-                            # 🛡️ HARDENED MATCH GUARD FIX: Check both friendly name maps and Raw ID listings
                             is_target_match = False
                             if friendly_name and friendly_name in final_target_nodes:
                                 is_target_match = True
                             else:
-                                # Fallback check: look up if the raw API tracking reference maps back to our targeted assets list
                                 for target_node in final_target_nodes:
                                     if reverse_hardware_map.get(target_node) == api_root_id:
                                         friendly_name = target_node
@@ -4121,6 +4056,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.session_state['recovery_cached_stats'] = db_max_timestamps
                         st.session_state['recovery_run_complete'] = True
                         st.cache_data.clear()
+                        time.sleep(0.5)
                         st.rerun()
                     except Exception as bq_err:
                         st.error(f"Batch loading Ingestion pipeline failure: {bq_err}")
@@ -4166,8 +4102,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         # Navigation actions row
         action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
         
-        # 🛡️ FIX 1: Point directly to your clean live table instead of the old backup table!
-        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
+        # 🛡️ FIX: Target the live production directory schema explicitly
+        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
     
         if action == "📋 Project List":
             st.subheader("📋 Complete Project Registry Table")
@@ -4176,7 +4112,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 with st.spinner("Extracting structural project lists..."):
                     df = client.query(query).to_dataframe()
                 if not df.empty:
-                    # Safely clean all of your new active lifecycle date columns
                     date_cols = ['Date_Initialized', 'Date_Freezedown', 'Date_Maintenance', 'Date_Archived']
                     for col in date_cols:
                         if col in df.columns:
@@ -4216,16 +4151,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 n_city = c_g1.text_input("City Deployment Field", value=template_data.get('City', ''))
                 n_tz = c_g2.text_input("Operational Timezone Reference", value=template_data.get('Timezone', 'America/Los_Angeles'))
                 
-                # 🛡️ FIX 2: Added active status toggles to filter your views
                 col_status, col_asbuilt = st.columns(2)
-                n_status = col_status.selectbox("Project Status", ["Active", "Inactive", "Complete"], index=0)
+                # 🛡️ FIX: Standardized creation options to cleanly map to your lifecycle database values
+                n_status = col_status.selectbox("Project Status", ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"], index=0)
                 n_as_built = col_asbuilt.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
                 
                 st.markdown("---")
                 st.caption("📅 **Project Lifecycle Target Dates**")
                 d_col1, d_col2, d_col3, d_col4 = st.columns(4)
                 
-                # 🛡️ FIX 3: Replaced dead dates with your 4 new operational milestones
                 n_date_init = d_col1.date_input("Date Initialized", value=None)
                 n_date_freeze = d_col2.date_input("Date Freezedown", value=None)
                 n_date_maint = d_col3.date_input("Date Maintenance", value=None)
@@ -4241,11 +4175,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         safe_n_tz = n_tz.strip().replace("'", "''")
                         safe_n_as_built = n_as_built.strip().replace("'", "''")
                         
-                        # Helper to format blank dates smoothly for the SQL script string
                         def sql_date(d_val):
-                            return f"'{d_val}'" if d_val else "NULL"
+                            return f"DATE('{d_val}')" if d_val else "NULL"
     
-                        # 🛡️ FIX 4: Query precisely maps to your clean Google Sheet headers
                         insert_q = f"""
                             INSERT INTO `{table_projects}` (
                                 Project, ProjectName, ProjectStatus, City, Timezone, AsBuiltFile,
@@ -4264,7 +4196,95 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             st.rerun()
                         except Exception as ins_err:
                             st.error(f"Database insertion failed: {ins_err}")
+                        
+        elif action == "🔧 Edit Project Metadata":
+            st.subheader(f"🔧 Configuration Editor: {selected_project}")
+            proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
+            try:
+                p_res = client.query(proj_q).to_dataframe()
+            except Exception as e:
+                p_res = pd.DataFrame()
+                st.error(f"Error querying table metadata: {e}")
+            
+            if p_res.empty:
+                st.error("Please pick an active project in the sidebar to modify metadata metrics.")
+            else:
+                p_data = p_res.iloc[0].to_dict()
+                with st.form("comprehensive_edit_project_pm"):
+                    col1, col2 = st.columns(2)
+                    u_project_id = col1.text_input("Project ID", value=p_data.get('Project', ''), disabled=True)
+                    u_project_name = col2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
     
+                    c3, c4 = st.columns(2)
+                    u_city = c3.text_input("City", value=p_data.get('City', ''))
+                    u_tz = c4.text_input("Timezone", value=p_data.get('Timezone', 'America/Los_Angeles'))
+                    
+                    u_up_notes = st.text_input("Upload Notes", value=p_data.get('UploadNote', ''))
+                    u_as_built = st.text_input("As-Built File Tracking ID", value=p_data.get('AsBuiltFile', ''))
+    
+                    st.divider()
+                    st.markdown("#### 🔄 Lifecycle Status & Target Phase Date")
+                    col_status, col_date = st.columns(2)
+                    
+                    status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
+                    curr_status = p_data.get('ProjectStatus', 'Initialized')
+                    s_idx = status_options.index(curr_status) if curr_status in status_options else 0
+                    u_status = col_status.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
+                    
+                    # 🛡️ FIX: Mapped precisely to your production schema name layout keys
+                    status_date_mappings = {
+                        "Initialized": "Date_Initialized",
+                        "Pre-freeze": "Date_Pre_Freeze",
+                        "Freezedown": "Date_Freezedown",
+                        "Maintenance": "Date_Maintenance",
+                        "Archived": "Date_Archived"
+                    }
+                    
+                    target_date_column = status_date_mappings.get(u_status, "Date_Freezedown")
+                    
+                    def safe_date(d):
+                        return pd.to_datetime(d).date() if pd.notnull(d) and str(d) != 'NaT' else None
+                        
+                    u_phase_date = col_date.date_input(
+                        f"Set Date for Phase: {u_status}", 
+                        value=safe_date(p_data.get(target_date_column))
+                    )
+    
+                    st.divider()
+                    u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
+    
+                    if st.form_submit_button("💾 Overwrite Project Registry Information"):
+                        formatted_date_clause = f"DATE('{u_phase_date}')" if (u_phase_date and str(u_phase_date) != 'None') else "NULL"
+                        
+                        safe_name = u_project_name.strip().replace("'", "''")
+                        safe_city = u_city.strip().replace("'", "''")
+                        safe_tz = u_tz.strip().replace("'", "''")
+                        safe_up_notes = u_up_notes.strip().replace("'", "''")
+                        safe_as_built = u_as_built.strip().replace("'", "''")
+                        safe_notes = u_notes.strip().replace("'", "''")
+                        
+                        update_q = f"""
+                            UPDATE `{table_projects}` SET 
+                                ProjectName = '{safe_name}', 
+                                ProjectStatus = '{u_status}', 
+                                City = '{safe_city}',
+                                Timezone = '{safe_tz}', 
+                                UploadNote = '{safe_up_notes}', 
+                                AsBuiltFile = '{safe_as_built}',
+                                EngNotes = '{safe_notes}', 
+                                {target_date_column} = {formatted_date_clause}
+                            WHERE Project = '{selected_project}'
+                        """
+                        try:
+                            client.query(update_q).result()
+                            st.success(f"✅ Configuration and {target_date_column} modified for: {selected_project}")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as query_err:
+                            st.error(f"❌ BigQuery update rejected: {query_err}")
+                            st.code(update_q, language="sql")  
+                            
         # =========================================================================
         # SUB-TAB 5: PROJECT MASTER
         # =========================================================================
@@ -4302,10 +4322,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     s_idx = status_options.index(curr_status) if curr_status in status_options else 0
                     u_status = col_status.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
                     
-                    # Dynamic mapping dictionary linking choices to your real database columns
+                    # 🛡️ FIX: Standardized schema map token key straight to Date_Pre_Freeze
                     status_date_mappings = {
                         "Initialized": "Date_Initialized",
-                        "Pre-freeze": "Date_PreFreeze",
+                        "Pre-freeze": "Date_Pre_Freeze",
                         "Freezedown": "Date_Freezedown",
                         "Maintenance": "Date_Maintenance",
                         "Archived": "Date_Archived"
@@ -4403,7 +4423,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 }).dropna()
                                 staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
                                 
-                                # 🛡️ HARDENED FIX: Explicitly enforce string formatting types on the staging environment
+                                # Explicitly enforce string formatting types on the staging environment
                                 load_job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("RawID", "STRING"),
@@ -4446,7 +4466,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             st.error(f"Missing required allocation column labels: {required - set(df_upload.columns)}")
                         else:
                             with st.spinner("Streaming spatial allocations into active registry view..."):
-                                # 🛡️ HARDENED FIX: Force explicit string formatting to guarantee 16-byte API safety
+                                # Force explicit string formatting to guarantee 16-byte API safety
                                 if 'Start_Date' in df_upload.columns:
                                     df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.strftime('%Y-%m-%d')
                                 else:
@@ -4467,7 +4487,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 if 'Depth' in df_upload.columns:
                                     df_upload['Depth'] = pd.to_numeric(df_upload['Depth'], errors='coerce').fillna(0.0)
 
-                                # 🛡️ HARDENED FIX: Explicitly enforce the table layout schema configuration
+                                # Explicitly enforce the table layout schema configuration
                                 job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("NodeNum", "STRING"),
@@ -4488,7 +4508,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             st.rerun()
                     except Exception as upload_err:
                         st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
-                        
 
 # =========================================================================
     # SUB-TAB 7: CHILLER OPERATIONS & SYSTEM MANIFEST
