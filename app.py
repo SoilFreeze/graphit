@@ -863,27 +863,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     with st.spinner(f"Syncing {p_name} telemetry..."):
         p_df = get_universal_portal_data(selected_project)
 
-    # =========================================================================
-    # 🔍 TEMPORARY LIVE CORES DEBUG PANEL
-    # =========================================================================
-    if selected_project == "2527-Elizabeth" or "Erie" in str(selected_project):
-        st.info("🔍 Data Engine Debug Tracker")
-        st.write(f"📊 Total Rows Pulled from BigQuery for this token: `{len(p_df)}`")
-        if not p_df.empty:
-            st.write("📋 Unique Locations found in this dataset:", p_df['Location'].unique().tolist())
-            st.write("📡 Unique Node IDs found in this dataset:", p_df['NodeNum'].unique().tolist())
-            st.write("🛠️ Data Sample Snapshot (Top 3 rows):")
-            st.dataframe(p_df.head(3), use_container_width=True)
-        else:
-            st.error("❌ BigQuery returned exactly 0 rows. Let's trace why:")
-            # Run a raw fallback check to see if the project exists under a different string format
-            client = get_bq_client()
-            if client:
-                test_q = f"SELECT Project, COUNT(*) as counts FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` WHERE Project LIKE '2527%' GROUP BY Project"
-                test_df = client.query(test_q).to_dataframe()
-                st.write("🗄️ Real project codes currently sitting in master_data_view for 2527:", test_df.to_dict(orient='records'))
-    # =========================================================================
-
+    
     if p_df.empty:
         st.warning(f"No data found for '{p_name}'.")
         return
