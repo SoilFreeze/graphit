@@ -3873,7 +3873,7 @@ elif page in ["Data Processing", "Admin Tools"]:
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
             st.subheader("🔐 Restricted Admin Access")
-            pwd = st.text_input("Enter Admin Password", type="password")
+            pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
             if st.button("Unlock Dashboard", use_container_width=True):
                 if pwd == st.secrets.get("admin_password", "Freeze123!!"):
                     st.session_state['authenticated'] = True
@@ -4264,7 +4264,7 @@ elif page in ["Data Processing", "Admin Tools"]:
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
             st.subheader("🔐 Restricted Admin Access")
-            pwd = st.text_input("Enter Admin Password", type="password")
+            pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
             if st.button("Unlock Dashboard", use_container_width=True):
                 if pwd == st.secrets.get("admin_password", "Freeze123!!"):
                     st.session_state['authenticated'] = True
