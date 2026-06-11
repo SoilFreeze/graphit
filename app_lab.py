@@ -2466,13 +2466,14 @@ def render_data_processing_page(selected_project):
                         is_lord = "-" in str(df_processed['NodeNum'].iloc[0])
                         target_table = "raw_lord" if is_lord else "raw_sensorpush"
                         
+                        # Around line 608 in 2026.06.10 lab.py
                         if st.button(f"🚀 Upload to {target_table}"):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
                                 if is_lord:
-                                    from decimal import Decimal
-                                    df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
+                                    # 🟢 CHANGE: Remove Decimal rounding conversion that forces NUMERIC data types
+                                    df_processed['temperature'] = df_processed['temperature'].astype(float)
                                 
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
                                 upload_payload_df = df_processed[columns_to_upload].copy()
@@ -2481,13 +2482,14 @@ def render_data_processing_page(selected_project):
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
+                                        # 🟢 FIXED: Changed from "NUMERIC" to "FLOAT" to match production
+                                        bigquery.SchemaField("temperature", "FLOAT"), 
                                     ],
                                     write_disposition="WRITE_APPEND"
                                 )
                                 client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
-                                st.cache_data.clear() 
+                                st.cache_data.clear()
 
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
@@ -2798,11 +2800,15 @@ def render_data_processing_page(selected_project):
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
+        # 🟢 THE FIX: Explicitly initialize as an empty dataframe so fleet_options never errors out
+        inv_raw_df = pd.DataFrame() 
+
         # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
         st.write("#### 📂 Current Inventory of Chillers")
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
+        
         try:
-            # 🛡️ HARDENED PLUG: Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
+            # Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2907,6 +2913,8 @@ def render_data_processing_page(selected_project):
         # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
         st.write("#### ➕ Update Chiller Status & Asset Records")
         is_brand_new_asset = st.checkbox("➕ Check this box to register a completely NEW chiller asset to the fleet", value=False)
+        
+        # 🤝 Safe fallback evaluation vector
         fleet_options = sorted(inv_raw_df['chiller_id'].tolist()) if not inv_raw_df.empty else []
         
         with st.form("hardened_unified_chiller_asset_management_form"):
