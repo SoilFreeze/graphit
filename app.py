@@ -4123,7 +4123,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         
         # Navigation actions row
         action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
-        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
+        
+        # 🛡️ FIX 1: Point directly to your clean live table instead of the old backup table!
+        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
     
         if action == "📋 Project List":
             st.subheader("📋 Complete Project Registry Table")
@@ -4132,7 +4134,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 with st.spinner("Extracting structural project lists..."):
                     df = client.query(query).to_dataframe()
                 if not df.empty:
-                    for col in ['Date_Freezedown', 'Date_Completion']:
+                    # Safely clean all of your new active lifecycle date columns
+                    date_cols = ['Date_Initialized', 'Date_Freezedown', 'Date_Maintenance', 'Date_Archived']
+                    for col in date_cols:
                         if col in df.columns:
                             df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
                     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -4170,9 +4174,20 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 n_city = c_g1.text_input("City Deployment Field", value=template_data.get('City', ''))
                 n_tz = c_g2.text_input("Operational Timezone Reference", value=template_data.get('Timezone', 'America/Los_Angeles'))
                 
-                n_up_notes = st.text_input("Automated Pipeline Sync Notes (UploadNote)", value=template_data.get('UploadNote', 'Data will be uploaded once per business day.'))
-                n_as_built = st.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
-                n_notes = st.text_area("Initial Site Engineering Field Notes", value=template_data.get('EngNotes', ''))
+                # 🛡️ FIX 2: Added active status toggles to filter your views
+                col_status, col_asbuilt = st.columns(2)
+                n_status = col_status.selectbox("Project Status", ["Active", "Inactive", "Complete"], index=0)
+                n_as_built = col_asbuilt.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
+                
+                st.markdown("---")
+                st.caption("📅 **Project Lifecycle Target Dates**")
+                d_col1, d_col2, d_col3, d_col4 = st.columns(4)
+                
+                # 🛡️ FIX 3: Replaced dead dates with your 4 new operational milestones
+                n_date_init = d_col1.date_input("Date Initialized", value=None)
+                n_date_freeze = d_col2.date_input("Date Freezedown", value=None)
+                n_date_maint = d_col3.date_input("Date Maintenance", value=None)
+                n_date_arch = d_col4.date_input("Date Archived", value=None)
                 
                 if st.form_submit_button("🚀 Commit New Project Entry"):
                     if not n_code.strip():
@@ -4182,13 +4197,22 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         safe_n_name = n_name.strip().replace("'", "''")
                         safe_n_city = n_city.strip().replace("'", "''")
                         safe_n_tz = n_tz.strip().replace("'", "''")
-                        safe_n_up_notes = n_up_notes.strip().replace("'", "''")
                         safe_n_as_built = n_as_built.strip().replace("'", "''")
-                        safe_n_notes = n_notes.strip().replace("'", "''")
+                        
+                        # Helper to format blank dates smoothly for the SQL script string
+                        def sql_date(d_val):
+                            return f"'{d_val}'" if d_val else "NULL"
     
+                        # 🛡️ FIX 4: Query precisely maps to your clean Google Sheet headers
                         insert_q = f"""
-                            INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, City, Timezone, UploadNote, AsBuiltFile, EngNotes)
-                            VALUES ('{safe_n_code}', '{safe_n_name}', 'Initialized', '{safe_n_city}', '{safe_n_tz}', '{safe_n_up_notes}', '{safe_n_as_built}', '{safe_n_notes}')
+                            INSERT INTO `{table_projects}` (
+                                Project, ProjectName, ProjectStatus, City, Timezone, AsBuiltFile,
+                                Date_Initialized, Date_Freezedown, Date_Maintenance, Date_Archived
+                            )
+                            VALUES (
+                                '{safe_n_code}', '{safe_n_name}', '{n_status}', '{safe_n_city}', '{safe_n_tz}', '{safe_n_as_built}',
+                                {sql_date(n_date_init)}, {sql_date(n_date_freeze)}, {sql_date(n_date_maint)}, {sql_date(n_date_arch)}
+                            )
                         """
                         try:
                             client.query(insert_q).result()
