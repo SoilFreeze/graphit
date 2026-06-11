@@ -622,7 +622,7 @@ def run_office_auto_assignment():
                 UNION ALL 
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             ) AS r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON CAST(r.NodeNum AS STRING) = CAST(n.NodeNum AS STRING)
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry_native` AS n ON CAST(r.NodeNum AS STRING) = CAST(n.NodeNum AS STRING)
             WHERE n.Project LIKE '%OFFICE%' 
         ) S ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
         WHEN MATCHED THEN UPDATE SET approve = 'OFFICE'
@@ -683,7 +683,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             -- Force text safe alignment between historical logs and live sheet strings
-            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON CAST(m.NodeNum AS STRING) = CAST(n.NodeNum AS STRING)
+            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry_native` n ON CAST(m.NodeNum AS STRING) = CAST(n.NodeNum AS STRING)
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
               AND NOT (m.temperature > 100 AND NOT STARTS_WITH(CAST(n.NodeNum AS STRING), 'SP'))
@@ -1760,14 +1760,14 @@ def render_node_selector(reg_df, proj_list):
             
     st.markdown("---")
     with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
-        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact copy of your staging table.")
+        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry_native` and overwrite them with an exact copy of your staging table.")
         confirm_token = st.text_input("Type out 'OVERWRITE' to authorize replacing production logs:", value="", key="force_production_overwrite_token_input")
         
         if st.button("💥 Wipe Production & Clone Playground Table", type="primary", use_container_width=True):
             if confirm_token.strip() != "OVERWRITE":
                 st.error("Authorization token verification failed. Action aborted.")
             else:
-                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
                 dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
                 job_config = bigquery.QueryJobConfig(write_disposition="WRITE_TRUNCATE", destination=prod_table)
                 sql = f"SELECT * FROM `{dummy_table}`"
@@ -1832,7 +1832,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             COALESCE(s.count_24h, 0) as count_24h,
             s.rssi_last_val as rssi_last,
             s.rssi_avg_val as rssi_avg
-        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_native` n
         LEFT JOIN Stats s ON n.NodeNum = s.NodeNum
         WHERE n.End_Date IS NULL
     """
@@ -2382,14 +2382,14 @@ def render_node_selector(reg_df, proj_list):
             
     st.markdown("---")
     with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
-        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact copy of your staging table.")
+        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry_native` and overwrite them with an exact copy of your staging table.")
         confirm_token = st.text_input("Type out 'OVERWRITE' to authorize replacing production logs:", value="", key="force_production_overwrite_token_input")
         
         if st.button("💥 Wipe Production & Clone Playground Table", type="primary", use_container_width=True):
             if confirm_token.strip() != "OVERWRITE":
                 st.error("Authorization token verification failed. Action aborted.")
             else:
-                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
                 dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
                 # 🛡️ FIX: Swapped from LoadJobConfig to QueryJobConfig for direct query destination truncation
                 job_config = bigquery.QueryJobConfig(write_disposition="WRITE_TRUNCATE", destination=prod_table)
@@ -3507,7 +3507,7 @@ def render_data_checker(client, full_reg_df):
         try:
             orphan_q = f"""
                 SELECT DISTINCT r.NodeNum, r.Project, r.Location 
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_native` r
                 LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` i 
                   ON TRIM(r.NodeNum) = TRIM(i.NodeNum)
                 WHERE i.NodeNum IS NULL AND r.NodeNum IS NOT NULL
@@ -3579,7 +3579,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         return
 
     # 1. CENTRAL TRANSACTIONAL DATA FETCH
-    target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
     # 🛡️ FIX: Ensure systemic calls target live project_registry elements cleanly
     table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
     
@@ -4410,7 +4410,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             horizontal=True, 
             key="bulk_uploads_engine_radio"
         )
-        target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+        target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
         target_inventory_path = f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory"
         target_curves_path = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
         
@@ -4984,7 +4984,7 @@ def render_lab_data_checker(client, reg_df):
         return
 
     # Extract clean baseline reference structures
-    active_registry_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    active_registry_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
     master_telemetry_view = f"{PROJECT_ID}.{DATASET_ID}.master_data_view"
     
     c1, c2, c3, c4 = st.tabs([
