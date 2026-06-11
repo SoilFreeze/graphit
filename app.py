@@ -59,63 +59,51 @@ def get_bq_client():
 ############################
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(selected_project_token):
-    """
-    Unified Audit Data Engine. Dynamically maps project definitions, but drops
-    strict project gating if no matching rows exist, allowing raw data review.
-    """
+def get_universal_portal_data(project_id):
     client = get_bq_client()
-    if client is None: 
-        return pd.DataFrame()
+    if client is None: return pd.DataFrame()
     
-    clean_token = str(selected_project_token).replace("'", "''").strip()
-    base_job_num = clean_token.split('-')[0].strip()
+    # Extract just the base job number prefix (e.g., "2527-Elizabeth" -> "2527")
+    base_job_num = str(project_id).split('-')[0].strip()
+    is_office = "OFFICE" in str(project_id).upper()
 
-    show_masked = st.session_state.get("global_show_masked", False)
-    filter_sql = "" if show_masked else "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'MASKED'"
+    # Dynamic visibility gating rules for data filtering
+    if is_office:
+        filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
+    else:
+        filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
 
-    # 1. Build a localized reference map from your project registry
-    query_matching = f"""
+    # FIXED: Joined against project_registry_backup (PROJECT_REGISTRY_TABLE) instead of project_registry
+    query = f"""
         WITH target_projects AS (
-            SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
-            WHERE Project = '{clean_token}' OR ProjectName = '{clean_token}'
+            SELECT Project FROM `{PROJECT_REGISTRY_TABLE}`
+            WHERE Project = @project_id 
+               OR ProjectName = @project_id
         )
-        SELECT m.Project, m.NodeNum, m.temperature, m.timestamp, m.approval_status,
-               COALESCE(m.Location, 'Unassigned Code') as Location, COALESCE(m.Bank, '—') as Bank, m.Depth
-        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         WHERE (
-            m.Project = '{clean_token}' OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%'
+            m.Project = @project_id 
+            OR m.Project = '{base_job_num}' 
+            OR m.Project LIKE '{base_job_num}%'
             OR m.Project IN (SELECT Project FROM target_projects)
-            OR EXISTS (SELECT 1 FROM target_projects tp WHERE m.Project LIKE CONCAT(SPLIT(tp.Project, '-')[OFFSET(0)], '%'))
         )
-          AND m.temperature >= -30.0 AND m.temperature <= 120.0
-          {filter_sql}
+        {filter_sql}
         ORDER BY m.timestamp ASC
     """
-
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("project_id", "STRING", project_id)
+        ]
+    )
+    
     try:
-        # 2. Try running with strict project gating filters
-        query_job = client.query(query_matching)
-        df = query_job.to_dataframe()
-        
-        # 3. AUDIT FALLBACK: If the filtered selection yields 0 rows (like looking for TPs on Erie St),
-        # pull ALL matching raw telemetry records so you can diagnose and approve them on screen.
-        if df.empty and clean_token != "All Projects":
-            st.toast(f"ℹ️ Audit Mode Active: Displaying unmapped raw data streams for {clean_token}", icon="🔍")
-            query_audit = f"""
-                SELECT m.Project, m.NodeNum, m.temperature, m.timestamp, m.approval_status,
-                       COALESCE(m.Location, 'Unassigned Code') as Location, COALESCE(m.Bank, '—') as Bank, m.Depth
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-                  {filter_sql}
-                ORDER BY m.timestamp ASC
-            """
-            df = client.query(query_audit).to_dataframe()
-            
-        return df
+        query_job = client.query(query, job_config=job_config)
+        return query_job.to_dataframe()
     except Exception as e:
         st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
+        
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
