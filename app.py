@@ -61,28 +61,22 @@ def get_bq_client():
 @st.cache_data(ttl=600)
 def get_universal_portal_data(selected_project_token):
     """
-    Unified Data Engine. Resolves numeric-to-named project mismatches, handles
-    Project ID vs ProjectName lookups, and streams all raw or approved rows for live auditing.
+    Unified Direct Data Engine. Uses Project column for filtering, maps Location
+    as the primary pipe/brine asset category, and leaves rows unfiltered for live auditing.
     """
     client = get_bq_client()
     if client is None: 
         return pd.DataFrame()
     
-    # 1. Clean the incoming token string safely
     clean_token = str(selected_project_token).replace("'", "''").strip()
-    
-    # 2. Extract base job number prefix if the user passes the raw ID (e.g., "2527-Elizabeth" -> "2527")
     base_job_num = clean_token.split('-')[0].strip()
 
-    # 3. Check sidebar toggle state for masked records
     show_masked = st.session_state.get("global_show_masked", False)
     if show_masked:
         filter_sql = ""
     else:
         filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'MASKED'"
 
-    # 4. Built-in mapping: checks m.Project against the lookup value, its numeric prefix,
-    # or searches the project registry to map the full project ID code.
     query = f"""
         WITH target_project AS (
             SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
@@ -90,7 +84,16 @@ def get_universal_portal_data(selected_project_token):
                OR ProjectName = '{clean_token}'
             LIMIT 1
         )
-        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+        SELECT 
+            m.Project,
+            m.NodeNum,
+            m.temperature,
+            m.timestamp,
+            m.approval_status,
+            COALESCE(m.Location, 'Unassigned Code') as Location,
+            COALESCE(m.Bank, '—') as Bank,
+            m.Depth
+        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         WHERE (
             m.Project = '{clean_token}'
             OR m.Project = '{base_job_num}'
@@ -796,7 +799,7 @@ def get_trend_arrow(current, previous):
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Updated: Connected to global red lookback slider state.
+    Maps graphs directly using the view's native Location entries.
     """
     # 1. INITIALIZE UI STATE VARIABLES FROM SIDEBAR KEYS
     show_ref = st.session_state.get("global_show_ref", True)
@@ -839,13 +842,11 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 
     # 5. DYNAMIC UI FILTERING
     mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
-    
     if not show_masked and mask_col in p_df.columns:
         p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
 
     # --- 6. TIMELINE CONFIG (CONNECTED TO GLOBAL RED SLIDER) ---
     lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
-    
     now_local = pd.Timestamp.now(tz=display_tz)
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
@@ -860,12 +861,11 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
-            # Extract ID and Location for Curve Matching
             clean_proj_id = str(selected_project).split('-')[0]
             search_id = f"{clean_proj_id}-{loc}"
             
-            # Broadened definition to catch any location that isn't a supply/return brine pipe
-            is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "AMB", "BANK S", "BANK R"])
+            # Treat everything as an eligible curve target unless it explicitly says supply/return
+            is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R"])
 
             fig = build_high_speed_graph(
                 df=loc_df, 
@@ -888,13 +888,8 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
-    Engineering-grade Vertical Temperature Profiles.
-    - Empirical data only (no theoretical lines).
-    - Recent Line: Most recent day's 6:00 AM snapshot (Bright Orange Solid Line).
-    - Fallback Engine: Symmetrical close-proximity data backup mapping.
-    - Baseline: First Monday at 06:00 AM (Black Dashed Line).
-    - Outlier Filter: Aligned with the physical boundary limit of 120°F.
-    - Freezing Line: Light Blue (Hex #ADD8E6).
+    Vertical Temperature Profiles.
+    Maps arrays dynamically based on native view Depth allocations.
     """
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
     
@@ -912,15 +907,14 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         st.warning("No data found for this project.")
         return
 
+    # Convert native view Depth values straight into a graph-safe float coordinate
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-    
-    # HARDENED FIX: Changed filter limit from 50.0 to 120.0 to capture pre-freezedown data points
     p_df = p_df[p_df['temperature'] <= 120.0]
     
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
     if depth_df.empty:
-        st.info("No sensors with valid 'Depth' values under 120°F found in the registry.")
+        st.info("No sensors with valid numeric 'Depth' entries found in the data stream.")
         return
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
@@ -940,7 +934,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             
             fig = go.Figure()
 
-            # --- A. CALCULATE BASELINE RAW HOOKS ---
+            # --- A. BASELINE Snapshots ---
             baseline_ts = loc_data['timestamp_local'].min()
             b_window = loc_data[
                 (loc_data['timestamp_local'] >= baseline_ts - pd.Timedelta(hours=12)) & 
@@ -958,7 +952,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     .sort_values('Depth_Num')
                 )
 
-            # --- B. MOST RECENT LINE SEARCH ENGINE ---
+            # --- B. RECENT 6 AM Snapshots ---
             loc_data['date_str'] = loc_data['timestamp_local'].dt.strftime('%Y-%m-%d')
             loc_data['hour_int'] = loc_data['timestamp_local'].dt.hour
             
@@ -990,7 +984,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
 
             snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
 
-            # --- C. PLOT WEEKLY HISTORICAL SNAPSHOTS (Mondays) ---
+            # --- C. HISTORICAL SNAPSHOTS ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
@@ -1031,7 +1025,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
-            # --- D. INJECT THE BRIGHT ORANGE MOST RECENT PROFILE ---
+            # --- D. INJECT THE MOST RECENT LINE ---
             if not snap_recent.empty:
                 recent_temps = snap_recent['temperature']
                 if unit_mode == "Celsius": recent_temps = (recent_temps - 32) * 5/9
@@ -1046,7 +1040,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     text=snap_recent['timestamp_local'].dt.strftime('%b %d, %H:%M')
                 ))
 
-            # --- E. LAYER OVERRIDE: INJECT BLACK DASHED BASELINE AT THE VERY END ---
+            # --- E. INJECT BASELINE ---
             if not snap_base.empty:
                 b_temps = snap_base['temperature']
                 if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
@@ -1060,10 +1054,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
 
-            # --- F. FREEZING REFERENCE LINE ---
             fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
-            # --- G. STANDARDIZED SCALING & BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
@@ -1073,19 +1065,15 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 height=800,
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
-                    range=[-20, 80], 
-                    dtick=10,
+                    range=[-20, 80], dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                    gridcolor='Gainsboro', 
-                    showline=True, linewidth=2, linecolor='black', mirror=True
+                    gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True
                 ),
                 yaxis=dict(
                     title="Depth (ft)", 
-                    range=[y_limit, 0], 
-                    dtick=10,
+                    range=[y_limit, 0], dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                    gridcolor='Silver', 
-                    showline=True, linewidth=2, linecolor='black', mirror=True
+                    gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True
                 ),
                 legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
             )
