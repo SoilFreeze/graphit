@@ -545,7 +545,7 @@ def assign_row_color(hours):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Strictly locked to: project_registry, master_data_view, and manual_rejections.
+    Strictly locked to read-only views across: project_registry, master_data_view, and manual_rejections.
     """
     # 1. HEADER LOGIC (Source: project_registry via Sidebar Session State)
     p_meta = st.session_state.get('project_metadata')
@@ -606,7 +606,110 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
     try:
         df = client.query(query, job_config=job_config).to_dataframe()
-        if df.empty:# =============================================================================
+        if df.empty:
+            st.warning("No data found in master_data_view for this project.")
+            return
+
+        # 3. STATUS & LAG CALCULATIONS
+        now_local = pd.Timestamp.now(tz=display_tz)
+        
+        def get_lag(ts):
+            if pd.isnull(ts): return 999.0
+            ts_aware = ts if ts.tzinfo else ts.tz_localize('UTC')
+            return (now_local - ts_aware.tz_convert(display_tz)).total_seconds() / 3600.0
+
+        df['last_seen_hrs'] = df['last_ping'].apply(get_lag)
+
+        # 4. FORMATTING HELPERS
+        def get_status_icon(hrs):
+            if hrs >= 999.0: return "❌ Never"
+            if hrs <= 1.0: return f"🟢 {hrs:.1f}h"
+            if hrs <= 6.0: return f"🟠 {hrs:.1f}h"
+            return f"🔴 {hrs:.1f}h"
+
+        def fmt_t(val):
+            if pd.isnull(val): return "N/A"
+            v = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+            return f"{v:.1f}{unit_label}"
+
+        def get_arrow(cur, prev):
+            if pd.isnull(cur) or pd.isnull(prev): return "N/A"
+            d = cur - prev
+            return f"🔺 +{d:.1f}" if d > 0.1 else f"🔹 {d:.1f}" if d < -0.1 else "➡️ 0.0"
+
+        # 5. LOCATION PERFORMANCE SUMMARY
+        st.subheader("📍 Location Performance Summary")
+        
+        summary_rows = []
+        for loc, loc_group in df.groupby('Location'):
+            summary_rows.append({
+                'Location': loc,
+                'Total Nodes': int(len(loc_group)),
+                'Seen 1h': int(loc_group['seen_1h_f'].sum()),
+                'Seen 6h': int(loc_group['seen_6h_f'].sum()),
+                'Seen 24h': int(loc_group['seen_24h_f'].sum()),
+                '24h Coverage': f"{loc_group['coverage_24h'].mean():.1f}%",
+                '7d Coverage': f"{loc_group['coverage_7d'].mean():.1f}%",
+                'Avg Temp': fmt_t(loc_group['current_temp'].mean()),
+                'Low 24h': fmt_t(loc_group['low_24h'].min()),
+                'High 24h': fmt_t(loc_group['high_24h'].max()),
+                'Best Seen': get_status_icon(loc_group['last_seen_hrs'].min()),
+                'Worst Seen': get_status_icon(loc_group['last_seen_hrs'].max())
+            })
+            
+        summary_df = pd.DataFrame(summary_rows)
+
+        def style_missing_counters(val_df):
+            canvas = pd.DataFrame('', index=val_df.index, columns=val_df.columns)
+            target_cols = ['Seen 1h', 'Seen 6h', 'Seen 24h']
+            
+            for idx in val_df.index:
+                total = val_df.loc[idx, 'Total Nodes']
+                for col in target_cols:
+                    missing = total - val_df.loc[idx, col]
+                    if missing == 0:
+                        bg_style = "background-color: #d1fae5; color: #065f46; font-weight: bold;"
+                    elif 1 <= missing <= 3:
+                        bg_style = "background-color: #bbf7d0; color: #14532d; font-weight: bold;"
+                    elif 4 <= missing <= 6:
+                        bg_style = "background-color: #fef08a; color: #713f12; font-weight: bold;"
+                    elif 7 <= missing <= 10:
+                        bg_style = "background-color: #fed7aa; color: #7c2d12; font-weight: bold;"
+                    else:
+                        bg_style = "background-color: #fca5a5; color: #7f1d1d; font-weight: bold;"
+                    canvas.loc[idx, col] = bg_style
+            return canvas
+
+        st.dataframe(summary_df.style.apply(style_missing_counters, axis=None), use_container_width=True, hide_index=True)
+
+        # 6. DETAILED SENSOR AUDIT
+        st.divider()
+        st.subheader("🔍 Detailed Sensor Audit")
+        
+        selected_loc = st.selectbox("Filter Audit by Location:", ["--- All ---"] + sorted(df['Location'].unique()))
+        audit_df = df.copy() if selected_loc == "--- All ---" else df[df['Location'] == selected_loc]
+        
+        rows = []
+        for _, r in audit_df.sort_values(['Location', 'Depth', 'Bank']).iterrows():
+            rows.append({
+                "Node": r['NodeNum'],
+                "Location": r['Location'],
+                "Position": f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"Bank {r['Bank']}",
+                "Last Seen": get_status_icon(r['last_seen_hrs']),
+                "24 hour coverage": f"{r['coverage_24h']:.1f}%",
+                "Current Temp": fmt_t(r['current_temp']),
+                "Change for 1 hr": get_arrow(r['current_temp'], r['avg_1h']),
+                "Change for 24 hr": get_arrow(r['current_temp'], r['avg_24h']),
+                "24 hr high": fmt_t(r['high_24h']),
+                "24 hour low": fmt_t(r['low_24h'])
+            })
+        
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    except Exception as e:
+        st.error(f"Sensor Status Error: {e}")
+            
+# =============================================================================
 # 6. SENSOR STATUS WORKSPACE & PERFORMANCE TABLES
 # =============================================================================
 def fmt_temp(val, unit_mode, unit_label):
