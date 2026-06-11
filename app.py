@@ -58,29 +58,36 @@ def get_bq_client():
 # - 2. DATA ENGINE LOGIC - #
 ############################
 
-@st.cache_data(ttl=600)  
-def get_universal_portal_data(project_id, view_mode="engineering"):
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id):
+    """
+    Unified Data Engine. Resolves numeric project string mismatches and pulls
+    all raw streaming, unreviewed, and approved rows for live auditing.
+    """
     client = get_bq_client()
-    if client is None: return pd.DataFrame()
-
-    # EXTRACT BASE JOB NUMBER OR CLEAN PRESETS (e.g., "2538-Ferndale" -> "2538")
+    if client is None: 
+        return pd.DataFrame()
+    
+    # 1. Extract base job number prefix (e.g., "2538-Ferndale" -> "2538")
     base_job_num = str(project_id).split('-')[0].strip()
-    is_office = "OFFICE" in str(project_id).upper()
-
-    if view_mode == "client":
-        filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
+    
+    # 2. Check the sidebar toggle state for masked records
+    show_masked = st.session_state.get("global_show_masked", False)
+    
+    # 3. Formulate the auditing filter condition
+    if show_masked:
+        # Show absolutely everything: TRUE, MASKED, BADDATA, and NULL/PENDING unreviewed rows
+        filter_sql = ""
     else:
-        if is_office:
-            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
-        else:
-            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
+        # Default active state: Show approved, unreviewed streaming data, and BADDATA spikes, but hide MASKED
+        filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'MASKED'"
 
-    # UPGRADED FILTER MAPPING: Matches base strings, full string, or fuzzy base arrays
     query = f"""
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON p.Project = @project_id
         WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
-        {filter_sql}
+          AND m.temperature >= -30.0 AND m.temperature <= 120.0
+          {filter_sql}
         ORDER BY m.timestamp ASC
     """
     
@@ -96,6 +103,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     except Exception as e:
         st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
+        
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
