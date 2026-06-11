@@ -166,13 +166,20 @@ sidebar_client = get_bq_client()
 if sidebar_client is not None:
     try:
         # Fixed: Evaluates dynamic list based strictly on new Google Sheet 'ShowActive = Yes' parameter checks
-        proj_q = f"""
-            SELECT CAST(Project AS STRING) as Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
-            FROM `{PROJECT_REGISTRY_TABLE}` 
-            WHERE Project IS NOT NULL 
-              AND TRIM(CAST(Project AS STRING)) != ''
-              AND (UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES' OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
-        """
+        # Find the proj_q block in your sidebar and update it to this:
+proj_q = f"""
+    SELECT 
+        CAST(Project AS STRING) as Project, 
+        ProjectName, 
+        Timezone, 
+        ProjectStatus, 
+        Date_Freezedown
+    FROM `{PROJECT_REGISTRY_TABLE}` 
+    WHERE Project IS NOT NULL 
+      AND TRIM(CAST(Project AS STRING)) != ''
+      AND (UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES' 
+           OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
+"""
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
         # Python fix: Strip whitespace and filter out non-values to kill "No Project"
@@ -647,18 +654,16 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     # SQL QUERY: Balanced approach showing active field data while pulling straight from Google Sheet tables
     summary_q = f"""
-        WITH active_projects AS (
+        active_projects AS (
             SELECT 
                 CAST(Project AS STRING) as Project, 
                 ProjectName, 
                 ProjectStatus, 
-                Date_Freezedown,
-                -- Slices out numeric base prefixes (e.g. '2538') to handle trailing descriptive text mismatches
-                REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
+                Date_Freezedown
             FROM `{PROJECT_REGISTRY_TABLE}`
             WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES'
               AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
-        ),
+        )
         raw_data AS (
             SELECT 
                 p.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, m.NodeNum
@@ -1149,12 +1154,8 @@ def apply_sanity_filter(df):
 ##############################
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
-    The main Global Project Summary dashboard.
-    - Fixed English translations for ranges.
-    - Robust timezone-aware sensor check-in counters.
-    - Automated link directory for active external client portals.
-    - FIXED: Outlier filter raised to 120°F to accommodate warm pre-freeze zones.
-    - FIXED: Re-aligned grouping hierarchy to prioritize numeric Depth for TempPipes.
+    Renders Global Project Summary.
+    Updated: Points to live Google Sheet tables and ensures column names match production schema.
     """
     st.header("🌐 Global Project Summary")
     
@@ -1163,10 +1164,15 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # SQL QUERY: Balanced approach showing active field data while purging bad data
+    # UPDATED: Removed SoilType, ensured tables use live production registries
     summary_q = f"""
         WITH active_projects AS (
-            SELECT CAST(Project AS STRING) as Project, ProjectName, ProjectStatus, Date_Freezedown
+            SELECT 
+                CAST(Project AS STRING) as Project, 
+                ProjectName, 
+                ProjectStatus, 
+                Date_Freezedown,
+                REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
             FROM `{PROJECT_REGISTRY_TABLE}`
             WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES'
               AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
@@ -1176,15 +1182,12 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 p.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, m.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             INNER JOIN active_projects p 
-                ON REGEXP_EXTRACT(TRIM(CAST(m.Project AS STRING)), r'^\\d+') = REGEXP_EXTRACT(TRIM(CAST(p.Project AS STRING)), r'^\\d+')
+                ON REGEXP_EXTRACT(TRIM(CAST(m.Project AS STRING)), r'^\\d+') = p.base_prefix
             LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
-              -- HARDENED JOIN: Strips formatting punctuation to cleanly match Lord vs SensorPush strings
               ON REGEXP_REPLACE(UPPER(TRIM(CAST(m.NodeNum AS STRING))), r'[:-]', '') = 
                  REGEXP_REPLACE(UPPER(TRIM(CAST(n.NodeNum AS STRING))), r'[:-]', '')
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
-              -- Outlier Shield: Aligned with the physical boundary limit of 120°F to handle high-ambient ground zones
               AND NOT (m.temperature > 120.0 AND NOT STARTS_WITH(m.NodeNum, 'SP'))
         ),
         MaxTime AS (
