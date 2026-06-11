@@ -1975,111 +1975,122 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 # Function: Status Dashboard (Setup Node Tool) - Left Unchanged
 # ===============================================================
 def render_project_status_dashboard(client, selected_project, unit_label, target_registry):
+    """Renders high-level project summaries segmented by structural hardware groupings."""
     st.subheader("📊 Project Status Summary")
-    
-    query = f"""
-        SELECT 
-            n.NodeNum, n.Bank, n.Location, n.Depth,
-            CASE 
-                WHEN (n.Bank LIKE 'S%' OR n.Location LIKE 'S%') AND (n.Bank NOT LIKE '%Amb%' AND n.Location NOT LIKE '%Amb%') THEN 'Supply'
-                WHEN (n.Bank LIKE 'R%' OR n.Location LIKE 'R%') AND (n.Bank NOT LIKE '%Amb%' AND n.Location NOT LIKE '%Amb%') THEN 'Return'
-                WHEN (n.Bank LIKE '%Amb%' OR n.Location LIKE '%Amb%') THEN 'Ambient'
-                WHEN n.Depth IS NOT NULL THEN 'TempPipes'
-                ELSE 'Other'
-            END as hardware_type,
-            AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
-            MIN(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as min_now,
-            MAX(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as max_now,
-            MIN(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN m.temperature END) as min_24h,
-            MAX(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN m.temperature END) as max_24h,
-            AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev,
-            AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN m.temperature END) as avg_6h_prev,
-            COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
-            ARRAY_AGG(m.temperature ORDER BY m.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-            MAX(m.timestamp) as latest_ts
-        FROM `{target_registry}` n
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
-        WHERE n.Project = @proj_id AND n.End_Date IS NULL
-        GROUP BY 1, 2, 3, 4, 5
-    """
+    query = f"SELECT * FROM `{target_registry}` WHERE Project = @proj_id AND End_Date IS NULL"
     
     try:
-        df = client.query(query, job_config=bigquery.QueryJobConfig(
+        nodes_df = client.query(query, job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
         )).to_dataframe()
+        
+        if nodes_df.empty:
+            st.info("No active nodes found for dashboard summary.")
+            return
+
+        telemetry_q = f"""
+            SELECT NodeNum, MAX(timestamp) as latest_ts,
+                   AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
+                   MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as min_now,
+                   MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as max_now,
+                   MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as min_24h,
+                   MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as max_24h,
+                   AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h_prev,
+                   AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h_prev,
+                   COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
+                   ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            WHERE Project = @proj_id
+            GROUP BY NodeNum
+        """
+        tel_df = client.query(telemetry_q, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        )).to_dataframe()
+        
+        nodes_df['NodeNum'] = nodes_df['NodeNum'].astype(str).str.strip()
+        tel_df['NodeNum'] = tel_df['NodeNum'].astype(str).str.strip()
+        df = pd.merge(nodes_df, tel_df, on='NodeNum', how='left')
+
+        # Software Type-Guard: Safely coerce external text fields dynamically
+        def resolve_hw_type(row):
+            b, l, d = str(row.get('Bank', '')).upper(), str(row.get('Location', '')).upper(), str(row.get('Depth', '')).strip()
+            if ('S' in b or 'S' in l) and 'AMB' not in b and 'AMB' not in l: return 'Supply'
+            if ('R' in b or 'R' in l) and 'AMB' not in b and 'AMB' not in l: return 'Return'
+            if 'AMB' in b or 'AMB' in l: return 'Ambient'
+            if d != '' and d.lower() != 'none' and d != '0': return 'TempPipes'
+            return 'Other'
+
+        df['hardware_type'] = df.apply(resolve_hw_type, axis=1)
+        cols = st.columns(4)
+        type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient": (cols[3], "☁️")}
+        now_utc = pd.Timestamp.now(tz='UTC')
+
+        for h_type, (col, icon) in type_map.items():
+            g_df = df[df['hardware_type'] == h_type]
+            with col:
+                st.markdown(f"#### {icon} {h_type}")
+                if g_df.empty or g_df['latest_ts'].isna().all():
+                    st.caption("No recent data")
+                    continue
+                
+                latest_time = g_df['latest_ts'].max()
+                if pd.isnull(latest_time) or pd.isna(latest_time):
+                    st.subheader("⚠️ Offline")
+                else:
+                    if latest_time.tzinfo is None: latest_time = latest_time.tz_localize('UTC')
+                    else: latest_time = latest_time.tz_convert('UTC')
+                    
+                    # 🛡️ THE INT-CAST SHIELD: Blocks NaN calculation streams before hitting int()
+                    total_s = (now_utc - latest_time).total_seconds()
+                    if pd.isnull(total_s) or np.isnan(total_s):
+                        st.subheader("⚠️ Offline")
+                    else:
+                        lag_hrs = total_s / 3600
+                        if lag_hrs > 1.1: 
+                            st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
+                        else:
+                            val = g_df['avg_now'].mean() if pd.notnull(g_df['avg_now'].mean()) else g_df['latest_temp'].mean()
+                            unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
+                            display_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                            st.title(f"{display_val:.1f}{unit_label}")
+                
+                active_1h = int(g_df['avg_now'].notnull().sum())
+                active_24h = int((g_df['pings_24h'] > 0).sum())
+                st.write(f"**{active_1h}/{len(g_df)}** (1h) | **{active_24h}/{len(g_df)}** (24h)")
+                
+                min_now_val = g_df['min_now'].min()
+                max_now_val = g_df['max_now'].max()
+                min_24h_val = g_df['min_24h'].min()
+                max_24h_val = g_df['max_24h'].max()
+                
+                if pd.notnull(min_now_val) and pd.notnull(max_now_val):
+                    mn = (min_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_now_val
+                    mx = (max_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_now_val
+                    st.caption(f"Cur: {mn:.1f} to {mx:.1f}{unit_label}")
+                else:
+                    st.caption(f"Cur: N/A to N/A")
+                    
+                if pd.notnull(min_24h_val) and pd.notnull(max_24h_val):
+                    mn24 = (min_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_24h_val
+                    mx24 = (max_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_24h_val
+                    st.caption(f"24h: {mn24:.1f} to {mx24:.1f}{unit_label}")
+                else:
+                    st.caption(f"24h: N/A to N/A")
+                
+                t_row = st.columns(2)
+                try:
+                    prev_1h = g_df['avg_1h_prev'].mean()
+                    arrow_1h = get_trend_arrow(val, prev_1h) if pd.notnull(prev_1h) else "➡️ N/A"
+                    t_row[0].caption(f"1h\n{arrow_1h}")
+                except Exception: t_row[0].caption("1h\n➡️ N/A")
+                    
+                try:
+                    prev_6h = g_df['avg_6h_prev'].mean()
+                    arrow_6h = get_trend_arrow(val, prev_6h) if pd.notnull(prev_6h) else "➡️ N/A"
+                    t_row[1].caption(f"6h\n{arrow_6h}")
+                except Exception: t_row[1].caption("6h\n➡️ N/A")
     except Exception as e:
-        st.error(f"Dashboard Query Failed: {e}")
-        return
-
-    if df.empty:
-        st.info("No active nodes found for dashboard summary.")
-        return
-
-    cols = st.columns(4)
-    type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient": (cols[3], "☁️")}
-    now_utc = pd.Timestamp.now(tz='UTC')
-
-    for h_type, (col, icon) in type_map.items():
-        g_df = df[df['hardware_type'] == h_type]
-        with col:
-            st.markdown(f"#### {icon} {h_type}")
-            if g_df.empty or g_df['latest_ts'].isna().all():
-                st.caption("No recent data")
-                continue
-            
-            latest_time = g_df['latest_ts'].max()
-            if latest_time.tzinfo is None:
-                latest_time = latest_time.tz_localize('UTC')
-            else:
-                latest_time = latest_time.tz_convert('UTC')
-            
-            lag_hrs = (now_utc - latest_time).total_seconds() / 3600
-            val = g_df['avg_now'].mean() if pd.notnull(g_df['avg_now'].mean()) else g_df['latest_temp'].mean()
-            
-            if lag_hrs > 1.1: 
-                st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
-            else: 
-                unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
-                display_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                st.title(f"{display_val:.1f}{unit_label}")
-            
-            active_1h = int(g_df['avg_now'].notnull().sum())
-            active_24h = int((g_df['pings_24h'] > 0).sum())
-            st.write(f"**{active_1h}/{len(g_df)}** (1h) | **{active_24h}/{len(g_df)}** (24h)")
-            
-            min_now_val = g_df['min_now'].min()
-            max_now_val = g_df['max_now'].max()
-            min_24h_val = g_df['min_24h'].min()
-            max_24h_val = g_df['max_24h'].max()
-            
-            if pd.notnull(min_now_val) and pd.notnull(max_now_val):
-                mn = (min_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_now_val
-                mx = (max_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_now_val
-                st.caption(f"Cur: {mn:.1f} to {mx:.1f}{unit_label}")
-            else:
-                st.caption(f"Cur: N/A to N/A")
-                
-            if pd.notnull(min_24h_val) and pd.notnull(max_24h_val):
-                mn24 = (min_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_24h_val
-                mx24 = (max_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_24h_val
-                st.caption(f"24h: {mn24:.1f} to {mx24:.1f}{unit_label}")
-            else:
-                st.caption(f"24h: N/A to N/A")
-            
-            t_row = st.columns(2)
-            try:
-                prev_1h = g_df['avg_1h_prev'].mean()
-                arrow_1h = get_trend_arrow(val, prev_1h) if pd.notnull(prev_1h) else "➡️ N/A"
-                t_row[0].caption(f"1h\n{arrow_1h}")
-            except Exception:
-                t_row[0].caption("1h\n➡️ N/A")
-                
-            try:
-                prev_6h = g_df['avg_6h_prev'].mean()
-                arrow_6h = get_trend_arrow(val, prev_6h) if pd.notnull(prev_6h) else "➡️ N/A"
-                t_row[1].caption(f"6h\n{arrow_6h}")
-            except Exception:
-                t_row[1].caption("6h\n➡️ N/A")
+        st.error(f"Dashboard Panel Fault: {e}")
             
 # =============================================================================
 # Function: Hardware integrity table (Setup Node Tool - Left Unchanged)
@@ -3396,8 +3407,16 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
 # =============================================================================
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
-    """Renders editing form panels and handles transactional database appends."""
-    st.markdown(f"### ⚙️ Operational Settings Editor: **{selected_node_data.get('NodeNum')}**")
+    """Renders data assignment guidelines for Google Sheet backed external table arrays."""
+    st.markdown(f"### ⚙️ Operational Settings Inspector: **{selected_node_data.get('NodeNum')}**")
+    st.info(
+        "ℹ️ **External Table Configuration Notice:** This hardware registry is linked directly to a live Google Spreadsheet. "
+        "To modify allocation assignments, update borehole paths, adjust deployment depths, or toggle active status parameters, "
+        "please open the underlying configuration document directly."
+    )
+    
+    with st.expander("📊 View Selection Parameter Metadata Snapshot"):
+        st.json(selected_node_data)
     
     current_project = str(selected_node_data.get('Project', 'Office'))
     current_location = str(selected_node_data.get('Location', ''))
@@ -4646,10 +4665,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 @st.cache_data(ttl=300)
 def load_lab_node_registry_data(target_table):
-    """Safely assembles asset inventories with matching real-time ping lag windows."""
+    """Safely assembles asset inventories with matching real-time ping lag windows from external STRING fields."""
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     try:
+        # 🛡️ EXTERNAL TRANSITION SHIELD: Virtual cast string attributes to structured keys on query execution
         master_query = f"""
             WITH LatestTelemetry AS (
                 SELECT 
@@ -4661,16 +4681,19 @@ def load_lab_node_registry_data(target_table):
             ),
             AssignmentWindows AS (
                 SELECT 
-                    NodeNum, Start_Date, COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
-                    DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
-                FROM `{target_table}` WHERE Project != 'Dead'
+                    NodeNum, 
+                    SAFE_CAST(Start_Date AS DATE) as Start_Date, 
+                    COALESCE(SAFE_CAST(End_Date AS DATE), CURRENT_DATE()) AS Effective_End,
+                    DATE_DIFF(COALESCE(SAFE_CAST(End_Date AS DATE), CURRENT_DATE()), SAFE_CAST(Start_Date AS DATE), DAY) * 24 AS Expected_Hours
+                FROM `{target_table}` 
+                WHERE Project != 'Dead' AND Start_Date IS NOT NULL
             ),
             ActualProjectPings AS (
                 SELECT 
                     m.NodeNum, a.Start_Date,
                     COUNT(DISTINCT TIMESTAMP_TRUNC(m.timestamp, HOUR)) AS Actual_Pings_Logged
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                INNER JOIN AssignmentWindows a ON m.NodeNum = a.NodeNum 
+                INNER JOIN AssignmentWindows a ON CAST(m.NodeNum AS STRING) = CAST(a.NodeNum AS STRING)
                   AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
                 GROUP BY m.NodeNum, a.Start_Date
             )
@@ -4678,17 +4701,22 @@ def load_lab_node_registry_data(target_table):
                 R.*, T.last_ping, T.last_temp, A.Expected_Hours,
                 COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
             FROM `{target_table}` R
-            LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
-            LEFT JOIN AssignmentWindows A ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
-            LEFT JOIN ActualProjectPings P ON R.NodeNum = P.NodeNum AND R.Start_Date = P.Start_Date
+            LEFT JOIN LatestTelemetry T ON CAST(R.NodeNum AS STRING) = CAST(T.NodeNum AS STRING)
+            LEFT JOIN AssignmentWindows A ON CAST(R.NodeNum AS STRING) = CAST(A.NodeNum AS STRING) 
+                AND SAFE_CAST(R.Start_Date AS DATE) = A.Start_Date
+            LEFT JOIN ActualProjectPings P ON CAST(R.NodeNum AS STRING) = CAST(P.NodeNum AS STRING) 
+                AND SAFE_CAST(R.Start_Date AS DATE) = P.Start_Date
         """
         df = client.query(master_query).to_dataframe()
         now_utc = pd.Timestamp.now(tz='UTC')
         
-        if not df.empty and 'last_ping' in df.columns:
+        if df is None or df.empty:
+            return pd.DataFrame()
+            
+        if 'last_ping' in df.columns:
             df['hours_hidden'] = df['last_ping'].apply(
-                lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
-                if pd.notnull(x) else float('inf')
+                lambda x: (now_utc - pd.to_datetime(x, utc=True)).total_seconds() / 3600.0
+                if pd.notnull(x) and str(x).strip().lower() != 'nat' else float('inf')
             )
             df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
             
@@ -4703,7 +4731,7 @@ def load_lab_node_registry_data(target_table):
             df['hours_hidden'] = float('inf')
             df['Last Seen'] = "❌ Never"
             
-        if not df.empty and 'Expected_Hours' in df.columns:
+        if 'Expected_Hours' in df.columns:
             exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
             act_pings = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
             raw_efficiency = np.where(exp_hours <= 0, 0.0, np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1)))
