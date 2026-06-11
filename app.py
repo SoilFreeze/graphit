@@ -623,11 +623,14 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             SELECT 
                 CAST(n.Project AS STRING) as Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{NODE_REGISTRY_TABLE}` n ON TRIM(CAST(m.NodeNum AS STRING)) = TRIM(CAST(n.NodeNum AS STRING))
+            JOIN `{NODE_REGISTRY_TABLE}` n 
+              -- HARDENED JOIN: Strips text variations, colons, and dashes to match node strings cleanly
+              ON REGEXP_REPLACE(UPPER(TRIM(CAST(m.NodeNum AS STRING))), r'[:-]', '') = 
+                 REGEXP_REPLACE(UPPER(TRIM(CAST(n.NodeNum AS STRING))), r'[:-]', '')
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
-              -- FIXED: Threshold raised to 120.0 to prevent warm ground sensors from being deleted
-              AND NOT (m.temperature > 120.0 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
+              -- Standard boundary safety cutoff
+              AND m.temperature >= -30.0 AND m.temperature <= 120.0
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
