@@ -831,7 +831,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     with st.spinner(f"Syncing {p_name} telemetry..."):
-        # FIXED: Removed view_mode="engineering" to match the raw auditing engine
         p_df = get_universal_portal_data(selected_project)
 
     if p_df.empty:
@@ -849,8 +848,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     
     now_local = pd.Timestamp.now(tz=display_tz)
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # Calculate start view dynamically based on the slider value
     start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
     # 7. LOCATION-BASED PLOTTING LOOP
@@ -867,8 +864,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
             clean_proj_id = str(selected_project).split('-')[0]
             search_id = f"{clean_proj_id}-{loc}"
             
-            is_temp_pipe = any(x in loc.upper() for x in ["TP", "T", "PIPE", "TEMP"])
-            
+            # Broadened definition to catch any location that isn't a supply/return brine pipe
+            is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "AMB", "BANK S", "BANK R"])
+
             fig = build_high_speed_graph(
                 df=loc_df, 
                 title=f"Thermal Trends: {loc}", 
@@ -893,49 +891,41 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     Engineering-grade Vertical Temperature Profiles.
     - Empirical data only (no theoretical lines).
     - Recent Line: Most recent day's 6:00 AM snapshot (Bright Orange Solid Line).
-    - Fallback Engine: If a specific pipe lacks a 6 AM reading on the most recent day,
-      it scans that same day to find its closest available reading as a fallback substitute.
-    - Baseline: First Monday at 06:00 AM (Black Dashed Line) forced to sit on top layer.
-    - Outlier Filter: Explicitly excludes any rogue sensor pings reading above 50°F.
+    - Fallback Engine: Symmetrical close-proximity data backup mapping.
+    - Baseline: First Monday at 06:00 AM (Black Dashed Line).
+    - Outlier Filter: Aligned with the physical boundary limit of 120°F.
     - Freezing Line: Light Blue (Hex #ADD8E6).
-    - Scale: Fixed -20 to 80.
-    - Frame: Full 4-sided black box.
     """
-    # 1. HEADER
     st.header(f"📏 Depth Profile Analysis: {selected_project}")
     
     if not selected_project or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
         return
 
-    # 2. SIDEBAR SETTINGS
     st.sidebar.subheader("📐 Profile Settings")
     lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
 
     with st.spinner("Fetching historical telemetry..."):
-        # FIXED: Removed view_mode="engineering" to match the raw auditing engine
         p_df = get_universal_portal_data(selected_project)
 
     if p_df is None or p_df.empty:
         st.warning("No data found for this project.")
         return
 
-    # 3. PRE-PROCESS DATA & APPLY 50°F OUTLIER MASK FILTER
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
     
-    # HARD FILTER CRITERIA: Ignore any weird readings above 50°F before building charts
-    p_df = p_df[p_df['temperature'] <= 50.0]
+    # HARDENED FIX: Changed filter limit from 50.0 to 120.0 to capture pre-freezedown data points
+    p_df = p_df[p_df['temperature'] <= 120.0]
     
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
     if depth_df.empty:
-        st.info("No sensors with valid 'Depth' values under 50°F found in the registry.")
+        st.info("No sensors with valid 'Depth' values under 120°F found in the registry.")
         return
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     
-    # 4. TIMELINE REFERENCE SYSTEM CONTROLS
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
     locations = sorted(depth_df['Location'].unique())
@@ -944,7 +934,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             
-            # Ensure timestamps are localized matching display preferences
             if loc_data['timestamp'].dt.tz is None:
                 loc_data['timestamp'] = loc_data['timestamp'].dt.tz_localize('UTC')
             loc_data['timestamp_local'] = loc_data['timestamp'].dt.tz_convert(display_tz)
@@ -969,7 +958,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     .sort_values('Depth_Num')
                 )
 
-            # --- B. HARDENED MOST RECENT LINE SEARCH ENGINE (WITH PIPE-LEVEL FALLBACKS) ---
+            # --- B. MOST RECENT LINE SEARCH ENGINE ---
             loc_data['date_str'] = loc_data['timestamp_local'].dt.strftime('%Y-%m-%d')
             loc_data['hour_int'] = loc_data['timestamp_local'].dt.hour
             
@@ -994,7 +983,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         if not exact_6am.empty:
                             recent_profile_rows.append(exact_6am.sort_values('timestamp_local').iloc[-1])
                         else:
-                            # Symmetrical dynamic fallback checking window
                             node_group = node_group.assign(hour_dist=(node_group['hour_int'] - 6).abs())
                             best_fallback_row = node_group.sort_values(by=['hour_dist', 'timestamp_local']).iloc[0]
                             recent_profile_rows.append(best_fallback_row)
@@ -1023,7 +1011,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         .sort_values('Depth_Num')
                     )
                     
-                    # Hard fallback window processing check
                     if snap_week.empty:
                         snap_week = (
                             window.assign(hour_dist=(window['timestamp_local'].dt.hour - 6).abs())
@@ -1044,7 +1031,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                         hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
-            # --- D. INJECT THE BRIGHT ORANGE HARDENED MOST RECENT PROFILE ---
+            # --- D. INJECT THE BRIGHT ORANGE MOST RECENT PROFILE ---
             if not snap_recent.empty:
                 recent_temps = snap_recent['temperature']
                 if unit_mode == "Celsius": recent_temps = (recent_temps - 32) * 5/9
