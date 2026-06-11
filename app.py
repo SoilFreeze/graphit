@@ -55,22 +55,38 @@ def get_bq_client():
 ############################
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
+def get_universal_portal_data(project_id, view_mode="engineering"):
+    """
+    Fetches approved project telemetry using dynamic row-level boundary joins 
+    to prevent cross-phase data truncation, with flexible engineering/client masking.
+    """
     client = get_bq_client()
-    if client is None: return pd.DataFrame()
+    if client is None: 
+        return pd.DataFrame()
     
-    # Extract just the base job number (e.g., 2541) to ensure global matches
+    # 🧼 Extract the base job number (e.g., "2541") to allow flawless cross-phase matches
     base_job_num = str(project_id).split('-')[0].strip()
-    
+    is_office = "OFFICE" in str(project_id).upper()
+
+    # 🎛️ Configure data access rules based on user clearance level & project environment
+    if view_mode == "client":
+        filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
+    else:
+        if is_office:
+            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
+        else:
+            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')"
+
+    # 📊 Unified query: Blends timeline limits, custom filters, and telemetry gap evaluations
     query = f"""
         WITH filtered_base AS (
             SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p ON p.Project = @project_id
-            -- Match against the telemetry's base project string
+            -- 🛡️ Pointing directly to your clean, live Google Sheet table
+            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON p.Project = @project_id
             WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
-              AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
+              {filter_sql}
         ),
         gap_evaluation AS (
             SELECT *,
@@ -83,45 +99,27 @@ def get_universal_portal_data(project_id):
            OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 12
         ORDER BY timestamp ASC
     """
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
-    return client.query(query, job_config=job_config).to_dataframe()
-    
-def get_universal_portal_data(project_id, view_mode="engineering"):
-    client = get_bq_client()
-    if client is None: return pd.DataFrame()
-
-    is_office = "OFFICE" in str(project_id).upper()
-
-    if view_mode == "client":
-        filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
-    else:
-        # If Office, show everything except BadData. If regular project, hide False/0.
-        if is_office:
-            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
-        else:
-            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
-
-    query = f"""
-        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p ON m.Project = p.Project
-        WHERE m.Project = @project_id
-        {filter_sql}
-        ORDER BY m.timestamp ASC
-    """
-    # ... rest of function
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("project_id", "STRING", project_id)
-        ]
+        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
     )
     
     try:
-        query_job = client.query(query, job_config=job_config)
-        return query_job.to_dataframe()
+        df = client.query(query, job_config=job_config).to_dataframe()
+        
+        # 🛡️ THE AGE SHIELD: Protect homepage metrics if data is missing or empty
+        if df is None or df.empty:
+            return pd.DataFrame(columns=['Project', 'NodeNum', 'Bank', 'Location', 'Depth', 'temperature', 'timestamp', 'approval_status'])
+            
+        # 🛡️ TEXT CLEANUP: Safe cast NodeNum to string to allow alpha-numeric channel IDs
+        df = df.dropna(subset=['NodeNum'])
+        df['NodeNum'] = df['NodeNum'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        
+        return df
+        
     except Exception as e:
-        st.error(f"⚠️ Data Sync Error: {e}")
-        return pd.DataFrame()
+        st.error(f"⚠️ Data Engine Error: {e}")
+        return pd.DataFrame(columns=['Project', 'NodeNum', 'Bank', 'Location', 'Depth', 'temperature', 'timestamp', 'approval_status'])
 
 ###########################
 # - SIDEBAR NAVIGATION -  #
