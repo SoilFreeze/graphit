@@ -59,57 +59,52 @@ def get_bq_client():
 ############################
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
+def get_universal_portal_data(selected_project_token):
     """
-    Unified Data Engine. Resolves numeric project string mismatches, handles fuzzy 
-    naming lookups, and pulls all raw streaming/approved rows for live auditing.
+    Unified Data Engine. Resolves numeric-to-named project mismatches, handles
+    Project ID vs ProjectName lookups, and streams all raw or approved rows for live auditing.
     """
     client = get_bq_client()
     if client is None: 
         return pd.DataFrame()
     
-    # 1. Extract base job number prefix if present (e.g., "2527-Elizabeth" -> "2527")
-    base_job_num = str(project_id).split('-')[0].strip()
+    # 1. Clean the incoming token string safely
+    clean_token = str(selected_project_token).replace("'", "''").strip()
     
-    # 2. Extract key words to catch partial name matches (e.g., "Erie")
-    clean_name = str(project_id).replace("'", "''").strip()
-    name_keywords = [w for w in clean_name.split() if len(w) > 3 and w.lower() != "remediation"]
-    fuzzy_name_clause = " OR ".join([f"m.Project LIKE '%{kw}%' OR p.ProjectName LIKE '%{kw}%'" for kw in name_keywords])
-    if not fuzzy_name_clause:
-        fuzzy_name_clause = "FALSE"
+    # 2. Extract base job number prefix if the user passes the raw ID (e.g., "2527-Elizabeth" -> "2527")
+    base_job_num = clean_token.split('-')[0].strip()
 
-    # 3. Check the sidebar toggle state for masked records
+    # 3. Check sidebar toggle state for masked records
     show_masked = st.session_state.get("global_show_masked", False)
     if show_masked:
         filter_sql = ""
     else:
         filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'MASKED'"
 
-    # 4. Built-in fallback architecture to find names even with partial strings
+    # 4. Built-in mapping: checks m.Project against the lookup value, its numeric prefix,
+    # or searches the project registry to map the full project ID code.
     query = f"""
+        WITH target_project AS (
+            SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
+            WHERE Project = '{clean_token}' 
+               OR ProjectName = '{clean_token}'
+            LIMIT 1
+        )
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p 
-          ON (m.Project = p.Project OR m.Project LIKE CONCAT(SPLIT(p.Project, '-')[OFFSET(0)], '%'))
         WHERE (
-            p.Project = @project_id 
-            OR p.ProjectName = @project_id 
-            OR m.Project = '{base_job_num}' 
+            m.Project = '{clean_token}'
+            OR m.Project = '{base_job_num}'
             OR m.Project LIKE '{base_job_num}%'
-            OR ({fuzzy_name_clause})
+            OR m.Project IN (SELECT Project FROM target_project)
+            OR m.Project LIKE CONCAT((SELECT SPLIT(Project, '-')[OFFSET(0)] FROM target_project), '%')
         )
           AND m.temperature >= -30.0 AND m.temperature <= 120.0
           {filter_sql}
         ORDER BY m.timestamp ASC
     """
     
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("project_id", "STRING", project_id)
-        ]
-    )
-    
     try:
-        query_job = client.query(query, job_config=job_config)
+        query_job = client.query(query)
         return query_job.to_dataframe()
     except Exception as e:
         st.error(f"⚠️ Data Sync Error: {e}")
