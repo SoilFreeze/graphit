@@ -1891,6 +1891,7 @@ active_refs = st.session_state.get("active_refs", [])
 
 client = get_bq_client() 
 
+# FIXED: Aligned "Summary" to match the sidebar selection string exactly
 if page == "Summary":
     render_summary_dashboard(unit_label, unit_mode, display_tz)
 
