@@ -61,8 +61,8 @@ def get_bq_client():
 @st.cache_data(ttl=600)
 def get_universal_portal_data(selected_project_token):
     """
-    Unified Direct Data Engine. Uses Project column for filtering, maps Location
-    as the primary pipe/brine asset category, and leaves rows unfiltered for live auditing.
+    Unified Audit Data Engine. Dynamically maps project definitions, but drops
+    strict project gating if no matching rows exist, allowing raw data review.
     """
     client = get_bq_client()
     if client is None: 
@@ -72,47 +72,50 @@ def get_universal_portal_data(selected_project_token):
     base_job_num = clean_token.split('-')[0].strip()
 
     show_masked = st.session_state.get("global_show_masked", False)
-    if show_masked:
-        filter_sql = ""
-    else:
-        filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'MASKED'"
+    filter_sql = "" if show_masked else "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'MASKED'"
 
-    query = f"""
-        WITH target_project AS (
+    # 1. Build a localized reference map from your project registry
+    query_matching = f"""
+        WITH target_projects AS (
             SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
-            WHERE Project = '{clean_token}' 
-               OR ProjectName = '{clean_token}'
-            LIMIT 1
+            WHERE Project = '{clean_token}' OR ProjectName = '{clean_token}'
         )
-        SELECT 
-            m.Project,
-            m.NodeNum,
-            m.temperature,
-            m.timestamp,
-            m.approval_status,
-            COALESCE(m.Location, 'Unassigned Code') as Location,
-            COALESCE(m.Bank, '—') as Bank,
-            m.Depth
+        SELECT m.Project, m.NodeNum, m.temperature, m.timestamp, m.approval_status,
+               COALESCE(m.Location, 'Unassigned Code') as Location, COALESCE(m.Bank, '—') as Bank, m.Depth
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         WHERE (
-            m.Project = '{clean_token}'
-            OR m.Project = '{base_job_num}'
-            OR m.Project LIKE '{base_job_num}%'
-            OR m.Project IN (SELECT Project FROM target_project)
-            OR m.Project LIKE CONCAT((SELECT SPLIT(Project, '-')[OFFSET(0)] FROM target_project), '%')
+            m.Project = '{clean_token}' OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%'
+            OR m.Project IN (SELECT Project FROM target_projects)
+            OR EXISTS (SELECT 1 FROM target_projects tp WHERE m.Project LIKE CONCAT(SPLIT(tp.Project, '-')[OFFSET(0)], '%'))
         )
           AND m.temperature >= -30.0 AND m.temperature <= 120.0
           {filter_sql}
         ORDER BY m.timestamp ASC
     """
-    
+
     try:
-        query_job = client.query(query)
-        return query_job.to_dataframe()
+        # 2. Try running with strict project gating filters
+        query_job = client.query(query_matching)
+        df = query_job.to_dataframe()
+        
+        # 3. AUDIT FALLBACK: If the filtered selection yields 0 rows (like looking for TPs on Erie St),
+        # pull ALL matching raw telemetry records so you can diagnose and approve them on screen.
+        if df.empty and clean_token != "All Projects":
+            st.toast(f"ℹ️ Audit Mode Active: Displaying unmapped raw data streams for {clean_token}", icon="🔍")
+            query_audit = f"""
+                SELECT m.Project, m.NodeNum, m.temperature, m.timestamp, m.approval_status,
+                       COALESCE(m.Location, 'Unassigned Code') as Location, COALESCE(m.Bank, '—') as Bank, m.Depth
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+                WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+                  {filter_sql}
+                ORDER BY m.timestamp ASC
+            """
+            df = client.query(query_audit).to_dataframe()
+            
+        return df
     except Exception as e:
         st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
-        
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
