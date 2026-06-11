@@ -1174,7 +1174,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 Date_Freezedown,
                 REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
             FROM `{PROJECT_REGISTRY_TABLE}`
-            WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES'
+            WHERE (UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('YES', 'TRUE', '1'))
               AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
