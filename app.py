@@ -23,6 +23,8 @@ st.set_page_config(
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+# 🛡️ FIX: Anchor the registry table directly to your live configuration sheet
+REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
 
 @st.cache_resource
 def get_bq_client():
@@ -31,9 +33,10 @@ def get_bq_client():
     Prioritizes Service Account info from st.secrets for Streamlit Cloud.
     """
     try:
+        # 🛡️ FIX: Aligned scopes cleanly with the drive parameters used in your initialization script
         SCOPES = [
             "https://www.googleapis.com/auth/bigquery", 
-            "https://www.googleapis.com/auth/drive" 
+            "https://www.googleapis.com/auth/drive.readonly" 
         ]
         
         if "gcp_service_account" in st.secrets:
