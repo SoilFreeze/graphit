@@ -58,38 +58,7 @@ def get_bq_client():
 # - 2. DATA ENGINE LOGIC - #
 ############################
 
-@st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
-    client = get_bq_client()
-    if client is None: return pd.DataFrame()
-    
-    # Extract just the base job number (e.g., 2541) to ensure global matches
-    base_job_num = str(project_id).split('-')[0].strip()
-    
-    query = f"""
-        WITH filtered_base AS (
-            SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON p.Project = @project_id
-            -- Match against the telemetry's base project string
-            WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
-              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
-              AND m.temperature >= -30.0 AND m.temperature <= 120.0
-              AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
-        ),
-        gap_evaluation AS (
-            SELECT *,
-                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_timestamp
-            FROM filtered_base
-        )
-        SELECT Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
-        FROM gap_evaluation
-        WHERE prev_timestamp IS NULL 
-           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 12
-        ORDER BY timestamp ASC
-    """
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
-    return client.query(query, job_config=job_config).to_dataframe()
-    
+@st.cache_data(ttl=600)  
 def get_universal_portal_data(project_id, view_mode="engineering"):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
