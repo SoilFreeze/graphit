@@ -759,7 +759,15 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
-            is_tp = p_df['Depth'].notnull() & (p_df['Depth'].astype(str).str.strip() != '') & ~is_s &
+            
+            # 🛡️ FIXED: Enclosed in full outer parentheses to handle multi-line bitwise operations safely
+            is_tp = (
+                p_df['Depth'].notnull() & 
+                (p_df['Depth'].astype(str).str.strip() != '') & 
+                ~is_s & 
+                ~is_r & 
+                ~is_amb
+            )
 
 #############################
 # - 2. PAGE: TIME vs TEMP - #
