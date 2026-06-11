@@ -60,35 +60,65 @@ def get_bq_client():
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
+    """
+    Unified Direct Data Engine.
+    - Strips punctuation (hyphens and colons) to seamlessly match Lord vs SensorPush strings.
+    - Links project names directly to project_registry_backup.
+    """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    # Extract just the base job number prefix (e.g., "2527-Elizabeth" -> "2527")
-    base_job_num = str(project_id).split('-')[0].strip()
-    is_office = "OFFICE" in str(project_id).upper()
+    clean_token = str(project_id).replace("'", "''").strip()
+    base_job_num = clean_token.split('-')[0].strip()
+    is_office = "OFFICE" in clean_token.upper()
 
-    # Dynamic visibility gating rules for data filtering
+    # Visibility filtering conditions
     if is_office:
         filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
     else:
         filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
 
-    # FIXED: Joined against project_registry_backup (PROJECT_REGISTRY_TABLE) instead of project_registry
+    # Upgraded Query: Uses REGEXP_REPLACE to normalize Node ID strings dynamically
     query = f"""
         WITH target_projects AS (
             SELECT Project FROM `{PROJECT_REGISTRY_TABLE}`
             WHERE Project = @project_id 
                OR ProjectName = @project_id
+        ),
+        raw_telemetry AS (
+            SELECT 
+                m.Project,
+                m.NodeNum as RawNode,
+                -- Creates a standardized alphanumeric string (e.g., "5720CH2")
+                REGEXP_REPLACE(UPPER(TRIM(CAST(m.NodeNum AS STRING))), r'[:-]', '') as CleanTelemetryNode,
+                m.temperature,
+                m.timestamp,
+                m.approval_status,
+                COALESCE(m.Location, 'Unassigned Code') as Location,
+                COALESCE(m.Bank, '—') as Bank,
+                m.Depth
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+              {filter_sql}
         )
-        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+        SELECT 
+            t.Project,
+            t.RawNode as NodeNum,
+            t.temperature,
+            t.timestamp,
+            t.approval_status,
+            t.Location,
+            t.Bank,
+            t.Depth
+        FROM raw_telemetry t
         WHERE (
-            m.Project = @project_id 
-            OR m.Project = '{base_job_num}' 
-            OR m.Project LIKE '{base_job_num}%'
-            OR m.Project IN (SELECT Project FROM target_projects)
+            t.Project = @project_id 
+            OR t.Project = '{clean_token}'
+            OR t.Project = '{base_job_num}' 
+            OR t.Project LIKE '{base_job_num}%'
+            OR t.Project IN (SELECT Project FROM target_projects)
         )
-        {filter_sql}
-        ORDER BY m.timestamp ASC
+        ORDER BY t.timestamp ASC
     """
     
     job_config = bigquery.QueryJobConfig(
