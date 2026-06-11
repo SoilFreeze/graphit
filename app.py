@@ -802,7 +802,7 @@ def get_trend_arrow(current, previous):
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Maps graphs directly using the view's native Location entries.
+    Standardized: Normalizes variations like TP2 vs T2 for seamless plotting.
     """
     # 1. INITIALIZE UI STATE VARIABLES FROM SIDEBAR KEYS
     show_ref = st.session_state.get("global_show_ref", True)
@@ -865,10 +865,14 @@ def render_global_overview(selected_project, project_metadata, display_tz):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
             clean_proj_id = str(selected_project).split('-')[0]
-            search_id = f"{clean_proj_id}-{loc}"
             
-            # Treat everything as an eligible curve target unless it explicitly says supply/return
-            is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R"])
+            # NORMALIZATION EXTRACTION: Converts "TP2", "TP-2", or "T2" into a clean "T2" pattern for the curve lookup
+            clean_loc_num = "".join(re.findall(r'\d+', loc))
+            normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
+            search_id = f"{clean_proj_id}-{normalized_loc}"
+            
+            # Exclude supply/return loops from being flagged as vertical ground temperature boreholes
+            is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R", "AMB"])
 
             fig = build_high_speed_graph(
                 df=loc_df, 
