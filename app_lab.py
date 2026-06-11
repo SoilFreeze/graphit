@@ -282,7 +282,10 @@ def apply_sanity_filter(df):
 # WORKSPACE PAGE 1: GLOBAL DASHBOARD SUMMARY
 # =============================================================================
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
-    """Renders high-level project multi-column status metrics and active counters."""
+    """
+    Renders high-level project multi-column status metrics and active counters.
+    Fixed: Uses LEFT JOIN on node registry to prevent blank project views when nodes are streaming.
+    """
     st.header("🌐 Global Project Summary")
     client = get_bq_client()
     if client is None: return
@@ -297,16 +300,26 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
               AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
-            SELECT CAST(n.Project AS STRING) as Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
+            SELECT 
+                COALESCE(CAST(n.Project AS STRING), CAST(m.Project AS STRING)) as Project, 
+                COALESCE(n.Bank, '') as Bank, 
+                COALESCE(n.Location, '') as Location, 
+                n.Depth, 
+                m.temperature, 
+                m.timestamp, 
+                m.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{NODE_REGISTRY_TABLE}` n ON TRIM(CAST(m.NodeNum AS STRING)) = TRIM(CAST(n.NodeNum AS STRING))
+            LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON TRIM(CAST(m.NodeNum AS STRING)) = TRIM(CAST(n.NodeNum AS STRING))
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
-              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
+              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(m.NodeNum, 'SP'))
         ),
-        MaxTime AS (SELECT MAX(timestamp) as max_ts FROM raw_data),
+        MaxTime AS (
+            SELECT MAX(timestamp) as max_ts FROM raw_data
+        ),
         LatestStats AS (
-            SELECT r.Project, r.Bank, r.Location, r.Depth, r.NodeNum,
+            SELECT 
+                r.Project, r.Bank, r.Location, r.Depth, r.NodeNum,
                 AVG(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as avg_now,
                 MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as min_now,
                 MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
@@ -315,23 +328,39 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
                 COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
                 ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp
-            FROM raw_data r CROSS JOIN MaxTime m GROUP BY 1, 2, 3, 4, 5
+            FROM raw_data r 
+            CROSS JOIN MaxTime m 
+            GROUP BY 1, 2, 3, 4, 5
         )
-        SELECT p.*, ls.*,
+        SELECT 
+            p.Project as ProjectID,
+            p.ProjectName,
+            p.ProjectStatus,
+            p.Date_Freezedown,
+            ls.*,
             (COUNTIF(ls.Bank LIKE 'S%' AND ls.latest_temp <= -10) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'S%') OVER(PARTITION BY p.Project), 0)) * 100 as supply_kpi,
             (COUNTIF(ls.Bank LIKE 'R%' AND ls.latest_temp <= 0) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'R%') OVER(PARTITION BY p.Project), 0)) * 100 as return_kpi,
             (COUNTIF(ls.Depth IS NOT NULL AND ls.latest_temp <= 32) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Depth IS NOT NULL) OVER(PARTITION BY p.Project), 0)) * 100 as freeze_kpi
-        FROM active_projects p LEFT JOIN LatestStats ls ON p.Project = ls.Project
+        FROM active_projects p 
+        LEFT JOIN LatestStats ls ON p.Project = ls.Project
     """
     try:
         df = client.query(summary_q).to_dataframe()
-        df[['Bank', 'Location']] = df[['Bank', 'Location']].fillna('')
+        df['Bank'] = df['Bank'].fillna('')
+        df['Location'] = df['Location'].fillna('')
     except Exception as e:
-        st.error(f"Dashboard Query Failed: {e}"); return
+        st.error(f"Dashboard Query Failed: {e}")
+        return
 
-    for project in sorted(df['Project'].unique()):
-        p_df = df[df['Project'] == project]
-        p_name, f_date = p_df['ProjectName'].iloc[0] or project, p_df['Date_Freezedown'].iloc[0]
+    if df.empty:
+        st.info("No active projects found with streaming data profiles.")
+        return
+
+    # Loop over unique verified project profiles found in the registry tables
+    for project in sorted(df['ProjectID'].unique()):
+        p_df = df[df['ProjectID'] == project]
+        p_name = p_df['ProjectName'].iloc[0] or project
+        f_date = p_df['Date_Freezedown'].iloc[0]
         
         day_text, f_date_display = "", "Not Set"
         if pd.notnull(f_date):
@@ -347,15 +376,26 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             if proj_match:
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{proj_match.group(1)}.streamlit.app)")
             
-            st.markdown(f"📡 **Hardware Status:** `{p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()}` nodes active (1h) | `{p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()}` nodes active (24h) | Total: `{p_df['NodeNum'].dropna().nunique()}` registered")
+            # Recalculate node counters precisely out of selection pools
+            act_1h = p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()
+            act_24h = p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()
+            tot_nodes = p_df['NodeNum'].dropna().nunique()
+            
+            st.markdown(f"📡 **Hardware Status:** `{act_1h}` nodes pinged in the last hour | `{act_24h}` nodes pinged in the last 24h (Total Pool: `{tot_nodes}` registered)")
             st.divider() 
 
+            # Spatial Group Splitting
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
             is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
 
-            groups_data = [("📥 Supply", p_df[is_s], "supply_kpi", -10), ("📤 Return", p_df[is_r], "return_kpi", 0), ("📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), ("☁️ Ambient", p_df[is_amb], None, None)]
+            groups_data = [
+                ("📥 Supply", p_df[is_s], "supply_kpi", -10), 
+                ("📤 Return", p_df[is_r], "return_kpi", 0), 
+                ("📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
+                ("☁️ Ambient", p_df[is_amb], None, None)
+            ]
 
             if mobile_mode:
                 for title, g_df, kpi_col, kpi_val in groups_data:
@@ -363,9 +403,11 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                     st.markdown("<hr style='border: 1px dashed #ccc; margin: 15px 0;'>", unsafe_allow_html=True)
             else:
                 cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
-                for s_idx in [1, 3, 5]: cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 320px; margin: auto;'></div>", unsafe_allow_html=True)
+                for s_idx in [1, 3, 5]: 
+                    cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 280px; margin: auto;'></div>", unsafe_allow_html=True)
                 for idx, (title, g_df, kpi_col, kpi_val) in enumerate(groups_data):
-                    with cols[[0, 2, 4, 6][idx]]: render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
+                    with cols[[0, 2, 4, 6][idx]]: 
+                        render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
 
 def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
     """Layout engine displaying specific array KPIs and standard ranges."""
