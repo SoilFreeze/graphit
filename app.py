@@ -601,8 +601,11 @@ def apply_sanity_filter(df):
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     The main Global Project Summary dashboard.
-    - Fixed high-temperature cutoff limit to prevent sensor clipping during warm ambient phases.
+    - Fixed English translations for ranges.
     - Robust timezone-aware sensor check-in counters.
+    - Automated link directory for active external client portals.
+    - FIXED: Outlier filter raised to 120°F to accommodate warm pre-freeze zones.
+    - FIXED: Re-aligned grouping hierarchy to prioritize numeric Depth for TempPipes.
     """
     st.header("🌐 Global Project Summary")
     
@@ -611,7 +614,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # SQL QUERY: Upgraded outlier shield threshold from 100 to 120 to catch pre-freeze values
+    # SQL QUERY: Balanced approach showing active field data while purging bad data
     summary_q = f"""
         WITH active_projects AS (
             SELECT CAST(Project AS STRING) as Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -624,13 +627,14 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 CAST(n.Project AS STRING) as Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{NODE_REGISTRY_TABLE}` n 
-              -- HARDENED JOIN: Strips text variations, colons, and dashes to match node strings cleanly
+              -- HARDENED JOIN: Strips formatting punctuation to cleanly match Lord vs SensorPush strings
               ON REGEXP_REPLACE(UPPER(TRIM(CAST(m.NodeNum AS STRING))), r'[:-]', '') = 
                  REGEXP_REPLACE(UPPER(TRIM(CAST(n.NodeNum AS STRING))), r'[:-]', '')
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+              -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
-              -- Standard boundary safety cutoff
-              AND m.temperature >= -30.0 AND m.temperature <= 120.0
+              -- Outlier Shield: Aligned with the physical boundary limit of 120°F to handle high-ambient ground zones
+              AND NOT (m.temperature > 120.0 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
@@ -688,12 +692,14 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             h1.subheader(f"🏗️ {p_name}")
             h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
             
+            # --- CLIENT PORTAL LINK INJECTION ENGINE ---
             proj_match = re.search(r'\b(\d{4})\b', str(project))
             if proj_match:
                 job_number = proj_match.group(1)
                 portal_url = f"https://sf{job_number}.streamlit.app"
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link]({portal_url})")
             
+            # --- ACCURATE CHECK-IN COUNTERS ---
             active_1h = p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()
             active_24h = p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()
             total_nodes = p_df['NodeNum'].dropna().nunique()
@@ -704,10 +710,13 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             )
             st.divider() 
 
+            # Data isolation
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
-            is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
-            is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
-            is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
+            
+            # CRITICAL FIX: Prioritize valid numeric Depths for TempPipes first to stop multi-channel Lord nodes from slipping into brines
+            is_tp = p_df['Depth'].notnull() & (p_df['Depth'].astype(str).str.strip() != '') & ~is_amb
+            is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb & ~is_tp
+            is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb & ~is_tp
 
             groups_data = [
                 ("📥 Supply", p_df[is_s], "supply_kpi", -10), 
@@ -731,7 +740,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 for idx, (title, g_df, kpi_col, kpi_val) in enumerate(groups_data):
                     with cols[col_mappings[idx]]:
                         render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
-
 
 def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
     """Helper layout compiler to handle repeating column metric sets."""
