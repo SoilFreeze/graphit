@@ -23,8 +23,6 @@ st.set_page_config(
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-# 🛡️ FIX: Anchor the registry table directly to your live configuration sheet
-REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
 
 @st.cache_resource
 def get_bq_client():
@@ -33,10 +31,9 @@ def get_bq_client():
     Prioritizes Service Account info from st.secrets for Streamlit Cloud.
     """
     try:
-        # 🛡️ FIX: Aligned scopes cleanly with the drive parameters used in your initialization script
         SCOPES = [
             "https://www.googleapis.com/auth/bigquery", 
-            "https://www.googleapis.com/auth/drive.readonly" 
+            "https://www.googleapis.com/auth/drive" 
         ]
         
         if "gcp_service_account" in st.secrets:
@@ -58,38 +55,22 @@ def get_bq_client():
 ############################
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, view_mode="engineering"):
-    """
-    Fetches approved project telemetry using dynamic row-level boundary joins 
-    to prevent cross-phase data truncation, with flexible engineering/client masking.
-    """
+def get_universal_portal_data(project_id):
     client = get_bq_client()
-    if client is None: 
-        return pd.DataFrame()
+    if client is None: return pd.DataFrame()
     
-    # 🧼 Extract the base job number (e.g., "2541") to allow flawless cross-phase matches
+    # Extract just the base job number (e.g., 2541) to ensure global matches
     base_job_num = str(project_id).split('-')[0].strip()
-    is_office = "OFFICE" in str(project_id).upper()
-
-    # 🎛️ Configure data access rules based on user clearance level & project environment
-    if view_mode == "client":
-        filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
-    else:
-        if is_office:
-            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
-        else:
-            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')"
-
-    # 📊 Unified query: Blends timeline limits, custom filters, and telemetry gap evaluations
-    # 🛡️ FIX: Corrected table join constraint from 'p.Project = @project_id' to relational 'm.Project = p.Project'
+    
     query = f"""
         WITH filtered_base AS (
             SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p ON m.Project = p.Project
+            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON p.Project = @project_id
+            -- Match against the telemetry's base project string
             WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
-              {filter_sql}
+              AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
         ),
         gap_evaluation AS (
             SELECT *,
@@ -102,27 +83,45 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
            OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 12
         ORDER BY timestamp ASC
     """
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
+    return client.query(query, job_config=job_config).to_dataframe()
+    
+def get_universal_portal_data(project_id, view_mode="engineering"):
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
+
+    is_office = "OFFICE" in str(project_id).upper()
+
+    if view_mode == "client":
+        filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')"
+    else:
+        # If Office, show everything except BadData. If regular project, hide False/0.
+        if is_office:
+            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
+        else:
+            filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
+
+    query = f"""
+        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
+        WHERE m.Project = @project_id
+        {filter_sql}
+        ORDER BY m.timestamp ASC
+    """
+    # ... rest of function
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
+        query_parameters=[
+            bigquery.ScalarQueryParameter("project_id", "STRING", project_id)
+        ]
     )
     
     try:
-        df = client.query(query, job_config=job_config).to_dataframe()
-        
-        # 🛡️ THE AGE SHIELD: Protect homepage metrics if data is missing or empty
-        if df is None or df.empty:
-            return pd.DataFrame(columns=['Project', 'NodeNum', 'Bank', 'Location', 'Depth', 'temperature', 'timestamp', 'approval_status'])
-            
-        # 🛡️ TEXT CLEANUP: Safe cast NodeNum to string to allow alpha-numeric channel IDs
-        df = df.dropna(subset=['NodeNum'])
-        df['NodeNum'] = df['NodeNum'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        
-        return df
-        
+        query_job = client.query(query, job_config=job_config)
+        return query_job.to_dataframe()
     except Exception as e:
-        st.error(f"⚠️ Data Engine Error: {e}")
-        return pd.DataFrame(columns=['Project', 'NodeNum', 'Bank', 'Location', 'Depth', 'temperature', 'timestamp', 'approval_status'])
+        st.error(f"⚠️ Data Sync Error: {e}")
+        return pd.DataFrame()
 
 ###########################
 # - SIDEBAR NAVIGATION -  #
@@ -158,7 +157,7 @@ if sidebar_client is not None:
         # SQL fix: Exclude empty strings and force inclusion of 'Office'
         proj_q = f"""
             SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` 
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
             WHERE Project IS NOT NULL 
               AND TRIM(Project) != ''
               AND (ProjectStatus != 'Archived' OR UPPER(Project) LIKE '%OFFICE%')
@@ -214,33 +213,22 @@ if sidebar_client is not None:
 
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
-        # 🛡️ FIX 1: Enhanced checks to completely reject NaT string placeholders from dead projects
-        if not pulse_df.empty and pd.notnull(pulse_df['last_sync'].iloc[0]):
-            last_sync_str = str(pulse_df['last_sync'].iloc[0]).strip()
+        if not pulse_df.empty and pulse_df['last_sync'].iloc[0]:
+            last_sync_str = str(pulse_df['last_sync'].iloc[0])
             
-            if last_sync_str.lower() not in ['none', 'nan', 'null', 'nat', '']:
-                last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
-                now_utc = pd.Timestamp.now(tz='UTC')
-                
-                # 🛡️ FIX 2: Check total seconds separately before running the integer conversion macro
-                total_seconds = (now_utc - last_sync_ts).total_seconds()
-                
-                if pd.isna(total_seconds) or np.isnan(total_seconds):
-                    st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
-                else:
-                    elapsed_mins = int(total_seconds / 60)
-                    
-                    if elapsed_mins <= 60:
-                        pulse_status = f"🟢 **Live** ({elapsed_mins}m ago)"
-                    elif elapsed_mins <= 180:
-                        pulse_status = f"🟠 **Delayed** ({elapsed_mins}m ago)"
-                    else:
-                        pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
-                        
-                    st.sidebar.markdown(f"**{scope_label}:** {pulse_status}")
-                    st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
+            last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
+            now_utc = pd.Timestamp.now(tz='UTC')
+            elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
+            
+            if elapsed_mins <= 60:
+                pulse_status = f"🟢 **Live** ({elapsed_mins}m ago)"
+            elif elapsed_mins <= 180:
+                pulse_status = f"🟠 **Delayed** ({elapsed_mins}m ago)"
             else:
-                st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
+                pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
+                
+            st.sidebar.markdown(f"**{scope_label}:** {pulse_status}")
+            st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
         else:
             st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
             
@@ -314,7 +302,7 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True
 )
-# --- CSS TO FORCE DATA TABLE PROGRESS COLUMNS RED ---
+# --- NEW INSERTION: CSS TO FORCE DATA TABLE PROGRESS COLUMNS RED ---
 st.sidebar.markdown(
     """
     <style>
@@ -398,22 +386,8 @@ def natural_sort_key(s):
     """
     Splits strings into chunks of text and numbers to allow natural sorting.
     e.g., "10ft (SP32)" -> [10, "ft (sp", 32, ")"]
-    Handles custom text placeholders and alphanumeric channel assignments cleanly.
     """
-    if pd.isna(s) or str(s).strip().lower() in ['nan', 'null', '']:
-        return [9999, ""]
-        
-    val_str = str(s).strip()
-    
-    # Extract channel digit if matching multi-channel pattern to prevent sorting failures
-    if '-ch' in val_str.lower():
-        try:
-            channel_num = re.findall(r'\d+', val_str.lower().split('-ch')[-1])[0]
-            return [int(channel_num), val_str.lower()]
-        except:
-            return [9999, val_str.lower()]
-
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', val_str)]
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
@@ -425,8 +399,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
     """
 
-    if df is None or df.empty: 
-        return go.Figure().update_layout(title="No data available")
+    if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
     plot_df = df.copy() 
@@ -448,64 +421,55 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     proj_num = proj_match[0] if proj_match else ""
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    # 3. THEORETICAL REFERENCE CURVES (Spreadsheet Suffix & Space Safe)
+    # 3. THEORETICAL REFERENCE CURVES (Granular Phase/System Regex Fallbacks)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            proj_str = str(st.session_state.get('selected_project', '')).strip()
+            proj_str = str(st.session_state.get('selected_project', ''))
             proj_match = re.findall(r'\d+', proj_str)
-            clean_job_num = proj_match[0] if proj_match else ""
-            pure_loc = str(curve_id).split('-')[-1].strip()
+            proj_num = proj_match[0] if proj_match else ""
+            loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
 
-            if clean_job_num and pure_loc:
+            if proj_num and loc_part:
+                # Upgraded query using regex to look inside complex text strings
                 target_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE CAST(CurveID AS STRING) LIKE '{clean_job_num}-%'
-                      AND (
-                        CAST(CurveID AS STRING) LIKE '%-{pure_loc}' 
-                        OR CAST(CurveID AS STRING) LIKE '%-{pure_loc}-%'
-                        OR CAST(CurveID AS STRING) LIKE '%-{pure_loc} %'
-                      )
+                    WHERE REGEXP_CONTAINS(CurveID, r'^{proj_num}.*{loc_part}$')
                     ORDER BY Day
                 """
                 target_df = client.query(target_q).to_dataframe()
-                
                 if not target_df.empty:
-                    dash_styles = ['dashdot', 'dash', 'dot', 'longdash']
-                    gray_shades = ['rgba(30,30,30,0.85)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.65)']
+                    dash_styles = ['dashdot', 'dash', 'dot']
+                    gray_shades = ['rgba(30,30,30,0.8)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.7)']
                     
                     for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                         c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                         c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                         ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                         
-                        soil_label = str(cid).replace(f"{clean_job_num}-", "")
+                        # Extract the descriptive midsection (Phase/System info) for the graph label
+                        label_clean = str(cid).replace(f"{proj_num}-", "").replace(f"-{loc_part}", "")
+                        display_label = f"Goal: {label_clean}" if label_clean != loc_part else f"Goal: {loc_part}"
+                        
+                        selected_dash = dash_styles[c_idx % len(dash_styles)]
+                        selected_gray = gray_shades[c_idx % len(gray_shades)]
                         
                         fig.add_trace(go.Scatter(
                             x=c_df['timestamp'], y=ref_y, 
-                            name=f"<b>Goal: {soil_label}</b>", 
+                            name=f"<b>{display_label}</b>", 
                             mode='lines',
-                            line=dict(
-                                color=gray_shades[c_idx % len(gray_shades)], 
-                                width=3.5, 
-                                dash=dash_styles[c_idx % len(dash_styles)], 
-                                shape='spline', 
-                                smoothing=1.3
-                            ),
+                            line=dict(color=selected_gray, width=3.5, dash=selected_dash, shape='spline', smoothing=1.3),
                             legendrank=1 
                         ))
-        except:
+        except Exception as e:
             pass
 
     # 4. SENSOR DATA (Naturally Sorted Group Loops)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
     node_metadata = []
-    # Drop entries missing names to guarantee loop execution safety
-    valid_plot_df = plot_df.dropna(subset=['NodeNum'])
-    
-    for sn in valid_plot_df['NodeNum'].unique():
-        node_df = valid_plot_df[valid_plot_df['NodeNum'] == sn]
+    for sn in plot_df['NodeNum'].unique():
+        node_df = plot_df[plot_df['NodeNum'] == sn]
         depth_val = node_df['Depth'].iloc[0]
         bank_val = node_df['Bank'].iloc[0]
         loc_val = node_df['Location'].iloc[0]
@@ -513,12 +477,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
             display_name = f"{bank_val} ({sn})"
             sort_val = str(bank_val)  
-        elif pd.notnull(depth_val) and not pd.isna(depth_val) and str(depth_val).strip() != '': 
+        elif pd.notnull(depth_val) and not pd.isna(depth_val): 
             display_name = f"{depth_val}ft ({sn})"
-            try:
-                sort_val = f"depth_{float(depth_val):05.1f}" 
-            except:
-                sort_val = f"depth_{str(depth_val)}"
+            sort_val = f"depth_{float(depth_val):05.1f}" 
         else: 
             display_name = f"{loc_val} ({sn})"
             sort_val = str(display_name)
@@ -535,7 +496,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         sn = config['node_num']
         display_name = config['display_name']
         
-        s_df = valid_plot_df[valid_plot_df['NodeNum'] == sn].sort_values('timestamp')
+        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
         
         fig.add_trace(go.Scatter(
@@ -554,12 +515,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
     
-    try:
-        m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
-        for m_dt in m_range:
-            fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
-    except:
-        pass
+    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+    for m_dt in m_range:
+        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
     # 6. LAYOUT & TITLING
     p_name = st.session_state.get('selected_project', 'Project')
@@ -587,7 +545,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
-                                
+                               
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
     """
     Fallback function for hardcoded soil types.
@@ -622,7 +580,7 @@ def run_office_auto_assignment():
                 UNION ALL 
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             ) AS r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry_native` AS n ON CAST(r.NodeNum AS STRING) = CAST(n.NodeNum AS STRING)
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
             WHERE n.Project LIKE '%OFFICE%' 
         ) S ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
         WHEN MATCHED THEN UPDATE SET approve = 'OFFICE'
@@ -633,6 +591,7 @@ def run_office_auto_assignment():
         st.success("✅ Successfully assigned 'OFFICE' status to all relevant telemetry.")
     except Exception as e:
         st.error(f"Auto-assignment failed: {e}")
+
 ##################
 # High temp mask #
 ##################
@@ -641,11 +600,13 @@ def apply_sanity_filter(df):
     Automated filter for rogue data points.
     Flags anything outside the absolute limits of -30°F and 120°F as BADDATA.
     """
-    if df is None or df.empty:
+    if df.empty:
         return df
 
+    # Logic: Mark records outside of strict industrial physical limits [-30, 120]
     bad_condition = (df['temperature'] > 120) | (df['temperature'] < -30)
     
+    # If your view or data holds an approval column, mark it in-memory
     if 'approve' in df.columns:
         df.loc[bad_condition, 'approve'] = 'BADDATA'
     elif 'approval_status' in df.columns:
@@ -670,26 +631,27 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # 🛡️ FIX: Point directly to live project_registry_backup table instead of obsolete backup view
+    # SQL QUERY: Balanced approach showing active field data while purging bad data
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup`
-            WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze', 'Active', 'Initialized')
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
+            WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
               AND UPPER(Project) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
             SELECT 
                 n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            -- Force text safe alignment between historical logs and live sheet strings
-            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry_native` n ON CAST(m.NodeNum AS STRING) = CAST(n.NodeNum AS STRING)
+            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
-              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(CAST(n.NodeNum AS STRING), 'SP'))
+              -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
+              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
+              -- Outlier Shield: Ignore hardware spikes above boiling point
+              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
         ),
         MaxTime AS (
-            SELECT COALESCE(MAX(timestamp), CURRENT_TIMESTAMP()) as max_ts FROM raw_data
+            SELECT MAX(timestamp) as max_ts FROM raw_data
         ),
         LatestStats AS (
             SELECT 
@@ -723,19 +685,9 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     
     try:
         df = client.query(summary_q).to_dataframe()
-        if df is None or df.empty:
-            st.info("No currently active projects tracking data stream windows.")
-            return
-            
-        # 🛡️ FIX: Instantly drop safe values into empty summary metrics to stop integer conversion crashes
-        count_cols = ['checkins_1h', 'checkins_24h', 'supply_kpi', 'return_kpi', 'freeze_kpi']
-        for col in count_cols:
-            if col in df.columns:
-                df[col] = df[col].fillna(0)
-                
         df[['Bank', 'Location']] = df[['Bank', 'Location']].fillna('')
     except Exception as e:
-        st.error(f"Dashboard Summary Extraction Error: {e}")
+        st.error(f"Dashboard Query Failed: {e}")
         return
 
     for project in sorted(df['Project'].unique()):
@@ -761,10 +713,10 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 portal_url = f"https://sf{job_number}.streamlit.app"
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link]({portal_url})")
             
-            # --- ACCURATE SYSTEM COUNTERS ---
-            active_1h = int(p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique())
-            active_24h = int(p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique())
-            total_nodes = int(p_df['NodeNum'].dropna().nunique())
+            # --- FIXED: ACCURATE CHECK-IN COUNTERS ---
+            active_1h = p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()
+            active_24h = p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()
+            total_nodes = p_df['NodeNum'].dropna().nunique()
             
             st.markdown(
                 f"📡 **Hardware Status:** `{active_1h}` nodes pinged in the last hour | "
@@ -772,18 +724,11 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             )
             st.divider() 
 
-            # Data isolation parameters
+            # Data isolation
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
-            
-            is_tp = (
-                p_df['Depth'].notnull() & 
-                (p_df['Depth'].astype(str).str.strip() != '') & 
-                ~is_s & 
-                ~is_r & 
-                ~is_amb
-            )
+            is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
 
             groups_data = [
                 ("📥 Supply", p_df[is_s], "supply_kpi", -10), 
@@ -812,7 +757,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
     """Helper layout compiler to handle repeating column metric sets."""
     st.markdown(f"**{title}**")
-    if g_df is None or g_df.empty or 'latest_temp' not in g_df.columns or g_df['latest_temp'].isnull().all():
+    if g_df.empty or g_df['latest_temp'].isnull().all():
         st.caption("No recent data")
         return
     
@@ -828,8 +773,8 @@ def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label
 
     st.metric("Avg (Latest)", f"{l_conv:.1f}{unit_label}")
     
-    if kpi_col and not g_df[kpi_col].isnull().all():
-        pct = g_df[kpi_col].dropna().iloc[0]
+    if kpi_col:
+        pct = g_df[kpi_col].iloc[0]
         color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
         st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
 
@@ -846,6 +791,8 @@ def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label
     range_html += "</div>"
     st.markdown(range_html, unsafe_allow_html=True)
 
+    st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
+
 
 def get_trend_arrow(current, previous):
     """Helper to generate trend icons with updated blue downward arrow."""
@@ -854,6 +801,7 @@ def get_trend_arrow(current, previous):
     if delta > 0.1: return f"🔺 +{delta:.1f}"
     if delta < -0.1: return f"🔹 {delta:.1f}"
     return "➡️ 0.0"
+
 #############################
 # - 2. PAGE: TIME vs TEMP - #
 #############################
@@ -1196,9 +1144,9 @@ def assign_row_color(hours):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Strictly locked to: project_registry_backup, master_data_view, and manual_rejections.
+    Strictly locked to: project_registry, master_data_view, and manual_rejections.
     """
-    # 1. HEADER LOGIC (Source: project_registry_backup via Sidebar Session State)
+    # 1. HEADER LOGIC (Source: project_registry via Sidebar Session State)
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
@@ -1760,14 +1708,14 @@ def render_node_selector(reg_df, proj_list):
             
     st.markdown("---")
     with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
-        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry_native` and overwrite them with an exact copy of your staging table.")
+        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact copy of your staging table.")
         confirm_token = st.text_input("Type out 'OVERWRITE' to authorize replacing production logs:", value="", key="force_production_overwrite_token_input")
         
         if st.button("💥 Wipe Production & Clone Playground Table", type="primary", use_container_width=True):
             if confirm_token.strip() != "OVERWRITE":
                 st.error("Authorization token verification failed. Action aborted.")
             else:
-                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
+                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
                 dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
                 job_config = bigquery.QueryJobConfig(write_disposition="WRITE_TRUNCATE", destination=prod_table)
                 sql = f"SELECT * FROM `{dummy_table}`"
@@ -1832,7 +1780,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             COALESCE(s.count_24h, 0) as count_24h,
             s.rssi_last_val as rssi_last,
             s.rssi_avg_val as rssi_avg
-        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_native` n
+        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
         LEFT JOIN Stats s ON n.NodeNum = s.NodeNum
         WHERE n.End_Date IS NULL
     """
@@ -1975,122 +1923,111 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 # Function: Status Dashboard (Setup Node Tool) - Left Unchanged
 # ===============================================================
 def render_project_status_dashboard(client, selected_project, unit_label, target_registry):
-    """Renders high-level project summaries segmented by structural hardware groupings."""
     st.subheader("📊 Project Status Summary")
-    query = f"SELECT * FROM `{target_registry}` WHERE Project = @proj_id AND End_Date IS NULL"
+    
+    query = f"""
+        SELECT 
+            n.NodeNum, n.Bank, n.Location, n.Depth,
+            CASE 
+                WHEN (n.Bank LIKE 'S%' OR n.Location LIKE 'S%') AND (n.Bank NOT LIKE '%Amb%' AND n.Location NOT LIKE '%Amb%') THEN 'Supply'
+                WHEN (n.Bank LIKE 'R%' OR n.Location LIKE 'R%') AND (n.Bank NOT LIKE '%Amb%' AND n.Location NOT LIKE '%Amb%') THEN 'Return'
+                WHEN (n.Bank LIKE '%Amb%' OR n.Location LIKE '%Amb%') THEN 'Ambient'
+                WHEN n.Depth IS NOT NULL THEN 'TempPipes'
+                ELSE 'Other'
+            END as hardware_type,
+            AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
+            MIN(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as min_now,
+            MAX(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as max_now,
+            MIN(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN m.temperature END) as min_24h,
+            MAX(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN m.temperature END) as max_24h,
+            AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev,
+            AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN m.temperature END) as avg_6h_prev,
+            COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
+            ARRAY_AGG(m.temperature ORDER BY m.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+            MAX(m.timestamp) as latest_ts
+        FROM `{target_registry}` n
+        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
+        WHERE n.Project = @proj_id AND n.End_Date IS NULL
+        GROUP BY 1, 2, 3, 4, 5
+    """
     
     try:
-        nodes_df = client.query(query, job_config=bigquery.QueryJobConfig(
+        df = client.query(query, job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
         )).to_dataframe()
-        
-        if nodes_df.empty:
-            st.info("No active nodes found for dashboard summary.")
-            return
-
-        telemetry_q = f"""
-            SELECT NodeNum, MAX(timestamp) as latest_ts,
-                   AVG(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_now,
-                   MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as min_now,
-                   MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as max_now,
-                   MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as min_24h,
-                   MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as max_24h,
-                   AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h_prev,
-                   AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN temperature END) as avg_6h_prev,
-                   COUNTIF(timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
-                   ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE Project = @proj_id
-            GROUP BY NodeNum
-        """
-        tel_df = client.query(telemetry_q, job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-        )).to_dataframe()
-        
-        nodes_df['NodeNum'] = nodes_df['NodeNum'].astype(str).str.strip()
-        tel_df['NodeNum'] = tel_df['NodeNum'].astype(str).str.strip()
-        df = pd.merge(nodes_df, tel_df, on='NodeNum', how='left')
-
-        # Software Type-Guard: Safely coerce external text fields dynamically
-        def resolve_hw_type(row):
-            b, l, d = str(row.get('Bank', '')).upper(), str(row.get('Location', '')).upper(), str(row.get('Depth', '')).strip()
-            if ('S' in b or 'S' in l) and 'AMB' not in b and 'AMB' not in l: return 'Supply'
-            if ('R' in b or 'R' in l) and 'AMB' not in b and 'AMB' not in l: return 'Return'
-            if 'AMB' in b or 'AMB' in l: return 'Ambient'
-            if d != '' and d.lower() != 'none' and d != '0': return 'TempPipes'
-            return 'Other'
-
-        df['hardware_type'] = df.apply(resolve_hw_type, axis=1)
-        cols = st.columns(4)
-        type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient": (cols[3], "☁️")}
-        now_utc = pd.Timestamp.now(tz='UTC')
-
-        for h_type, (col, icon) in type_map.items():
-            g_df = df[df['hardware_type'] == h_type]
-            with col:
-                st.markdown(f"#### {icon} {h_type}")
-                if g_df.empty or g_df['latest_ts'].isna().all():
-                    st.caption("No recent data")
-                    continue
-                
-                latest_time = g_df['latest_ts'].max()
-                if pd.isnull(latest_time) or pd.isna(latest_time):
-                    st.subheader("⚠️ Offline")
-                else:
-                    if latest_time.tzinfo is None: latest_time = latest_time.tz_localize('UTC')
-                    else: latest_time = latest_time.tz_convert('UTC')
-                    
-                    # 🛡️ THE INT-CAST SHIELD: Blocks NaN calculation streams before hitting int()
-                    total_s = (now_utc - latest_time).total_seconds()
-                    if pd.isnull(total_s) or np.isnan(total_s):
-                        st.subheader("⚠️ Offline")
-                    else:
-                        lag_hrs = total_s / 3600
-                        if lag_hrs > 1.1: 
-                            st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
-                        else:
-                            val = g_df['avg_now'].mean() if pd.notnull(g_df['avg_now'].mean()) else g_df['latest_temp'].mean()
-                            unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
-                            display_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                            st.title(f"{display_val:.1f}{unit_label}")
-                
-                active_1h = int(g_df['avg_now'].notnull().sum())
-                active_24h = int((g_df['pings_24h'] > 0).sum())
-                st.write(f"**{active_1h}/{len(g_df)}** (1h) | **{active_24h}/{len(g_df)}** (24h)")
-                
-                min_now_val = g_df['min_now'].min()
-                max_now_val = g_df['max_now'].max()
-                min_24h_val = g_df['min_24h'].min()
-                max_24h_val = g_df['max_24h'].max()
-                
-                if pd.notnull(min_now_val) and pd.notnull(max_now_val):
-                    mn = (min_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_now_val
-                    mx = (max_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_now_val
-                    st.caption(f"Cur: {mn:.1f} to {mx:.1f}{unit_label}")
-                else:
-                    st.caption(f"Cur: N/A to N/A")
-                    
-                if pd.notnull(min_24h_val) and pd.notnull(max_24h_val):
-                    mn24 = (min_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_24h_val
-                    mx24 = (max_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_24h_val
-                    st.caption(f"24h: {mn24:.1f} to {mx24:.1f}{unit_label}")
-                else:
-                    st.caption(f"24h: N/A to N/A")
-                
-                t_row = st.columns(2)
-                try:
-                    prev_1h = g_df['avg_1h_prev'].mean()
-                    arrow_1h = get_trend_arrow(val, prev_1h) if pd.notnull(prev_1h) else "➡️ N/A"
-                    t_row[0].caption(f"1h\n{arrow_1h}")
-                except Exception: t_row[0].caption("1h\n➡️ N/A")
-                    
-                try:
-                    prev_6h = g_df['avg_6h_prev'].mean()
-                    arrow_6h = get_trend_arrow(val, prev_6h) if pd.notnull(prev_6h) else "➡️ N/A"
-                    t_row[1].caption(f"6h\n{arrow_6h}")
-                except Exception: t_row[1].caption("6h\n➡️ N/A")
     except Exception as e:
-        st.error(f"Dashboard Panel Fault: {e}")
+        st.error(f"Dashboard Query Failed: {e}")
+        return
+
+    if df.empty:
+        st.info("No active nodes found for dashboard summary.")
+        return
+
+    cols = st.columns(4)
+    type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient": (cols[3], "☁️")}
+    now_utc = pd.Timestamp.now(tz='UTC')
+
+    for h_type, (col, icon) in type_map.items():
+        g_df = df[df['hardware_type'] == h_type]
+        with col:
+            st.markdown(f"#### {icon} {h_type}")
+            if g_df.empty or g_df['latest_ts'].isna().all():
+                st.caption("No recent data")
+                continue
+            
+            latest_time = g_df['latest_ts'].max()
+            if latest_time.tzinfo is None:
+                latest_time = latest_time.tz_localize('UTC')
+            else:
+                latest_time = latest_time.tz_convert('UTC')
+            
+            lag_hrs = (now_utc - latest_time).total_seconds() / 3600
+            val = g_df['avg_now'].mean() if pd.notnull(g_df['avg_now'].mean()) else g_df['latest_temp'].mean()
+            
+            if lag_hrs > 1.1: 
+                st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
+            else: 
+                unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
+                display_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
+                st.title(f"{display_val:.1f}{unit_label}")
+            
+            active_1h = int(g_df['avg_now'].notnull().sum())
+            active_24h = int((g_df['pings_24h'] > 0).sum())
+            st.write(f"**{active_1h}/{len(g_df)}** (1h) | **{active_24h}/{len(g_df)}** (24h)")
+            
+            min_now_val = g_df['min_now'].min()
+            max_now_val = g_df['max_now'].max()
+            min_24h_val = g_df['min_24h'].min()
+            max_24h_val = g_df['max_24h'].max()
+            
+            if pd.notnull(min_now_val) and pd.notnull(max_now_val):
+                mn = (min_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_now_val
+                mx = (max_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_now_val
+                st.caption(f"Cur: {mn:.1f} to {mx:.1f}{unit_label}")
+            else:
+                st.caption(f"Cur: N/A to N/A")
+                
+            if pd.notnull(min_24h_val) and pd.notnull(max_24h_val):
+                mn24 = (min_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_24h_val
+                mx24 = (max_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_24h_val
+                st.caption(f"24h: {mn24:.1f} to {mx24:.1f}{unit_label}")
+            else:
+                st.caption(f"24h: N/A to N/A")
+            
+            t_row = st.columns(2)
+            try:
+                prev_1h = g_df['avg_1h_prev'].mean()
+                arrow_1h = get_trend_arrow(val, prev_1h) if pd.notnull(prev_1h) else "➡️ N/A"
+                t_row[0].caption(f"1h\n{arrow_1h}")
+            except Exception:
+                t_row[0].caption("1h\n➡️ N/A")
+                
+            try:
+                prev_6h = g_df['avg_6h_prev'].mean()
+                arrow_6h = get_trend_arrow(val, prev_6h) if pd.notnull(prev_6h) else "➡️ N/A"
+                t_row[1].caption(f"6h\n{arrow_6h}")
+            except Exception:
+                t_row[1].caption("6h\n➡️ N/A")
             
 # =============================================================================
 # Function: Hardware integrity table (Setup Node Tool - Left Unchanged)
@@ -2382,17 +2319,16 @@ def render_node_selector(reg_df, proj_list):
             
     st.markdown("---")
     with st.expander("🧨 Danger Zone: Sync Playground Staging Table Directly to Production"):
-        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry_native` and overwrite them with an exact copy of your staging table.")
+        st.error("⚠️ CRITICAL WARNING: This action will completely erase ALL records in your live production `node_registry` and overwrite them with an exact copy of your staging table.")
         confirm_token = st.text_input("Type out 'OVERWRITE' to authorize replacing production logs:", value="", key="force_production_overwrite_token_input")
         
         if st.button("💥 Wipe Production & Clone Playground Table", type="primary", use_container_width=True):
             if confirm_token.strip() != "OVERWRITE":
                 st.error("Authorization token verification failed. Action aborted.")
             else:
-                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
+                prod_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
                 dummy_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_dummy"
-                # 🛡️ FIX: Swapped from LoadJobConfig to QueryJobConfig for direct query destination truncation
-                job_config = bigquery.QueryJobConfig(write_disposition="WRITE_TRUNCATE", destination=prod_table)
+                job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
                 sql = f"SELECT * FROM `{dummy_table}`"
                 try:
                     with st.spinner("Executing complete environment teardown and reconstruction workflows..."):
@@ -2524,7 +2460,8 @@ def render_data_processing_page(selected_project):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
                                 if is_lord:
-                                    df_processed['temperature'] = df_processed['temperature'].astype(float)
+                                    from decimal import Decimal
+                                    df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
                                 
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
                                 upload_payload_df = df_processed[columns_to_upload].copy()
@@ -2533,16 +2470,16 @@ def render_data_processing_page(selected_project):
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "FLOAT"), 
+                                        bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
                                     ],
                                     write_disposition="WRITE_APPEND"
                                 )
                                 client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
-                                st.cache_data.clear()
+                                st.cache_data.clear() 
 
             except Exception as e:
-                st.error(f"AppSheet Pipeline Integration Ingestion Failed: {e}")
+                st.error(f"Ingestion Failed: {e}")
 
     # --- TAB 2: EXPORT LOGIC ---
     with tab_export:
@@ -2697,7 +2634,7 @@ def render_data_processing_page(selected_project):
         st.write("Track power transitions, compressor cycles, repair costs, and generator behaviors relative to active freeze down operations.")
         
         try:
-            proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` WHERE ProjectStatus != 'Archived' ORDER BY Project"
+            proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived' ORDER BY Project"
             active_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
         except Exception:
             active_projects_list = ["Office"]
@@ -2787,6 +2724,7 @@ def render_data_processing_page(selected_project):
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
+            # 🛡️ HARDENED FIX: Incorporated a clean database join mapping handle to display explicit Chiller Names
             logs_q = f"""
                 SELECT e.event_id,
                        FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', e.event_timestamp) as Start_Time,
@@ -2849,13 +2787,11 @@ def render_data_processing_page(selected_project):
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
-        inv_raw_df = pd.DataFrame() 
-
         # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
         st.write("#### 📂 Current Inventory of Chillers")
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
-        
         try:
+            # 🛡️ HARDENED PLUG: Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2960,7 +2896,6 @@ def render_data_processing_page(selected_project):
         # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
         st.write("#### ➕ Update Chiller Status & Asset Records")
         is_brand_new_asset = st.checkbox("➕ Check this box to register a completely NEW chiller asset to the fleet", value=False)
-        
         fleet_options = sorted(inv_raw_df['chiller_id'].tolist()) if not inv_raw_df.empty else []
         
         with st.form("hardened_unified_chiller_asset_management_form"):
@@ -3034,7 +2969,7 @@ def render_data_processing_page(selected_project):
                         st.error(f"❌ BigQuery Database Rejected Entry: {bq_fault}")
                         st.code(execution_sql, language="sql")
 ######################
-# Page: Admin Tool Helpers   #
+# Page: Admin Tool Helpers  #
 ######################
 # =============================================================================
 # SUB-TAB WORKSPACE HELPERS: ADVANCED MAINTENANCE & BULK APPROVAL WORKSPACE
@@ -3102,14 +3037,13 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"temperature < {f['threshold']}")
 
-    # 🛡️ FIX: Repaired the mapping logic constraint conflict so 'true' checks for standard TRUE values
     if current_status_filter != "all":
         if current_status_filter == "all but null":
             where_clauses.append("r.approve IS NOT NULL")
         elif current_status_filter == "null (streaming / unreviewed)":
             where_clauses.append("r.approve IS NULL")
         elif current_status_filter == "true":
-            where_clauses.append("UPPER(CAST(r.approve AS STRING)) IN ('TRUE', '1')")
+            where_clauses.append("r.approve IS NULL")
         else:
             where_clauses.append(f"LOWER(CAST(r.approve AS STRING)) = '{str(current_status_filter).lower()}'")
 
@@ -3169,13 +3103,29 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
 
 
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
-    """Main administrative execution module managing bulk data status parameters."""
+    """
+    Main administrative execution module managing bulk data approval modification routines,
+    hourly table consolidation aggregates, and manual rejection string standardization.
+    
+    Parameters:
+    -----------
+    client : bigquery.Client
+        Authenticated Google Cloud BigQuery client instance.
+    full_reg_df : pandas.DataFrame
+        The full sensor node registry dataset mapping nodes to active hardware configurations.
+    selected_project : str
+        The current active project context token filtered out of the sidebar app menu.
+    tab_logistics : streamlit.tabs
+        Bubble handle routing to pass downstream context states across layouts.
+    """
+    # Establish explicit table paths mapped directly out of your data view catalog
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
 
     st.title("⚡ Bulk Approval and Database Maintenance")
     st.divider()
 
+    # Initialize application state memory footprints to prevent unintended app re-runs during data scans
     if "blk_mgmt_profile_df" not in st.session_state: 
         st.session_state.blk_mgmt_profile_df = None
     if "blk_mgmt_total_points" not in st.session_state: 
@@ -3187,26 +3137,33 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.header("🧹 Global Database Cleanup")
     st.write(
         "Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency "
-        "and duplicate records system-wide."
+        "and duplicate records system-wide. "
+        "**Note:** Running this cleanup automatically drops any rogue data points outside the physical bounds of -30°F and 120°F."
     )
     
+    # Split utilities into clean side-by-side management columns
     clean_col1, clean_col2 = st.columns(2)
     
     with clean_col1:
         st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
+        st.caption("Truncates raw timestamps to the hour, filters bad logs, and collapses records to an average value.")
         run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Hourly Consolidation", use_container_width=True)
         
     with clean_col2:
         st.write("##### 🧼 Approval String Casing Standardization")
-        run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE/MASKED'", use_container_width=True)
+        st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
+        run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
 
+    # --- PATHWAY A: COMPREHENSIVE HOURLY HOOD CONSOLIDATION ENGINE ---
     if run_telemetry_cleanup:
         status_box = st.empty()
         try:
+            # 1. Audit active data rows before applying modifications to map the exact purge count
             status_box.markdown("⏳ **[1/4] Calculating initial database row baselines...**")
             count_sp_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
             
+            # 2. Upgraded SensorPush: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
             status_box.markdown("🧹 **[2/4] Consolidating and averaging SensorPush timelines to the hour...**")
             sp_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
@@ -3224,6 +3181,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             """
             client.query(sp_cleanup_sql).result()
             
+            # 3. Upgraded Lord: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
             status_box.markdown("🛰️ **[3/4] Consolidating and averaging Lord Wireless timelines to the hour...**")
             lord_cleanup_sql = f"""
                 CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
@@ -3241,6 +3199,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             client.query(lord_cleanup_sql).result()
             st.cache_data.clear()
 
+            # 4. Pull database row summaries to document the data cleanup audit trail
             status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling consolidated tallies...**")
             count_sp_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
             count_lord_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
@@ -3252,6 +3211,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             status_box.empty()
             st.success("🎉 Global Database Consolidation successfully completed!")
             
+            # Print comparative ledger results matrix
             report_data = [
                 {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged High-Freq Points": f"{sp_removed:,}"},
                 {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged High-Freq Points": f"{lord_removed:,}"},
@@ -3263,21 +3223,24 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             status_box.empty()
             st.error(f"Global Database Consolidation Failed: {e}")
 
+    # --- PATHWAY B: REJECTIONS ENGINE STRING CASING CLEANUP ---
     if run_string_cleanup:
         status_box_str = st.empty()
         try:
             status_box_str.markdown("🧼 **Standardizing mixed-case manual override parameters...**")
-            # 🛡️ FIX: Updated to natively standardize lower case flags to uppercase equivalents ('TRUE', 'MASKED')
+            
+            # Targets the data override source table directly (`manual_rejections`)
+            # Converts lower or mixed-case string variants safely into standard uppercase 'TRUE' or 'FALSE'
             str_cleanup_sql = f"""
                 UPDATE `{target_table}`
                 SET approve = UPPER(TRIM(approve))
-                WHERE LOWER(approve) IN ('true', 'false', 'masked')
+                WHERE LOWER(approve) IN ('true', 'false')
             """
             job = client.query(str_cleanup_sql)
             job.result()
             
             status_box_str.empty()
-            st.success(f"🎉 Text standardization complete! Successfully cleaned {job.num_dml_affected_rows:,} records.")
+            st.success(f"🎉 Text standardization complete! Successfully cleaned {job.num_dml_affected_rows:,} records inside the rejections ledger.")
             st.cache_data.clear()
             time.sleep(0.5)
             st.rerun()
@@ -3288,21 +3251,26 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
     st.divider()
 
     # =========================================================================
-    # UTILITY B: BULK APPROVAL SYSTEM CONTROLS
+    # UTILITY B: BULK APPROVAL AND DATA STATUS CHANGE SYSTEM CONTROLS
     # =========================================================================
     st.header("⚡ Bulk Approval and Data Status Change")
+    st.info("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides.")
     
+    # Render user selection widgets to grab Target Scope (Project/All), Filtering Criteria, and New Status Value
     target_scope, current_status_filter, new_status = render_bulk_approval_controls()
     st.divider()
 
+    # Build active project logic constraints by pulling down matching query string blocks
     filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
     where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
     
+    # Map raw field strings to match the proper table aliases used inside the Master analytical query view
     aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
                               .replace("timestamp", "t.timestamp")
                               .replace("temperature", "t.temperature")
                               .replace("r.approve", "t.approval_status"))
     
+    # Internal function to map and verify exactly how many data rows will be changed before saving
     def run_profile_audit():
         status_q = f"""
             SELECT  
@@ -3324,10 +3292,14 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                 st.session_state.blk_mgmt_profile_df = pd.DataFrame()
                 st.session_state.blk_mgmt_total_points = 0
 
+    # Step 1 Button: Verification Routine
     if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
-        try: run_profile_audit()
-        except Exception as e: st.error(f"Verification Matrix Compilation Failed: {e}")
+        try:
+            run_profile_audit()
+        except Exception as e:
+            st.error(f"Verification Matrix Compilation Failed: {e}")
 
+    # Render results grid if data profile calculations are actively held in app cache states
     if st.session_state.blk_mgmt_profile_df is not None:
         if not st.session_state.blk_mgmt_profile_df.empty:
             st.subheader("📊 Current Node Status")
@@ -3337,10 +3309,14 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
             st.warning("No telemetry data points found matching this configuration window.")
 
     st.divider()
+    st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
     
+    # Step 2: Form Checkbox and Execution Engine Block
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
-            if new_status == "true":
+            
+            # PATH A: If target override is TRUE, drop tracking tokens entirely out of the rejections table so they re-approve
+            if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
                     WHERE STRUCT(NodeNum, timestamp) IN (
@@ -3349,6 +3325,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                         WHERE {aliased_where}
                     )
                 """
+            # PATH B: If target override is a custom flag (FALSE, BADDATA, MASK), merge row coordinates into manual_rejections
             else:
                 sql = f"""
                     MERGE `{target_table}` T
@@ -3369,21 +3346,25 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_l
                     job = client.query(sql)
                     job.result()
                 
-                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records.")
+                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records inside the registry ledger.")
                 st.cache_data.clear()
-                run_profile_audit()
+                run_profile_audit() # Refresh data metrics locally
                 st.balloons()
                 time.sleep(1.0)
                 st.rerun()
             except Exception as e:
                 st.error(f"Execution Error: {e}")
+                st.code(sql, language="sql")
 
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
-    """Executes a proper database commit to write approvals, rejections, or flags."""
+    """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
     client = get_bq_client()
     if client is None: return False
         
-    ts_str = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if isinstance(timestamp, pd.Timestamp) else str(timestamp)
+    if isinstance(timestamp, pd.Timestamp):
+        ts_str = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')
+    else:
+        ts_str = str(timestamp)
 
     write_q = f"""
         MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
@@ -3403,76 +3384,82 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
         return False
 
 # =============================================================================
-# WORKER UTILITIES: NODE LOGISTICS ENGINE
+# WORKER UTILITIES: NODE LOGISTICS ENGINE (FROM TOOLS)
 # =============================================================================
 
 def render_node_action_manager(client, selected_node_data, reg_df, proj_list, target_registry):
-    """Renders data assignment guidelines for Google Sheet backed external table arrays."""
-    st.markdown(f"### ⚙️ Operational Settings Inspector: **{selected_node_data.get('NodeNum')}**")
-    st.info(
-        "ℹ️ **External Table Configuration Notice:** This hardware registry is linked directly to a live Google Spreadsheet. "
-        "To modify allocation assignments, update borehole paths, adjust deployment depths, or toggle active status parameters, "
-        "please open the underlying configuration document directly."
-    )
-    
-    with st.expander("📊 View Selection Parameter Metadata Snapshot"):
-        st.json(selected_node_data)
+    """Renders editing form panels and handles transactional database appends."""
+    st.markdown(f"### ⚙️ Operational Settings Editor: **{selected_node_data.get('NodeNum')}**")
     
     current_project = str(selected_node_data.get('Project', 'Office'))
     current_location = str(selected_node_data.get('Location', ''))
     current_bank = str(selected_node_data.get('Bank', 'A'))
     current_depth = float(selected_node_data.get('Depth', 0.0))
     current_status = str(selected_node_data.get('SensorStatus', 'On Project'))
-    current_phase = str(selected_node_data.get('Phase', ''))
-    current_system = str(selected_node_data.get('System', ''))
     
     raw_date = selected_node_data.get('Start_Date')
-    current_start_date = pd.to_datetime(raw_date).date() if isinstance(raw_date, (datetime, date, pd.Timestamp)) else datetime.now().date()
+    if isinstance(raw_date, (datetime, date)):
+        current_start_date = raw_date
+    else:
+        try: current_start_date = pd.to_datetime(raw_date).date()
+        except Exception: current_start_date = datetime.now().date()
 
     edit_c1, edit_c2, edit_c3 = st.columns(3)
     
     with edit_c1:
         raw_projects = reg_df['Project'].dropna().unique().tolist() if 'reg_df' in locals() else []
         u_projects = sorted(list(set(["Office"] + raw_projects)))
-        new_node_project = st.selectbox("Target Allocation Project:", options=u_projects, index=u_projects.index(current_project) if current_project in u_projects else 0)
+        new_node_project = st.selectbox(
+            "Target Allocation Project:", 
+            options=u_projects, 
+            index=u_projects.index(current_project) if current_project in u_projects else 0
+        )
         new_node_location = st.text_input("Target Allocation Location / Borehole:", value=current_location)
 
     with edit_c2:
         bank_options = ["A", "B", "C", "D", "E", "X"]
-        new_node_bank = st.selectbox("Bank Designation String:", options=bank_options, index=bank_options.index(current_bank) if current_bank in bank_options else 0)
-        new_node_depth = st.number_input("Sensor Vertical Placement Depth (Feet):", value=float(current_depth), step=1.0, format="%.2f")
+        new_node_bank = st.selectbox(
+            "Bank Designation String:", 
+            options=bank_options, 
+            index=bank_options.index(current_bank) if current_bank in bank_options else 0
+        )
+        new_node_depth = st.number_input(
+            "Sensor Vertical Placement Depth (Feet):", 
+            value=float(current_depth), step=1.0, format="%.2f"
+        )
 
     with edit_c3:
         status_options = ["On Project", "In Office/Shop", "Decommissioned", "Spare/Storage"]
-        new_node_status = st.selectbox("Operational Tracking Status:", options=status_options, index=status_options.index(current_status) if current_status in status_options else 0)
+        new_node_status = st.selectbox(
+            "Operational Tracking Status:", 
+            options=status_options, 
+            index=status_options.index(current_status) if current_status in status_options else 0
+        )
         new_node_start_date = st.date_input("Deployment Modification Effective Date:", value=current_start_date)
-
-    # ➕ Added: Sub-Phase and Loop System Layout Fields for the Tech Team Form Roster
-    form_col_add1, form_col_add2 = st.columns(2)
-    new_node_phase = form_col_add1.text_input("Project Sub-Phase Assignment Token:", value=current_phase, placeholder="e.g., Phase 1, Stage B")
-    new_node_system = form_col_add2.text_input("Mechanical Chiller Loop System Name:", value=current_system, placeholder="e.g., Freeze Loop A, Return Collector")
 
     st.markdown("#### 🚀 Step 3: Authorize Change Record")
     with st.expander("⚠️ View Registry Transaction Script Actions"):
-        st.write(f"Executing this deployment write adds a tracking line into `{target_registry}` effective **{new_node_start_date.strftime('%m/%d/%Y')}**.")
+        st.write(
+            f"Executing this deployment write adds a tracking line into `{target_registry}` mapping "
+            f"**{selected_node_data.get('NodeNum')}** to Project **{new_node_project}** at depth **{new_node_depth} ft** "
+            f"effective **{new_node_start_date.strftime('%m/%d/%Y')}**."
+        )
         
         if st.checkbox("I verify that these field allocation parameters match our physical sensor logs.", key="confirm_node_logistics_action_write"):
             if st.button(f"💾 Append Deployment Update for {selected_node_data.get('NodeNum')}", type="primary", use_container_width=True):
-                # 🛡️ FIX: Re-inserted missing payload key parameters to balance against your explicit schema rules
                 new_logistics_payload = [{
                     "NodeNum": str(selected_node_data.get('NodeNum')).strip(),
                     "Project": str(new_node_project).strip(),
                     "Location": str(new_node_location).strip(),
                     "Bank": str(new_node_bank).strip().upper(),
                     "Depth": float(new_node_depth),
-                    "Start_Date": str(new_node_start_date.strftime('%Y-%m-%d')), 
-                    "SensorStatus": str(new_node_status).strip(),
-                    "Phase": str(new_node_phase).strip(),
-                    "System": str(new_node_system).strip()
+                    "Start_Date": str(new_node_start_date.strftime('%Y-%m-%d')), # Standardized date format string pass
+                    "SensorStatus": str(new_node_status).strip()
                 }]
                 
                 try:
                     with st.spinner("Appending tracking metrics to node registry matrix..."):
+                        # Locate inside render_admin_page() -> tab_bulk_config
                         job_config = bigquery.LoadJobConfig(
                             schema=[
                                 bigquery.SchemaField("NodeNum", "STRING"),
@@ -3482,24 +3469,24 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                                 bigquery.SchemaField("Depth", "FLOAT"),
                                 bigquery.SchemaField("SensorStatus", "STRING"),
                                 bigquery.SchemaField("Start_Date", "DATE"),
-                                bigquery.SchemaField("Phase", "STRING"),
-                                bigquery.SchemaField("System", "STRING"),
+                                bigquery.SchemaField("Phase", "STRING"),   # ➕ Add
+                                bigquery.SchemaField("System", "STRING"),  # ➕ Add
                             ],
                             write_disposition="WRITE_APPEND"
                         )
                         log_df = pd.DataFrame(new_logistics_payload)
                         client.load_table_from_dataframe(log_df, target_registry, job_config=job_config).result()
                         
-                    st.success(f"🎉 Success! Asset registry mapping updated cleanly.")
+                    st.success(f"🎉 Success! Asset registry mapping updated for node {selected_node_data.get('NodeNum')}.")
                     st.cache_data.clear()
                     time.sleep(1.0)
                     st.rerun()
                 except Exception as log_err:
-                    st.error(f"❌ Failed to commit node asset updates: {log_err}")
+                    st.error(f"❌ Failed to commit node asset updates to registry table: {log_err}")
 
 
 def render_data_checker(client, full_reg_df):
-    """Renders a quality assurance diagnostics matrix highlighting configuration risks."""
+    """Renders a quality assurance diagnostics matrix highlighting configuration or orphan risks."""
     st.divider()
     st.markdown("### 🔍 System Registry Diagnostics Audit")
     
@@ -3507,7 +3494,7 @@ def render_data_checker(client, full_reg_df):
         try:
             orphan_q = f"""
                 SELECT DISTINCT r.NodeNum, r.Project, r.Location 
-                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_native` r
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` r
                 LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` i 
                   ON TRIM(r.NodeNum) = TRIM(i.NodeNum)
                 WHERE i.NodeNum IS NULL AND r.NodeNum IS NOT NULL
@@ -3515,13 +3502,14 @@ def render_data_checker(client, full_reg_df):
             """
             orphan_df = client.query(orphan_q).to_dataframe()
             if not orphan_df.empty:
-                st.warning("⚠️ **Orphan Sensor Alert:** Discovered deployment node tags lacking inventory keys:")
+                st.warning("⚠️ **Orphan Sensor Alert:** The following node tags exist in deployment schedules but lack hardware index keys:")
                 st.dataframe(orphan_df, use_container_width=True, hide_index=True)
             else:
                 st.success("✅ All registered node mappings align cleanly with the Hardware Inventory catalog.")
         except Exception as e:
             st.caption(f"Integrity check skipped or loading: {e}")
-            
+
+
 # =============================================================================
 # DATA RECOVERY REQUISITE ENGINE HELPERS
 # =============================================================================
@@ -3579,16 +3567,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         return
 
     # 1. CENTRAL TRANSACTIONAL DATA FETCH
-    target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
-    # 🛡️ FIX: Ensure systemic calls target live project_registry elements cleanly
-    table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
-    
+    target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
     try:
-        # Load registry data path structure
-        query_all_reg = f"SELECT * FROM `{target_registry_path}` WHERE End_Date IS NULL"
-        full_reg_df = client.query(query_all_reg).to_dataframe()
+        # Single-pass database join with real-time latency calculations for the grids
+        full_reg_df = load_lab_node_registry_data(target_registry_path)
         
-        proj_reg_q = f"SELECT Project FROM `{table_projects}` WHERE ProjectStatus != 'Archived'"
+        proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
         available_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
     except Exception as e:
         st.error(f"Registry Link Offline: {e}")
@@ -3605,6 +3589,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         "❄️ Chiller Operations"
     ])
 
+    
     # --- SUB-TAB 1: ADMIN SUMMARY ---
     with tab_admin_sum:
         st.subheader("📋 Centralized Infrastructure Status Overview")
@@ -3651,8 +3636,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     COUNT(DISTINCT n.NodeNum) as Mapped_Sensors,
                     COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_in_last_6_hours,
                     COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_in_last_24_hours
-                FROM `{target_registry_path}` n
-                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON CAST(n.NodeNum AS STRING) = CAST(m.NodeNum AS STRING)
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry` n
+                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum
                 WHERE n.End_Date IS NULL
                 GROUP BY n.Project
             )
@@ -3664,9 +3649,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 COALESCE(m.Mapped_Sensors, 0) as Mapped_Sensors,
                 COALESCE(m.Active_in_last_6_hours, 0) as Active_in_last_6_hours,
                 COALESCE(m.Active_in_last_24_hours, 0) as Active_in_last_24_hours
-            FROM `{table_projects}` p
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` p
             LEFT JOIN Metrics m ON p.Project = m.Project
-            WHERE p.ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze', 'Active', 'Initialized')
+            WHERE p.ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
               AND UPPER(p.Project) NOT LIKE '%OFFICE%'
             ORDER BY p.Project ASC
         """
@@ -3678,7 +3663,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             for _, r in sum_summary_df.iterrows():
                 p_status = str(r['ProjectStatus']).strip()
                 f_date = r['Date_Freezedown']
-                status_tracking_text = "Initialized"
+                status_tracking_text = "Not Freezing"
                 
                 if pd.notnull(f_date):
                     days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
@@ -3690,8 +3675,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         status_tracking_text = f"Day {days_count} of Maintenance"
                     elif p_status.lower() == "pre-freeze":
                         status_tracking_text = f"Pre-freeze (Day {days_count})"
-                else:
-                    status_tracking_text = f"Status Tier: {p_status}"
                 
                 rows.append({
                     "Project ID": r['Project'],
@@ -3715,7 +3698,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         all_projects_q = f"""
             WITH NodeCounts AS (
                 SELECT Project, COUNT(DISTINCT NodeNum) as Nodes_Assigned
-                FROM `{target_registry_path}`
+                FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`
                 WHERE End_Date IS NULL
                 GROUP BY Project
             )
@@ -3724,7 +3707,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 COALESCE(p.ProjectName, p.Project) as `Project Name`,
                 p.ProjectStatus as `Project Status`,
                 COALESCE(n.Nodes_Assigned, 0) as `Sensors Assigned`
-            FROM `{table_projects}` p
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` p
             LEFT JOIN NodeCounts n ON p.Project = n.Project
             ORDER BY p.ProjectStatus ASC, p.Project ASC
         """
@@ -3746,8 +3729,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
     # =========================================================================
-#     # SUB-TAB 3: NODE MASTER
-# =========================================================================
+    # SUB-TAB 3: NODE MASTER
+    # =========================================================================
     with tab_logistics:
         st.title("📋 Node Status and Changes")
         st.write("Manage active asset configurations, update field deployment depths, or reassign operational node locations.")
@@ -3853,15 +3836,15 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 
                 # 3. CALL ACTION FORM HANDLER COMPONENT WITH CASCADING VARIABLES
                 try:
-                    # 🛡️ FIX: Cleaned up link wrappers to call verified component targets natively
-                    render_node_action_manager(
+                    render_lab_node_action_manager(
                         client=client,
                         selected_node_data=chosen_target_record,
                         reg_df=full_reg_df,
                         proj_list=u_projects,
+                        known_project_locations=u_locations, 
                         target_registry=target_registry_path
                     )
-                    render_data_checker(client, full_reg_df)
+                    render_lab_data_checker(client, full_reg_df)
                 except Exception as routing_err:
                     st.error(f"Internal workspace linkage failed: {routing_err}")
             else:
@@ -4003,10 +3986,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             api_root_id = str(s_id).split('.')[0].strip()
                             friendly_name = hardware_map.get(api_root_id)
                             
+                            # 🛡️ HARDENED MATCH GUARD FIX: Check both friendly name maps and Raw ID listings
                             is_target_match = False
                             if friendly_name and friendly_name in final_target_nodes:
                                 is_target_match = True
                             else:
+                                # Fallback check: look up if the raw API tracking reference maps back to our targeted assets list
                                 for target_node in final_target_nodes:
                                     if reverse_hardware_map.get(target_node) == api_root_id:
                                         friendly_name = target_node
@@ -4075,7 +4060,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         st.session_state['recovery_cached_stats'] = db_max_timestamps
                         st.session_state['recovery_run_complete'] = True
                         st.cache_data.clear()
-                        time.sleep(0.5)
                         st.rerun()
                     except Exception as bq_err:
                         st.error(f"Batch loading Ingestion pipeline failure: {bq_err}")
@@ -4120,8 +4104,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         
         # Navigation actions row
         action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
-        
-        # 🛡️ FIX: Target the live production directory schema explicitly
         table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
     
         if action == "📋 Project List":
@@ -4131,8 +4113,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 with st.spinner("Extracting structural project lists..."):
                     df = client.query(query).to_dataframe()
                 if not df.empty:
-                    date_cols = ['Date_Initialized', 'Date_Freezedown', 'Date_Maintenance', 'Date_Archived']
-                    for col in date_cols:
+                    for col in ['Date_Freezedown', 'Date_Completion']:
                         if col in df.columns:
                             df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
                     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -4170,19 +4151,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 n_city = c_g1.text_input("City Deployment Field", value=template_data.get('City', ''))
                 n_tz = c_g2.text_input("Operational Timezone Reference", value=template_data.get('Timezone', 'America/Los_Angeles'))
                 
-                col_status, col_asbuilt = st.columns(2)
-                # 🛡️ FIX: Standardized creation options to cleanly map to your lifecycle database values
-                n_status = col_status.selectbox("Project Status", ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"], index=0)
-                n_as_built = col_asbuilt.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
-                
-                st.markdown("---")
-                st.caption("📅 **Project Lifecycle Target Dates**")
-                d_col1, d_col2, d_col3, d_col4 = st.columns(4)
-                
-                n_date_init = d_col1.date_input("Date Initialized", value=None)
-                n_date_freeze = d_col2.date_input("Date Freezedown", value=None)
-                n_date_maint = d_col3.date_input("Date Maintenance", value=None)
-                n_date_arch = d_col4.date_input("Date Archived", value=None)
+                n_up_notes = st.text_input("Automated Pipeline Sync Notes (UploadNote)", value=template_data.get('UploadNote', 'Data will be uploaded once per business day.'))
+                n_as_built = st.text_input("Engineering Archive ID (AsBuiltFile)", value=template_data.get('AsBuiltFile', ''))
+                n_notes = st.text_area("Initial Site Engineering Field Notes", value=template_data.get('EngNotes', ''))
                 
                 if st.form_submit_button("🚀 Commit New Project Entry"):
                     if not n_code.strip():
@@ -4192,20 +4163,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         safe_n_name = n_name.strip().replace("'", "''")
                         safe_n_city = n_city.strip().replace("'", "''")
                         safe_n_tz = n_tz.strip().replace("'", "''")
+                        safe_n_up_notes = n_up_notes.strip().replace("'", "''")
                         safe_n_as_built = n_as_built.strip().replace("'", "''")
-                        
-                        def sql_date(d_val):
-                            return f"DATE('{d_val}')" if d_val else "NULL"
+                        safe_n_notes = n_notes.strip().replace("'", "''")
     
                         insert_q = f"""
-                            INSERT INTO `{table_projects}` (
-                                Project, ProjectName, ProjectStatus, City, Timezone, AsBuiltFile,
-                                Date_Initialized, Date_Freezedown, Date_Maintenance, Date_Archived
-                            )
-                            VALUES (
-                                '{safe_n_code}', '{safe_n_name}', '{n_status}', '{safe_n_city}', '{safe_n_tz}', '{safe_n_as_built}',
-                                {sql_date(n_date_init)}, {sql_date(n_date_freeze)}, {sql_date(n_date_maint)}, {sql_date(n_date_arch)}
-                            )
+                            INSERT INTO `{table_projects}` (Project, ProjectName, ProjectStatus, City, Timezone, UploadNote, AsBuiltFile, EngNotes)
+                            VALUES ('{safe_n_code}', '{safe_n_name}', 'Initialized', '{safe_n_city}', '{safe_n_tz}', '{safe_n_up_notes}', '{safe_n_as_built}', '{safe_n_notes}')
                         """
                         try:
                             client.query(insert_q).result()
@@ -4215,95 +4179,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             st.rerun()
                         except Exception as ins_err:
                             st.error(f"Database insertion failed: {ins_err}")
-                        
-        elif action == "🔧 Edit Project Metadata":
-            st.subheader(f"🔧 Configuration Editor: {selected_project}")
-            proj_q = f"SELECT * FROM `{table_projects}` WHERE Project = '{selected_project}'"
-            try:
-                p_res = client.query(proj_q).to_dataframe()
-            except Exception as e:
-                p_res = pd.DataFrame()
-                st.error(f"Error querying table metadata: {e}")
-            
-            if p_res.empty:
-                st.error("Please pick an active project in the sidebar to modify metadata metrics.")
-            else:
-                p_data = p_res.iloc[0].to_dict()
-                with st.form("comprehensive_edit_project_pm"):
-                    col1, col2 = st.columns(2)
-                    u_project_id = col1.text_input("Project ID", value=p_data.get('Project', ''), disabled=True)
-                    u_project_name = col2.text_input("Friendly Project Name", value=p_data.get('ProjectName', ''))
     
-                    c3, c4 = st.columns(2)
-                    u_city = c3.text_input("City", value=p_data.get('City', ''))
-                    u_tz = c4.text_input("Timezone", value=p_data.get('Timezone', 'America/Los_Angeles'))
-                    
-                    u_up_notes = st.text_input("Upload Notes", value=p_data.get('UploadNote', ''))
-                    u_as_built = st.text_input("As-Built File Tracking ID", value=p_data.get('AsBuiltFile', ''))
-    
-                    st.divider()
-                    st.markdown("#### 🔄 Lifecycle Status & Target Phase Date")
-                    col_status, col_date = st.columns(2)
-                    
-                    status_options = ["Initialized", "Pre-freeze", "Freezedown", "Maintenance", "Archived"]
-                    curr_status = p_data.get('ProjectStatus', 'Initialized')
-                    s_idx = status_options.index(curr_status) if curr_status in status_options else 0
-                    u_status = col_status.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
-                    
-                    # 🛡️ FIX: Mapped precisely to your production schema name layout keys
-                    status_date_mappings = {
-                        "Initialized": "Date_Initialized",
-                        "Pre-freeze": "Date_Pre_Freeze",
-                        "Freezedown": "Date_Freezedown",
-                        "Maintenance": "Date_Maintenance",
-                        "Archived": "Date_Archived"
-                    }
-                    
-                    target_date_column = status_date_mappings.get(u_status, "Date_Freezedown")
-                    
-                    def safe_date(d):
-                        return pd.to_datetime(d).date() if pd.notnull(d) and str(d) != 'NaT' else None
-                        
-                    u_phase_date = col_date.date_input(
-                        f"Set Date for Phase: {u_status}", 
-                        value=safe_date(p_data.get(target_date_column))
-                    )
-    
-                    st.divider()
-                    u_notes = st.text_area("Engineering & Site Notes Logs", value=p_data.get('EngNotes', ''))
-    
-                    if st.form_submit_button("💾 Overwrite Project Registry Information"):
-                        formatted_date_clause = f"DATE('{u_phase_date}')" if (u_phase_date and str(u_phase_date) != 'None') else "NULL"
-                        
-                        safe_name = u_project_name.strip().replace("'", "''")
-                        safe_city = u_city.strip().replace("'", "''")
-                        safe_tz = u_tz.strip().replace("'", "''")
-                        safe_up_notes = u_up_notes.strip().replace("'", "''")
-                        safe_as_built = u_as_built.strip().replace("'", "''")
-                        safe_notes = u_notes.strip().replace("'", "''")
-                        
-                        update_q = f"""
-                            UPDATE `{table_projects}` SET 
-                                ProjectName = '{safe_name}', 
-                                ProjectStatus = '{u_status}', 
-                                City = '{safe_city}',
-                                Timezone = '{safe_tz}', 
-                                UploadNote = '{safe_up_notes}', 
-                                AsBuiltFile = '{safe_as_built}',
-                                EngNotes = '{safe_notes}', 
-                                {target_date_column} = {formatted_date_clause}
-                            WHERE Project = '{selected_project}'
-                        """
-                        try:
-                            client.query(update_q).result()
-                            st.success(f"✅ Configuration and {target_date_column} modified for: {selected_project}")
-                            st.cache_data.clear()
-                            time.sleep(1)
-                            st.rerun()
-                        except Exception as query_err:
-                            st.error(f"❌ BigQuery update rejected: {query_err}")
-                            st.code(update_q, language="sql")  
-                            
         # =========================================================================
         # SUB-TAB 5: PROJECT MASTER
         # =========================================================================
@@ -4341,10 +4217,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     s_idx = status_options.index(curr_status) if curr_status in status_options else 0
                     u_status = col_status.selectbox("Lifecycle Status Tier", status_options, index=s_idx)
                     
-                    # 🛡️ FIX: Standardized schema map token key straight to Date_Pre_Freeze
+                    # Dynamic mapping dictionary linking choices to your real database columns
                     status_date_mappings = {
                         "Initialized": "Date_Initialized",
-                        "Pre-freeze": "Date_Pre_Freeze",
+                        "Pre-freeze": "Date_PreFreeze",
                         "Freezedown": "Date_Freezedown",
                         "Maintenance": "Date_Maintenance",
                         "Archived": "Date_Archived"
@@ -4410,7 +4286,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             horizontal=True, 
             key="bulk_uploads_engine_radio"
         )
-        target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
+        target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
         target_inventory_path = f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory"
         target_curves_path = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
         
@@ -4442,7 +4318,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 }).dropna()
                                 staging_table = f"{PROJECT_ID}.{DATASET_ID}.temp_staged_inventory_import"
                                 
-                                # Explicitly enforce string formatting types on the staging environment
+                                # 🛡️ HARDENED FIX: Explicitly enforce string formatting types on the staging environment
                                 load_job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("RawID", "STRING"),
@@ -4485,7 +4361,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             st.error(f"Missing required allocation column labels: {required - set(df_upload.columns)}")
                         else:
                             with st.spinner("Streaming spatial allocations into active registry view..."):
-                                # Force explicit string formatting to guarantee 16-byte API safety
+                                # 🛡️ HARDENED FIX: Force explicit string formatting to guarantee 16-byte API safety
                                 if 'Start_Date' in df_upload.columns:
                                     df_upload['Start_Date'] = pd.to_datetime(df_upload['Start_Date'], errors='coerce').dt.strftime('%Y-%m-%d')
                                 else:
@@ -4506,7 +4382,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                                 if 'Depth' in df_upload.columns:
                                     df_upload['Depth'] = pd.to_numeric(df_upload['Depth'], errors='coerce').fillna(0.0)
 
-                                # Explicitly enforce the table layout schema configuration
+                                # 🛡️ HARDENED FIX: Explicitly enforce the table layout schema configuration
                                 job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("NodeNum", "STRING"),
@@ -4527,6 +4403,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             st.rerun()
                     except Exception as upload_err:
                         st.error(f"Bulk hardware deployment logging operation failed: {upload_err}")
+                        
 
 # =========================================================================
     # SUB-TAB 7: CHILLER OPERATIONS & SYSTEM MANIFEST
@@ -4665,11 +4542,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
 @st.cache_data(ttl=300)
 def load_lab_node_registry_data(target_table):
-    """Safely assembles asset inventories with matching real-time ping lag windows from external STRING fields."""
+    """Safely assembles asset inventories with matching real-time ping lag windows."""
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     try:
-        # 🛡️ EXTERNAL TRANSITION SHIELD: Virtual cast string attributes to structured keys on query execution
         master_query = f"""
             WITH LatestTelemetry AS (
                 SELECT 
@@ -4681,19 +4557,16 @@ def load_lab_node_registry_data(target_table):
             ),
             AssignmentWindows AS (
                 SELECT 
-                    NodeNum, 
-                    SAFE_CAST(Start_Date AS DATE) as Start_Date, 
-                    COALESCE(SAFE_CAST(End_Date AS DATE), CURRENT_DATE()) AS Effective_End,
-                    DATE_DIFF(COALESCE(SAFE_CAST(End_Date AS DATE), CURRENT_DATE()), SAFE_CAST(Start_Date AS DATE), DAY) * 24 AS Expected_Hours
-                FROM `{target_table}` 
-                WHERE Project != 'Dead' AND Start_Date IS NOT NULL
+                    NodeNum, Start_Date, COALESCE(End_Date, CURRENT_DATE()) AS Effective_End,
+                    DATE_DIFF(COALESCE(End_Date, CURRENT_DATE()), Start_Date, DAY) * 24 AS Expected_Hours
+                FROM `{target_table}` WHERE Project != 'Dead'
             ),
             ActualProjectPings AS (
                 SELECT 
                     m.NodeNum, a.Start_Date,
                     COUNT(DISTINCT TIMESTAMP_TRUNC(m.timestamp, HOUR)) AS Actual_Pings_Logged
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-                INNER JOIN AssignmentWindows a ON CAST(m.NodeNum AS STRING) = CAST(a.NodeNum AS STRING)
+                INNER JOIN AssignmentWindows a ON m.NodeNum = a.NodeNum 
                   AND EXTRACT(DATE FROM m.timestamp) BETWEEN a.Start_Date AND a.Effective_End
                 GROUP BY m.NodeNum, a.Start_Date
             )
@@ -4701,22 +4574,17 @@ def load_lab_node_registry_data(target_table):
                 R.*, T.last_ping, T.last_temp, A.Expected_Hours,
                 COALESCE(P.Actual_Pings_Logged, 0) AS Actual_Pings_Logged
             FROM `{target_table}` R
-            LEFT JOIN LatestTelemetry T ON CAST(R.NodeNum AS STRING) = CAST(T.NodeNum AS STRING)
-            LEFT JOIN AssignmentWindows A ON CAST(R.NodeNum AS STRING) = CAST(A.NodeNum AS STRING) 
-                AND SAFE_CAST(R.Start_Date AS DATE) = A.Start_Date
-            LEFT JOIN ActualProjectPings P ON CAST(R.NodeNum AS STRING) = CAST(P.NodeNum AS STRING) 
-                AND SAFE_CAST(R.Start_Date AS DATE) = P.Start_Date
+            LEFT JOIN LatestTelemetry T ON R.NodeNum = T.NodeNum
+            LEFT JOIN AssignmentWindows A ON R.NodeNum = A.NodeNum AND R.Start_Date = A.Start_Date
+            LEFT JOIN ActualProjectPings P ON R.NodeNum = P.NodeNum AND R.Start_Date = P.Start_Date
         """
         df = client.query(master_query).to_dataframe()
         now_utc = pd.Timestamp.now(tz='UTC')
         
-        if df is None or df.empty:
-            return pd.DataFrame()
-            
-        if 'last_ping' in df.columns:
+        if not df.empty and 'last_ping' in df.columns:
             df['hours_hidden'] = df['last_ping'].apply(
-                lambda x: (now_utc - pd.to_datetime(x, utc=True)).total_seconds() / 3600.0
-                if pd.notnull(x) and str(x).strip().lower() != 'nat' else float('inf')
+                lambda x: (now_utc - pd.to_datetime(x).tz_convert('UTC')).total_seconds() / 3600.0
+                if pd.notnull(x) else float('inf')
             )
             df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
             
@@ -4731,7 +4599,7 @@ def load_lab_node_registry_data(target_table):
             df['hours_hidden'] = float('inf')
             df['Last Seen'] = "❌ Never"
             
-        if 'Expected_Hours' in df.columns:
+        if not df.empty and 'Expected_Hours' in df.columns:
             exp_hours = pd.to_numeric(df['Expected_Hours'], errors='coerce').fillna(0)
             act_pings = pd.to_numeric(df['Actual_Pings_Logged'], errors='coerce').fillna(0)
             raw_efficiency = np.where(exp_hours <= 0, 0.0, np.minimum(100.0, np.round((act_pings / exp_hours) * 100, 1)))
@@ -4984,7 +4852,7 @@ def render_lab_data_checker(client, reg_df):
         return
 
     # Extract clean baseline reference structures
-    active_registry_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
+    active_registry_table = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
     master_telemetry_view = f"{PROJECT_ID}.{DATASET_ID}.master_data_view"
     
     c1, c2, c3, c4 = st.tabs([
