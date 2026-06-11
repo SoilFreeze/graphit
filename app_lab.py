@@ -5,10 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import datetime, timedelta, timezone, date, time as dt_time
-import pytz
-import traceback
-import io
+from datetime import datetime, timedelta
 import re
 import numpy as np
 
@@ -19,117 +16,71 @@ st.set_page_config(
     layout="wide"
 )
 
-# Global Database Constants
+# Global Database Constants - Linked to Read-Only Infrastructure
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
-OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
-# Redirection pointed directly to live federated Google Sheet tables
+# Schema-Aligned Table References
 PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
 NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data_view"
+REF_CURVE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
 
 @st.cache_resource
 def get_bq_client():
-    """
-    Initializes and caches the BigQuery connection.
-    Prioritizes Service Account info from st.secrets for Streamlit Cloud.
-    """
+    """Initializes and caches the BigQuery connection."""
     try:
-        SCOPES = [
-            "https://www.googleapis.com/auth/bigquery", 
-            "https://www.googleapis.com/auth/drive" 
-        ]
-        
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             credentials = service_account.Credentials.from_service_account_info(
-                info, 
-                scopes=SCOPES
+                info, scopes=["https://www.googleapis.com/auth/bigquery"]
             )
             return bigquery.Client(credentials=credentials, project=info["project_id"])
-        
         return bigquery.Client(project=PROJECT_ID)
-
     except Exception as e:
         st.error(f"❌ BigQuery Authentication Failed: {e}")
         return None
         
 ############################
-# - 2. DATA ENGINE LOGIC - #
+# - 2. READ-ONLY DATA ENGINE - #
 ############################
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Unified Direct Data Engine.
-    - Strips punctuation (hyphens and colons) to seamlessly match Lord vs SensorPush strings.
-    - Links project names directly to project_registry production sheets.
+    Unified Data Fetcher.
+    Pulls directly from master_data_view. Write operations have been deprecated.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
     clean_token = str(project_id).replace("'", "''").strip()
     base_job_num = clean_token.split('-')[0].strip()
-    is_office = "OFFICE" in clean_token.upper()
 
-    # Visibility filtering conditions
-    if is_office:
-        filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'BADDATA'"
-    else:
-        filter_sql = "AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')"
-
-    # Upgraded Query: Uses REGEXP_REPLACE to normalize Node ID strings dynamically
+    # Sanitized query pulling only from the consolidated view
     query = f"""
-        WITH target_projects AS (
-            SELECT Project FROM `{PROJECT_REGISTRY_TABLE}`
-            WHERE Project = @project_id 
-               OR ProjectName = @project_id
-        ),
-        raw_telemetry AS (
-            SELECT 
-                m.Project,
-                m.NodeNum as RawNode,
-                -- Creates a standardized alphanumeric string (e.g., "5720CH2")
-                REGEXP_REPLACE(UPPER(TRIM(CAST(m.NodeNum AS STRING))), r'[:-]', '') as CleanTelemetryNode,
-                m.temperature,
-                m.timestamp,
-                m.approval_status,
-                COALESCE(m.Location, 'Unassigned Code') as Location,
-                COALESCE(m.Bank, '—') as Bank,
-                m.Depth
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-              {filter_sql}
-        )
         SELECT 
-            t.Project,
-            t.RawNode as NodeNum,
-            t.temperature,
-            t.timestamp,
-            t.approval_status,
-            t.Location,
-            t.Bank,
-            t.Depth
-        FROM raw_telemetry t
-        WHERE (
-            t.Project = @project_id 
-            OR t.Project = '{clean_token}'
-            OR t.Project = '{base_job_num}' 
-            OR t.Project LIKE '{base_job_num}%'
-            OR t.Project IN (SELECT Project FROM target_projects)
-        )
-        ORDER BY t.timestamp ASC
+            m.Project,
+            m.NodeNum,
+            m.temperature,
+            m.timestamp,
+            m.approval_status,
+            COALESCE(m.Location, 'Unassigned') as Location,
+            COALESCE(m.Bank, '—') as Bank,
+            m.Depth
+        FROM `{MASTER_VIEW}` m
+        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+          AND (m.Project = @project_id 
+               OR m.Project LIKE '{base_job_num}%')
+        ORDER BY m.timestamp ASC
     """
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("project_id", "STRING", project_id)
-        ]
+        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
     )
     
     try:
-        query_job = client.query(query, job_config=job_config)
-        return query_job.to_dataframe()
+        return client.query(query, job_config=job_config).to_dataframe()
     except Exception as e:
         st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
