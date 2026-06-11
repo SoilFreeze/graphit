@@ -24,6 +24,10 @@ DATASET_ID = "Temperature"
 PROJECT_ID = "sensorpush-export"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
+# Redirection for Google Sheets / Native Table Migration Phase
+PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
+NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
+
 @st.cache_resource
 def get_bq_client():
     """
@@ -65,7 +69,7 @@ def get_universal_portal_data(project_id):
     query = f"""
         WITH filtered_base AS (
             SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p ON p.Project = @project_id
+            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON p.Project = @project_id
             -- Match against the telemetry's base project string
             WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
@@ -103,7 +107,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 
     query = f"""
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p ON m.Project = p.Project
+        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
         WHERE m.Project = @project_id
         {filter_sql}
         ORDER BY m.timestamp ASC
@@ -154,13 +158,13 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # SQL fix: Exclude empty strings and force inclusion of 'Office'
+
         proj_q = f"""
-            SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` 
+            SELECT CAST(Project AS STRING) as Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
+            FROM `{PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
-              AND TRIM(Project) != ''
-              AND (ProjectStatus != 'Archived' OR UPPER(Project) LIKE '%OFFICE%')
+              AND TRIM(CAST(Project AS STRING)) != ''
+              AND (ProjectStatus != 'Archived' OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
@@ -634,16 +638,16 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     # SQL QUERY: Balanced approach showing active field data while purging bad data
     summary_q = f"""
         WITH active_projects AS (
-            SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup`
+            SELECT CAST(Project AS STRING) as Project, ProjectName, ProjectStatus, Date_Freezedown
+            FROM `{PROJECT_REGISTRY_TABLE}`
             WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
-              AND UPPER(Project) NOT LIKE '%OFFICE%'
+              AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
             SELECT 
-                n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
+                CAST(n.Project AS STRING) as Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
+            JOIN `{NODE_REGISTRY_TABLE}` n ON TRIM(CAST(m.NodeNum AS STRING)) = TRIM(CAST(n.NodeNum AS STRING))
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
               -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
@@ -1144,9 +1148,9 @@ def assign_row_color(hours):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Strictly locked to: project_registry_backup, master_data_view, and manual_rejections.
+    Strictly locked to: project_registry, master_data_view, and manual_rejections.
     """
-    # 1. HEADER LOGIC (Source: project_registry_backup via Sidebar Session State)
+    # 1. HEADER LOGIC (Source: project_registry via Sidebar Session State)
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
@@ -2634,7 +2638,7 @@ def render_data_processing_page(selected_project):
         st.write("Track power transitions, compressor cycles, repair costs, and generator behaviors relative to active freeze down operations.")
         
         try:
-            proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` WHERE ProjectStatus != 'Archived' ORDER BY Project"
+            proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived' ORDER BY Project"
             active_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
         except Exception:
             active_projects_list = ["Office"]
@@ -3567,12 +3571,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         return
 
     # 1. CENTRAL TRANSACTIONAL DATA FETCH
-    target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    # 1. CENTRAL TRANSACTIONAL DATA FETCH     
+    target_registry_path = NODE_REGISTRY_TABLE
     try:
         # Single-pass database join with real-time latency calculations for the grids
         full_reg_df = load_lab_node_registry_data(target_registry_path)
         
-        proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` WHERE ProjectStatus != 'Archived'"
+        proj_reg_q = f"SELECT Project FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE ProjectStatus != 'Archived'"
         available_projects_list = sorted(client.query(proj_reg_q).to_dataframe()['Project'].dropna().unique().tolist())
     except Exception as e:
         st.error(f"Registry Link Offline: {e}")
@@ -3649,7 +3654,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 COALESCE(m.Mapped_Sensors, 0) as Mapped_Sensors,
                 COALESCE(m.Active_in_last_6_hours, 0) as Active_in_last_6_hours,
                 COALESCE(m.Active_in_last_24_hours, 0) as Active_in_last_24_hours
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` p
             LEFT JOIN Metrics m ON p.Project = m.Project
             WHERE p.ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
               AND UPPER(p.Project) NOT LIKE '%OFFICE%'
@@ -3707,7 +3712,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 COALESCE(p.ProjectName, p.Project) as `Project Name`,
                 p.ProjectStatus as `Project Status`,
                 COALESCE(n.Nodes_Assigned, 0) as `Sensors Assigned`
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` p
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` p
             LEFT JOIN NodeCounts n ON p.Project = n.Project
             ORDER BY p.ProjectStatus ASC, p.Project ASC
         """
@@ -4104,7 +4109,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         
         # Navigation actions row
         action = st.radio("Action", ["📋 Project List", "🏗️ New Project", "🔧 Edit Project Metadata"], horizontal=True, key="admin_pm_action_radio")
-        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
+        table_projects = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
     
         if action == "📋 Project List":
             st.subheader("📋 Complete Project Registry Table")
@@ -4286,7 +4291,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             horizontal=True, 
             key="bulk_uploads_engine_radio"
         )
-        target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+        # 1. CENTRAL TRANSACTIONAL DATA FETCH     
+        target_registry_path = NODE_REGISTRY_TABLE
         target_inventory_path = f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory"
         target_curves_path = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
         
