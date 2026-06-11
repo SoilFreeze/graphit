@@ -24,6 +24,10 @@ DATASET_ID = "Temperature"
 PROJECT_ID = "sensorpush-export"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
+# Redirection for Google Sheets / Native Table Migration Phase
+PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
+NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
+
 @st.cache_resource
 def get_bq_client():
     """
@@ -154,13 +158,13 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # SQL fix: Exclude empty strings and force inclusion of 'Office'
+
         proj_q = f"""
-            SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
+            SELECT CAST(Project AS STRING) as Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
+            FROM `{PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
-              AND TRIM(Project) != ''
-              AND (ProjectStatus != 'Archived' OR UPPER(Project) LIKE '%OFFICE%')
+              AND TRIM(CAST(Project AS STRING)) != ''
+              AND (ProjectStatus != 'Archived' OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
@@ -421,55 +425,44 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     proj_num = proj_match[0] if proj_match else ""
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    # 3. THEORETICAL REFERENCE CURVES (Spreadsheet Suffix & Space Safe)
+    # 3. THEORETICAL REFERENCE CURVES (Granular Phase/System Regex Fallbacks)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # 🟢 FORCE STRING & EXTRACT FIRST 4 CHARACTERS SAFELY (e.g., "2541")
-            proj_str = str(st.session_state.get('selected_project', '')).strip()
+            proj_str = str(st.session_state.get('selected_project', ''))
             proj_match = re.findall(r'\d+', proj_str)
-            clean_job_num = proj_match[0] if proj_match else ""
-            
-            # Extract just the exact physical location token (e.g., "T7") safely
-            pure_loc = str(curve_id).split('-')[-1].strip()
+            proj_num = proj_match[0] if proj_match else ""
+            loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
 
-            if clean_job_num and pure_loc:
-                # 🟢 THE MATCHING FIX: Uses the same flexible wildcards as the portal
+            if proj_num and loc_part:
+                # Upgraded query using regex to look inside complex text strings
                 target_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE CAST(CurveID AS STRING) LIKE '{clean_job_num}-%'
-                      AND (
-                        CAST(CurveID AS STRING) LIKE '%-{pure_loc}' 
-                        OR CAST(CurveID AS STRING) LIKE '%-{pure_loc}-%'
-                        OR CAST(CurveID AS STRING) LIKE '%-{pure_loc} %'
-                      )
+                    WHERE REGEXP_CONTAINS(CurveID, r'^{proj_num}.*{loc_part}$')
                     ORDER BY Day
                 """
                 target_df = client.query(target_q).to_dataframe()
-                
                 if not target_df.empty:
-                    dash_styles = ['dashdot', 'dash', 'dot', 'longdash']
-                    gray_shades = ['rgba(30,30,30,0.85)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.65)']
+                    dash_styles = ['dashdot', 'dash', 'dot']
+                    gray_shades = ['rgba(30,30,30,0.8)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.7)']
                     
                     for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                         c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                         c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                         ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                         
-                        # Clean up prefix for display (e.g., "2541-T7-UnSat Fill" -> "T7-UnSat Fill")
-                        soil_label = str(cid).replace(f"{clean_job_num}-", "")
+                        # Extract the descriptive midsection (Phase/System info) for the graph label
+                        label_clean = str(cid).replace(f"{proj_num}-", "").replace(f"-{loc_part}", "")
+                        display_label = f"Goal: {label_clean}" if label_clean != loc_part else f"Goal: {loc_part}"
+                        
+                        selected_dash = dash_styles[c_idx % len(dash_styles)]
+                        selected_gray = gray_shades[c_idx % len(gray_shades)]
                         
                         fig.add_trace(go.Scatter(
                             x=c_df['timestamp'], y=ref_y, 
-                            name=f"<b>Goal: {soil_label}</b>", 
+                            name=f"<b>{display_label}</b>", 
                             mode='lines',
-                            line=dict(
-                                color=gray_shades[c_idx % len(gray_shades)], 
-                                width=3.5, 
-                                dash=dash_styles[c_idx % len(dash_styles)], 
-                                shape='spline', 
-                                smoothing=1.3
-                            ),
+                            line=dict(color=selected_gray, width=3.5, dash=selected_dash, shape='spline', smoothing=1.3),
                             legendrank=1 
                         ))
         except Exception as e:
@@ -645,16 +638,16 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     # SQL QUERY: Balanced approach showing active field data while purging bad data
     summary_q = f"""
         WITH active_projects AS (
-            SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
+            SELECT CAST(Project AS STRING) as Project, ProjectName, ProjectStatus, Date_Freezedown
+            FROM `{PROJECT_REGISTRY_TABLE}`
             WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
-              AND UPPER(Project) NOT LIKE '%OFFICE%'
+              AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
             SELECT 
-                n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
+                CAST(n.Project AS STRING) as Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
+            JOIN `{NODE_REGISTRY_TABLE}` n ON TRIM(CAST(m.NodeNum AS STRING)) = TRIM(CAST(n.NodeNum AS STRING))
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
               -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
@@ -2466,14 +2459,13 @@ def render_data_processing_page(selected_project):
                         is_lord = "-" in str(df_processed['NodeNum'].iloc[0])
                         target_table = "raw_lord" if is_lord else "raw_sensorpush"
                         
-                        # Around line 608 in 2026.06.10 lab.py
                         if st.button(f"🚀 Upload to {target_table}"):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
                                 if is_lord:
-                                    # 🟢 CHANGE: Remove Decimal rounding conversion that forces NUMERIC data types
-                                    df_processed['temperature'] = df_processed['temperature'].astype(float)
+                                    from decimal import Decimal
+                                    df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
                                 
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
                                 upload_payload_df = df_processed[columns_to_upload].copy()
@@ -2482,14 +2474,13 @@ def render_data_processing_page(selected_project):
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
-                                        # 🟢 FIXED: Changed from "NUMERIC" to "FLOAT" to match production
-                                        bigquery.SchemaField("temperature", "FLOAT"), 
+                                        bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
                                     ],
                                     write_disposition="WRITE_APPEND"
                                 )
                                 client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
-                                st.cache_data.clear()
+                                st.cache_data.clear() 
 
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
@@ -2800,15 +2791,11 @@ def render_data_processing_page(selected_project):
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
-        # 🟢 THE FIX: Explicitly initialize as an empty dataframe so fleet_options never errors out
-        inv_raw_df = pd.DataFrame() 
-
         # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
         st.write("#### 📂 Current Inventory of Chillers")
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
-        
         try:
-            # Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
+            # 🛡️ HARDENED PLUG: Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2913,8 +2900,6 @@ def render_data_processing_page(selected_project):
         # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
         st.write("#### ➕ Update Chiller Status & Asset Records")
         is_brand_new_asset = st.checkbox("➕ Check this box to register a completely NEW chiller asset to the fleet", value=False)
-        
-        # 🤝 Safe fallback evaluation vector
         fleet_options = sorted(inv_raw_df['chiller_id'].tolist()) if not inv_raw_df.empty else []
         
         with st.form("hardened_unified_chiller_asset_management_form"):
@@ -3586,7 +3571,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         return
 
     # 1. CENTRAL TRANSACTIONAL DATA FETCH
-    target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+    # 1. CENTRAL TRANSACTIONAL DATA FETCH     
+    target_registry_path = NODE_REGISTRY_TABLE
     try:
         # Single-pass database join with real-time latency calculations for the grids
         full_reg_df = load_lab_node_registry_data(target_registry_path)
@@ -4305,7 +4291,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             horizontal=True, 
             key="bulk_uploads_engine_radio"
         )
-        target_registry_path = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+        # 1. CENTRAL TRANSACTIONAL DATA FETCH     
+        target_registry_path = NODE_REGISTRY_TABLE
         target_inventory_path = f"{PROJECT_ID}.{DATASET_ID}.hardware_inventory"
         target_curves_path = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
         
