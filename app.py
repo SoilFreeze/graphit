@@ -601,9 +601,8 @@ def apply_sanity_filter(df):
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     The main Global Project Summary dashboard.
-    - Fixed English translations for ranges.
+    - Fixed high-temperature cutoff limit to prevent sensor clipping during warm ambient phases.
     - Robust timezone-aware sensor check-in counters.
-    - Automated link directory for active external client portals.
     """
     st.header("🌐 Global Project Summary")
     
@@ -612,7 +611,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # SQL QUERY: Balanced approach showing active field data while purging bad data
+    # SQL QUERY: Upgraded outlier shield threshold from 100 to 120 to catch pre-freeze values
     summary_q = f"""
         WITH active_projects AS (
             SELECT CAST(Project AS STRING) as Project, ProjectName, ProjectStatus, Date_Freezedown
@@ -626,10 +625,9 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{NODE_REGISTRY_TABLE}` n ON TRIM(CAST(m.NodeNum AS STRING)) = TRIM(CAST(n.NodeNum AS STRING))
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
-              -- Outlier Shield: Ignore hardware spikes above boiling point
-              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
+              -- FIXED: Threshold raised to 120.0 to prevent warm ground sensors from being deleted
+              AND NOT (m.temperature > 120.0 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
@@ -687,14 +685,12 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             h1.subheader(f"🏗️ {p_name}")
             h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
             
-            # --- CLIENT PORTAL LINK INJECTION ENGINE ---
             proj_match = re.search(r'\b(\d{4})\b', str(project))
             if proj_match:
                 job_number = proj_match.group(1)
                 portal_url = f"https://sf{job_number}.streamlit.app"
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link]({portal_url})")
             
-            # --- FIXED: ACCURATE CHECK-IN COUNTERS ---
             active_1h = p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()
             active_24h = p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()
             total_nodes = p_df['NodeNum'].dropna().nunique()
@@ -705,7 +701,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             )
             st.divider() 
 
-            # Data isolation
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
