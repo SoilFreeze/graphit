@@ -55,6 +55,37 @@ def get_bq_client():
 ############################
 
 @st.cache_data(ttl=600)
+def get_universal_portal_data(project_id):
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
+    
+    # Extract just the base job number (e.g., 2541) to ensure global matches
+    base_job_num = str(project_id).split('-')[0].strip()
+    
+    query = f"""
+        WITH filtered_base AS (
+            SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON p.Project = @project_id
+            -- Match against the telemetry's base project string
+            WHERE (m.Project = @project_id OR m.Project = '{base_job_num}' OR m.Project LIKE '{base_job_num}%')
+              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+              AND m.temperature >= -30.0 AND m.temperature <= 120.0
+              AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
+        ),
+        gap_evaluation AS (
+            SELECT *,
+                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_timestamp
+            FROM filtered_base
+        )
+        SELECT Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
+        FROM gap_evaluation
+        WHERE prev_timestamp IS NULL 
+           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 12
+        ORDER BY timestamp ASC
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
+    return client.query(query, job_config=job_config).to_dataframe()
+    
 def get_universal_portal_data(project_id, view_mode="engineering"):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
@@ -390,55 +421,52 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     proj_num = proj_match[0] if proj_match else ""
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    # 3. THEORETICAL REFERENCE CURVES
+    # 3. THEORETICAL REFERENCE CURVES (Spreadsheet Suffix & Space Safe)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # Extract the raw project number (e.g., 2538)
-            proj_str = str(st.session_state.get('selected_project', ''))
+            # 🟢 FORCE STRING & EXTRACT FIRST 4 CHARACTERS SAFELY (e.g., "2541")
+            proj_str = str(st.session_state.get('selected_project', '')).strip()
             proj_match = re.findall(r'\d+', proj_str)
-            proj_num = proj_match[0] if proj_match else ""
+            clean_job_num = proj_match[0] if proj_match else ""
             
-            # Extract the exact pipe identifier (e.g., T1, T10)
-            loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
+            # Extract just the exact physical location token (e.g., "T7") safely
+            pure_loc = str(curve_id).split('-')[-1].strip()
 
-            if proj_num and loc_part:
-                # Rigid string comparison blocks to eliminate multi-channel cross-talk leaks
+            if clean_job_num and pure_loc:
+                # 🟢 THE MATCHING FIX: Uses the same flexible wildcards as the portal
                 target_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE (CurveID = '{proj_num}-{loc_part}' 
-                       OR CurveID = '{proj_num}_{loc_part}'
-                       OR UPPER(CurveID) LIKE UPPER('{proj_num}-%{loc_part}')
-                       OR (UPPER(CurveID) LIKE UPPER('%{proj_num}%') AND ENDS_WITH(UPPER(CurveID), UPPER('-{loc_part}'))))
+                    WHERE CAST(CurveID AS STRING) LIKE '{clean_job_num}-%'
+                      AND (
+                        CAST(CurveID AS STRING) LIKE '%-{pure_loc}' 
+                        OR CAST(CurveID AS STRING) LIKE '%-{pure_loc}-%'
+                        OR CAST(CurveID AS STRING) LIKE '%-{pure_loc} %'
+                      )
                     ORDER BY Day
                 """
                 target_df = client.query(target_q).to_dataframe()
+                
                 if not target_df.empty:
-                    dash_styles = ['dashdot', 'dash', 'dot']
-                    gray_shades = [
-                        'rgba(30, 30, 30, 0.8)',   
-                        'rgba(70, 70, 70, 0.75)',  
-                        'rgba(110, 110, 110, 0.7)' 
-                    ]
+                    dash_styles = ['dashdot', 'dash', 'dot', 'longdash']
+                    gray_shades = ['rgba(30,30,30,0.85)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.65)']
                     
                     for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                         c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                         c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                         ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                        soil_label = str(cid).split('-')[-1].strip()
                         
-                        selected_dash = dash_styles[c_idx % len(dash_styles)]
-                        selected_gray = gray_shades[c_idx % len(gray_shades)]
+                        # Clean up prefix for display (e.g., "2541-T7-UnSat Fill" -> "T7-UnSat Fill")
+                        soil_label = str(cid).replace(f"{clean_job_num}-", "")
                         
                         fig.add_trace(go.Scatter(
-                            x=c_df['timestamp'], 
-                            y=ref_y, 
+                            x=c_df['timestamp'], y=ref_y, 
                             name=f"<b>Goal: {soil_label}</b>", 
                             mode='lines',
                             line=dict(
-                                color=selected_gray, 
+                                color=gray_shades[c_idx % len(gray_shades)], 
                                 width=3.5, 
-                                dash=selected_dash, 
+                                dash=dash_styles[c_idx % len(dash_styles)], 
                                 shape='spline', 
                                 smoothing=1.3
                             ),
@@ -2438,13 +2466,14 @@ def render_data_processing_page(selected_project):
                         is_lord = "-" in str(df_processed['NodeNum'].iloc[0])
                         target_table = "raw_lord" if is_lord else "raw_sensorpush"
                         
+                        # Around line 608 in 2026.06.10 lab.py
                         if st.button(f"🚀 Upload to {target_table}"):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
                                 
                                 if is_lord:
-                                    from decimal import Decimal
-                                    df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
+                                    # 🟢 CHANGE: Remove Decimal rounding conversion that forces NUMERIC data types
+                                    df_processed['temperature'] = df_processed['temperature'].astype(float)
                                 
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
                                 upload_payload_df = df_processed[columns_to_upload].copy()
@@ -2453,13 +2482,14 @@ def render_data_processing_page(selected_project):
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
+                                        # 🟢 FIXED: Changed from "NUMERIC" to "FLOAT" to match production
+                                        bigquery.SchemaField("temperature", "FLOAT"), 
                                     ],
                                     write_disposition="WRITE_APPEND"
                                 )
                                 client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
                                 st.success("Upload Complete!")
-                                st.cache_data.clear() 
+                                st.cache_data.clear()
 
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
@@ -2770,11 +2800,15 @@ def render_data_processing_page(selected_project):
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
         
+        # 🟢 THE FIX: Explicitly initialize as an empty dataframe so fleet_options never errors out
+        inv_raw_df = pd.DataFrame() 
+
         # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
         st.write("#### 📂 Current Inventory of Chillers")
         st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
+        
         try:
-            # 🛡️ HARDENED PLUG: Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
+            # Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2879,6 +2913,8 @@ def render_data_processing_page(selected_project):
         # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
         st.write("#### ➕ Update Chiller Status & Asset Records")
         is_brand_new_asset = st.checkbox("➕ Check this box to register a completely NEW chiller asset to the fleet", value=False)
+        
+        # 🤝 Safe fallback evaluation vector
         fleet_options = sorted(inv_raw_df['chiller_id'].tolist()) if not inv_raw_df.empty else []
         
         with st.form("hardened_unified_chiller_asset_management_form"):
@@ -3442,6 +3478,7 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                 
                 try:
                     with st.spinner("Appending tracking metrics to node registry matrix..."):
+                        # Locate inside render_admin_page() -> tab_bulk_config
                         job_config = bigquery.LoadJobConfig(
                             schema=[
                                 bigquery.SchemaField("NodeNum", "STRING"),
@@ -3449,8 +3486,10 @@ def render_node_action_manager(client, selected_node_data, reg_df, proj_list, ta
                                 bigquery.SchemaField("Location", "STRING"),
                                 bigquery.SchemaField("Bank", "STRING"),
                                 bigquery.SchemaField("Depth", "FLOAT"),
-                                bigquery.SchemaField("Start_Date", "DATE"),
                                 bigquery.SchemaField("SensorStatus", "STRING"),
+                                bigquery.SchemaField("Start_Date", "DATE"),
+                                bigquery.SchemaField("Phase", "STRING"),   # ➕ Add
+                                bigquery.SchemaField("System", "STRING"),  # ➕ Add
                             ],
                             write_disposition="WRITE_APPEND"
                         )
@@ -4703,7 +4742,6 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         # LOCATION ARCHITECTURE OVERRIDE
         current_loc_val = str(selected_node_data.get('Location', ''))
         
-        # Build dropdown options containing current assigned options pool
         form_loc_options = sorted(list(set(known_project_locations)))
         if current_loc_val not in form_loc_options and current_loc_val.strip() != "":
             form_loc_options.append(current_loc_val)
@@ -4727,6 +4765,11 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         status_idx = status_options.index(curr_status_str) if curr_status_str in status_options else 0
         edit_status = col3.selectbox("Sensor Status", status_options, index=status_idx)
         
+        # 🟢 INSERT THE NEW COLUMNS RIGHT HERE (Between your two existing row column definitions)
+        c_new1, c_new2 = st.columns(2)
+        edit_phase = c_new1.text_input("Phase Designation", value=str(selected_node_data.get('Phase', '1')))
+        edit_system = c_new2.text_input("System / Loop Designation", value=str(selected_node_data.get('System', '1')))
+
         c4, c5, c6, c7 = st.columns(4)
         edit_bank = c4.text_input("Bank", value=str(selected_node_data.get('Bank', '')) if pd.notnull(selected_node_data.get('Bank')) else "")
         edit_depth = c5.number_input("Depth", value=float(selected_node_data.get('Depth', 0.0)))
@@ -4738,7 +4781,10 @@ def render_lab_node_action_manager(client, selected_node_data, reg_df, proj_list
         use_end_date_toggle = c7.checkbox("Apply Terminated End Date Constraints?", value=has_end_date, key=f"end_dt_toggle_{node_id}_{origin_start_str}")
         edit_end = c7.date_input("End Date", value=default_end_date, disabled=not use_end_date_toggle)
 
-        if st.form_submit_button("💾 Overwrite Targeted Assignment Attributes Configuration Row Line", use_container_width=True):
+        if st.form_submit_button("💾 Overwrite Targeted Assignment Attributes Configuration Row Line"):
+            # Add these strings right below your other string sanitization lines:
+            safe_phase = str(edit_phase).replace("'", "''").strip()
+            safe_system = str(edit_system).replace("'", "''").strip()
             raw_loc_str = custom_loc_input.strip() if chosen_form_loc == "➕ Add Custom Location..." else chosen_form_loc
             
             if chosen_form_loc == "➕ Add Custom Location..." and not raw_loc_str:
