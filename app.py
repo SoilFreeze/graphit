@@ -825,10 +825,11 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     with st.spinner(f"Syncing {p_name} telemetry..."):
-        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+        # FIXED: Removed view_mode="engineering" to match the raw auditing engine
+        p_df = get_universal_portal_data(selected_project)
 
     if p_df.empty:
-        st.warning(f"No engineering data found for '{p_name}'.")
+        st.warning(f"No data found for '{p_name}'.")
         return
 
     # 5. DYNAMIC UI FILTERING
@@ -906,7 +907,8 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
 
     with st.spinner("Fetching historical telemetry..."):
-        p_df = get_universal_portal_data(selected_project, view_mode="engineering")
+        # FIXED: Removed view_mode="engineering" to match the raw auditing engine
+        p_df = get_universal_portal_data(selected_project)
 
     if p_df is None or p_df.empty:
         st.warning("No data found for this project.")
@@ -1096,7 +1098,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
-
+            
 ###########################
 # PAGE 4: SENSOR STATUS - #
 ###########################
@@ -2447,7 +2449,7 @@ def render_data_processing_page(selected_project):
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
                                 upload_payload_df = df_processed[columns_to_upload].copy()
                                 
-                                job_config = bigquery.LoadJobConfig(
+                                job_config = bigquery.QueryJobConfig(
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
@@ -2472,8 +2474,9 @@ def render_data_processing_page(selected_project):
             e_start = c1.date_input("Start Date", value=datetime.now() - timedelta(days=30))
             e_end = c2.date_input("End Date", value=datetime.now())
             
-            with st.spinner("Processing engineering records..."):
-                full_df = get_universal_portal_data(selected_project, view_mode="engineering")
+            with st.spinner("Processing dashboard records..."):
+                # FIXED: Removed view_mode="engineering" to run cleanly against the new unfiltered data stream
+                full_df = get_universal_portal_data(selected_project)
             
             if not full_df.empty:
                 all_locs = sorted(full_df['Location'].unique().tolist())
@@ -2705,7 +2708,6 @@ def render_data_processing_page(selected_project):
                 
             where_stmt = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             
-            # 🛡️ HARDENED FIX: Incorporated a clean database join mapping handle to display explicit Chiller Names
             logs_q = f"""
                 SELECT e.event_id,
                        FORMAT_TIMESTAMP('%m/%d/%Y %H:%M', e.event_timestamp) as Start_Time,
@@ -2767,12 +2769,7 @@ def render_data_processing_page(selected_project):
     # --- TAB 5: REGISTER CHILLER CONTROLS ---
     with tab_chiller_reg:
         st.subheader("❄️ Chiller Infrastructure Master Control")
-        
-        # Section A: Live Dynamic Inventory Ledger (Positioned AT THE TOP)
-        st.write("#### 📂 Current Inventory of Chillers")
-        st.caption("💡 **Tip:** Double-click cells to directly update Equipment Type, Initial Cost, or Condition, then click Save below.")
         try:
-            # 🛡️ HARDENED PLUG: Aggregates SUM(event_cost) from real events instead of calculating a flat runtime multiplier
             inventory_q = f"""
                 WITH TimelineState AS (
                     SELECT 
@@ -2874,7 +2871,7 @@ def render_data_processing_page(selected_project):
 
         st.divider()
 
-        # Section B: Registration Entry Form (Positioned UNDERNEATH the table)
+        # Section B: Registration Entry Form
         st.write("#### ➕ Update Chiller Status & Asset Records")
         is_brand_new_asset = st.checkbox("➕ Check this box to register a completely NEW chiller asset to the fleet", value=False)
         fleet_options = sorted(inv_raw_df['chiller_id'].tolist()) if not inv_raw_df.empty else []
@@ -2949,6 +2946,8 @@ def render_data_processing_page(selected_project):
                     except Exception as bq_fault:
                         st.error(f"❌ BigQuery Database Rejected Entry: {bq_fault}")
                         st.code(execution_sql, language="sql")
+
+
 ######################
 # Page: Admin Tool Helpers  #
 ######################
