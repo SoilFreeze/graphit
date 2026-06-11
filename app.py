@@ -155,10 +155,10 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # SQL fix: Exclude empty strings and force inclusion of 'Office'
+        # 🛡️ FIX: Direct connection to your live project_registry & dropped dead SoilType parameter
         proj_q = f"""
-            SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown, SoilType 
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup` 
+            SELECT Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown 
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` 
             WHERE Project IS NOT NULL 
               AND TRIM(Project) != ''
               AND (ProjectStatus != 'Archived' OR UPPER(Project) LIKE '%OFFICE%')
@@ -303,7 +303,7 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True
 )
-# --- NEW INSERTION: CSS TO FORCE DATA TABLE PROGRESS COLUMNS RED ---
+# --- CSS TO FORCE DATA TABLE PROGRESS COLUMNS RED ---
 st.sidebar.markdown(
     """
     <style>
