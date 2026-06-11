@@ -387,8 +387,22 @@ def natural_sort_key(s):
     """
     Splits strings into chunks of text and numbers to allow natural sorting.
     e.g., "10ft (SP32)" -> [10, "ft (sp", 32, ")"]
+    Handles custom text placeholders and alphanumeric channel assignments cleanly.
     """
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+    if pd.isna(s) or str(s).strip().lower() in ['nan', 'null', '']:
+        return [9999, ""]
+        
+    val_str = str(s).strip()
+    
+    # Extract channel digit if matching multi-channel pattern to prevent sorting failures
+    if '-ch' in val_str.lower():
+        try:
+            channel_num = re.findall(r'\d+', val_str.lower().split('-ch')[-1])[0]
+            return [int(channel_num), val_str.lower()]
+        except:
+            return [9999, val_str.lower()]
+
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', val_str)]
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
@@ -400,7 +414,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
     """
 
-    if df.empty: return go.Figure().update_layout(title="No data available")
+    if df is None or df.empty: 
+        return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
     plot_df = df.copy() 
@@ -425,16 +440,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. THEORETICAL REFERENCE CURVES (Spreadsheet Suffix & Space Safe)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # 🟢 FORCE STRING & EXTRACT FIRST 4 CHARACTERS SAFELY (e.g., "2541")
             proj_str = str(st.session_state.get('selected_project', '')).strip()
             proj_match = re.findall(r'\d+', proj_str)
             clean_job_num = proj_match[0] if proj_match else ""
-            
-            # Extract just the exact physical location token (e.g., "T7") safely
             pure_loc = str(curve_id).split('-')[-1].strip()
 
             if clean_job_num and pure_loc:
-                # 🟢 THE MATCHING FIX: Uses the same flexible wildcards as the portal
                 target_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -457,7 +468,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                         ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                         
-                        # Clean up prefix for display (e.g., "2541-T7-UnSat Fill" -> "T7-UnSat Fill")
                         soil_label = str(cid).replace(f"{clean_job_num}-", "")
                         
                         fig.add_trace(go.Scatter(
@@ -473,15 +483,18 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                             ),
                             legendrank=1 
                         ))
-        except Exception as e:
+        except:
             pass
 
     # 4. SENSOR DATA (Naturally Sorted Group Loops)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
     node_metadata = []
-    for sn in plot_df['NodeNum'].unique():
-        node_df = plot_df[plot_df['NodeNum'] == sn]
+    # Drop entries missing names to guarantee loop execution safety
+    valid_plot_df = plot_df.dropna(subset=['NodeNum'])
+    
+    for sn in valid_plot_df['NodeNum'].unique():
+        node_df = valid_plot_df[valid_plot_df['NodeNum'] == sn]
         depth_val = node_df['Depth'].iloc[0]
         bank_val = node_df['Bank'].iloc[0]
         loc_val = node_df['Location'].iloc[0]
@@ -489,9 +502,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
             display_name = f"{bank_val} ({sn})"
             sort_val = str(bank_val)  
-        elif pd.notnull(depth_val) and not pd.isna(depth_val): 
+        elif pd.notnull(depth_val) and not pd.isna(depth_val) and str(depth_val).strip() != '': 
             display_name = f"{depth_val}ft ({sn})"
-            sort_val = f"depth_{float(depth_val):05.1f}" 
+            try:
+                sort_val = f"depth_{float(depth_val):05.1f}" 
+            except:
+                sort_val = f"depth_{str(depth_val)}"
         else: 
             display_name = f"{loc_val} ({sn})"
             sort_val = str(display_name)
@@ -508,7 +524,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         sn = config['node_num']
         display_name = config['display_name']
         
-        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
+        s_df = valid_plot_df[valid_plot_df['NodeNum'] == sn].sort_values('timestamp')
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
         
         fig.add_trace(go.Scatter(
@@ -527,9 +543,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
     
-    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
-    for m_dt in m_range:
-        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+    try:
+        m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+        for m_dt in m_range:
+            fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+    except:
+        pass
 
     # 6. LAYOUT & TITLING
     p_name = st.session_state.get('selected_project', 'Project')
@@ -557,7 +576,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
-                               
+                                
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
     """
     Fallback function for hardcoded soil types.
@@ -592,7 +611,7 @@ def run_office_auto_assignment():
                 UNION ALL 
                 SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
             ) AS r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON CAST(r.NodeNum AS STRING) = CAST(n.NodeNum AS STRING)
             WHERE n.Project LIKE '%OFFICE%' 
         ) S ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
         WHEN MATCHED THEN UPDATE SET approve = 'OFFICE'
@@ -612,13 +631,11 @@ def apply_sanity_filter(df):
     Automated filter for rogue data points.
     Flags anything outside the absolute limits of -30°F and 120°F as BADDATA.
     """
-    if df.empty:
+    if df is None or df.empty:
         return df
 
-    # Logic: Mark records outside of strict industrial physical limits [-30, 120]
     bad_condition = (df['temperature'] > 120) | (df['temperature'] < -30)
     
-    # If your view or data holds an approval column, mark it in-memory
     if 'approve' in df.columns:
         df.loc[bad_condition, 'approve'] = 'BADDATA'
     elif 'approval_status' in df.columns:
@@ -643,27 +660,26 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
-    # SQL QUERY: Balanced approach showing active field data while purging bad data
+    # 🛡️ FIX: Point directly to live project_registry table instead of obsolete backup view
     summary_q = f"""
         WITH active_projects AS (
             SELECT Project, ProjectName, ProjectStatus, Date_Freezedown
-            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry_backup`
-            WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze')
+            FROM `{PROJECT_ID}.{DATASET_ID}.project_registry`
+            WHERE ProjectStatus IN ('Freezedown', 'Maintenance', 'Pre-freeze', 'Active', 'Initialized')
               AND UPPER(Project) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
             SELECT 
                 n.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, n.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON m.NodeNum = n.NodeNum
+            -- Force text safe alignment between historical logs and live sheet strings
+            JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` n ON CAST(m.NodeNum AS STRING) = CAST(n.NodeNum AS STRING)
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              -- BALANCED RULE: Show verified AND streaming real-time data, but block bad data
-              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
-              -- Outlier Shield: Ignore hardware spikes above boiling point
-              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(n.NodeNum, 'SP'))
+              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+              AND NOT (m.temperature > 100 AND NOT STARTS_WITH(CAST(n.NodeNum AS STRING), 'SP'))
         ),
         MaxTime AS (
-            SELECT MAX(timestamp) as max_ts FROM raw_data
+            SELECT COALESCE(MAX(timestamp), CURRENT_TIMESTAMP()) as max_ts FROM raw_data
         ),
         LatestStats AS (
             SELECT 
@@ -697,9 +713,12 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     
     try:
         df = client.query(summary_q).to_dataframe()
+        if df is None or df.empty:
+            st.info("No currently active projects tracking data stream windows.")
+            return
         df[['Bank', 'Location']] = df[['Bank', 'Location']].fillna('')
     except Exception as e:
-        st.error(f"Dashboard Query Failed: {e}")
+        st.error(f"Dashboard Summary Extraction Error: {e}")
         return
 
     for project in sorted(df['Project'].unique()):
@@ -725,7 +744,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 portal_url = f"https://sf{job_number}.streamlit.app"
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link]({portal_url})")
             
-            # --- FIXED: ACCURATE CHECK-IN COUNTERS ---
+            # --- PROTECTED MASK: ACCURATE SYSTEM COUNTERS ---
             active_1h = p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()
             active_24h = p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()
             total_nodes = p_df['NodeNum'].dropna().nunique()
@@ -736,83 +755,11 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             )
             st.divider() 
 
-            # Data isolation
+            # Data isolation parameters
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb
-            is_tp = p_df['Depth'].notnull() & ~is_s & ~is_r & ~is_amb
-
-            groups_data = [
-                ("📥 Supply", p_df[is_s], "supply_kpi", -10), 
-                ("📤 Return", p_df[is_r], "return_kpi", 0), 
-                ("📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
-                ("☁️ Ambient", p_df[is_amb], None, None)
-            ]
-
-            if mobile_mode:
-                for title, g_df, kpi_col, kpi_val in groups_data:
-                    render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
-                    st.markdown("<hr style='border: 1px dashed #ccc; margin: 15px 0;'>", unsafe_allow_html=True)
-            else:
-                cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
-                col_mappings = [0, 2, 4, 6]
-                spacer_mappings = [1, 3, 5]
-                
-                for s_idx in spacer_mappings:
-                    cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 320px; margin: auto;'></div>", unsafe_allow_html=True)
-                
-                for idx, (title, g_df, kpi_col, kpi_val) in enumerate(groups_data):
-                    with cols[col_mappings[idx]]:
-                        render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
-
-
-def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
-    """Helper layout compiler to handle repeating column metric sets."""
-    st.markdown(f"**{title}**")
-    if g_df.empty or g_df['latest_temp'].isnull().all():
-        st.caption("No recent data")
-        return
-    
-    latest_val = g_df['latest_temp'].mean()
-    c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
-    m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
-
-    def convert(v):
-        if pd.isnull(v) or pd.isna(v): return None
-        return (v - 32) * 5/9 if unit_mode == "Celsius" else v
-
-    l_conv, c_min, c_max, m24, x24 = map(convert, [latest_val, c_min, c_max, m24, x24])
-
-    st.metric("Avg (Latest)", f"{l_conv:.1f}{unit_label}")
-    
-    if kpi_col:
-        pct = g_df[kpi_col].iloc[0]
-        color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
-        st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
-
-    range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'><b>Normal Ranges:</b><br>"
-    if c_min is not None and c_max is not None:
-        range_html += f"Current: {c_min:.1f} to {c_max:.1f}{unit_label}<br>"
-    else:
-        range_html += "Current: No Data<br>"
-    
-    if m24 is not None and x24 is not None:
-        range_html += f"24h Range: {m24:.1f} to {x24:.1f}{unit_label}"
-    else:
-        range_html += "24h Range: No Data"
-    range_html += "</div>"
-    st.markdown(range_html, unsafe_allow_html=True)
-
-    st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
-
-
-def get_trend_arrow(current, previous):
-    """Helper to generate trend icons with updated blue downward arrow."""
-    if pd.isnull(current) or pd.isnull(previous): return "N/A"
-    delta = current - previous
-    if delta > 0.1: return f"🔺 +{delta:.1f}"
-    if delta < -0.1: return f"🔹 {delta:.1f}"
-    return "➡️ 0.0"
+            is_tp = p_df['Depth'].notnull() & (p_df['Depth'].astype(str).str.strip() != '') & ~is_s &
 
 #############################
 # - 2. PAGE: TIME vs TEMP - #
