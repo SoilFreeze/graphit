@@ -167,19 +167,19 @@ if sidebar_client is not None:
     try:
         # Fixed: Evaluates dynamic list based strictly on new Google Sheet 'ShowActive = Yes' parameter checks
         # Find the proj_q block in your sidebar and update it to this:
-proj_q = f"""
-    SELECT 
-        CAST(Project AS STRING) as Project, 
-        ProjectName, 
-        Timezone, 
-        ProjectStatus, 
-        Date_Freezedown
-    FROM `{PROJECT_REGISTRY_TABLE}` 
-    WHERE Project IS NOT NULL 
-      AND TRIM(CAST(Project AS STRING)) != ''
-      AND (UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES' 
-           OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
-"""
+        proj_q = f"""
+            SELECT 
+                CAST(Project AS STRING) as Project, 
+                ProjectName, 
+                Timezone, 
+                ProjectStatus, 
+                Date_Freezedown
+            FROM `{PROJECT_REGISTRY_TABLE}` 
+            WHERE Project IS NOT NULL 
+              AND TRIM(CAST(Project AS STRING)) != ''
+              AND (UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES' 
+                   OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
+        """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
         # Python fix: Strip whitespace and filter out non-values to kill "No Project"
