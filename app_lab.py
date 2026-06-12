@@ -125,15 +125,7 @@ selected_project = "All Projects"
 project_metadata = None  
 
 sidebar_client = get_bq_client()
-# --- TEMPORARY DEBUG BLOCK ---
-st.sidebar.markdown("### 🐛 DEBUG RAW DATA")
-try:
-    debug_df = sidebar_client.query(f"SELECT * FROM `{PROJECT_REGISTRY_TABLE}` LIMIT 5").to_dataframe()
-    st.sidebar.dataframe(debug_df)
-    st.sidebar.write("Columns BigQuery sees:", debug_df.columns.tolist())
-except Exception as e:
-    st.sidebar.error(f"Debug query failed: {e}")
-# -----------------------------
+
 if sidebar_client is not None:
     try:
         proj_q = f"""
