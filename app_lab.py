@@ -1773,7 +1773,7 @@ def render_data_processing_page(selected_project):
             try:
                 # 1. FORMAT DETECTION
                 is_sensorconnect, skip_rows = False, 0
-                if u_files.name.endswith('.csv'):
+                if f.name.endswith('.csv'):
                     u_files.seek(0)
                     for i, line in enumerate(u_files):
                         if b"DATA_START" in line:
@@ -1784,7 +1784,7 @@ def render_data_processing_page(selected_project):
                 # 2. DATA READING
                 if is_sensorconnect:
                     df_raw = pd.read_csv(u_files, encoding='latin1', skiprows=skip_rows, dtype=str)
-                elif u_files.name.endswith('.csv'):
+                elif f.name.endswith('.csv'):
                     df_raw = pd.read_csv(u_files, encoding='latin1', dtype=str)
                 else:
                     df_raw = pd.read_excel(u_files, dtype=str)
@@ -1832,7 +1832,7 @@ def render_data_processing_page(selected_project):
                             st.error(f"❌ Error: Could not find timestamp or temperature headers. Found: {actual_headers}")
                             return # Stop execution if columns aren't found
                         
-                        clean_name = u_files.name.replace(".csv", "").replace(".xlsx", "")
+                        clean_name = f.name.replace(".csv", "").replace(".xlsx", "")
                         match = re.search(r'^([^ \(\)]+)', clean_name)
                         
                         df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
