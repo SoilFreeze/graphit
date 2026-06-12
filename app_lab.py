@@ -2500,9 +2500,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_bulk_app:
         execute_bulk_approval_workspace(client, full_reg_df, selected_project)
         
+    # -------------------------------------------------------------------------
     # --- SUB-TAB 3: SENSORPUSH API CLOUD RECOVERY BACKFILL ENGINE ---
-     # -------------------------------------------------------------------------
-    # SUB-TAB 4: DATA RECOVERY PIPELINE ENGINE
+    # -------------------------------------------------------------------------
+
     # -------------------------------------------------------------------------
     with tab_recovery:
         st.title("📡 Data Recovery Engine")
@@ -2747,6 +2748,98 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             if grand_total_tally > 0:
                 st.balloons()
 
+# -------------------------------------------------------------------------
+        # SUB-SECTION: HARDWARE AUDIT & STATUS LOOKUP
+        # -------------------------------------------------------------------------
+        st.divider()
+        st.subheader("📋 Account Hardware Audit & Status Lookup")
+        st.write("Scan all connected SensorPush cloud accounts to generate a comprehensive list of mapped hardware, physical IDs, and the last time they successfully logged data.")
+
+        if st.button("📊 Run Fleet Account Audit", use_container_width=True, key="btn_run_account_audit"):
+            import requests
+            import pandas as pd
+
+            audit_records = []
+            hardware_map = {}
+            db_max_timestamps = {}
+
+            LOCAL_INV_TABLE = "hardware_inventory"
+            LOCAL_API_URL = "https://api.sensorpush.com/api/v1"
+            ACCOUNTS = [
+                {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
+                {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
+                {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
+            ]
+
+            with st.status("Gathering Fleet Intelligence...", expanded=True) as audit_status:
+                st.write("🔍 Building Hardware Translation Maps from Database...")
+                try:
+                    inv_q = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{LOCAL_INV_TABLE}` WHERE RawID IS NOT NULL"
+                    for row in client.query(inv_q):
+                        clean_id = str(row.RawID).split('.')[0].strip()
+                        hardware_map[clean_id] = str(row.NodeNum).strip()
+                except Exception as e:
+                    st.warning(f"Could not load inventory: {e}")
+
+                st.write("📅 Checking Database For Last Known Data Points...")
+                try:
+                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` GROUP BY NodeNum"
+                    for row in client.query(time_q):
+                        if row.max_time:
+                            db_max_timestamps[str(row.NodeNum)] = str(row.max_time)
+                except Exception as e:
+                    st.warning(f"Could not load timestamps: {e}")
+
+                st.write("☁️ Polling Cloud APIs for Registered Devices...")
+                for acc in ACCOUNTS:
+                    acc_email = acc['email']
+                    try:
+                        auth_r = requests.post(f"{LOCAL_API_URL}/oauth/authorize", json=acc, timeout=15).json()
+                        token = requests.post(f"{LOCAL_API_URL}/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
+
+                        s_resp = requests.post(f"{LOCAL_API_URL}/devices/sensors", headers={"Authorization": token}, json={}, timeout=20).json()
+
+                        if isinstance(s_resp, dict):
+                            for s_id, s_meta in s_resp.items():
+                                raw_physical_id = str(s_id).split('.')[0].strip()
+                                node_num = hardware_map.get(raw_physical_id, "⚠️ Unmapped/Unknown")
+                                last_seen = db_max_timestamps.get(node_num, "❌ No Database Records")
+
+                                audit_records.append({
+                                    "Account Email": acc_email,
+                                    "Node Number": node_num,
+                                    "Physical ID (RawID)": raw_physical_id,
+                                    "App Friendly Name": s_meta.get('name', 'Unknown'), 
+                                    "Last Database Check-In": last_seen
+                                })
+                    except Exception as e:
+                        st.error(f"Failed to poll account {acc_email}: {e}")
+
+                audit_status.update(label="Audit Complete!", state="complete")
+
+            # -------------------------------------------------------------------------
+            # RENDER THE AUDIT RESULTS
+            # -------------------------------------------------------------------------
+            if audit_records:
+                st.write("### 🗄️ Fleet Audit Results")
+                
+                # Convert to dataframe and sort it logically
+                audit_df = pd.DataFrame(audit_records).sort_values(by=["Account Email", "Node Number"])
+                st.dataframe(audit_df, use_container_width=True, hide_index=True)
+
+                # Generate CSV payload for download
+                csv_payload = audit_df.to_csv(index=False).encode('utf-8')
+                
+                st.download_button(
+                    label="⬇️ Download Audit Report as CSV",
+                    data=csv_payload,
+                    file_name="sensorpush_fleet_audit.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.info("No devices found across any accounts.")
+    
     # --- SUB-TAB 4: PROJECT LIFECYCLE HISTORY DIRECTORY ---
     with tab_proj_master:
         st.subheader("🗄️ Complete Master Project Lifecycle Directory")
