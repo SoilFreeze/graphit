@@ -36,10 +36,7 @@ BASE_URL = "https://api.sensorpush.com/api/v1"
 # 2. SENSORPUSH API LOGIC (Hard-coded Accounts)
 # ===============================================================
 def get_sensorpush_data():
-    """Consolidates fleet list using explicit, hard-coded dictionary access."""
     all_devices = []
-    
-    # Using a list of dictionaries
     accounts = [
         {"name": "Account 1", "email": "tsteele@soilfreeze.com", "password": "Freeze123!!"},
         {"name": "Account 2", "email": "soilfreeze98072@gmail.com", "password": "Freeze123!!"}
@@ -47,33 +44,38 @@ def get_sensorpush_data():
     
     for acc in accounts:
         try:
-           # 1. Authorize
+            # 1. Authorize
             auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json={
                 "email": acc["email"],
                 "password": acc["password"]
             })
             
-            # --- RAW DATA DUMP ---
-            st.write(f"--- DEBUG: {acc['name']} ---")
-            st.write(f"Status Code: {auth_resp.status_code}")
-            st.write(f"Raw Response Body: {auth_resp.text}")
-            
             if auth_resp.status_code != 200:
-                st.error(f"Auth failed for {acc['name']}")
+                st.error(f"Auth failed for {acc['name']}: {auth_resp.text}")
                 continue
             
-            # 2. Fetch Devices
-            dev_resp = requests.get(f"{BASE_URL}/devices", headers=headers)
-            devices = dev_resp.json()
+            # Parse JSON safely
+            auth_data = auth_resp.json()
+            token = auth_data.get("authorization")
             
-            # 3. Parse Metadata using standard bracket notation
-            for dev in devices:
-                all_devices.append({
-                    "Account": acc["name"],
-                    "NodeNum": dev["name"],       # Direct access
-                    "PhysicalID": dev["id"],      # Direct access
-                    "LastSeen": dev["last_seen"]  # Direct access
-                })
+            # CRITICAL: Define headers here so they exist for the next step
+            headers = {"Authorization": token}
+            
+            # 2. Fetch Devices using the now-defined headers
+            dev_resp = requests.get(f"{BASE_URL}/devices", headers=headers)
+            
+            if dev_resp.status_code == 200:
+                devices = dev_resp.json()
+                for dev in devices:
+                    all_devices.append({
+                        "Account": acc["name"],
+                        "NodeNum": dev.get("name"),
+                        "PhysicalID": dev.get("id"),
+                        "LastSeen": dev.get("last_seen")
+                    })
+            else:
+                st.error(f"Failed to fetch devices for {acc['name']}: {dev_resp.text}")
+                
         except Exception as e:
             st.error(f"Error fetching {acc['name']}: {e}")
             
