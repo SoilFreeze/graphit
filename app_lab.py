@@ -1980,34 +1980,50 @@ def render_data_processing_page(selected_project):
         if u_files:
             if st.button("💾 Commit Files to BigQuery", key="commit_ref_btn_final", use_container_width=True):
                 progress_bar = st.progress(0)
-                
+                table_ref = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
+        
                 for idx, f in enumerate(u_files):
                     try:
                         curve_id = f.name.replace(".csv", "")
+                        
+                        # Simplified encoding handling
+                        f.seek(0)
                         try:
-                            f.seek(0)
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='utf-8')
-                        except Exception:
+                        except UnicodeDecodeError:
                             f.seek(0)
                             ref_df = pd.read_csv(f, skiprows=2, names=['Day', 'Temp'], encoding='latin-1')
-
+        
+                        # Data validation
                         ref_df['Day'] = pd.to_numeric(ref_df['Day'], errors='coerce')
                         ref_df['Temp'] = pd.to_numeric(ref_df['Temp'], errors='coerce')
                         ref_df = ref_df.dropna(subset=['Day', 'Temp'])
-                        ref_df['CurveID'] = curve_id
-
-                        if not ref_df.empty:
-                            client.query(f"DELETE FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID='{curve_id}'").result()
-                            table_ref = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
-                            client.load_table_from_dataframe(ref_df, table_ref).result()
-                            st.toast(f"Success: {curve_id}", icon="✅")
-                        else:
-                            st.error(f"❌ {f.name} contained no valid numeric data after row 2.")
-                            
-                        progress_bar.progress((idx + 1) / len(u_files))
                         
+                        if ref_df.empty:
+                            st.error(f"❌ {f.name} contained no valid numeric data.")
+                            continue
+        
+                        ref_df['CurveID'] = curve_id
+        
+                        # Atomic Update: Delete old and Load new
+                        client.query(f"DELETE FROM `{table_ref}` WHERE CurveID='{curve_id}'").result()
+                        
+                        job_config = bigquery.LoadJobConfig(
+                            schema=[
+                                bigquery.SchemaField("Day", "INTEGER"),
+                                bigquery.SchemaField("Temp", "FLOAT"),
+                                bigquery.SchemaField("CurveID", "STRING"),
+                            ],
+                            write_disposition="WRITE_APPEND"
+                        )
+                        
+                        client.load_table_from_dataframe(ref_df, table_ref, job_config=job_config).result()
+                        st.toast(f"Success: {curve_id}", icon="✅")
+                                    
                     except Exception as e:
                         st.error(f"❌ Error processing {f.name}: {e}")
+                    
+                    progress_bar.progress((idx + 1) / len(u_files))
                 
                 st.success("Library Processing Complete.")
                 st.cache_data.clear()
