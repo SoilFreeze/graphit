@@ -28,15 +28,27 @@ REF_CURVE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
 
 @st.cache_resource
 def get_bq_client():
-    """Initializes and caches the BigQuery connection."""
+    """
+    Initializes and caches the BigQuery connection.
+    Includes mandatory Google Drive scopes for federated Google Sheet tables.
+    """
     try:
+        # THE FIX: Both BigQuery and Drive scopes are required for external tables
+        SCOPES = [
+            "https://www.googleapis.com/auth/bigquery", 
+            "https://www.googleapis.com/auth/drive" 
+        ]
+        
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             credentials = service_account.Credentials.from_service_account_info(
-                info, scopes=["https://www.googleapis.com/auth/bigquery"]
+                info, 
+                scopes=SCOPES
             )
             return bigquery.Client(credentials=credentials, project=info["project_id"])
+        
         return bigquery.Client(project=PROJECT_ID)
+
     except Exception as e:
         st.error(f"❌ BigQuery Authentication Failed: {e}")
         return None
