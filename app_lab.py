@@ -128,7 +128,6 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # UPDATED: Evaluates dynamic list based strictly on the new BOOLEAN 'ShowActive' schema parameter
         proj_q = f"""
             SELECT 
                 CAST(Project AS STRING) as Project, 
@@ -139,7 +138,7 @@ if sidebar_client is not None:
             FROM `{PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
-              AND (UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('YES', 'TRUE', '1') 
+              AND (ShowActive IS TRUE 
                    OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
