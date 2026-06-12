@@ -4,6 +4,16 @@ import re
 from google.cloud import bigquery
 import plotly.graph_objects as go
 import plotly.express as px
+import streamlit as st
+from google.oauth2 import service_account
+from google.cloud import bigquery
+
+# Load credentials from Streamlit Secrets
+creds_dict = st.secrets["gcp"]
+credentials = service_account.Credentials.from_service_account_info(creds_dict)
+
+# Initialize Client with the loaded credentials
+client = bigquery.Client(credentials=credentials, project=creds_dict["project_id"])
 
 # 1. SETUP
 st.set_page_config(layout="wide", page_title="SoilFreeze Engineering Dashboard")
