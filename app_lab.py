@@ -1766,8 +1766,9 @@ def render_data_processing_page(selected_project):
         st.subheader("📄 Manual File Ingestion")
         st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
         
-        u_file = st.file_uploader("Select CSV or Excel file", type=['csv', 'xlsx'], key="manual_upload_main")
-        
+        # Change accept_multiple_files to True
+        u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
+
         if u_file is not None:
             try:
                 # 1. FORMAT DETECTION
