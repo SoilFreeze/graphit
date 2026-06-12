@@ -1831,11 +1831,10 @@ def render_data_processing_page(selected_project):
                         
                         st.success(f"✅ Prepared {len(df_processed)} records for Node(s): {', '.join(df_processed['NodeNum'].unique())}")
                         
+                        # --- CORRECTED UPLOAD BLOCK ---
                         if st.button(f"🚀 Upload to {target_table}"):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
-                                
-                                # Evaluates natively based on the branch parsing rather than a risky string hyphen check
                                 is_lord = (target_table == "raw_lord") 
                                 
                                 if is_lord:
@@ -1845,7 +1844,8 @@ def render_data_processing_page(selected_project):
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
                                 upload_payload_df = df_processed[columns_to_upload].copy()
                                 
-                                job_config = bigquery.QueryJobConfig(
+                                # Use LoadJobConfig here instead of QueryJobConfig
+                                job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
@@ -1853,9 +1853,16 @@ def render_data_processing_page(selected_project):
                                     ],
                                     write_disposition="WRITE_APPEND"
                                 )
-                                client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
+                                
+                                # Now this will work correctly
+                                client.load_table_from_dataframe(
+                                    upload_payload_df, 
+                                    table_id, 
+                                    job_config=job_config
+                                ).result()
+                                
                                 st.success("Upload Complete!")
-                                st.cache_data.clear() 
+                                st.cache_data.clear()
 
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
