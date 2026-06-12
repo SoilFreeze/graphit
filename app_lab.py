@@ -1769,25 +1769,25 @@ def render_data_processing_page(selected_project):
         # Change accept_multiple_files to True
         u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
 
-        if u_file is not None:
+        if u_files is not None:
             try:
                 # 1. FORMAT DETECTION
                 is_sensorconnect, skip_rows = False, 0
-                if u_file.name.endswith('.csv'):
-                    u_file.seek(0)
-                    for i, line in enumerate(u_file):
+                if u_files.name.endswith('.csv'):
+                    u_files.seek(0)
+                    for i, line in enumerate(u_files):
                         if b"DATA_START" in line:
                             is_sensorconnect, skip_rows = True, i + 1
                             break
-                    u_file.seek(0)
+                    u_files.seek(0)
 
                 # 2. DATA READING
                 if is_sensorconnect:
-                    df_raw = pd.read_csv(u_file, encoding='latin1', skiprows=skip_rows, dtype=str)
-                elif u_file.name.endswith('.csv'):
-                    df_raw = pd.read_csv(u_file, encoding='latin1', dtype=str)
+                    df_raw = pd.read_csv(u_files, encoding='latin1', skiprows=skip_rows, dtype=str)
+                elif u_files.name.endswith('.csv'):
+                    df_raw = pd.read_csv(u_files, encoding='latin1', dtype=str)
                 else:
-                    df_raw = pd.read_excel(u_file, dtype=str)
+                    df_raw = pd.read_excel(u_files, dtype=str)
 
                 if not df_raw.empty:
                     df_processed = pd.DataFrame()
@@ -1832,7 +1832,7 @@ def render_data_processing_page(selected_project):
                             st.error(f"❌ Error: Could not find timestamp or temperature headers. Found: {actual_headers}")
                             return # Stop execution if columns aren't found
                         
-                        clean_name = u_file.name.replace(".csv", "").replace(".xlsx", "")
+                        clean_name = u_files.name.replace(".csv", "").replace(".xlsx", "")
                         match = re.search(r'^([^ \(\)]+)', clean_name)
                         
                         df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
