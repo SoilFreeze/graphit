@@ -478,13 +478,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             'sort_key': sort_val
         })
 
-       sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
+    # This line must be aligned with the 'for sn in plot_df...' line above
+    sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
 
-   for i, config in enumerate(node_metadata):
+    # This for loop must also be aligned with the 'for sn...' line
+    for i, config in enumerate(sorted_node_configs):
         sn = config['node_num']
-        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         display_name = config['display_name']
         
+        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
         
         fig.add_trace(go.Scatter(
