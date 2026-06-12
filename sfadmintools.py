@@ -30,34 +30,35 @@ TABLE_ID = "raw_sensorpush"
 INVENTORY_TABLE = "hardware_inventory"
 BASE_URL = "https://api.sensorpush.com/api/v1"
 
-# ===============================================================
-# 2. DATABASE CLIENT
-# ===============================================================
-@st.cache_resource
-def get_bq_client():
-    """Initializes and returns the BigQuery client."""
-    try:
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(info)
-            return bigquery.Client(credentials=credentials, project=info["project_id"])
-        return bigquery.Client(project=PROJECT_ID)
-    except Exception as e:
-        st.error(f"❌ Database Link Offline: {e}")
-        return None
 
-client = get_bq_client()
 import streamlit as st
 import pandas as pd
 import requests
+from google.cloud import bigquery
+from google.oauth2 import service_account
 
+# ===============================================================
+# 1. CONFIG & CLIENT INITIALIZATION
+# ===============================================================
+def get_bq_client():
+    """Initializes BigQuery client using secrets."""
+    try:
+        info = st.secrets["gcp_service_account"]
+        credentials = service_account.Credentials.from_service_account_info(info)
+        return bigquery.Client(credentials=credentials, project=info["project_id"])
+    except Exception as e:
+        st.error(f"❌ BigQuery Auth Error: {e}")
+        return None
+
+client = get_bq_client()
 BASE_URL = "https://api.sensorpush.com/api/v1"
 
+# ===============================================================
+# 2. SENSORPUSH API LOGIC (Hard-coded Accounts)
+# ===============================================================
 def get_sensorpush_data():
-    """Consolidates fleet list using hard-coded credentials."""
+    """Fetches device list from hard-coded accounts."""
     all_devices = []
-    
-    # Hard-coded account list
     accounts = [
         {"name": "Account 1", "email": "tsteele@soilfreeze.com", "password": "Freeze123!!"},
         {"name": "Account 1", "email": "ldunham@soilfreeze.com", "password": "Freeze123!!"},
@@ -96,5 +97,27 @@ def get_sensorpush_data():
             
     return pd.DataFrame(all_devices)
 
-# In your main() function, simply call:
-# df = get_sensorpush_data()
+# ===============================================================
+# 3. MAIN UI
+# ===============================================================
+def main():
+    st.set_page_config(page_title="SF Engineering Admin", layout="wide")
+    st.title("📡 SensorPush Fleet Audit Tool")
+    
+    # This button now triggers the API pull
+    if st.button("🔄 Pull Live Fleet Metadata"):
+        with st.spinner("Pinging SensorPush API..."):
+            df = get_sensorpush_data()
+            
+            if not df.empty:
+                # Format timestamp
+                df['LastSeen'] = pd.to_datetime(df['LastSeen']).dt.tz_convert('America/Los_Angeles')
+                st.dataframe(df, use_container_width=True)
+                
+                # Optional: Add a button to save these to BigQuery if needed
+                st.download_button("Download Report", df.to_csv(index=False), "fleet_audit.csv")
+            else:
+                st.warning("No data retrieved.")
+
+if __name__ == "__main__":
+    main()
