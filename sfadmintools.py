@@ -51,26 +51,29 @@ import streamlit as st
 import pandas as pd
 import requests
 
-# Constants
 BASE_URL = "https://api.sensorpush.com/api/v1"
 
 def get_sensorpush_data():
-    """Authenticates against all accounts in secrets and returns a consolidated fleet list."""
+    """Consolidates fleet list using hard-coded credentials."""
     all_devices = []
     
-    # Access accounts from secrets
-    accounts = st.secrets.get("sensorpush_accounts", {})
+    # Hard-coded account list
+    accounts = [
+        {"name": "Account 1", "email": "tsteele@soilfreeze.com", "password": "Freeze123!!"},
+        {"name": "Account 1", "email": "ldunham@soilfreeze.com", "password": "Freeze123!!"},
+        {"name": "Account 2", "email": "soilfreeze98072@gmail.com", "password": "Freeze123!!"}
+    ]
     
-    for account_name, creds in accounts.items():
+    for acc in accounts:
         try:
             # 1. Authorize
             auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json={
-                "email": creds["email"],
-                "password": creds["password"]
+                "email": acc["email"],
+                "password": acc["password"]
             })
             
             if auth_resp.status_code != 200:
-                st.error(f"Auth failed for {account_name}")
+                st.error(f"Auth failed for {acc['name']}")
                 continue
                 
             token = auth_resp.json().get("authorization")
@@ -83,33 +86,15 @@ def get_sensorpush_data():
             # 3. Parse Metadata
             for dev in devices:
                 all_devices.append({
-                    "Account": account_name,
+                    "Account": acc["name"],
                     "NodeNum": dev.get("name"),
                     "PhysicalID": dev.get("id"),
                     "LastSeen": dev.get("last_seen")
                 })
         except Exception as e:
-            st.error(f"Error fetching {account_name}: {e}")
+            st.error(f"Error fetching {acc['name']}: {e}")
             
     return pd.DataFrame(all_devices)
 
-def main():
-    st.set_page_config(page_title="SF Fleet Audit", layout="wide")
-    st.title("📡 SensorPush Fleet Audit Tool")
-    
-    if st.button("🔄 Pull Live Fleet Metadata"):
-        with st.spinner("Pinging SensorPush API..."):
-            df = get_sensorpush_data()
-            
-            if not df.empty:
-                # Format timestamp for better readability
-                df['LastSeen'] = pd.to_datetime(df['LastSeen']).dt.tz_convert('America/Los_Angeles')
-                st.dataframe(df, use_container_width=True)
-                
-                # Optional: Download as CSV
-                st.download_button("Download Fleet Report", df.to_csv(index=False), "fleet_audit.csv")
-            else:
-                st.warning("No data retrieved.")
-
-if __name__ == "__main__":
-    main()
+# In your main() function, simply call:
+# df = get_sensorpush_data()
