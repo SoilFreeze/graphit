@@ -2500,7 +2500,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
     # --- SUB-TAB 2: BULK APPROVAL SYSTEM RUNROOM ---
     with tab_bulk_app:
-        execute_bulk_approval_workspace(client, full_reg_df, selected_project)
+        execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics)
         
     # -------------------------------------------------------------------------
     # --- SUB-TAB 3: SENSORPUSH API CLOUD RECOVERY BACKFILL ENGINE ---
