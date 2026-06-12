@@ -2145,7 +2145,7 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
     }
 
 
-def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
+def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     """
     Main administrative execution module managing bulk data approval modification routines,
     hourly table consolidation aggregates, and manual rejection string standardization.
