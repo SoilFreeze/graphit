@@ -47,29 +47,69 @@ def get_bq_client():
         return None
 
 client = get_bq_client()
-def get_sensorpush_fleet_status():
-    """Fetches device list directly from API."""
-    # Authenticate (Ensure you have your API credentials in secrets)
-    email = st.secrets["sensorpush_accounts"]["account1"]["email"]
-    password = st.secrets["sensorpush_accounts"]["account1"]["password"]
+import streamlit as st
+import pandas as pd
+import requests
+
+# Constants
+BASE_URL = "https://api.sensorpush.com/api/v1"
+
+def get_sensorpush_data():
+    """Authenticates against all accounts in secrets and returns a consolidated fleet list."""
+    all_devices = []
     
-    # 1. Get Auth Token
-    auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json={
-        "email": email,
-        "password": password
-    })
-    token = auth_resp.json().get("authorization")
+    # Access accounts from secrets
+    accounts = st.secrets.get("sensorpush_accounts", {})
     
-    # 2. Get Devices
-    headers = {"Authorization": token}
-    devices_resp = requests.get(f"{BASE_URL}/devices", headers=headers)
+    for account_name, creds in accounts.items():
+        try:
+            # 1. Authorize
+            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json={
+                "email": creds["email"],
+                "password": creds["password"]
+            })
+            
+            if auth_resp.status_code != 200:
+                st.error(f"Auth failed for {account_name}")
+                continue
+                
+            token = auth_resp.json().get("authorization")
+            headers = {"Authorization": token}
+            
+            # 2. Fetch Devices
+            dev_resp = requests.get(f"{BASE_URL}/devices", headers=headers)
+            devices = dev_resp.json()
+            
+            # 3. Parse Metadata
+            for dev in devices:
+                all_devices.append({
+                    "Account": account_name,
+                    "NodeNum": dev.get("name"),
+                    "PhysicalID": dev.get("id"),
+                    "LastSeen": dev.get("last_seen")
+                })
+        except Exception as e:
+            st.error(f"Error fetching {account_name}: {e}")
+            
+    return pd.DataFrame(all_devices)
+
+def main():
+    st.set_page_config(page_title="SF Fleet Audit", layout="wide")
+    st.title("📡 SensorPush Fleet Audit Tool")
     
-    # 3. Format into a clean table
-    data = []
-    for d in devices_resp.json():
-        data.append({
-            "NodeName": d.get("name"),
-            "PhysicalID": d.get("id"),
-            "LastSeen": d.get("last_seen")
-        })
-    return pd.DataFrame(data)
+    if st.button("🔄 Pull Live Fleet Metadata"):
+        with st.spinner("Pinging SensorPush API..."):
+            df = get_sensorpush_data()
+            
+            if not df.empty:
+                # Format timestamp for better readability
+                df['LastSeen'] = pd.to_datetime(df['LastSeen']).dt.tz_convert('America/Los_Angeles')
+                st.dataframe(df, use_container_width=True)
+                
+                # Optional: Download as CSV
+                st.download_button("Download Fleet Report", df.to_csv(index=False), "fleet_audit.csv")
+            else:
+                st.warning("No data retrieved.")
+
+if __name__ == "__main__":
+    main()
