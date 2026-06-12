@@ -1855,32 +1855,27 @@ def render_data_processing_page(selected_project):
                         if st.button(f"🚀 Upload to {target_table}"):
                             with st.spinner("Writing to BigQuery..."):
                                 table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
+                                
+                                # 1. FORCE 1 DECIMAL PRECISION HERE
+                                df_processed['temperature'] = df_processed['temperature'].round(1)
+                                
                                 is_lord = (target_table == "raw_lord") 
                                 
-                                if is_lord:
-                                    from decimal import Decimal
-                                    df_processed['temperature'] = df_processed['temperature'].apply(lambda x: Decimal(str(round(x, 1))) if pd.notnull(x) else None)
-                                
+                                # 2. PREPARE PAYLOAD
                                 columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
                                 upload_payload_df = df_processed[columns_to_upload].copy()
                                 
-                                # Use LoadJobConfig here instead of QueryJobConfig
+                                # 3. UPLOAD WITH FLOAT SCHEMA (Consistent for both tables now)
                                 job_config = bigquery.LoadJobConfig(
                                     schema=[
                                         bigquery.SchemaField("timestamp", "TIMESTAMP"),
                                         bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "NUMERIC" if is_lord else "FLOAT"),
+                                        bigquery.SchemaField("temperature", "FLOAT"), 
                                     ],
                                     write_disposition="WRITE_APPEND"
                                 )
-                                
-                                # Now this will work correctly
-                                client.load_table_from_dataframe(
-                                    upload_payload_df, 
-                                    table_id, 
-                                    job_config=job_config
-                                ).result()
-                                
+                                client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
+                                                               
                                 st.success("Upload Complete!")
                                 st.cache_data.clear()
 
