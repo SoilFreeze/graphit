@@ -2145,10 +2145,21 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
     }
 
 
-def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
+def execute_bulk_approval_workspace(client, full_reg_df, selected_project, tab_logistics):
     """
     Main administrative execution module managing bulk data approval modification routines,
     hourly table consolidation aggregates, and manual rejection string standardization.
+    
+    Parameters:
+    -----------
+    client : bigquery.Client
+        Authenticated Google Cloud BigQuery client instance.
+    full_reg_df : pandas.DataFrame
+        The full sensor node registry dataset mapping nodes to active hardware configurations.
+    selected_project : str
+        The current active project context token filtered out of the sidebar app menu.
+    tab_logistics : streamlit.tabs
+        Bubble handle routing to pass downstream context states across layouts.
     """
     # Establish explicit table paths mapped directly out of your data view catalog
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
@@ -2261,14 +2272,12 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
         try:
             status_box_str.markdown("🧼 **Standardizing mixed-case manual override parameters...**")
             
-            # Scans rejections table to convert false/lower case values to standardized uppercase or masked states
+            # Targets the data override source table directly (`manual_rejections`)
+            # Converts lower or mixed-case string variants safely into standard uppercase 'TRUE' or 'FALSE'
             str_cleanup_sql = f"""
                 UPDATE `{target_table}`
-                SET approve = CASE 
-                    WHEN LOWER(TRIM(approve)) = 'false' THEN 'MASKED' 
-                    ELSE UPPER(TRIM(approve)) 
-                END
-                WHERE LOWER(TRIM(approve)) IN ('true', 'false')
+                SET approve = UPPER(TRIM(approve))
+                WHERE LOWER(approve) IN ('true', 'false')
             """
             job = client.query(str_cleanup_sql)
             job.result()
@@ -2343,14 +2352,14 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
             st.warning("No telemetry data points found matching this configuration window.")
 
     st.divider()
-    st.info(f"Target Designation Status for selected coordinates: **{new_status.upper()}**")
+    st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
     
     # Step 2: Form Checkbox and Execution Engine Block
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
-        if st.button(f"🚀 Step 2: Execute Status Override to {new_status.upper()}", key="exec_blk_mgmt_btn", use_container_width=True):
+        if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
             
             # PATH A: If target override is TRUE, drop tracking tokens entirely out of the rejections table so they re-approve
-            if new_status.upper() == "TRUE":
+            if new_status == "TRUE":
                 sql = f"""
                     DELETE FROM `{target_table}`
                     WHERE STRUCT(NodeNum, timestamp) IN (
@@ -2359,7 +2368,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
                         WHERE {aliased_where}
                     )
                 """
-            # PATH B: If target override is a custom flag (BADDATA, MASKED, OFFICE), merge row coordinates into manual_rejections
+            # PATH B: If target override is a custom flag (FALSE, BADDATA, MASK), merge row coordinates into manual_rejections
             else:
                 sql = f"""
                     MERGE `{target_table}` T
@@ -2370,10 +2379,10 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
                     ) S
                     ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
                     WHEN MATCHED THEN
-                        UPDATE SET approve = '{new_status.upper()}'
+                        UPDATE SET approve = '{new_status}'
                     WHEN NOT MATCHED THEN
                         INSERT (NodeNum, timestamp, approve) 
-                        VALUES (S.NodeNum, S.timestamp, '{new_status.upper()}')
+                        VALUES (S.NodeNum, S.timestamp, '{new_status}')
                 """
             try:
                 with st.spinner("Processing database status reclassifications..."):
@@ -2405,10 +2414,10 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
         USING (SELECT '{node_num}' as NodeNum, TIMESTAMP('{ts_str}') as timestamp) S
         ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
         WHEN MATCHED THEN
-          UPDATE SET approve = '{new_status.upper()}'
+          UPDATE SET approve = '{new_status}'
         WHEN NOT MATCHED THEN
           INSERT (NodeNum, timestamp, approve) 
-          VALUES (S.NodeNum, S.timestamp, '{new_status.upper()}')
+          VALUES (S.NodeNum, S.timestamp, '{new_status}')
     """
     try:
         client.query(write_q).result()
@@ -2416,6 +2425,7 @@ def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     except Exception as e:
         st.error(f"⚠️ Cloud DB Commit Failed: {e}")
         return False
+
 
 # =============================================================================
 # DATA RECOVERY REQUISITE ENGINE HELPERS
