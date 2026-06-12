@@ -646,9 +646,10 @@ def get_trend_arrow(current, previous):
     if delta < -0.1: return f"🔹 {delta:.1f}"
     return "➡️ 0.0"
 
-# =============================================================================
-# WORKSPACE PAGE 2: TIME VS TEMP SCROLLING OVERVIEW
-# =============================================================================
+#############################
+# - 2. PAGE: TIME vs TEMP - #
+#############################
+
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
@@ -689,6 +690,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     with st.spinner(f"Syncing {p_name} telemetry..."):
         p_df = get_universal_portal_data(selected_project)
 
+    
     if p_df.empty:
         st.warning(f"No data found for '{p_name}'.")
         return
@@ -705,27 +707,18 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
     # 7. LOCATION-BASED PLOTTING LOOP
-    # --- ADDED: Filter p_df to ONLY contain nodes assigned to the selected_project ---
-    # We retrieve the specific list of nodes assigned to this project
-    valid_nodes_for_project = full_reg_df[full_reg_df['Project'] == selected_project]['NodeNum'].unique().tolist()
-    p_df = p_df[p_df['NodeNum'].isin(valid_nodes_for_project)].copy()
-    
-    # Now sort the locations based on the valid nodes for this specific project
     locations = sorted(
         [str(loc) for loc in p_df['Location'].dropna().unique()], 
         key=natural_sort_key
     )
 
     for loc in locations:
-        # We define loc_nodes to ensure this expander only handles nodes for this location in THIS project
-        loc_nodes = p_df[(p_df['Location'] == loc)]['NodeNum'].unique().tolist()
-        
         with st.expander(f"📍 Location: {loc}", expanded=True):
-            loc_df = p_df[(p_df['Location'] == loc) & (p_df['NodeNum'].isin(loc_nodes))].copy()
+            loc_df = p_df[p_df['Location'] == loc].copy()
             
             clean_proj_id = str(selected_project).split('-')[0]
             
-            # NORMALIZATION EXTRACTION: Converts "TP2", "TP-2", or "T2" into clean "T2"
+            # NORMALIZATION EXTRACTION: Converts "TP2", "TP-2", or "T2" into a clean "T2" pattern for the curve lookup
             clean_loc_num = "".join(re.findall(r'\d+', loc))
             normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
             search_id = f"{clean_proj_id}-{normalized_loc}"
@@ -748,10 +741,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
             
             st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
 
-# =============================================================================
-# WORKSPACE PAGE 3: TEMPERATURE VS DEPTH CHARTS
-# =============================================================================
-
+#########################
+# Page 3 - Depth Charts #
+#########################
 
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
