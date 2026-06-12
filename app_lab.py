@@ -1860,27 +1860,27 @@ def render_data_processing_page(selected_project):
                         
                         # --- CORRECTED UPLOAD BLOCK ---
                         if all_processed_dfs:
-            combined_df = pd.concat(all_processed_dfs, ignore_index=True)
-            combined_df['temperature'] = combined_df['temperature'].round(1)
-            
-            if st.button(f"🚀 Commit {len(combined_df)} records to {target_table}"):
-                with st.spinner("Writing to BigQuery..."):
-                    table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
-                    
-                    job_config = bigquery.LoadJobConfig(
-                        schema=[
-                            bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                            bigquery.SchemaField("NodeNum", "STRING"),
-                            bigquery.SchemaField("temperature", "FLOAT"), 
-                        ],
-                        write_disposition="WRITE_APPEND"
-                    )
-                    client.load_table_from_dataframe(combined_df[['timestamp', 'NodeNum', 'temperature']], table_id, job_config=job_config).result()
-                    st.success("Batch Upload Complete!")
-                    st.cache_data.clear()
-
-            except Exception as e:
-                st.error(f"Ingestion Failed: {e}")
+                            combined_df = pd.concat(all_processed_dfs, ignore_index=True)
+                            combined_df['temperature'] = combined_df['temperature'].round(1)
+                
+                            if st.button(f"🚀 Commit {len(combined_df)} records to {target_table}"):
+                                with st.spinner("Writing to BigQuery..."):
+                                    table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
+                                    
+                                    job_config = bigquery.LoadJobConfig(
+                                        schema=[
+                                            bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                            bigquery.SchemaField("NodeNum", "STRING"),
+                                            bigquery.SchemaField("temperature", "FLOAT"), 
+                                        ],
+                                        write_disposition="WRITE_APPEND"
+                                    )
+                                    client.load_table_from_dataframe(combined_df[['timestamp', 'NodeNum', 'temperature']], table_id, job_config=job_config).result()
+                                    st.success("Batch Upload Complete!")
+                                    st.cache_data.clear()
+                
+                            except Exception as e:
+                                st.error(f"Ingestion Failed: {e}")
 
     # --- TAB 2: EXPORT LOGIC ---
     with tab_export:
