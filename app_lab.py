@@ -2501,62 +2501,251 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         execute_bulk_approval_workspace(client, full_reg_df, selected_project)
         
     # --- SUB-TAB 3: SENSORPUSH API CLOUD RECOVERY BACKFILL ENGINE ---
+     # -------------------------------------------------------------------------
+    # SUB-TAB 4: DATA RECOVERY PIPELINE ENGINE
+    # -------------------------------------------------------------------------
     with tab_recovery:
         st.title("📡 Data Recovery Engine")
-        st.write("Extract missing data matrices from the SensorPush API framework and execute batch appends straight to raw tables.")
-        tgt_nodes = render_recovery_filters(full_reg_df)
-        
-        c_rec1, c_rec2 = st.columns(2)
-        r_start = c_rec1.date_input("Extraction Window Start Date", value=datetime.now().date() - timedelta(days=2), key="dt_rec_start")
-        r_end = c_rec2.date_input("Extraction Window End Date", value=datetime.now().date(), key="dt_rec_end")
-        
-        final_nodes = tgt_nodes if tgt_nodes else sorted((full_reg_df[(full_reg_df['Project'] == st.session_state.get('rec_proj_sel_isolated', 'All')) & (full_reg_df['Location'] == st.session_state.get('rec_loc_sel_isolated', 'All'))] if st.session_state.get('rec_proj_sel_isolated', 'All') != "All" else full_reg_df)['NodeNum'].dropna().unique().tolist())
-        st.warning(f"⚠️ Backfill Action Plan: Querying cloud servers for {len(final_nodes)} nodes from {r_start} to {r_end}.")
+        st.write(
+            "Extract raw chronological data streams directly from the SensorPush Cloud API architecture "
+            "and execute a direct batch-load insert into your primary production table layers."
+        )
+        st.divider()
 
-        if st.button("🚀 Execute Cloud Backfill Ingestion Pipeline Run", use_container_width=True, key="btn_trigger_recovery_run"):
-            all_rows, h_map, rev_map, b_marks, account_stats = [], {}, {}, {}, {}
-            ACCOUNTS = [{'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'}, {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'}, {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}]
+        # 1. RENDER STREAMLINED HIERARCHICAL SEARCH DROPDOWNS
+        dropdown_selected_nodes = render_recovery_filters(full_reg_df)
+
+        st.divider()
+
+        # 2. DEFINE TIMELINE RECOVERY CONTROLS
+        st.subheader("📅 Define Recovery Timeline Parameters")
+        rec_c1, rec_c2 = st.columns(2)
+        with rec_c1:
+            rec_start_date = st.date_input("Extraction Window Start Date", value=datetime.now().date() - timedelta(days=2), key="dt_rec_start")
+        with rec_c2:
+            rec_end_date = st.date_input("Extraction Window End Date", value=datetime.now().date(), key="dt_rec_end")
+
+        st.divider()
+
+        # 3. CONTEXTUAL DETERMINATION OF TARGET HARDWARE SCOPE
+        if dropdown_selected_nodes:
+            final_target_nodes = dropdown_selected_nodes
+        else:
+            active_proj_context = st.session_state.get('rec_proj_sel_isolated', 'All')
+            active_loc_context = st.session_state.get('rec_loc_sel_isolated', 'All')
             
-            with st.status("Executing API extraction pipelines...", expanded=True) as status_box:
-                try:
-                    for row in client.query(f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.hardware_inventory` WHERE RawID IS NOT NULL"):
-                        rid, fn = str(row.RawID).split('.')[0].strip(), str(row.NodeNum).strip()
-                        h_map[rid] = fn; rev_map[fn] = rid
-                except Exception as e: st.error(f"Hardware inventory lookup failed: {e}"); st.stop()
+            slice_df = full_reg_df.copy()
+            if active_proj_context != "All":
+                slice_df = slice_df[slice_df['Project'] == active_proj_context]
+            if active_loc_context != "All":
+                slice_df = slice_df[slice_df['Location'] == active_loc_context]
                 
-                for row in client.query(f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` GROUP BY NodeNum"): b_marks[str(row.NodeNum)] = str(row.max_time)
-                
-                iso_s = datetime.combine(r_start, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
-                iso_e = datetime.combine(r_end, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
-                
-                for acc in ACCOUNTS:
-                    account_stats[acc['email']] = 0
-                    try:
-                        auth_r = requests.post("https://api.sensorpush.com/api/v1/oauth/authorize", json=acc, timeout=15).json()
-                        token = requests.post("https://api.sensorpush.com/api/v1/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
-                        s_resp = requests.post("https://api.sensorpush.com/api/v1/devices/sensors", headers={"Authorization": token}, json={}, timeout=20).json()
-                        rssi_map = {str(sid).strip(): sm.get('rssi') for sid, sm in s_resp.items() if isinstance(sm, dict)}
-                        
-                        r_samples = requests.post("https://api.sensorpush.com/api/v1/samples", headers={"Authorization": token}, json={"startTime": iso_s, "endTime": iso_e, "limit": 100000}, timeout=60).json()
-                        for sid, samples in r_samples.get('sensors', {}).items():
-                            fn = h_map.get(str(sid).split('.')[0].strip()) or next((n for n in final_nodes if rev_map.get(n) == str(sid).split('.')[0].strip()), None)
-                            if fn in final_nodes:
-                                current_rssi = rssi_map.get(str(sid).strip())
-                                for s in samples:
-                                    temp = s.get('temp_f') or s.get('temperature')
-                                    if temp is not None:
-                                        account_stats[acc['email']] += 1
-                                        all_rows.append({"timestamp": pd.to_datetime(s['observed']), "NodeNum": str(fn), "temperature": float(temp), "rssi": float(current_rssi) if current_rssi is not None else None})
-                    except Exception: continue
+            final_target_nodes = sorted(slice_df['NodeNum'].dropna().unique().tolist())
 
-                if all_rows:
-                    up_df = pd.DataFrame(all_rows)
-                    up_df['timestamp'] = pd.to_datetime(up_df['timestamp'], utc=True)
-                    load_config = bigquery.LoadJobConfig(schema=[bigquery.SchemaField("timestamp", "TIMESTAMP"), bigquery.SchemaField("NodeNum", "STRING"), bigquery.SchemaField("temperature", "FLOAT"), bigquery.SchemaField("rssi", "FLOAT")], write_disposition="WRITE_APPEND")
-                    client.load_table_from_dataframe(up_df, f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush", job_config=load_config).result()
-                    status_box.update(label="Recovery Append Complete!", state="complete")
-                    st.success(f"🎉 Success! Extracted and appended {len(up_df):,} lines."); st.cache_data.clear()
-                else: status_box.update(label="Cloud sync found 0 rows for selected constraints.", state="complete")
+        # 4. SELECTION METRIC WARNING BANNER
+        scope_text = f"{len(final_target_nodes)} selected nodes" if final_target_nodes else "ALL registered fleet nodes"
+        st.warning(f"⚠️ **Action Required:** Initiating backfill protocol for {scope_text} from **{rec_start_date}** through **{rec_end_date}**.")
+
+        # Initialize tracking flags inside session state to survive reruns safely
+        if 'recovery_run_complete' not in st.session_state:
+            st.session_state['recovery_run_complete'] = False
+        if 'recovery_cached_rows' not in st.session_state:
+            st.session_state['recovery_cached_rows'] = []
+        if 'recovery_cached_stats' not in st.session_state:
+            st.session_state['recovery_cached_stats'] = {}
+
+        # 5. TRIGGER EXECUTION PIPELINE BUTTON
+        if st.button("🚀 Execute Cloud Backfill Ingestion Pipeline Run", use_container_width=True, key="btn_trigger_recovery_run"):
+            import requests
+            import numpy as np
+            
+            all_rows = []
+            hardware_map = {}
+            reverse_hardware_map = {}
+            db_max_timestamps = {}
+            node_stats = {}
+            account_stats = {}
+
+            LOCAL_REC_TABLE = "raw_sensorpush"
+            LOCAL_INV_TABLE = "hardware_inventory"
+            LOCAL_API_URL = "https://api.sensorpush.com/api/v1"
+
+            ACCOUNTS = [
+                {'email': 'ldunham@soilfreeze.com', 'password': 'Freeze123!!'},
+                {'email': 'tsteele@soilfreeze.com', 'password': 'Freeze123!!'},
+                {'email': 'soilfreeze98072@gmail.com', 'password': 'Freeze123!!'}
+            ]
+
+            start_time_iso = datetime.combine(rec_start_date, datetime.min.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
+            end_time_iso = datetime.combine(rec_end_date, datetime.max.time()).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+            for node in final_target_nodes:
+                node_stats[node] = 0
+
+            with st.status("Executing Cloud Backfill Ingestion Pipeline Run...", expanded=True) as status_box:
+                st.write("🔍 Extracting Translation Mappings from Hardware Inventory...")
+                try:
+                    inv_q = f"SELECT RawID, NodeNum FROM `{PROJECT_ID}.{DATASET_ID}.{LOCAL_INV_TABLE}` WHERE RawID IS NOT NULL"
+                    for row in client.query(inv_q):
+                        clean_db_id = str(row.RawID).split('.')[0].strip()
+                        friendly_name = str(row.NodeNum).strip()
+                        hardware_map[clean_db_id] = friendly_name
+                        reverse_hardware_map[friendly_name] = clean_db_id
+                        if friendly_name in node_stats:
+                            node_stats[friendly_name] = 0
+                except Exception as e:
+                    st.error(f"Failed to query inventory map tables: {e}")
+                    st.stop()
+
+                st.write("📅 Checking historical system check-in history benchmarks...")
+                try:
+                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` GROUP BY NodeNum"
+                    for row in client.query(time_q):
+                        if row.max_time:
+                            db_max_timestamps[str(row.NodeNum)] = str(row.max_time)
+                except Exception as e:
+                    st.warning(f"Could not calculate maximum timelines: {e}")
+
+                for acc in ACCOUNTS:
+                    st.write(f"🔐 Authenticating token profile for `{acc['email']}`...")
+                    account_stats[acc['email']] = 0
+                    
+                    try:
+                        auth_r = requests.post(f"{LOCAL_API_URL}/oauth/authorize", json=acc, timeout=15).json()
+                        token = requests.post(f"{LOCAL_API_URL}/oauth/accesstoken", json={"authorization": auth_r['authorization']}, timeout=15).json().get('accesstoken')
+                        
+                        s_resp = requests.post(f"{LOCAL_API_URL}/devices/sensors", headers={"Authorization": token}, json={}, timeout=20).json()
+                        device_rssi_map = {}
+                        if isinstance(s_resp, dict):
+                            for s_id, s_meta in s_resp.items():
+                                if isinstance(s_meta, dict) and 'rssi' in s_meta:
+                                    device_rssi_map[str(s_id).strip()] = s_meta.get('rssi')
+
+                        st.write(f"📥 Pulling raw cloud payload matrix for `{acc['email']}`...")
+                        samples_payload = {"startTime": start_time_iso, "endTime": end_time_iso, "limit": 100000}
+                        r_samples = requests.post(f"{LOCAL_API_URL}/samples", headers={"Authorization": token}, json=samples_payload, timeout=60).json()
+
+                        st.write(f"DEBUG [{acc['email']}]: Found {len(r_samples.get('sensors', {}))} raw sensor payloads in API response.")
+                        
+                        sensors_data = r_samples.get('sensors', {})
+                        if not sensors_data:
+                            continue
+
+                        for s_id, samples in sensors_data.items():
+                            api_root_id = str(s_id).split('.')[0].strip()
+                            friendly_name = hardware_map.get(api_root_id)
+                            
+                            # 🛡️ HARDENED MATCH GUARD FIX: Check both friendly name maps and Raw ID listings
+                            is_target_match = False
+                            if friendly_name and friendly_name in final_target_nodes:
+                                is_target_match = True
+                            else:
+                                # Fallback check: look up if the raw API tracking reference maps back to our targeted assets list
+                                for target_node in final_target_nodes:
+                                    if reverse_hardware_map.get(target_node) == api_root_id:
+                                        friendly_name = target_node
+                                        is_target_match = True
+                                        break
+                                        
+                            if not is_target_match:
+                                continue
+                                
+                            if friendly_name not in node_stats:
+                                node_stats[friendly_name] = 0
+                                
+                            current_device_rssi = device_rssi_map.get(str(s_id).strip())
+                            
+                            for s in samples:
+                                temp = s.get('temp_f') or s.get('temperature') or s.get('thermocouple_temperature')
+                                if temp is not None:
+                                    account_stats[acc['email']] += 1
+                                    all_rows.append({
+                                        "timestamp": pd.to_datetime(s['observed']),
+                                        "NodeNum": str(friendly_name),
+                                        "temperature": float(temp),
+                                        "rssi": float(current_device_rssi) if current_device_rssi is not None else None
+                                    })
+                    except Exception:
+                        continue
+
+                total_recovered_appends = len(all_rows)
+                if total_recovered_appends == 0:
+                    st.info("🔒 Cloud accounts returned 0 points for this window context.")
+                    status_box.update(label="Run Finalized (0 Points Found)", state="complete")
+                    st.session_state['recovery_run_complete'] = False
+                else:
+                    st.write(f"📥 Batch loading rows straight into `{LOCAL_REC_TABLE}`...")
+                    try:
+                        upload_df = pd.DataFrame(all_rows)
+                        upload_df['timestamp'] = pd.to_datetime(upload_df['timestamp'], utc=True)
+                        
+                        if 'rssi' in upload_df.columns:
+                            upload_df['rssi'] = pd.to_numeric(upload_df['rssi'], errors='coerce').astype(object).where(upload_df['rssi'].notnull(), None)
+                        if 'temperature' in upload_df.columns:
+                            upload_df['temperature'] = pd.to_numeric(upload_df['temperature'], errors='coerce')
+                        
+                        upload_df['NodeNum'] = upload_df['NodeNum'].astype(str).str.strip()
+
+                        real_table_ref = f"{PROJECT_ID}.{DATASET_ID}.{LOCAL_REC_TABLE}"
+                        
+                        job_config = bigquery.LoadJobConfig(
+                            schema=[
+                                bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                                bigquery.SchemaField("NodeNum", "STRING"),
+                                bigquery.SchemaField("temperature", "FLOAT"),
+                                bigquery.SchemaField("rssi", "FLOAT"),
+                            ],
+                            write_disposition="WRITE_APPEND"
+                        )
+                        
+                        client.load_table_from_dataframe(upload_df, real_table_ref, job_config=job_config).result()
+                        
+                        st.success(f"🎉 Success! Appended {total_recovered_appends:,} raw rows to storage.")
+                        summary_line = " | ".join([f"**{email}**: {count:,} pts" for email, count in account_stats.items()])
+                        st.markdown(f"📥 **Account Run Summary Logs:** {summary_line}")
+                        status_box.update(label="Recovery Dump Complete!", state="complete")
+                        
+                        st.session_state['recovery_cached_rows'] = all_rows
+                        st.session_state['recovery_cached_stats'] = db_max_timestamps
+                        st.session_state['recovery_run_complete'] = True
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as bq_err:
+                        st.error(f"Batch loading Ingestion pipeline failure: {bq_err}")
+                        status_box.update(state="error")
+
+        if st.session_state.get('recovery_run_complete'):
+            st.write("### 📊 Data Recovery Tally Distribution:")
+            summary_records = []
+            grand_total_tally = 0
+            
+            cached_rows = st.session_state['recovery_cached_rows']
+            cached_benchmarks = st.session_state['recovery_cached_stats']
+            nodes_to_report = final_target_nodes
+            
+            for node in nodes_to_report:
+                true_node_count = sum(1 for row in cached_rows if row["NodeNum"] == node)
+                grand_total_tally += true_node_count
+                last_checked_in = cached_benchmarks.get(node, "❌ No Historical Records Found")
+                
+                summary_records.append({
+                    "Node Number": node,
+                    "Last Database Check-In": last_checked_in,
+                    "Points Extracted & Appended": true_node_count
+                })
+                
+            summary_df = pd.DataFrame(summary_records).sort_values(by="Node Number")
+            
+            total_row = pd.DataFrame([{
+                "Node Number": "🧮 Combined Total Pool",
+                "Last Database Check-In": "—",
+                "Points Extracted & Appended": grand_total_tally
+            }])
+            summary_df = pd.concat([summary_df, total_row], ignore_index=True)
+            
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            if grand_total_tally > 0:
+                st.balloons()
 
     # --- SUB-TAB 4: PROJECT LIFECYCLE HISTORY DIRECTORY ---
     with tab_proj_master:
