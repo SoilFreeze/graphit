@@ -1763,34 +1763,34 @@ def render_data_processing_page(selected_project):
     
     # --- TAB 1: UPLOAD LOGIC ---
     with tab_upload:
-    st.subheader("📄 Manual File Ingestion")
-    st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
+        st.subheader("📄 Manual File Ingestion")
+        st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
+        
+        u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
     
-    u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
-
-    if u_files:
-        all_processed_dfs = []
-        target_table = None
-
-        # 1. PROCESS ALL FILES
-        for f in u_files:
-            try:
-                # Format Detection & Reading
-                is_sensorconnect, skip_rows = False, 0
-                if f.name.endswith('.csv'):
-                    f.seek(0)
-                    for i, line in enumerate(f):
-                        if b"DATA_START" in line:
-                            is_sensorconnect, skip_rows = True, i + 1
-                            break
-                    f.seek(0)
-                
-                if is_sensorconnect:
-                    df_raw = pd.read_csv(f, encoding='latin1', skiprows=skip_rows, dtype=str)
-                elif f.name.endswith('.csv'):
-                    df_raw = pd.read_csv(f, encoding='latin1', dtype=str)
-                else:
-                    df_raw = pd.read_excel(f, dtype=str)
+        if u_files:
+            all_processed_dfs = []
+            target_table = None
+    
+            # 1. PROCESS ALL FILES
+            for f in u_files:
+                try:
+                    # Format Detection & Reading
+                    is_sensorconnect, skip_rows = False, 0
+                    if f.name.endswith('.csv'):
+                        f.seek(0)
+                        for i, line in enumerate(f):
+                            if b"DATA_START" in line:
+                                is_sensorconnect, skip_rows = True, i + 1
+                                break
+                        f.seek(0)
+                    
+                    if is_sensorconnect:
+                        df_raw = pd.read_csv(f, encoding='latin1', skiprows=skip_rows, dtype=str)
+                    elif f.name.endswith('.csv'):
+                        df_raw = pd.read_csv(f, encoding='latin1', dtype=str)
+                    else:
+                        df_raw = pd.read_excel(f, dtype=str)
 
                 if not df_raw.empty:
                     df_processed = pd.DataFrame()
