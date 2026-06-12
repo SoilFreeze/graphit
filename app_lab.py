@@ -478,7 +478,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             'sort_key': sort_val
         })
 
-    sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
+   sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
 
    for i, config in enumerate(node_metadata):
         sn = config['node_num']
