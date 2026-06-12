@@ -2031,14 +2031,14 @@ def render_bulk_approval_controls():
     with c2:
         current_status_filter = st.selectbox(
             "Filter Current Designation Status:",
-            options=["all", "all but null", "true", "null (streaming / unreviewed)", "MASKED", "office", "baddata"],
+            options=["all", "all but null", "true", "null (streaming / unreviewed)", "masked", "office", "baddata"],
             key="blk_mgmt_current_status_filter",
             help="Limits modifications only to data points that currently match this selected classification."
         )
     with c3:
         new_status = st.selectbox(
             "Set Approval Status To:", 
-            ["TRUE", "MASKED", "office", "baddata"], 
+            ["true", "masked", "office", "baddata"], 
             key="blk_mgmt_new_status"
         )
     return target_scope, current_status_filter, new_status
