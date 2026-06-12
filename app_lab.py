@@ -1792,12 +1792,12 @@ def render_data_processing_page(selected_project):
                     else:
                         df_raw = pd.read_excel(f, dtype=str)
 
-                if not df_raw.empty:
-                    df_processed = pd.DataFrame()
-                    actual_headers = list(df_raw.columns)
-                    clean_headers = [str(h).strip().lower() for h in actual_headers]
-                    
-                    target_table = ""
+                    if not df_raw.empty:
+                        df_processed = pd.DataFrame()
+                        actual_headers = list(df_raw.columns)
+                        clean_headers = [str(h).strip().lower() for h in actual_headers]
+                        
+                        target_table = ""
                     
                     # BRANCH A: Lord SensorConnect (Melt Wide to Long)
                     if is_sensorconnect:
