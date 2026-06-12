@@ -138,8 +138,10 @@ if sidebar_client is not None:
             FROM `{PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
-              AND (ShowActive IS TRUE 
-                   OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
+              AND (
+                  UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1') 
+                  OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%'
+              )
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
@@ -941,17 +943,17 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
     summary_q = f"""
-        WITH active_projects AS (
-            SELECT 
-                CAST(Project AS STRING) as Project, 
-                ProjectName, 
-                ProjectStatus, 
-                Date_Freezedown,
-                REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
-            FROM `{PROJECT_REGISTRY_TABLE}`
-            WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('YES', 'TRUE', '1')
-              AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
-        ),
+            WITH active_projects AS (
+                SELECT 
+                    CAST(Project AS STRING) as Project, 
+                    ProjectName, 
+                    ProjectStatus, 
+                    Date_Freezedown,
+                    REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
+                FROM `{PROJECT_REGISTRY_TABLE}`
+                WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
+                  AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
+            ),
         raw_data AS (
             SELECT 
                 p.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, m.NodeNum
