@@ -1753,7 +1753,7 @@ def render_data_processing_page(selected_project):
         return
         
     # Standardized 5-tab layout order matching blueprint specifications
-    tab_upload, tab_export, tab_ref_library, tab_event_log, tab_chiller_reg = st.tabs([
+    tab_upload, tab_export, tab_ref_library = st.tabs([
         "📄 Upload Telemetry", 
         "📥 Export Report",
         "📈 Ref Curve Library"
