@@ -1807,11 +1807,17 @@ def render_data_processing_page(selected_project):
                         df_processed['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
                         target_table = "raw_lord"
 
-                    # BRANCH C: SensorPush Native & Standard
+                    # BRANCH C: SensorPush
                     else:
-                        st.info("Detected Format: SensorPush Native")
-                        t_match = [h for h in actual_headers if 'time' in h.lower()][0]
-                        v_match = [h for h in actual_headers if 'temp' in h.lower()][0]
+                        st.info("Detected Format: SensorPush")
+                        
+                        # Use a more flexible search for headers
+                        t_match = next((h for h in actual_headers if 'timestamp' in h.lower()), None)
+                        v_match = next((h for h in actual_headers if 'temp' in h.lower()), None)
+                        
+                        if not t_match or not v_match:
+                            st.error(f"❌ Error: Could not find timestamp or temperature headers. Found: {actual_headers}")
+                            return # Stop execution if columns aren't found
                         
                         clean_name = u_file.name.replace(".csv", "").replace(".xlsx", "")
                         match = re.search(r'^([^ \(\)]+)', clean_name)
@@ -1820,7 +1826,7 @@ def render_data_processing_page(selected_project):
                         df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
                         df_processed['NodeNum'] = match.group(1).strip() if match else clean_name
                         target_table = "raw_sensorpush"
-
+                        
                     # 3. AUTOMATED LIMITS FILTER RUNROOM
                     if not df_processed.empty:
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
