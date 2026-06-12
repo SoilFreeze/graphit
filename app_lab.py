@@ -1763,31 +1763,34 @@ def render_data_processing_page(selected_project):
     
     # --- TAB 1: UPLOAD LOGIC ---
     with tab_upload:
-        st.subheader("📄 Manual File Ingestion")
-        st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
-        
-        # Change accept_multiple_files to True
-        u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
+    st.subheader("📄 Manual File Ingestion")
+    st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
+    
+    u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
 
-        if u_files is not None:
+    if u_files:
+        all_processed_dfs = []
+        target_table = None
+
+        # 1. PROCESS ALL FILES
+        for f in u_files:
             try:
-                # 1. FORMAT DETECTION
+                # Format Detection & Reading
                 is_sensorconnect, skip_rows = False, 0
                 if f.name.endswith('.csv'):
-                    u_files.seek(0)
-                    for i, line in enumerate(u_files):
+                    f.seek(0)
+                    for i, line in enumerate(f):
                         if b"DATA_START" in line:
                             is_sensorconnect, skip_rows = True, i + 1
                             break
-                    u_files.seek(0)
-
-                # 2. DATA READING
+                    f.seek(0)
+                
                 if is_sensorconnect:
-                    df_raw = pd.read_csv(u_files, encoding='latin1', skiprows=skip_rows, dtype=str)
+                    df_raw = pd.read_csv(f, encoding='latin1', skiprows=skip_rows, dtype=str)
                 elif f.name.endswith('.csv'):
-                    df_raw = pd.read_csv(u_files, encoding='latin1', dtype=str)
+                    df_raw = pd.read_csv(f, encoding='latin1', dtype=str)
                 else:
-                    df_raw = pd.read_excel(u_files, dtype=str)
+                    df_raw = pd.read_excel(f, dtype=str)
 
                 if not df_raw.empty:
                     df_processed = pd.DataFrame()
@@ -1843,6 +1846,9 @@ def render_data_processing_page(selected_project):
                     # 3. AUTOMATED LIMITS FILTER RUNROOM
                     if not df_processed.empty:
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
+                        df_processed['temperature'] = pd.to_numeric(df_processed['temperature'], errors='coerce')
+                        all_processed_dfs.append(df_processed)
+                        st.write(f"✅ Prepared {f.name}: {len(df_processed)} records.")
                         
                         bad_mask = (df_processed['temperature'] > 120) | (df_processed['temperature'] < -30)
                         
@@ -1853,32 +1859,25 @@ def render_data_processing_page(selected_project):
                         st.success(f"✅ Prepared {len(df_processed)} records for Node(s): {', '.join(df_processed['NodeNum'].unique())}")
                         
                         # --- CORRECTED UPLOAD BLOCK ---
-                        if st.button(f"🚀 Upload to {target_table}"):
-                            with st.spinner("Writing to BigQuery..."):
-                                table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
-                                
-                                # 1. FORCE 1 DECIMAL PRECISION HERE
-                                df_processed['temperature'] = df_processed['temperature'].round(1)
-                                
-                                is_lord = (target_table == "raw_lord") 
-                                
-                                # 2. PREPARE PAYLOAD
-                                columns_to_upload = ['timestamp', 'NodeNum', 'temperature']
-                                upload_payload_df = df_processed[columns_to_upload].copy()
-                                
-                                # 3. UPLOAD WITH FLOAT SCHEMA (Consistent for both tables now)
-                                job_config = bigquery.LoadJobConfig(
-                                    schema=[
-                                        bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                        bigquery.SchemaField("NodeNum", "STRING"),
-                                        bigquery.SchemaField("temperature", "FLOAT"), 
-                                    ],
-                                    write_disposition="WRITE_APPEND"
-                                )
-                                client.load_table_from_dataframe(upload_payload_df, table_id, job_config=job_config).result()
-                                                               
-                                st.success("Upload Complete!")
-                                st.cache_data.clear()
+                        if all_processed_dfs:
+            combined_df = pd.concat(all_processed_dfs, ignore_index=True)
+            combined_df['temperature'] = combined_df['temperature'].round(1)
+            
+            if st.button(f"🚀 Commit {len(combined_df)} records to {target_table}"):
+                with st.spinner("Writing to BigQuery..."):
+                    table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
+                    
+                    job_config = bigquery.LoadJobConfig(
+                        schema=[
+                            bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                            bigquery.SchemaField("NodeNum", "STRING"),
+                            bigquery.SchemaField("temperature", "FLOAT"), 
+                        ],
+                        write_disposition="WRITE_APPEND"
+                    )
+                    client.load_table_from_dataframe(combined_df[['timestamp', 'NodeNum', 'temperature']], table_id, job_config=job_config).result()
+                    st.success("Batch Upload Complete!")
+                    st.cache_data.clear()
 
             except Exception as e:
                 st.error(f"Ingestion Failed: {e}")
