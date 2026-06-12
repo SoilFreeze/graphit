@@ -9,27 +9,6 @@ import re
 import requests
 import numpy as np
 
-# ===============================================================
-# 1. CONFIGURATION, GLOBAL CONSTANTS & SESSION STATE
-# ===============================================================
-def initialize_app():
-    """Sets up page config and global session state variables."""
-    st.set_page_config(page_title="SF Engineering Admin", page_icon="🛠️", layout="wide")
-    
-    if 'unit_mode' not in st.session_state:
-        st.session_state['unit_mode'] = "Fahrenheit"
-    
-    # Unified core data paths to prevent variable drift inside main()
-    return "Temperature", "sensorpush-export"
-
-DATASET_ID, PROJECT_ID = initialize_app()
-display_tz = "America/Los_Angeles"
-
-# Global target references for API tools to prevent variable drift
-TABLE_ID = "raw_sensorpush"
-INVENTORY_TABLE = "hardware_inventory"
-BASE_URL = "https://api.sensorpush.com/api/v1"
-
 
 import streamlit as st
 import pandas as pd
