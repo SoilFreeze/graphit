@@ -47,65 +47,29 @@ def get_bq_client():
         return None
 
 client = get_bq_client()
-# ===============================================================
-# 3. UTILITY FUNCTIONS
-# ===============================================================
-
-def get_fleet_telemetry(auth_headers):
-    """Placeholder: Pings API to fetch fleet registry. Replace with actual API endpoints."""
-    # Example logic:
-    # response = requests.get(f"{BASE_URL}/gateways", headers=auth_headers)
-    # return pd.DataFrame(response.json())
-    return pd.DataFrame(columns=['NodeNum', 'PhysicalID', 'LastCheckIn'])
-
-# ===============================================================
-# 4. MAIN APP ENGINE
-# ===============================================================
-
-def main():
-    st.sidebar.title("🛠️ Engineering Admin")
-    page = st.sidebar.radio("Navigation", ["📄 Ingestion", "📡 API Sync & Audit", "🔍 Unmapped Nodes"])
-
-    # TAB 1: MANUAL INGESTION
-    if page == "📄 Ingestion":
-        st.subheader("Manual File Ingestion")
-        u_files = st.file_uploader("Select CSV/Excel files", type=['csv', 'xlsx'], accept_multiple_files=True)
-        
-        if u_files:
-            all_processed_dfs = []
-            for f in u_files:
-                # ... [Insert your existing Processing Logic here] ...
-                st.write(f"✅ Prepared: {f.name}")
-            
-            if st.button("🚀 Commit Batch to BigQuery"):
-                combined_df = pd.concat(all_processed_dfs)
-                # ... [Insert your load_table_from_dataframe logic here] ...
-                st.success("Upload Complete")
-
-    # TAB 2: API SYNC
-    elif page == "📡 API Sync & Audit":
-        st.subheader("Fleet Synchronization")
-        if st.button("🔄 Sync API to Registry"):
-            with st.spinner("Reconciling..."):
-                # Call get_fleet_telemetry and perform SQL UPDATE
-                st.success("Registry Synced with API")
-
-    # TAB 3: UNMAPPED NODE AUDIT
-    elif page == "🔍 Unmapped Nodes":
-        st.subheader("Unmapped Node Audit")
-        query = f"""
-            SELECT NodeNum, COUNT(*) as total_points, MIN(timestamp) as first, MAX(timestamp) as last
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE LOWER(NodeNum) LIKE '%unmapped%'
-            GROUP BY NodeNum
-            ORDER BY total_points DESC
-        """
-        if st.button("Run Audit"):
-            df_unmapped = client.query(query).to_dataframe()
-            if not df_unmapped.empty:
-                st.dataframe(df_unmapped)
-            else:
-                st.success("✅ No unmapped nodes detected.")
-
-if __name__ == "__main__":
-    main()
+def get_sensorpush_fleet_status():
+    """Fetches device list directly from API."""
+    # Authenticate (Ensure you have your API credentials in secrets)
+    email = st.secrets["sensorpush_accounts"]["account1"]["email"]
+    password = st.secrets["sensorpush_accounts"]["account1"]["password"]
+    
+    # 1. Get Auth Token
+    auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json={
+        "email": email,
+        "password": password
+    })
+    token = auth_resp.json().get("authorization")
+    
+    # 2. Get Devices
+    headers = {"Authorization": token}
+    devices_resp = requests.get(f"{BASE_URL}/devices", headers=headers)
+    
+    # 3. Format into a clean table
+    data = []
+    for d in devices_resp.json():
+        data.append({
+            "NodeName": d.get("name"),
+            "PhysicalID": d.get("id"),
+            "LastSeen": d.get("last_seen")
+        })
+    return pd.DataFrame(data)
