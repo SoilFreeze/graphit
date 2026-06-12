@@ -8,11 +8,21 @@ import streamlit as st
 from google.oauth2 import service_account
 from google.cloud import bigquery
 
-# Load credentials from Streamlit Secrets
-creds_dict = st.secrets["gcp"]
-credentials = service_account.Credentials.from_service_account_info(creds_dict)
+# Access secrets directly because they are at the top level of your file
+creds_dict = {
+    "type": st.secrets["type"],
+    "project_id": st.secrets["project_id"],
+    "private_key_id": st.secrets["private_key_id"],
+    "private_key": st.secrets["private_key"].replace("\\n", "\n"), # Ensure newlines are fixed
+    "client_email": st.secrets["client_email"],
+    "client_id": st.secrets["client_id"],
+    "auth_uri": st.secrets["auth_uri"],
+    "token_uri": st.secrets["token_uri"],
+    "auth_provider_x509_cert_url": st.secrets["auth_provider_x509_cert_url"],
+    "client_x509_cert_url": st.secrets["client_x509_cert_url"],
+}
 
-# Initialize Client with the loaded credentials
+credentials = service_account.Credentials.from_service_account_info(creds_dict)
 client = bigquery.Client(credentials=credentials, project=creds_dict["project_id"])
 
 # 1. SETUP
