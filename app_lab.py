@@ -96,7 +96,9 @@ def get_universal_portal_data(project_id):
     except Exception as e:
         st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
-        
+
+
+
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
@@ -371,17 +373,21 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
-                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
+                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None, 
+                           allowed_nodes=None): # <-- 1. Add allowed_nodes parameter
     """
     Engineering-grade Trend Graph.
-    - Legend: Naturally sorted by logical numerical order (1, 2, ... 10).
-    - Hover: Date at top, Time only on entries.
-    - Gaps: Lines break if data is missing for > 6 hours.
-    - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
+    - Added: 'allowed_nodes' filter to prevent cross-phase data contamination.
     """
-
     if df.empty: return go.Figure().update_layout(title="No data available")
 
+    # 2. FILTER DATA IMMEDIATELY
+    plot_df = df.copy()
+    if allowed_nodes is not None:
+        plot_df = plot_df[plot_df['NodeNum'].isin(allowed_nodes)]
+    
+    if plot_df.empty: return go.Figure().update_layout(title="No nodes in this project phase")                  
+                               
     client = get_bq_client()
     plot_df = df.copy() 
 
@@ -449,7 +455,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
     node_metadata = []
-    for sn in plot_df['NodeNum'].unique():
+    # Only iterate through nodes that survived the filter
+    for sn in sorted(plot_df['NodeNum'].unique(), key=natural_sort_key): 
         node_df = plot_df[plot_df['NodeNum'] == sn]
         depth_val = node_df['Depth'].iloc[0]
         bank_val = node_df['Bank'].iloc[0]
@@ -473,11 +480,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
 
-    for i, config in enumerate(sorted_node_configs):
+   for i, config in enumerate(node_metadata):
         sn = config['node_num']
+        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         display_name = config['display_name']
         
-        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
         
         fig.add_trace(go.Scatter(
@@ -696,18 +703,27 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
     # 7. LOCATION-BASED PLOTTING LOOP
+    # --- ADDED: Filter p_df to ONLY contain nodes assigned to the selected_project ---
+    # We retrieve the specific list of nodes assigned to this project
+    valid_nodes_for_project = full_reg_df[full_reg_df['Project'] == selected_project]['NodeNum'].unique().tolist()
+    p_df = p_df[p_df['NodeNum'].isin(valid_nodes_for_project)].copy()
+    
+    # Now sort the locations based on the valid nodes for this specific project
     locations = sorted(
         [str(loc) for loc in p_df['Location'].dropna().unique()], 
         key=natural_sort_key
     )
 
     for loc in locations:
+        # We define loc_nodes to ensure this expander only handles nodes for this location in THIS project
+        loc_nodes = p_df[(p_df['Location'] == loc)]['NodeNum'].unique().tolist()
+        
         with st.expander(f"📍 Location: {loc}", expanded=True):
-            loc_df = p_df[p_df['Location'] == loc].copy()
+            loc_df = p_df[(p_df['Location'] == loc) & (p_df['NodeNum'].isin(loc_nodes))].copy()
             
             clean_proj_id = str(selected_project).split('-')[0]
             
-            # NORMALIZATION EXTRACTION: Converts "TP2", "TP-2", or "T2" into a clean "T2" pattern for the curve lookup
+            # NORMALIZATION EXTRACTION: Converts "TP2", "TP-2", or "T2" into clean "T2"
             clean_loc_num = "".join(re.findall(r'\d+', loc))
             normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
             search_id = f"{clean_proj_id}-{normalized_loc}"
@@ -733,6 +749,8 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 # =============================================================================
 # WORKSPACE PAGE 3: TEMPERATURE VS DEPTH CHARTS
 # =============================================================================
+
+
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Vertical Temperature Profiles.
