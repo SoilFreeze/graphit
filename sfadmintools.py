@@ -47,16 +47,20 @@ def get_sensorpush_data():
     
     for acc in accounts:
         try:
-            # 1. Authorize - Force explicit string types
-            payload = {"email": str(acc["email"]), "password": str(acc["password"])}
-            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=payload)
+           # 1. Authorize
+            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json={
+                "email": acc["email"],
+                "password": acc["password"]
+            })
+            
+            # --- RAW DATA DUMP ---
+            st.write(f"--- DEBUG: {acc['name']} ---")
+            st.write(f"Status Code: {auth_resp.status_code}")
+            st.write(f"Raw Response Body: {auth_resp.text}")
             
             if auth_resp.status_code != 200:
-                st.error(f"Auth failed for {acc['name']}: {auth_resp.text}")
+                st.error(f"Auth failed for {acc['name']}")
                 continue
-                
-            token = auth_resp.json()["authorization"] # Direct access
-            headers = {"Authorization": token}
             
             # 2. Fetch Devices
             dev_resp = requests.get(f"{BASE_URL}/devices", headers=headers)
