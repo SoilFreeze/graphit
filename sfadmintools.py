@@ -36,46 +36,44 @@ BASE_URL = "https://api.sensorpush.com/api/v1"
 # 2. SENSORPUSH API LOGIC (Hard-coded Accounts)
 # ===============================================================
 def get_sensorpush_data():
-    """Fetches device list from hard-coded accounts."""
+    """Consolidates fleet list using explicit, hard-coded dictionary access."""
     all_devices = []
+    
+    # Using a list of dictionaries
     accounts = [
         {"name": "Account 1", "email": "tsteele@soilfreeze.com", "password": "Freeze123!!"},
-        {"name": "Account 1", "email": "ldunham@soilfreeze.com", "password": "Freeze123!!"},
         {"name": "Account 2", "email": "soilfreeze98072@gmail.com", "password": "Freeze123!!"}
     ]
     
     for acc in accounts:
         try:
-            # 1. Authorize
-            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json={
-                "email": acc["email"],
-                "password": acc["password"]
-            })
+            # 1. Authorize - Force explicit string types
+            payload = {"email": str(acc["email"]), "password": str(acc["password"])}
+            auth_resp = requests.post(f"{BASE_URL}/oauth/authorize", json=payload)
             
             if auth_resp.status_code != 200:
-                st.error(f"Auth failed for {acc['name']}")
+                st.error(f"Auth failed for {acc['name']}: {auth_resp.text}")
                 continue
                 
-            token = auth_resp.json().get("authorization")
+            token = auth_resp.json()["authorization"] # Direct access
             headers = {"Authorization": token}
             
             # 2. Fetch Devices
             dev_resp = requests.get(f"{BASE_URL}/devices", headers=headers)
             devices = dev_resp.json()
             
-            # 3. Parse Metadata
+            # 3. Parse Metadata using standard bracket notation
             for dev in devices:
                 all_devices.append({
                     "Account": acc["name"],
-                    "NodeNum": dev.get("name"),
-                    "PhysicalID": dev.get("id"),
-                    "LastSeen": dev.get("last_seen")
+                    "NodeNum": dev["name"],       # Direct access
+                    "PhysicalID": dev["id"],      # Direct access
+                    "LastSeen": dev["last_seen"]  # Direct access
                 })
         except Exception as e:
             st.error(f"Error fetching {acc['name']}: {e}")
             
     return pd.DataFrame(all_devices)
-
 # ===============================================================
 # 3. MAIN UI
 # ===============================================================
