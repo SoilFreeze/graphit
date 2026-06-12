@@ -139,7 +139,7 @@ if sidebar_client is not None:
             FROM `{PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
-              AND (ShowActive IS TRUE 
+              AND (UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('YES', 'TRUE', '1') 
                    OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%')
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
@@ -950,7 +950,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 Date_Freezedown,
                 REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
             FROM `{PROJECT_REGISTRY_TABLE}`
-            WHERE ShowActive IS TRUE
+            WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('YES', 'TRUE', '1')
               AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
