@@ -1762,125 +1762,101 @@ def render_data_processing_page(selected_project):
     ])
     
     # --- TAB 1: UPLOAD LOGIC ---
-    with tab_upload:
-        st.subheader("📄 Manual File Ingestion")
-        st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
-        
-        u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
+with tab_upload:
+    st.subheader("📄 Manual File Ingestion")
+    st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
     
-        if u_files:
-            all_processed_dfs = []
-            target_table = None
-    
-            # 1. PROCESS ALL FILES
-            for f in u_files:
-                try:
-                    # Format Detection & Reading
-                    is_sensorconnect, skip_rows = False, 0
-                    if f.name.endswith('.csv'):
-                        f.seek(0)
-                        for i, line in enumerate(f):
-                            if b"DATA_START" in line:
-                                is_sensorconnect, skip_rows = True, i + 1
-                                break
-                        f.seek(0)
-                    
-                    if is_sensorconnect:
-                        df_raw = pd.read_csv(f, encoding='latin1', skiprows=skip_rows, dtype=str)
-                    elif f.name.endswith('.csv'):
-                        df_raw = pd.read_csv(f, encoding='latin1', dtype=str)
-                    else:
-                        df_raw = pd.read_excel(f, dtype=str)
+    u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
 
-                    if not df_raw.empty:
-                        df_processed = pd.DataFrame()
-                        actual_headers = list(df_raw.columns)
-                        clean_headers = [str(h).strip().lower() for h in actual_headers]
-                        
-                        target_table = ""
+    if u_files:
+        all_processed_dfs = []
+        target_table = None
+
+        # 1. PROCESS ALL FILES
+        for f in u_files:
+            try:
+                # Format Detection
+                is_sensorconnect, skip_rows = False, 0
+                if f.name.endswith('.csv'):
+                    f.seek(0)
+                    for i, line in enumerate(f):
+                        if b"DATA_START" in line:
+                            is_sensorconnect, skip_rows = True, i + 1
+                            break
+                    f.seek(0)
+                
+                # Reading
+                if is_sensorconnect:
+                    df_raw = pd.read_csv(f, encoding='latin1', skiprows=skip_rows, dtype=str)
+                elif f.name.endswith('.csv'):
+                    df_raw = pd.read_csv(f, encoding='latin1', dtype=str)
+                else:
+                    df_raw = pd.read_excel(f, dtype=str)
+
+                # Processing
+                if not df_raw.empty:
+                    df_processed = pd.DataFrame()
+                    actual_headers = list(df_raw.columns)
+                    clean_headers = [str(h).strip().lower() for h in actual_headers]
                     
-                    # BRANCH A: Lord SensorConnect (Melt Wide to Long)
+                    # Branching Logic
                     if is_sensorconnect:
-                        st.info("Detected Format: Lord SensorConnect (Wide)")
                         time_col = [h for h in actual_headers if 'time' in h.lower()][0]
                         value_vars = [h for h in actual_headers if h != time_col]
                         df_melted = df_raw.melt(id_vars=[time_col], value_vars=value_vars, var_name='NodeNum', value_name='temperature')
-                        
                         df_processed['timestamp'] = pd.to_datetime(df_melted[time_col], errors='coerce', utc=True)
                         df_processed['NodeNum'] = df_melted['NodeNum'].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_melted['temperature'], errors='coerce')
                         target_table = "raw_lord"
-
-                    # BRANCH B: Lord SensorCloud (Standard Long Format)
+                    
                     elif any(k in clean_headers for k in ['channel', 'node']) and any('time' in h for h in clean_headers):
-                        st.info("Detected Format: Lord (Standard Long)")
                         time_h = actual_headers[next(i for i, h in enumerate(clean_headers) if 'time' in h)]
                         node_h = actual_headers[next(i for i, h in enumerate(clean_headers) if 'channel' in h or 'node' in h)]
                         temp_h = [h for h in actual_headers if 'temp' in h.lower()][0]
-                        
                         df_processed['timestamp'] = pd.to_datetime(df_raw[time_h], errors='coerce', utc=True)
                         df_processed['NodeNum'] = df_raw[node_h].str.strip().str.replace(':', '-')
                         df_processed['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
                         target_table = "raw_lord"
-
-                    # BRANCH C: SensorPush
-                    else:
-                        st.info("Detected Format: SensorPush")
                         
-                        # Use a more flexible search for headers
+                    else:
                         t_match = next((h for h in actual_headers if 'timestamp' in h.lower()), None)
                         v_match = next((h for h in actual_headers if 'temp' in h.lower()), None)
-                        
-                        if not t_match or not v_match:
-                            st.error(f"❌ Error: Could not find timestamp or temperature headers. Found: {actual_headers}")
-                            return # Stop execution if columns aren't found
-                        
-                        clean_name = f.name.replace(".csv", "").replace(".xlsx", "")
-                        match = re.search(r'^([^ \(\)]+)', clean_name)
-                        
-                        df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
-                        df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
-                        df_processed['NodeNum'] = match.group(1).strip() if match else clean_name
-                        target_table = "raw_sensorpush"
-                        
-                    # 3. AUTOMATED LIMITS FILTER RUNROOM
+                        if t_match and v_match:
+                            clean_name = f.name.replace(".csv", "").replace(".xlsx", "")
+                            match = re.search(r'^([^ \(\)]+)', clean_name)
+                            df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
+                            df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
+                            df_processed['NodeNum'] = match.group(1).strip() if match else clean_name
+                            target_table = "raw_sensorpush"
+                    
+                    # Sanity & Storage
                     if not df_processed.empty:
                         df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
-                        df_processed['temperature'] = pd.to_numeric(df_processed['temperature'], errors='coerce')
                         all_processed_dfs.append(df_processed)
                         st.write(f"✅ Prepared {f.name}: {len(df_processed)} records.")
-                        
-                        bad_mask = (df_processed['temperature'] > 120) | (df_processed['temperature'] < -30)
-                        
-                        bad_count = bad_mask.sum()
-                        if bad_count > 0:
-                            st.warning(f"⚠️ Sanity Filter: Flagged {bad_count} records exceeding -30°F to 120°F boundary lines as BADDATA.")
-                        
-                        st.success(f"✅ Prepared {len(df_processed)} records for Node(s): {', '.join(df_processed['NodeNum'].unique())}")
-                        
-                        # --- CORRECTED UPLOAD BLOCK ---
-                        if all_processed_dfs:
-                            combined_df = pd.concat(all_processed_dfs, ignore_index=True)
-                            combined_df['temperature'] = combined_df['temperature'].round(1)
-                
-                            if st.button(f"🚀 Commit {len(combined_df)} records to {target_table}"):
-                                with st.spinner("Writing to BigQuery..."):
-                                    table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
-                                    
-                                    job_config = bigquery.LoadJobConfig(
-                                        schema=[
-                                            bigquery.SchemaField("timestamp", "TIMESTAMP"),
-                                            bigquery.SchemaField("NodeNum", "STRING"),
-                                            bigquery.SchemaField("temperature", "FLOAT"), 
-                                        ],
-                                        write_disposition="WRITE_APPEND"
-                                    )
-                                    client.load_table_from_dataframe(combined_df[['timestamp', 'NodeNum', 'temperature']], table_id, job_config=job_config).result()
-                                    st.success("Batch Upload Complete!")
-                                    st.cache_data.clear()
-                
-                except Exception as e:
-                    st.error(f"Ingestion Failed: {e}")
+
+            except Exception as e:
+                st.error(f"❌ Error processing {f.name}: {e}")
+
+        # 2. BATCH UPLOAD (Outside the loop)
+        if all_processed_dfs and target_table:
+            combined_df = pd.concat(all_processed_dfs, ignore_index=True)
+            combined_df['temperature'] = combined_df['temperature'].round(1)
+            
+            if st.button(f"🚀 Commit {len(combined_df)} records to {target_table}"):
+                with st.spinner("Writing to BigQuery..."):
+                    table_id = f"{PROJECT_ID}.{DATASET_ID}.{target_table}"
+                    job_config = bigquery.LoadJobConfig(
+                        schema=[
+                            bigquery.SchemaField("timestamp", "TIMESTAMP"),
+                            bigquery.SchemaField("NodeNum", "STRING"),
+                            bigquery.SchemaField("temperature", "FLOAT"), 
+                        ],
+                        write_disposition="WRITE_APPEND"
+                    )
+                    client.load_table_from_dataframe(combined_df[['timestamp', 'NodeNum', 'temperature']], table_id, job_config=job_config).result()
+                    st.success("Batch Upload Complete!")
+                    st.cache_data.clear()
 
     # --- TAB 2: EXPORT LOGIC ---
     with tab_export:
