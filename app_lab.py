@@ -1879,8 +1879,8 @@ def render_data_processing_page(selected_project):
                                     st.success("Batch Upload Complete!")
                                     st.cache_data.clear()
                 
-                            except Exception as e:
-                                st.error(f"Ingestion Failed: {e}")
+                except Exception as e:
+                    st.error(f"Ingestion Failed: {e}")
 
     # --- TAB 2: EXPORT LOGIC ---
     with tab_export:
