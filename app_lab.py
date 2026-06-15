@@ -434,11 +434,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     # 2. SLOT IDENTIFICATION (Use Bank and Depth to force line separation)
     # This ensures that even if Location is the same, different Banks/Depths get their own line
+    # Ensure every pipe has its own color and trace by combining key attributes
     plot_df['Slot_ID'] = (
-        plot_df['Location'].astype(str) + "_" + 
-        plot_df['Bank'].astype(str) + "_" + 
-        plot_df['Depth'].astype(str) + "_" + 
-        plot_df['NodeNum'].astype(str) # Adding NodeNum forces the split!
+        plot_df['Location'].astype(str) + " | " + 
+        plot_df['Bank'].astype(str)
     )
     
     unique_slots = sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key)
@@ -767,6 +766,9 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     # 4. FILTERING
+    trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
+    p_df = p_df[~p_df['Location'].isin(trash_locations)].copy()
+    
     mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
     if not show_masked and mask_col in p_df.columns:
         p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
@@ -776,34 +778,26 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
-    # 5. FIXED LOOP: Using enumerate(locations) to generate unique keys
+    # 5. FIXED LOOP
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()], key=natural_sort_key)
 
     for i, loc in enumerate(locations):
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
-            clean_proj_id = str(selected_project).split('-')[0]
-            clean_loc_num = "".join(re.findall(r'\d+', loc))
-            normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
-            search_id = f"{clean_proj_id}-{normalized_loc}"
-            is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R", "AMB"])
+            # ... [Keep your search_id/is_temp_pipe logic] ...
 
             fig = build_high_speed_graph(
                 df=loc_df, title=f"Thermal Trends: {loc}", 
-                start_view=start_view, end_view=end_view, 
-                active_refs=active_refs, unit_mode=unit_mode, 
-                unit_label=unit_label, display_tz=display_tz,
-                f_start_date=f_start_date,
-                curve_id=search_id if (show_ref and is_temp_pipe) else None
+                # ... [Keep your existing params] ...
             )
             
-            # 6. CONSOLIDATED SAFETY CHECK
+            # 6. CONSOLIDATED SAFETY
             if fig is not None and hasattr(fig, 'data') and len(fig.data) > 0:
-                # Key is now guaranteed unique using 'i'
                 st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}_{i}")
             else:
-                st.warning(f"⚠️ Could not generate graph for {loc}. Data may be missing or invalid.")
+                st.warning(f"⚠️ Could not generate graph for {loc}.")
+        
                 
 
 #########################
