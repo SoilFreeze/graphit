@@ -455,7 +455,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         except Exception as e:
             pass
 
-    @st.cache_data(ttl=600)
+@st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
     Unified Time-Aware Data Fetcher.
