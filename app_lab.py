@@ -701,20 +701,19 @@ def get_trend_arrow(current, previous):
 def render_global_overview(selected_project, project_metadata, display_tz):
     """
     Shows all pipes/banks for a selected project in one scrolling view.
-    Standardized: Normalizes variations like TP2 vs T2 for seamless plotting.
+    Fixed: Uses enumerate(locations) to resolve NameError and DuplicateKey errors.
     """
-    # 1. INITIALIZE UI STATE VARIABLES FROM SIDEBAR KEYS
+    # 1. UI STATE
     show_ref = st.session_state.get("global_show_ref", True)
     show_masked = st.session_state.get("global_show_masked", False)
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
     unit_label = st.session_state.get("unit_label", "°F")
     active_refs = st.session_state.get("active_refs", [])
 
-    # 2. EXTRACT PROJECT METADATA
+    # 2. METADATA
     p_name = selected_project
     status = "Active"
     f_start_date = None
-
     if project_metadata:
         p_name = project_metadata.get('ProjectName', selected_project)
         status = project_metadata.get('ProjectStatus', 'Active')
@@ -722,84 +721,54 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         if pd.notnull(raw_f_date):
             f_start_date = pd.to_datetime(raw_f_date).date()
 
-    # 3. HEADER
     st.header(f"📈 Time vs Temp: {p_name} [{status}]")
     
-    if f_start_date:
-        today = pd.Timestamp.now(tz=display_tz).date()
-        days_since = (today - f_start_date).days
-        st.markdown(f"### 🗓️ Day **{max(0, days_since)}** of Freezedown")
-
-    # 4. DATA PRE-FLIGHT
+    # 3. SYNC
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Select a project in the sidebar to view engineering trends.")
+        st.info("💡 Select a project in the sidebar.")
         return
 
-    with st.spinner(f"Syncing {p_name} telemetry..."):
-        p_df = get_universal_portal_data(selected_project)
-
-    
+    p_df = get_universal_portal_data(selected_project)
     if p_df.empty:
         st.warning(f"No data found for '{p_name}'.")
         return
 
-    # 5. DYNAMIC UI FILTERING
+    # 4. FILTERING
     mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
     if not show_masked and mask_col in p_df.columns:
         p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
 
-    # --- 6. TIMELINE CONFIG (CONNECTED TO GLOBAL RED SLIDER) ---
     lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
     now_local = pd.Timestamp.now(tz=display_tz)
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
-    # 7. LOCATION-BASED PLOTTING LOOP
-    locations = sorted(
-        [str(loc) for loc in p_df['Location'].dropna().unique()], 
-        key=natural_sort_key
-    )
+    # 5. FIXED LOOP: Using enumerate(locations) to generate unique keys
+    locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()], key=natural_sort_key)
 
-    for loc in locations:
+    for i, loc in enumerate(locations):
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
             clean_proj_id = str(selected_project).split('-')[0]
-            
-            # NORMALIZATION EXTRACTION: Converts "TP2", "TP-2", or "T2" into a clean "T2" pattern for the curve lookup
             clean_loc_num = "".join(re.findall(r'\d+', loc))
             normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
             search_id = f"{clean_proj_id}-{normalized_loc}"
-            
-            # Exclude supply/return loops from being flagged as vertical ground temperature boreholes
             is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R", "AMB"])
 
             fig = build_high_speed_graph(
-                df=loc_df, 
-                title=f"Thermal Trends: {loc}", 
-                start_view=start_view, 
-                end_view=end_view, 
-                active_refs=active_refs, 
-                unit_mode=unit_mode, 
-                unit_label=unit_label, 
-                display_tz=display_tz,
+                df=loc_df, title=f"Thermal Trends: {loc}", 
+                start_view=start_view, end_view=end_view, 
+                active_refs=active_refs, unit_mode=unit_mode, 
+                unit_label=unit_label, display_tz=display_tz,
                 f_start_date=f_start_date,
                 curve_id=search_id if (show_ref and is_temp_pipe) else None
             )
-
-            # DEBUGGING SAFETY WRAPPER
+            
+            # 6. CONSOLIDATED SAFETY CHECK
             if fig is not None and hasattr(fig, 'data') and len(fig.data) > 0:
+                # Key is now guaranteed unique using 'i'
                 st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}_{i}")
-            else:
-                st.warning(f"⚠️ Data Audit for {loc}:")
-                # This will show you if the dataframe is empty or contains bad values
-                st.write(f"Telemetry row count: {len(loc_df)}")
-                if not loc_df.empty:
-                    st.write("Column info:", loc_df.dtypes)
-                    st.write("Sample data:", loc_df.head(3))
-            # --- THE SAFETY WRAPPER ---
-            if fig is not None and hasattr(fig, 'data'):
-                st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
             else:
                 st.warning(f"⚠️ Could not generate graph for {loc}. Data may be missing or invalid.")
                 
