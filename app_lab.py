@@ -789,7 +789,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 
             # DEBUGGING SAFETY WRAPPER
             if fig is not None and hasattr(fig, 'data') and len(fig.data) > 0:
-                st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
+                st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}_{i}")
             else:
                 st.warning(f"⚠️ Data Audit for {loc}:")
                 # This will show you if the dataframe is empty or contains bad values
