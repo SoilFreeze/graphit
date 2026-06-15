@@ -846,8 +846,7 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 display_tz=display_tz,
                 mobile_mode=False, 
                 f_start_date=f_start_date,
-                curve_id=search_id if (show_ref and is_temp_pipe) else None,
-                allowed_nodes=None
+                curve_id=search_id if (show_ref and is_temp_pipe) else None
             )
             
             # Consolidated safety check
