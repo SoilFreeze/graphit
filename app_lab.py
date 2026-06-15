@@ -757,25 +757,54 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
     # 5. FIXED LOOP
+    # 5. LOCATION-BASED PLOTTING LOOP
+    # Filter trash locations before creating the list
+    trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
+    p_df = p_df[~p_df['Location'].isin(trash_locations)].copy()
+    
     locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()], key=natural_sort_key)
 
     for i, loc in enumerate(locations):
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = p_df[p_df['Location'] == loc].copy()
             
-            # ... [Keep your search_id/is_temp_pipe logic] ...
+            # Integrity guard
+            if loc_df.empty or not isinstance(loc_df, pd.DataFrame):
+                st.warning(f"No valid data found for {loc}.")
+                continue
+            
+            clean_proj_id = str(selected_project).split('-')[0]
+            clean_loc_num = "".join(re.findall(r'\d+', loc))
+            normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
+            search_id = f"{clean_proj_id}-{normalized_loc}"
+            is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R", "AMB"])
 
+            # Full parameter mapping to prevent TypeError
             fig = build_high_speed_graph(
-                df=loc_df, title=f"Thermal Trends: {loc}", 
-                # ... [Keep your existing params] ...
+                df=loc_df, 
+                title=f"Thermal Trends: {loc}", 
+                start_view=start_view, 
+                end_view=end_view, 
+                active_refs=active_refs, 
+                unit_mode=unit_mode, 
+                unit_label=unit_label, 
+                display_tz=display_tz,
+                mobile_mode=False, 
+                f_start_date=f_start_date,
+                curve_id=search_id if (show_ref and is_temp_pipe) else None,
+                allowed_nodes=None
             )
             
-            # 6. CONSOLIDATED SAFETY
+            # Consolidated safety check
             if fig is not None and hasattr(fig, 'data') and len(fig.data) > 0:
-                st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}_{i}")
+                st.plotly_chart(
+                    fig, 
+                    use_container_width=True, 
+                    key=f"tvt_{selected_project}_{loc}_{i}"
+                )
             else:
-                st.warning(f"⚠️ Could not generate graph for {loc}.")
-        
+                st.warning(f"⚠️ Could not generate graph for {loc}. Data may be missing or invalid.")
+                
                 
 
 #########################
