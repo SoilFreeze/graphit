@@ -58,7 +58,7 @@ def get_bq_client():
 ############################
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
+def get_universal_portal_data(project_id, is_summary_page=False):
     """
     Unified Time-Aware Data Fetcher.
     Joins telemetry to registry by NodeNum AND valid date range.
@@ -70,18 +70,18 @@ def get_universal_portal_data(project_id):
     base_job_num = clean_token.split('-')[0].strip()
 
     # The JOIN logic below creates the "Time-Bound Lock"
+    filter_logic = "" if is_summary_page else """
+        AND (UPPER(COALESCE(n.Location, m.Location)) LIKE 'BANK%' 
+             OR REGEXP_CONTAINS(UPPER(COALESCE(n.Location, m.Location)), r'^T[0-9]+'))
+    """
+
     query = f"""
-        SELECT 
-            m.Project, m.NodeNum, m.temperature, m.timestamp, m.approval_status,
-            COALESCE(n.Location, m.Location, 'Unassigned') as Location,
-            COALESCE(n.Bank, m.Bank, '—') as Bank,
-            COALESCE(n.Depth, m.Depth) as Depth
+        SELECT ... 
         FROM `{MASTER_VIEW}` m
         LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON m.NodeNum = n.NodeNum
         WHERE m.temperature BETWEEN -30.0 AND 120.0
           AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
-          -- EXCLUDE unwanted locations
-          AND UPPER(COALESCE(n.Location, m.Location)) NOT IN ('DEAD STOCK', 'OFFICE', 'ELIZABETH')
+          {filter_logic}
         ORDER BY m.timestamp ASC
     """
     
