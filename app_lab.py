@@ -60,8 +60,8 @@ def get_bq_client():
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Unified Data Fetcher.
-    Pulls directly from master_data_view. Write operations have been deprecated.
+    Unified Time-Aware Data Fetcher.
+    Joins telemetry to registry by NodeNum AND valid date range.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
@@ -69,7 +69,7 @@ def get_universal_portal_data(project_id):
     clean_token = str(project_id).replace("'", "''").strip()
     base_job_num = clean_token.split('-')[0].strip()
 
-    # Sanitized query pulling only from the consolidated view
+    # The JOIN logic below creates the "Time-Bound Lock"
     query = f"""
         SELECT 
             m.Project,
@@ -77,13 +77,17 @@ def get_universal_portal_data(project_id):
             m.temperature,
             m.timestamp,
             m.approval_status,
-            COALESCE(m.Location, 'Unassigned') as Location,
-            COALESCE(m.Bank, '—') as Bank,
-            m.Depth
+            COALESCE(n.Location, m.Location, 'Unassigned') as Location,
+            COALESCE(n.Bank, m.Bank, '—') as Bank,
+            COALESCE(n.Depth, m.Depth) as Depth
         FROM `{MASTER_VIEW}` m
+        LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
+            ON m.NodeNum = n.NodeNum
+            AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
+            AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
         WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-          AND (m.Project = @project_id 
-               OR m.Project LIKE '{base_job_num}%')
+          AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
+          AND n.Project IS NOT NULL
         ORDER BY m.timestamp ASC
     """
     
@@ -451,10 +455,49 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         except Exception as e:
             pass
 
-    # 4. SENSOR DATA (Naturally Sorted Group Loops)
-    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
+    @st.cache_data(ttl=600)
+def get_universal_portal_data(project_id):
+    """
+    Unified Time-Aware Data Fetcher.
+    Joins telemetry to registry by NodeNum AND valid date range.
+    """
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
     
-    node_metadata = []
+    clean_token = str(project_id).replace("'", "''").strip()
+    base_job_num = clean_token.split('-')[0].strip()
+
+    # The JOIN logic below creates the "Time-Bound Lock"
+    query = f"""
+        SELECT 
+            m.Project,
+            m.NodeNum,
+            m.temperature,
+            m.timestamp,
+            m.approval_status,
+            COALESCE(n.Location, m.Location, 'Unassigned') as Location,
+            COALESCE(n.Bank, m.Bank, '—') as Bank,
+            COALESCE(n.Depth, m.Depth) as Depth
+        FROM `{MASTER_VIEW}` m
+        LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
+            ON m.NodeNum = n.NodeNum
+            AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
+            AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
+        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+          AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
+          AND n.Project IS NOT NULL
+        ORDER BY m.timestamp ASC
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
+    )
+    
+    try:
+        return client.query(query, job_config=job_config).to_dataframe()
+    except Exception as e:
+        st.error(f"⚠️ Data Sync Error: {e}")
+        return pd.DataFrame()
     # Only iterate through nodes that survived the filter
     for sn in sorted(plot_df['NodeNum'].unique(), key=natural_sort_key): 
         node_df = plot_df[plot_df['NodeNum'] == sn]
