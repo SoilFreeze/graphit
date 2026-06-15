@@ -80,6 +80,8 @@ def get_universal_portal_data(project_id):
         LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON m.NodeNum = n.NodeNum
         WHERE m.temperature BETWEEN -30.0 AND 120.0
           AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
+          -- EXCLUDE unwanted locations
+          AND UPPER(COALESCE(n.Location, m.Location)) NOT IN ('DEAD STOCK', 'OFFICE', 'ELIZABETH')
         ORDER BY m.timestamp ASC
     """
     
@@ -430,7 +432,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # 4. LOCATION/POSITION BASED GROUPING (Defensive)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
-    plot_df['Slot_ID'] = plot_df['Location'].astype(str) + "_" + plot_df['Bank'].astype(str) + "_" + plot_df['Depth'].astype(str)
+    # 2. SLOT IDENTIFICATION (Use Bank and Depth to force line separation)
+    # This ensures that even if Location is the same, different Banks/Depths get their own line
+    plot_df['Slot_ID'] = (
+        plot_df['Location'].astype(str) + "_" + 
+        plot_df['Bank'].astype(str) + "_" + 
+        plot_df['Depth'].astype(str) + "_" + 
+        plot_df['NodeNum'].astype(str) # Adding NodeNum forces the split!
+    )
     
     unique_slots = sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key)
     for i, slot in enumerate(unique_slots):
