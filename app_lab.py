@@ -370,17 +370,28 @@ def natural_sort_key(s):
     """
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
-                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None, 
-                           allowed_nodes=None):
+def build_high_speed_graph(
+    df, 
+    title, 
+    start_view, 
+    end_view, 
+    active_refs, 
+    unit_mode, 
+    unit_label, 
+    display_tz="UTC", 
+    mobile_mode=False, 
+    f_start_date=None, 
+    curve_id=None, 
+    allowed_nodes=None
+):
     """
     Engineering-grade Trend Graph.
-    - Added: 'allowed_nodes' filter.
-    - Added: Numeric conversion and Hourly Resampling to prevent Plotly crashes.
+    Includes data integrity guards to prevent Plotly rendering crashes.
     """
-    if df.empty: return go.Figure().update_layout(title="No data available")
+    if df is None or df.empty: 
+        return go.Figure().update_layout(title="No data available")
 
-    # 1. FILTER & CLEAN DATA
+    # 1. DATA CLEANING
     plot_df = df.copy()
     if allowed_nodes is not None:
         plot_df = plot_df[plot_df['NodeNum'].isin(allowed_nodes)]
@@ -388,9 +399,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     plot_df['temperature'] = pd.to_numeric(plot_df['temperature'], errors='coerce')
     plot_df = plot_df.dropna(subset=['temperature', 'timestamp'])
     
-    if plot_df.empty: return go.Figure().update_layout(title="No valid data in this project phase")
+    if plot_df.empty: 
+        return go.Figure().update_layout(title="No valid data")
 
-    # 2. TIMEZONE HANDLING
+    # 2. TIMEZONE & RANGE
     if plot_df['timestamp'].dt.tz is None:
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
@@ -399,97 +411,44 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
     fig = go.Figure()
 
-    # 3. THEORETICAL REFERENCE CURVES
+    # 3. REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            proj_str = str(st.session_state.get('selected_project', ''))
-            proj_match = re.findall(r'\d+', proj_str)
-            proj_num = proj_match[0] if proj_match else ""
-            loc_part = str(curve_id).split('-')[-1].strip()
-
-            if proj_num and loc_part:
-                target_q = f"""
-                    SELECT CurveID, Day, Temp 
-                    FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE REGEXP_CONTAINS(CurveID, r'^{proj_num}.*{loc_part}$')
-                    ORDER BY Day
-                """
-                target_df = get_bq_client().query(target_q).to_dataframe()
-                if not target_df.empty:
-                    dash_styles = ['dashdot', 'dash', 'dot']
-                    gray_shades = ['rgba(30,30,30,0.8)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.7)']
-                    for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
-                        c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-                        c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
-                        ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                        
-                        label_clean = str(cid).replace(f"{proj_num}-", "").replace(f"-{loc_part}", "")
-                        fig.add_trace(go.Scatter(
-                            x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {label_clean}</b>", mode='lines',
-                            line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3)
-                        ))
+            # ... [Keep your existing Reference Curve logic here] ...
         except Exception: pass
 
-    # 4. LOCATION/POSITION BASED GROUPING (Defensive)
-    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
-    # 2. SLOT IDENTIFICATION (Use Bank and Depth to force line separation)
-    # This ensures that even if Location is the same, different Banks/Depths get their own line
-    # Ensure every pipe has its own color and trace by combining key attributes
-    plot_df['Slot_ID'] = (
-        plot_df['Location'].astype(str) + " | " + 
-        plot_df['Bank'].astype(str)
-    )
+    # 4. SLOT IDENTIFICATION & PLOTTING
+    # Grouping by Location + Bank forces distinct lines per pipe
+    plot_df['Slot_ID'] = plot_df['Location'].astype(str) + "_" + plot_df['Bank'].astype(str)
     
-    unique_slots = sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key)
-    for i, slot in enumerate(unique_slots):
+    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
+    
+    for i, slot in enumerate(sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key)):
         s_df = plot_df[plot_df['Slot_ID'] == slot].sort_values('timestamp')
         if s_df.empty: continue
             
-        sample = s_df.iloc[0]
-        display_name = f"{sample['Location']} - {sample['Depth']}ft" if pd.notnull(sample['Depth']) and sample['Depth'] != 0 else f"{sample['Location']} - Bank {sample['Bank']}"
-        s_resampled = s_df.set_index('timestamp').resample('1h')['temperature'].mean().reset_index()
-        
+        # Resample to 1h mean to keep trace size manageable
+        s_resampled = s_df.set_index('timestamp').resample('1h')['temperature'].mean().dropna().reset_index()
+        if s_resampled.empty: continue
+            
         fig.add_trace(go.Scatter(
-            x=s_resampled['timestamp'], y=s_resampled['temperature'], name=display_name, mode='lines',
+            x=s_resampled['timestamp'], 
+            y=s_resampled['temperature'],
+            name=slot, 
+            mode='lines',
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
     # 5. LAYOUT
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue")
-    fig.update_layout(title=f"<b>{title}</b>", plot_bgcolor='white', height=650, xaxis=dict(range=[start_view, end_view]), yaxis=dict(title=f"Temp ({unit_label})"))
-    
-
-    # 1. PRE-PROCESSING
-    plot_df = df.copy()
-    plot_df['temperature'] = pd.to_numeric(plot_df['temperature'], errors='coerce')
-    plot_df = plot_df.dropna(subset=['temperature', 'timestamp'])
-    
-    # 2. SLOT IDENTIFICATION
-    plot_df['Slot_ID'] = plot_df['Location'].astype(str) + "_" + plot_df['Bank'].astype(str)
-    
-    fig = go.Figure()
-    
-    # 3. ROBUST LOOP
-    for slot in sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key):
-        s_df = plot_df[plot_df['Slot_ID'] == slot].sort_values('timestamp')
-        
-        # SKIP EMPTY SLOTS (Prevents IndexError)
-        if s_df.empty: 
-            continue
-            
-        s_resampled = s_df.set_index('timestamp').resample('1h')['temperature'].mean().dropna().reset_index()
-        
-        if s_resampled.empty: 
-            continue # Prevents PlotlyError
-            
-        fig.add_trace(go.Scatter(
-            x=s_resampled['timestamp'], y=s_resampled['temperature'],
-            name=slot, mode='lines',
-            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
-        ))
-                             
-
+    fig.update_layout(
+        title=f"<b>{title}</b>", 
+        plot_bgcolor='white', 
+        height=650, 
+        xaxis=dict(range=[start_view, end_view]), 
+        yaxis=dict(title=f"Temp ({unit_label})", range=y_range)
+    )
     return fig
 
 @st.cache_data(ttl=600)
