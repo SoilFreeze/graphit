@@ -998,28 +998,29 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
     summary_q = f"""
-            WITH active_projects AS (
-                SELECT 
-                    CAST(Project AS STRING) as Project, 
-                    ProjectName, 
-                    ProjectStatus, 
-                    Date_Freezedown,
-                    REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
-                FROM `{PROJECT_REGISTRY_TABLE}`
-                WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
-                  AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
-            ),
+        WITH active_projects AS (
+            SELECT 
+                CAST(Project AS STRING) as Project, 
+                ProjectName, 
+                ProjectStatus, 
+                Date_Freezedown,
+                REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
+            FROM `{PROJECT_REGISTRY_TABLE}`
+            WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES'
+              AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
+        ),
         raw_data AS (
             SELECT 
                 p.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, m.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             INNER JOIN active_projects p 
                 ON REGEXP_EXTRACT(TRIM(CAST(m.Project AS STRING)), r'^\\d+') = p.base_prefix
-            LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
-              ON REGEXP_REPLACE(UPPER(TRIM(CAST(m.NodeNum AS STRING))), r'[:-]', '') = 
-                 REGEXP_REPLACE(UPPER(TRIM(CAST(n.NodeNum AS STRING))), r'[:-]', '')
+            INNER JOIN `{NODE_REGISTRY_TABLE}` n 
+              ON m.NodeNum = n.NodeNum
+              -- TIME-BOUND LOCK: Only match telemetry to the registry window for that sensor
+              AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
+              AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              AND m.NodeNum IS NOT NULL
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
               AND NOT (m.temperature > 120.0 AND NOT STARTS_WITH(m.NodeNum, 'SP'))
         ),
