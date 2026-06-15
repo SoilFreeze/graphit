@@ -370,56 +370,40 @@ def natural_sort_key(s):
     """
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
-def build_high_speed_graph(
-    df, 
-    title, 
-    start_view, 
-    end_view, 
-    active_refs, 
-    unit_mode, 
-    unit_label, 
-    display_tz="UTC", 
-    mobile_mode=False, 
-    f_start_date=None, 
-    curve_id=None, 
-    allowed_nodes=None
-):
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
+                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
-    - Includes full Reference Curve logic.
-    - Includes Data Cleaning and Safety Guards.
+    - Legend: Naturally sorted by logical numerical order (1, 2, ... 10).
+    - Hover: Date at top, Time only on entries.
+    - Gaps: Lines break if data is missing for > 6 hours.
+    - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
     """
-    if df is None or df.empty: 
-        return go.Figure().update_layout(title="No data available")
+    if df.empty: return go.Figure().update_layout(title="No data available")
 
-    # 1. DATA CLEANING
-    plot_df = df.copy()
-    if allowed_nodes is not None:
-        plot_df = plot_df[plot_df['NodeNum'].isin(allowed_nodes)]
-    
-    plot_df['temperature'] = pd.to_numeric(plot_df['temperature'], errors='coerce')
-    plot_df = plot_df.dropna(subset=['temperature', 'timestamp'])
-    
-    if plot_df.empty: 
-        return go.Figure().update_layout(title="No valid data")
+    client = get_bq_client()
+    plot_df = df.copy() 
 
-    # 2. TIMEZONE & RANGE
+    # 1. TIMEZONE & UNITS
     if plot_df['timestamp'].dt.tz is None:
         plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
+
     fig = go.Figure()
+
+    # 2. GLOBAL TIMELINE SYNC
+    final_end_view, final_start_view = end_view, start_view
 
     # 3. THEORETICAL REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            client = get_bq_client()
             proj_str = str(st.session_state.get('selected_project', ''))
             proj_match = re.findall(r'\d+', proj_str)
             proj_num = proj_match[0] if proj_match else ""
-            loc_part = str(curve_id).split('-')[-1].strip()
+            loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
 
             if proj_num and loc_part:
                 target_q = f"""
@@ -432,66 +416,115 @@ def build_high_speed_graph(
                 if not target_df.empty:
                     dash_styles = ['dashdot', 'dash', 'dot']
                     gray_shades = ['rgba(30,30,30,0.8)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.7)']
+                    
                     for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                         c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                         c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                         ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                        
                         label_clean = str(cid).replace(f"{proj_num}-", "").replace(f"-{loc_part}", "")
+                        display_label = f"Goal: {label_clean}" if label_clean != loc_part else f"Goal: {loc_part}"
                         
                         fig.add_trace(go.Scatter(
-                            x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {label_clean}</b>", 
-                            mode='lines', line=dict(color=gray_shades[c_idx % len(gray_shades)], 
-                            width=3.5, dash=dash_styles[c_idx % len(dash_styles)], 
-                            shape='spline', smoothing=1.3)
+                            x=c_df['timestamp'], y=ref_y, name=f"<b>{display_label}</b>", 
+                            mode='lines',
+                            line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3),
+                            legendrank=1 
                         ))
         except Exception: pass
 
-    # 4. SLOT IDENTIFICATION & PLOTTING (Smart Logic)
-    # Check if we have depth data. If not, we group by Bank only.
-    # We use a lambda to fill empty/missing depth with a placeholder.
-    plot_df['Depth'] = plot_df['Depth'].fillna(0)
-    
-    # Logic: If Depth > 0, it's a Temp Pipe (group by Location/Bank/Depth)
-    # If Depth == 0, it's a Bank monitor (group by Location/Bank)
-    plot_df['Slot_ID'] = plot_df.apply(
-        lambda row: f"{row['Location']}_{row['Bank']}" if row['Depth'] == 0 
-        else f"{row['Location']}_{row['Bank']}_{row['Depth']}", axis=1
-    )
-    
+    # 4. SENSOR DATA (Naturally Sorted Group Loops)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
-    unique_slots = sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key)
-    
-    for i, slot in enumerate(unique_slots):
-        s_df = plot_df[plot_df['Slot_ID'] == slot].sort_values('timestamp')
-        if s_df.empty: continue
-            
-        s_resampled = s_df.set_index('timestamp')['temperature'].resample('1h').mean().dropna().reset_index()
-        if s_resampled.empty: continue
-            
-        # Create a clean label based on whether it's a Bank or a Depth
-        parts = slot.split('_')
-        if len(parts) == 3 and parts[2] != '0':
-            display_name = f"Bank {parts[1]} - Depth {parts[2]}ft"
-        else:
-            display_name = f"Bank {parts[1]} (Brine)"
+    node_metadata = []
+    for sn in plot_df['NodeNum'].unique():
+        node_df = plot_df[plot_df['NodeNum'] == sn]
+        depth_val = node_df['Depth'].iloc[0]
+        bank_val = node_df['Bank'].iloc[0]
+        loc_val = node_df['Location'].iloc[0]
 
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+            display_name = f"{bank_val} ({sn})"
+            sort_val = str(bank_val)  
+        elif pd.notnull(depth_val) and not pd.isna(depth_val): 
+            display_name = f"{depth_val}ft ({sn})"
+            sort_val = f"depth_{float(depth_val):05.1f}" 
+        else: 
+            display_name = f"{loc_val} ({sn})"
+            sort_val = str(display_name)
+
+        node_metadata.append({'node_num': sn, 'display_name': display_name, 'sort_key': sort_val})
+
+    sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
+
+    for i, config in enumerate(sorted_node_configs):
+        sn = config['node_num']
+        display_name = config['display_name']
+        
+        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
+        s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
+        
         fig.add_trace(go.Scatter(
-            x=s_resampled['timestamp'], 
-            y=s_resampled['temperature'], 
-            name=display_name, 
-            mode='lines',
+            x=s_df['timestamp'], y=s_df['temperature'],
+            name=display_name, mode='lines',
+            connectgaps=False, 
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+            hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
-    # 5. LAYOUT
-    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue")
+    # 5. REFERENCE LINES
+    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
+    
+    now_ts = pd.Timestamp.now(tz=display_tz)
+    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
+    
+    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+    for m_dt in m_range:
+        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+
+    # 6. LAYOUT & TITLING
+    p_name = st.session_state.get('selected_project', 'Project')
     fig.update_layout(
-        title=f"<b>{title}</b>", plot_bgcolor='white', height=650, 
-        xaxis=dict(range=[start_view, end_view]), yaxis=dict(title=f"Temp ({unit_label})", range=y_range)
+        title=dict(text=f"<b>{p_name} - Thermal Trend - {title}</b>", x=0.02, y=0.98, font=dict(size=18)),
+        plot_bgcolor='white', hovermode="x unified", height=650,
+        xaxis=dict(range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, hoverformat='%A, %b %d, %Y', tickformat='%b %d', minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')),
+        yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
+        legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
+
+def get_soil_reference_curves(soil_type, start_date, unit_mode):
+    references = {"Silty Sand": [(0, 50), (5, 32), (14, 20), (30, 10), (60, 5)], "Clay": [(0, 50), (10, 32), (25, 25), (45, 15), (90, 10)]}
+    curve = references.get(soil_type, [])
+    if not curve: return None, None
+    x_times = [pd.Timestamp(start_date) + pd.Timedelta(days=d) for d, t in curve]
+    y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
+    return x_times, y_temps
+
+def run_office_auto_assignment():
+    client = get_bq_client()
+    sql = f"""
+        MERGE `{OVERRIDE_TABLE}` T
+        USING (
+            SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
+            FROM (SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` UNION ALL SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`) AS r
+            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
+            WHERE n.Project LIKE '%OFFICE%' 
+        ) S ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
+        WHEN MATCHED THEN UPDATE SET approve = 'OFFICE'
+        WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'OFFICE')
+    """
+    try: client.query(sql).result(); st.success("✅ Success.")
+    except Exception as e: st.error(f"Failed: {e}")
+
+def apply_sanity_filter(df):
+    if df.empty: return df
+    bad_condition = (df['temperature'] > 120) | (df['temperature'] < -30)
+    if 'approve' in df.columns: df.loc[bad_condition, 'approve'] = 'BADDATA'
+    elif 'approval_status' in df.columns: df.loc[bad_condition, 'approval_status'] = 'BADDATA'
+    return df
+
+
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
