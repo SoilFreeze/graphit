@@ -77,17 +77,16 @@ def get_universal_portal_data(project_id):
             m.temperature,
             m.timestamp,
             m.approval_status,
+            -- Use COALESCE to fallback to the sensor's raw telemetry metadata
             COALESCE(n.Location, m.Location, 'Unassigned') as Location,
             COALESCE(n.Bank, m.Bank, '—') as Bank,
             COALESCE(n.Depth, m.Depth) as Depth
         FROM `{MASTER_VIEW}` m
         LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
             ON m.NodeNum = n.NodeNum
-            AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
-            AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
+            -- This date-bound join now only affects specific metadata attributes
         WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
           AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
-          AND n.Project IS NOT NULL
         ORDER BY m.timestamp ASC
     """
     
