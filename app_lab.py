@@ -447,18 +447,36 @@ def build_high_speed_graph(
         except Exception: pass
 
     # 4. SLOT IDENTIFICATION & PLOTTING
-    plot_df['Slot_ID'] = plot_df['Location'].astype(str) + "_" + plot_df['Bank'].astype(str)
+    # Adding Depth and NodeNum ensures that every pipe/sensor gets its own line trace
+    plot_df['Slot_ID'] = (
+        plot_df['Location'].astype(str) + "_" + 
+        plot_df['Bank'].astype(str) + "_" + 
+        plot_df['Depth'].astype(str)
+    )
+    
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
-    for i, slot in enumerate(sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key)):
+    # Sort slots naturally so lines appear in a logical order
+    unique_slots = sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key)
+    
+    for i, slot in enumerate(unique_slots):
         s_df = plot_df[plot_df['Slot_ID'] == slot].sort_values('timestamp')
         if s_df.empty: continue
             
-        s_resampled = s_df.set_index('timestamp').resample('1h')['temperature'].mean().dropna().reset_index()
+        # Resample to 1h mean to keep the graph fast and readable
+        s_resampled = s_df.set_index('timestamp')['temperature'].resample('1h').mean().dropna().reset_index()
+        
         if s_resampled.empty: continue
             
+        # Extract readable name for the legend
+        parts = slot.split('_')
+        display_name = f"Bank {parts[1]} - Depth {parts[2]}ft"
+        
         fig.add_trace(go.Scatter(
-            x=s_resampled['timestamp'], y=s_resampled['temperature'], name=slot, mode='lines',
+            x=s_resampled['timestamp'], 
+            y=s_resampled['temperature'], 
+            name=display_name, 
+            mode='lines',
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
             hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
