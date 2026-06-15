@@ -781,6 +781,17 @@ def render_global_overview(selected_project, project_metadata, display_tz):
                 f_start_date=f_start_date,
                 curve_id=search_id if (show_ref and is_temp_pipe) else None
             )
+
+            # DEBUGGING SAFETY WRAPPER
+            if fig is not None and hasattr(fig, 'data') and len(fig.data) > 0:
+                st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
+            else:
+                st.warning(f"⚠️ Data Audit for {loc}:")
+                # This will show you if the dataframe is empty or contains bad values
+                st.write(f"Telemetry row count: {len(loc_df)}")
+                if not loc_df.empty:
+                    st.write("Column info:", loc_df.dtypes)
+                    st.write("Sample data:", loc_df.head(3))
             # --- THE SAFETY WRAPPER ---
             if fig is not None and hasattr(fig, 'data'):
                 st.plotly_chart(fig, use_container_width=True, key=f"tvt_{selected_project}_{loc}")
