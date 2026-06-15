@@ -446,32 +446,36 @@ def build_high_speed_graph(
                         ))
         except Exception: pass
 
-    # 4. SLOT IDENTIFICATION & PLOTTING
-    # Adding Depth and NodeNum ensures that every pipe/sensor gets its own line trace
-    plot_df['Slot_ID'] = (
-        plot_df['Location'].astype(str) + "_" + 
-        plot_df['Bank'].astype(str) + "_" + 
-        plot_df['Depth'].astype(str)
+    # 4. SLOT IDENTIFICATION & PLOTTING (Smart Logic)
+    # Check if we have depth data. If not, we group by Bank only.
+    # We use a lambda to fill empty/missing depth with a placeholder.
+    plot_df['Depth'] = plot_df['Depth'].fillna(0)
+    
+    # Logic: If Depth > 0, it's a Temp Pipe (group by Location/Bank/Depth)
+    # If Depth == 0, it's a Bank monitor (group by Location/Bank)
+    plot_df['Slot_ID'] = plot_df.apply(
+        lambda row: f"{row['Location']}_{row['Bank']}" if row['Depth'] == 0 
+        else f"{row['Location']}_{row['Bank']}_{row['Depth']}", axis=1
     )
     
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
-    # Sort slots naturally so lines appear in a logical order
     unique_slots = sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key)
     
     for i, slot in enumerate(unique_slots):
         s_df = plot_df[plot_df['Slot_ID'] == slot].sort_values('timestamp')
         if s_df.empty: continue
             
-        # Resample to 1h mean to keep the graph fast and readable
         s_resampled = s_df.set_index('timestamp')['temperature'].resample('1h').mean().dropna().reset_index()
-        
         if s_resampled.empty: continue
             
-        # Extract readable name for the legend
+        # Create a clean label based on whether it's a Bank or a Depth
         parts = slot.split('_')
-        display_name = f"Bank {parts[1]} - Depth {parts[2]}ft"
-        
+        if len(parts) == 3 and parts[2] != '0':
+            display_name = f"Bank {parts[1]} - Depth {parts[2]}ft"
+        else:
+            display_name = f"Bank {parts[1]} (Brine)"
+
         fig.add_trace(go.Scatter(
             x=s_resampled['timestamp'], 
             y=s_resampled['temperature'], 
