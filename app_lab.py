@@ -72,20 +72,13 @@ def get_universal_portal_data(project_id):
     # The JOIN logic below creates the "Time-Bound Lock"
     query = f"""
         SELECT 
-            m.Project,
-            m.NodeNum,
-            m.temperature,
-            m.timestamp,
-            m.approval_status,
-            -- Use COALESCE to fallback to the sensor's raw telemetry metadata
+            m.Project, m.NodeNum, m.temperature, m.timestamp, m.approval_status,
             COALESCE(n.Location, m.Location, 'Unassigned') as Location,
             COALESCE(n.Bank, m.Bank, '—') as Bank,
             COALESCE(n.Depth, m.Depth) as Depth
         FROM `{MASTER_VIEW}` m
-        LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
-            ON m.NodeNum = n.NodeNum
-            -- This date-bound join now only affects specific metadata attributes
-        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+        LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON m.NodeNum = n.NodeNum
+        WHERE m.temperature BETWEEN -30.0 AND 120.0
           AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
         ORDER BY m.timestamp ASC
     """
@@ -457,6 +450,38 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 5. LAYOUT
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue")
     fig.update_layout(title=f"<b>{title}</b>", plot_bgcolor='white', height=650, xaxis=dict(range=[start_view, end_view]), yaxis=dict(title=f"Temp ({unit_label})"))
+    
+
+    # 1. PRE-PROCESSING
+    plot_df = df.copy()
+    plot_df['temperature'] = pd.to_numeric(plot_df['temperature'], errors='coerce')
+    plot_df = plot_df.dropna(subset=['temperature', 'timestamp'])
+    
+    # 2. SLOT IDENTIFICATION
+    plot_df['Slot_ID'] = plot_df['Location'].astype(str) + "_" + plot_df['Bank'].astype(str)
+    
+    fig = go.Figure()
+    
+    # 3. ROBUST LOOP
+    for slot in sorted(plot_df['Slot_ID'].unique(), key=natural_sort_key):
+        s_df = plot_df[plot_df['Slot_ID'] == slot].sort_values('timestamp')
+        
+        # SKIP EMPTY SLOTS (Prevents IndexError)
+        if s_df.empty: 
+            continue
+            
+        s_resampled = s_df.set_index('timestamp').resample('1h')['temperature'].mean().dropna().reset_index()
+        
+        if s_resampled.empty: 
+            continue # Prevents PlotlyError
+            
+        fig.add_trace(go.Scatter(
+            x=s_resampled['timestamp'], y=s_resampled['temperature'],
+            name=slot, mode='lines',
+            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+        ))
+                             
+
     return fig
 
 @st.cache_data(ttl=600)
