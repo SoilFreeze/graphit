@@ -60,14 +60,11 @@ def get_bq_client():
 def get_universal_portal_data(project_id, is_summary_page=False):
     """
     Unified Time-Aware Data Fetcher.
-    Joins telemetry to registry by NodeNum AND valid date range.
+    Strictly joins telemetry to registry by NodeNum AND exact Project Phase ID.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    clean_token = str(project_id).replace("'", "''").strip()
-    base_job_num = clean_token.split('-')[0].strip()
-
     # Dynamic filter for summary vs specific project views
     filter_logic = "" if is_summary_page else """
         AND (UPPER(COALESCE(n.Location, m.Location)) LIKE 'BANK%' 
@@ -90,7 +87,8 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
             AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
         WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-          AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
+          -- FIXED: Enforce strict equality so phases do not blend together
+          AND n.Project = @project_id
           AND n.Project IS NOT NULL
           {filter_logic}
         ORDER BY m.timestamp ASC
@@ -197,9 +195,9 @@ if sidebar_client is not None:
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-                WHERE Project = '{selected_project}' OR Project LIKE '{selected_project.split('-')[0]}%'
+                WHERE Project = '{selected_project}' 
             """
-            scope_label = f"Job {selected_project.split('-')[0]} Age"
+            scope_label = f"Job {selected_project} Age"
 
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
