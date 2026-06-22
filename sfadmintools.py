@@ -858,7 +858,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
-    locations = sorted(depth_df['Location'].unique())
+    locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
     
     for loc in locations:
         with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
