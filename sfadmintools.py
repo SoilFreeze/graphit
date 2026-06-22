@@ -376,9 +376,17 @@ active_refs = st.session_state.get("active_refs", [])
 
 def natural_sort_key(s):
     """
-    Splits strings into chunks of text and numbers to allow natural sorting.
-    e.g., "10ft (SP32)" -> [10, "ft (sp", 32, ")"]
+    Enhanced sorter: Extracts 'T' followed by digits and treats them as integers,
+    ensuring T2 comes before T10.
     """
+    # Look for the 'T' followed by numbers
+    match = re.match(r'([a-zA-Z\s]*)([tT])(\d+)(.*)', str(s))
+    if match:
+        # Returns a tuple: (Prefix, 't', NumericValue, Suffix)
+        # By converting the 3rd group to an int, T2 (2) will correctly sort before T10 (10)
+        return (match.group(1).lower(), match.group(2).lower(), int(match.group(3)), match.group(4).lower())
+    
+    # Fallback for standard strings (like Depth values)
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
