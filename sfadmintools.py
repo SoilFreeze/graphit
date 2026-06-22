@@ -889,8 +889,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 Date_Freezedown,
                 REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
             FROM `{PROJECT_REGISTRY_TABLE}`
-            WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES'
-              AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
+            WHERE UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
         ),
         raw_data AS (
             SELECT 
@@ -1309,7 +1308,7 @@ def render_project_status_dashboard(client, selected_project, unit_label, target
         return
 
     cols = st.columns(4)
-    type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient": (cols[3], "☁️")}
+    type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient":
     now_utc = pd.Timestamp.now(tz='UTC')
 
     for h_type, (col, icon) in type_map.items():
