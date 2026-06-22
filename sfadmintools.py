@@ -939,7 +939,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     Renders Global Project Summary.
-    Updated: Points to live Google Sheet tables and ensures column names match production schema.
+    Cleaned up: Removed the broken 'active projects' CTE and regex matching.
     """
     st.header("🌐 Global Project Summary")
     
@@ -948,24 +948,13 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
 
+    # Simplified Query: Stripped the active projects CTE. 
+    # Just pulls recent data and joins registry smoothly for names and dates.
     summary_q = f"""
-        WITH active_projects AS (
+        WITH raw_data AS (
             SELECT 
-                CAST(Project AS STRING) as Project, 
-                ProjectName, 
-                ProjectStatus, 
-                Date_Freezedown,
-                REGEXP_EXTRACT(TRIM(CAST(Project AS STRING)), r'^\\d+') as base_prefix
-            FROM `{PROJECT_REGISTRY_TABLE}`
-            WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) = 'YES'
-              AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
-        ),
-        raw_data AS (
-            SELECT 
-                p.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, m.NodeNum
+                m.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, m.NodeNum
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            INNER JOIN active_projects p 
-                ON REGEXP_EXTRACT(TRIM(CAST(m.Project AS STRING)), r'^\\d+') = p.base_prefix
             INNER JOIN `{NODE_REGISTRY_TABLE}` n 
               ON m.NodeNum = n.NodeNum
               -- TIME-BOUND LOCK: Only match telemetry to the registry window for that sensor
@@ -974,6 +963,8 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
               AND NOT (m.temperature > 120.0 AND NOT STARTS_WITH(m.NodeNum, 'SP'))
+              AND UPPER(m.Project) NOT LIKE '%OFFICE%'
+              AND m.Project IS NOT NULL
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
@@ -1000,12 +991,15 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             GROUP BY 1, 2, 3, 4, 5
         )
         SELECT 
-            p.*, ls.*,
-            (COUNTIF(ls.Bank LIKE 'S%' AND ls.latest_temp <= -10) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'S%') OVER(PARTITION BY p.Project), 0)) * 100 as supply_kpi,
-            (COUNTIF(ls.Bank LIKE 'R%' AND ls.latest_temp <= 0) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'R%') OVER(PARTITION BY p.Project), 0)) * 100 as return_kpi,
-            (COUNTIF(ls.Depth IS NOT NULL AND ls.latest_temp <= 32) OVER(PARTITION BY p.Project) / NULLIF(COUNTIF(ls.Depth IS NOT NULL) OVER(PARTITION BY p.Project), 0)) * 100 as freeze_kpi
-        FROM active_projects p
-        LEFT JOIN LatestStats ls ON p.Project = ls.Project
+            ls.*,
+            p.ProjectName, 
+            p.Date_Freezedown,
+            (COUNTIF(ls.Bank LIKE 'S%' AND ls.latest_temp <= -10) OVER(PARTITION BY ls.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'S%') OVER(PARTITION BY ls.Project), 0)) * 100 as supply_kpi,
+            (COUNTIF(ls.Bank LIKE 'R%' AND ls.latest_temp <= 0) OVER(PARTITION BY ls.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'R%') OVER(PARTITION BY ls.Project), 0)) * 100 as return_kpi,
+            (COUNTIF(ls.Depth IS NOT NULL AND ls.latest_temp <= 32) OVER(PARTITION BY ls.Project) / NULLIF(COUNTIF(ls.Depth IS NOT NULL) OVER(PARTITION BY ls.Project), 0)) * 100 as freeze_kpi
+        FROM LatestStats ls
+        LEFT JOIN `{PROJECT_REGISTRY_TABLE}` p 
+          ON STARTS_WITH(ls.Project, CAST(p.Project AS STRING))
     """
     
     try:
@@ -1016,12 +1010,12 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         return
 
     if df.empty:
-        st.info("No active projects found matching your active parameter checks.")
+        st.info("No projects found with active data in the last 48 hours.")
         return
 
     for project in sorted(df['Project'].unique()):
         p_df = df[df['Project'] == project]
-        p_name = p_df['ProjectName'].iloc[0] or project
+        p_name = p_df['ProjectName'].iloc[0] if pd.notnull(p_df['ProjectName'].iloc[0]) else project
         f_date = p_df['Date_Freezedown'].iloc[0]
         
         day_text, f_date_display = "", "Not Set"
@@ -1056,7 +1050,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             # Data isolation
             is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
             
-            # Prioritize valid numeric Depths for TempPipes first to stop multi-channel Lord nodes from slipping into brines
+            # Prioritize valid numeric Depths for TempPipes
             is_tp = p_df['Depth'].notnull() & (p_df['Depth'].astype(str).str.strip() != '') & ~is_amb
             is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb & ~is_tp
             is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb & ~is_tp
@@ -1083,6 +1077,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 for idx, (title, g_df, kpi_col, kpi_val) in enumerate(groups_data):
                     with cols[col_mappings[idx]]:
                         render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
+
 
 def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
     """Helper layout compiler to handle repeating column metric sets."""
