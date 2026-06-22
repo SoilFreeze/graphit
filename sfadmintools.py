@@ -56,7 +56,6 @@ def get_bq_client():
 ############################
 # - 2. READ-ONLY DATA ENGINE - #
 ############################
-
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, is_summary_page=False):
     """
@@ -69,7 +68,12 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     clean_token = str(project_id).replace("'", "''").strip()
     base_job_num = clean_token.split('-')[0].strip()
 
-    # The JOIN logic below creates the "Time-Bound Lock"
+    # Dynamic filter for summary vs specific project views
+    filter_logic = "" if is_summary_page else """
+        AND (UPPER(COALESCE(n.Location, m.Location)) LIKE 'BANK%' 
+             OR REGEXP_CONTAINS(UPPER(COALESCE(n.Location, m.Location)), r'^T[0-9]+'))
+    """
+
     query = f"""
         SELECT 
             m.Project,
@@ -88,6 +92,7 @@ def get_universal_portal_data(project_id, is_summary_page=False):
         WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
           AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
           AND n.Project IS NOT NULL
+          {filter_logic}
         ORDER BY m.timestamp ASC
     """
     
