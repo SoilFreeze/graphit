@@ -772,10 +772,26 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
     p_df = p_df[p_df['temperature'] <= 120.0]
     
+    # --- INTERCEPT: Actively strip out Banks and Ambient sensors ---
+    # Create safe, uppercase string columns for robust matching
+    clean_loc = p_df['Location'].fillna('').astype(str).str.upper()
+    clean_bank = p_df['Bank'].fillna('').astype(str).str.upper()
+
+    # Flag any row that is Supply (S), Return (R), or Ambient (Amb)
+    is_bank_or_amb = (
+        clean_loc.str.startswith('S') | clean_loc.str.startswith('R') | clean_loc.str.contains('BANK') |
+        clean_bank.str.startswith('S') | clean_bank.str.startswith('R') | clean_bank.str.contains('BANK') |
+        clean_loc.str.contains('AMB') | clean_bank.str.contains('AMB')
+    )
+    
+    # Drop the flagged rows before generating the final depth dataframe
+    p_df = p_df[~is_bank_or_amb]
+    # -------------------------------------------------------------
+    
     depth_df = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
     if depth_df.empty:
-        st.info("No sensors with valid numeric 'Depth' entries found in the data stream.")
+        st.info("No Temp Pipe sensors with valid numeric 'Depth' entries found in the data stream.")
         return
 
     unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
