@@ -57,40 +57,50 @@ def get_bq_client():
 # - 2. READ-ONLY DATA ENGINE - #
 ############################
 @st.cache_data(ttl=600)
-@st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, is_summary_page=False):
-    """
-    Unified Data Fetcher with Project Name Bridge.
-    Uses STARTS_WITH to link Registry phases to root Telemetry.
-    """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    # We strip any whitespace just in case
-    clean_id = str(project_id).strip()
+    # Extract the root job number (e.g., "2541" from "2541-Blackjack Phase 2")
+    # This works for any project ID format as long as it starts with digits
+    root_job_id = str(project_id).split('-')[0].strip()
 
-    # Replace your current query inside get_universal_portal_data with this:
     query = f"""
         SELECT 
-            m.*, n.Phase, n.System
+            m.Project as Raw_Project_Name,
+            m.NodeNum,
+            m.temperature,
+            m.timestamp,
+            m.approval_status,
+            COALESCE(n.Location, m.Location, 'Unassigned') as Location,
+            COALESCE(n.Bank, m.Bank, '—') as Bank,
+            COALESCE(n.Depth, m.Depth) as Depth,
+            n.Phase,
+            n.System
         FROM `{MASTER_VIEW}` m
-        INNER JOIN `{NODE_REGISTRY_TABLE}` n ON m.NodeNum = n.NodeNum
-        WHERE m.temperature BETWEEN -30.0 AND 120.0
-          -- BRIDGE: Look for the root job name, regardless of what phase suffix is on the registry
-          AND (m.Project = @project_id OR STARTS_WITH(@project_id, m.Project))
-          AND n.Project = @project_id
+        INNER JOIN `{NODE_REGISTRY_TABLE}` n 
+            ON m.NodeNum = n.NodeNum
+            AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
+            AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
+        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+          -- The Bridge: Match telemetry to the registry by the ROOT job ID
+          AND m.Project LIKE CONCAT(@root_job_id, '%')
+          AND n.Project LIKE CONCAT(@root_job_id, '%')
         ORDER BY m.timestamp ASC
     """
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", clean_id)]
+        query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
     )
     
-    try:
-        return client.query(query, job_config=job_config).to_dataframe()
-    except Exception as e:
-        st.error(f"⚠️ Data Sync Error: {e}")
-        return pd.DataFrame()
+    df = client.query(query, job_config=job_config).to_dataframe()
+    
+    # Now, filter by the specific Project Name requested (e.g., Phase 2) 
+    # using Python to ensure accuracy
+    if not is_summary_page:
+        df = df[df['Raw_Project_Name'] == project_id]
+        
+    return df
         
 ###########################
 # - SIDEBAR NAVIGATION -  #
