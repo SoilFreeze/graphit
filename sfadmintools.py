@@ -188,27 +188,17 @@ st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
     try:
-        # Contextual switching logic based on sidebar dropdown choice
-        if selected_project == "All Projects":
-            pulse_q = f"""
-                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            """
-            scope_label = "Last Data"
-        else:
-            pulse_q = f"""
-                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-                WHERE Project = '{selected_project}' 
-            """
-            scope_label = f"Job {selected_project} Age"
-
+        # Fixed query to use a safer aggregate
+        pulse_q = f"""
+            SELECT MAX(timestamp) as last_sync
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            WHERE Project = '{selected_project}'
+        """
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
-        if not pulse_df.empty and pulse_df['last_sync'].iloc[0]:
-            last_sync_str = str(pulse_df['last_sync'].iloc[0])
-            
-            last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
+        # Check if the dataframe is empty or if the result is NaT (Not a Time)
+        if not pulse_df.empty and pd.notnull(pulse_df['last_sync'].iloc[0]):
+            last_sync_ts = pd.to_datetime(pulse_df['last_sync'].iloc[0], utc=True)
             now_utc = pd.Timestamp.now(tz='UTC')
             elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
             
@@ -219,10 +209,9 @@ if sidebar_client is not None:
             else:
                 pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
                 
-            st.sidebar.markdown(f"**{scope_label}:** {pulse_status}")
-            st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
+            st.sidebar.markdown(f"**Job Age:** {pulse_status}")
         else:
-            st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
+            st.sidebar.markdown("**Job Age:** ❌ No Data Found")
             
     except Exception as pulse_err:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
