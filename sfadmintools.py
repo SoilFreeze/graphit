@@ -60,17 +60,20 @@ def get_bq_client():
 def get_universal_portal_data(project_id, is_summary_page=False):
     """
     Unified Time-Aware Data Fetcher.
-    Strictly joins telemetry to registry by NodeNum AND exact Project Phase ID.
+    Pulls all base project data and exposes Phase and System columns.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    # Dynamic filter for summary vs specific project views
+    clean_token = str(project_id).replace("'", "''").strip()
+    base_job_num = clean_token.split('-')[0].strip()
+
     filter_logic = "" if is_summary_page else """
         AND (UPPER(COALESCE(n.Location, m.Location)) LIKE 'BANK%' 
              OR REGEXP_CONTAINS(UPPER(COALESCE(n.Location, m.Location)), r'^T[0-9]+'))
     """
 
+    # Reverted back to LIKE wildcard, but added Phase and System columns
     query = f"""
         SELECT 
             m.Project,
@@ -80,15 +83,16 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             m.approval_status,
             COALESCE(n.Location, m.Location, 'Unassigned') as Location,
             COALESCE(n.Bank, m.Bank, '—') as Bank,
-            COALESCE(n.Depth, m.Depth) as Depth
+            COALESCE(n.Depth, m.Depth) as Depth,
+            n.Phase,
+            n.System
         FROM `{MASTER_VIEW}` m
         LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
             ON m.NodeNum = n.NodeNum
             AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
             AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
         WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-          -- FIXED: Enforce strict equality so phases do not blend together
-          AND n.Project = @project_id
+          AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
           AND n.Project IS NOT NULL
           {filter_logic}
         ORDER BY m.timestamp ASC
@@ -103,7 +107,7 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     except Exception as e:
         st.error(f"⚠️ Data Sync Error: {e}")
         return pd.DataFrame()
-
+        
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
@@ -678,6 +682,25 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         st.warning(f"No data found for '{p_name}'.")
         return
 
+    # --- NEW UI FILTERS FOR PHASE AND SYSTEM ---
+    st.markdown("### 🎛️ Sub-Project Filters")
+    f_col1, f_col2 = st.columns(2)
+    
+    # Safely extract unique phases and systems from the dataframe
+    avail_phases = sorted([str(p) for p in p_df['Phase'].dropna().unique() if str(p).strip()])
+    avail_systems = sorted([str(s) for s in p_df['System'].dropna().unique() if str(s).strip()])
+    
+    sel_phases = f_col1.multiselect("Filter by Phase", avail_phases, default=avail_phases)
+    sel_systems = f_col2.multiselect("Filter by System", avail_systems, default=avail_systems)
+
+    if sel_phases:
+        p_df = p_df[p_df['Phase'].astype(str).isin(sel_phases)]
+    if sel_systems:
+        p_df = p_df[p_df['System'].astype(str).isin(sel_systems)]
+        
+    st.divider()
+    # -----------------------------------------
+
     # 4. FILTERING
     trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
     p_df = p_df[~p_df['Location'].isin(trash_locations)].copy()
@@ -765,6 +788,20 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     if p_df is None or p_df.empty:
         st.warning("No data found for this project.")
         return
+
+    # --- NEW UI FILTERS FOR PHASE AND SYSTEM ---
+    st.sidebar.markdown("### 🎛️ Sub-Project Filters")
+    avail_phases = sorted([str(p) for p in p_df['Phase'].dropna().unique() if str(p).strip()])
+    avail_systems = sorted([str(s) for s in p_df['System'].dropna().unique() if str(s).strip()])
+    
+    sel_phases = st.sidebar.multiselect("Filter by Phase", avail_phases, default=avail_phases, key="depth_phase")
+    sel_systems = st.sidebar.multiselect("Filter by System", avail_systems, default=avail_systems, key="depth_sys")
+
+    if sel_phases:
+        p_df = p_df[p_df['Phase'].astype(str).isin(sel_phases)]
+    if sel_systems:
+        p_df = p_df[p_df['System'].astype(str).isin(sel_systems)]
+    # -----------------------------------------
 
     # Convert native view Depth values straight into a graph-safe float coordinate
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
