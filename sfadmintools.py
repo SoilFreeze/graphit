@@ -57,23 +57,18 @@ def get_bq_client():
 # - 2. READ-ONLY DATA ENGINE - #
 ############################
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, is_summary_page=False):
     """
-    Unified Time-Aware Data Fetcher.
-    Pulls all base project data and exposes Phase and System columns.
+    Unified Data Fetcher with Project Name Bridge.
+    Uses STARTS_WITH to link Registry phases to root Telemetry.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    clean_token = str(project_id).replace("'", "''").strip()
-    base_job_num = clean_token.split('-')[0].strip()
+    # We strip any whitespace just in case
+    clean_id = str(project_id).strip()
 
-    filter_logic = "" if is_summary_page else """
-        AND (UPPER(COALESCE(n.Location, m.Location)) LIKE 'BANK%' 
-             OR REGEXP_CONTAINS(UPPER(COALESCE(n.Location, m.Location)), r'^T[0-9]+'))
-    """
-
-    # Reverted back to LIKE wildcard, but added Phase and System columns
     query = f"""
         SELECT 
             m.Project,
@@ -87,19 +82,22 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             n.Phase,
             n.System
         FROM `{MASTER_VIEW}` m
-        LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
+        INNER JOIN `{NODE_REGISTRY_TABLE}` n 
             ON m.NodeNum = n.NodeNum
+            -- BRIDGE: Match Telemetry to Registry even if names aren't 1:1
+            -- This links '2541-Blackjack' (Tele) to '2541-Blackjack Phase2' (Reg)
+            AND STARTS_WITH(n.Project, m.Project)
             AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
             AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
         WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-          AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
+          -- Match the root job number (e.g., '2541')
+          AND m.Project LIKE CONCAT(SPLIT(@project_id, '-')[OFFSET(0)], '%')
           AND n.Project IS NOT NULL
-          {filter_logic}
         ORDER BY m.timestamp ASC
     """
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
+        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", clean_id)]
     )
     
     try:
