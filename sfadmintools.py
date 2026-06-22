@@ -708,12 +708,16 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     
     # --- MANUAL SYSTEM FILTER ---
     st.markdown("### 🎛️ System Filters")
+    # --- MANUAL SYSTEM FILTER (Conditional) ---
     avail_systems = sorted([str(s) for s in p_df['System'].dropna().unique() if str(s).strip()])
     
-    if avail_systems:
+    # Only show the filter if there are actually multiple systems to choose from
+    if len(avail_systems) > 1:
         sel_systems = st.multiselect("Filter by System", avail_systems, default=avail_systems)
         if sel_systems:
             p_df = p_df[p_df['System'].astype(str).isin(sel_systems)]
+    elif len(avail_systems) == 1:
+        st.caption(f"Showing data for System: **{avail_systems[0]}**")
 
     # 4. FILTERING
     trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
