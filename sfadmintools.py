@@ -376,24 +376,23 @@ active_refs = st.session_state.get("active_refs", [])
 
 def natural_sort_key(s):
     """
-    Robust sorter: Converts everything to strings before applying logic
-    to prevent TypeErrors during comparison.
+    Standardized sorter: Always returns a list, ensuring consistent sorting 
+    of mixed-type location strings.
     """
     s = str(s)
     # Look for 'T' followed by numbers
     match = re.match(r'([a-zA-Z\s]*)([tT])(\d+)(.*)', s)
     if match:
-        # We convert to string explicitly to ensure the tuple contains consistent types
-        return (
+        # Return a list of consistent structure: [Prefix, 't', NumericValue, Suffix]
+        return [
             str(match.group(1).lower()), 
             str(match.group(2).lower()), 
             int(match.group(3)), 
             str(match.group(4).lower())
-        )
+        ]
     
-    # Fallback for standard strings: split into chunks
-    # We ensure numbers are compared as integers, but text is treated as strings
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+    # Fallback for standard strings (e.g., "Bank S", "Office")
+    return [text.lower() if not text.isdigit() else int(text) for text in re.split(r'(\d+)', s)]
     
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
