@@ -524,6 +524,132 @@ def apply_sanity_filter(df):
     elif 'approval_status' in df.columns: df.loc[bad_condition, 'approval_status'] = 'BADDATA'
     return df
 
+
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id):
+    """
+    Unified Time-Aware Data Fetcher.
+    Joins telemetry to registry by NodeNum AND valid date range.
+    """
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
+    
+    clean_token = str(project_id).replace("'", "''").strip()
+    base_job_num = clean_token.split('-')[0].strip()
+
+    # The JOIN logic below creates the "Time-Bound Lock"
+    query = f"""
+        SELECT 
+            m.Project,
+            m.NodeNum,
+            m.temperature,
+            m.timestamp,
+            m.approval_status,
+            COALESCE(n.Location, m.Location, 'Unassigned') as Location,
+            COALESCE(n.Bank, m.Bank, '—') as Bank,
+            COALESCE(n.Depth, m.Depth) as Depth
+        FROM `{MASTER_VIEW}` m
+        LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
+            ON m.NodeNum = n.NodeNum
+            AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
+            AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
+        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+          AND (m.Project = @project_id OR m.Project LIKE '{base_job_num}%')
+          AND n.Project IS NOT NULL
+        ORDER BY m.timestamp ASC
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
+    )
+    
+    try:
+        return client.query(query, job_config=job_config).to_dataframe()
+    except Exception as e:
+        st.error(f"⚠️ Data Sync Error: {e}")
+        return pd.DataFrame()
+    # Only iterate through nodes that survived the filter
+    for sn in sorted(plot_df['NodeNum'].unique(), key=natural_sort_key): 
+        node_df = plot_df[plot_df['NodeNum'] == sn]
+        depth_val = node_df['Depth'].iloc[0]
+        bank_val = node_df['Bank'].iloc[0]
+        loc_val = node_df['Location'].iloc[0]
+
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+            display_name = f"{bank_val} ({sn})"
+            sort_val = str(bank_val)  
+        elif pd.notnull(depth_val) and not pd.isna(depth_val): 
+            display_name = f"{depth_val}ft ({sn})"
+            sort_val = f"depth_{float(depth_val):05.1f}" 
+        else: 
+            display_name = f"{loc_val} ({sn})"
+            sort_val = str(display_name)
+
+        node_metadata.append({
+            'node_num': sn,
+            'display_name': display_name,
+            'sort_key': sort_val
+        })
+
+    # This line must be aligned with the 'for sn in plot_df...' line above
+    sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
+
+    # This for loop must also be aligned with the 'for sn...' line
+    for i, config in enumerate(sorted_node_configs):
+        sn = config['node_num']
+        display_name = config['display_name']
+        
+        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
+        s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
+        
+        fig.add_trace(go.Scatter(
+            x=s_df['timestamp'], 
+            y=s_df['temperature'],
+            name=display_name, 
+            mode='lines',
+            connectgaps=False, 
+            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
+            hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+        ))
+
+    # 5. REFERENCE LINES
+    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
+    
+    now_ts = pd.Timestamp.now(tz=display_tz)
+    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
+    
+    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+    for m_dt in m_range:
+        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+
+    # 6. LAYOUT & TITLING
+    p_name = st.session_state.get('selected_project', 'Project')
+    
+    # Implementing the inverted Y-axis preference dynamically if required by project scope
+    fig.update_layout(
+        title=dict(text=f"<b>{p_name} - Thermal Trend - {title}</b>", x=0.02, y=0.98, font=dict(size=18)),
+        plot_bgcolor='white', 
+        hovermode="x unified", 
+        height=650,
+        xaxis=dict(
+            range=[final_start_view, final_end_view], 
+            showgrid=True, gridcolor='Gainsboro',
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            hoverformat='%A, %b %d, %Y', 
+            tickformat='%b %d',
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')
+        ),
+        yaxis=dict(
+            title=f"Temperature ({unit_label})", 
+            range=y_range, 
+            dtick=10,
+            showgrid=True, gridcolor='Gainsboro', 
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')
+        ),
+        legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
+    )
+    return fig
                                 
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
     """
@@ -1077,7 +1203,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 for idx, (title, g_df, kpi_col, kpi_val) in enumerate(groups_data):
                     with cols[col_mappings[idx]]:
                         render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
-
 
 def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
     """Helper layout compiler to handle repeating column metric sets."""
