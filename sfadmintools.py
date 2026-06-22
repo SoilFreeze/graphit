@@ -376,19 +376,25 @@ active_refs = st.session_state.get("active_refs", [])
 
 def natural_sort_key(s):
     """
-    Enhanced sorter: Extracts 'T' followed by digits and treats them as integers,
-    ensuring T2 comes before T10.
+    Robust sorter: Converts everything to strings before applying logic
+    to prevent TypeErrors during comparison.
     """
-    # Look for the 'T' followed by numbers
-    match = re.match(r'([a-zA-Z\s]*)([tT])(\d+)(.*)', str(s))
+    s = str(s)
+    # Look for 'T' followed by numbers
+    match = re.match(r'([a-zA-Z\s]*)([tT])(\d+)(.*)', s)
     if match:
-        # Returns a tuple: (Prefix, 't', NumericValue, Suffix)
-        # By converting the 3rd group to an int, T2 (2) will correctly sort before T10 (10)
-        return (match.group(1).lower(), match.group(2).lower(), int(match.group(3)), match.group(4).lower())
+        # We convert to string explicitly to ensure the tuple contains consistent types
+        return (
+            str(match.group(1).lower()), 
+            str(match.group(2).lower()), 
+            int(match.group(3)), 
+            str(match.group(4).lower())
+        )
     
-    # Fallback for standard strings (like Depth values)
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
-
+    # Fallback for standard strings: split into chunks
+    # We ensure numbers are compared as integers, but text is treated as strings
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+    
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
