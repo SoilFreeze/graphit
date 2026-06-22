@@ -682,24 +682,25 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         st.warning(f"No data found for '{p_name}'.")
         return
 
-    # --- NEW UI FILTERS FOR PHASE AND SYSTEM ---
-    st.markdown("### 🎛️ Sub-Project Filters")
-    f_col1, f_col2 = st.columns(2)
+    # --- AUTO-FILTER BY PHASE FROM PROJECT TITLE ---
+    # Looks for the word "Phase" followed by optional spaces and a number
+    import re
+    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
     
-    # Safely extract unique phases and systems from the dataframe
-    avail_phases = sorted([str(p) for p in p_df['Phase'].dropna().unique() if str(p).strip()])
+    if phase_match:
+        target_phase = phase_match.group(1)
+        # Force exact match on the Phase column
+        p_df = p_df[p_df['Phase'].astype(str) == target_phase]
+        st.caption(f"🎯 Auto-filtered to **Phase {target_phase}** based on project selection.")
+    
+    # --- MANUAL SYSTEM FILTER ---
+    st.markdown("### 🎛️ System Filters")
     avail_systems = sorted([str(s) for s in p_df['System'].dropna().unique() if str(s).strip()])
     
-    sel_phases = f_col1.multiselect("Filter by Phase", avail_phases, default=avail_phases)
-    sel_systems = f_col2.multiselect("Filter by System", avail_systems, default=avail_systems)
-
-    if sel_phases:
-        p_df = p_df[p_df['Phase'].astype(str).isin(sel_phases)]
-    if sel_systems:
-        p_df = p_df[p_df['System'].astype(str).isin(sel_systems)]
-        
-    st.divider()
-    # -----------------------------------------
+    if avail_systems:
+        sel_systems = st.multiselect("Filter by System", avail_systems, default=avail_systems)
+        if sel_systems:
+            p_df = p_df[p_df['System'].astype(str).isin(sel_systems)]
 
     # 4. FILTERING
     trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
@@ -789,19 +790,25 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         st.warning("No data found for this project.")
         return
 
-    # --- NEW UI FILTERS FOR PHASE AND SYSTEM ---
-    st.sidebar.markdown("### 🎛️ Sub-Project Filters")
-    avail_phases = sorted([str(p) for p in p_df['Phase'].dropna().unique() if str(p).strip()])
+    # --- AUTO-FILTER BY PHASE FROM PROJECT TITLE ---
+    import re
+    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+    
+    if phase_match:
+        target_phase = phase_match.group(1)
+        p_df = p_df[p_df['Phase'].astype(str) == target_phase]
+        st.sidebar.caption(f"🎯 Auto-filtered to Phase {target_phase}")
+
+    # --- MANUAL SYSTEM FILTER (SIDEBAR) ---
     avail_systems = sorted([str(s) for s in p_df['System'].dropna().unique() if str(s).strip()])
     
-    sel_phases = st.sidebar.multiselect("Filter by Phase", avail_phases, default=avail_phases, key="depth_phase")
-    sel_systems = st.sidebar.multiselect("Filter by System", avail_systems, default=avail_systems, key="depth_sys")
+    if avail_systems:
+        sel_systems = st.sidebar.multiselect("Filter by System", avail_systems, default=avail_systems, key="depth_sys")
+        if sel_systems:
+            p_df = p_df[p_df['System'].astype(str).isin(sel_systems)]
 
-    if sel_phases:
-        p_df = p_df[p_df['Phase'].astype(str).isin(sel_phases)]
-    if sel_systems:
-        p_df = p_df[p_df['System'].astype(str).isin(sel_systems)]
-    # -----------------------------------------
+    # Convert native view Depth values straight into a graph-safe float coordinate
+    p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
 
     # Convert native view Depth values straight into a graph-safe float coordinate
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
