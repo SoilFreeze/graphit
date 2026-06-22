@@ -69,30 +69,16 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     # We strip any whitespace just in case
     clean_id = str(project_id).strip()
 
+    # Replace your current query inside get_universal_portal_data with this:
     query = f"""
         SELECT 
-            m.Project,
-            m.NodeNum,
-            m.temperature,
-            m.timestamp,
-            m.approval_status,
-            COALESCE(n.Location, m.Location, 'Unassigned') as Location,
-            COALESCE(n.Bank, m.Bank, '—') as Bank,
-            COALESCE(n.Depth, m.Depth) as Depth,
-            n.Phase,
-            n.System
+            m.*, n.Phase, n.System
         FROM `{MASTER_VIEW}` m
-        INNER JOIN `{NODE_REGISTRY_TABLE}` n 
-            ON m.NodeNum = n.NodeNum
-            -- BRIDGE: Match Telemetry to Registry even if names aren't 1:1
-            -- This links '2541-Blackjack' (Tele) to '2541-Blackjack Phase2' (Reg)
-            AND STARTS_WITH(n.Project, m.Project)
-            AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
-            AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
-        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-          -- Match the root job number (e.g., '2541')
-          AND m.Project LIKE CONCAT(SPLIT(@project_id, '-')[OFFSET(0)], '%')
-          AND n.Project IS NOT NULL
+        INNER JOIN `{NODE_REGISTRY_TABLE}` n ON m.NodeNum = n.NodeNum
+        WHERE m.temperature BETWEEN -30.0 AND 120.0
+          -- BRIDGE: Look for the root job name, regardless of what phase suffix is on the registry
+          AND (m.Project = @project_id OR STARTS_WITH(@project_id, m.Project))
+          AND n.Project = @project_id
         ORDER BY m.timestamp ASC
     """
     
