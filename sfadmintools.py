@@ -410,25 +410,21 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     if curve_id and curve_id != "None" and f_start_date:
         try:
             # 1. IDENTIFY CONVENTION
-            # '2538-TP1-Sat Clay' -> proj='2538', loc='1' (or whatever digit is after T/TP)
+            # Extract parts: 2527-T8-Silty Sand -> parts[0]='2527', parts[1]='T8'
             parts = str(curve_id).split('-')
-            proj_num = parts[0].strip()
-            loc_raw = parts[1].strip() # 'TP1' or 'T1'
+            proj_num = parts[0].strip() if len(parts) > 0 else ""
+            loc_tag = parts[1].strip() if len(parts) > 1 else ""
             
-            # Extract just the digit (e.g., '1' from 'TP1')
-            loc_digit = re.findall(r'\d+', loc_raw)[0]
+            st.write(f"--- DEBUG: Searching for Project: '{proj_num}', Loc: '{loc_tag}' ---")
             
             # 2. QUERY DATABASE
-            # This matches anything that has the Project Number AND the Digit
-            # It bypasses the 'T' vs 'TP' prefix conflict entirely.
-            target_q = f"""
+            # We look for the Project Number first to see what the naming convention actually is
+            debug_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE CurveID LIKE '%{proj_num}%' 
-                  AND CurveID LIKE '%{loc_digit}%'
-                ORDER BY Day
+                WHERE CurveID LIKE '%{proj_num}%'
             """
-            target_df = client.query(target_q).to_dataframe()
+            target_df = client.query(debug_q).to_dataframe()
             
             # 3. DEBUG PRINTING
             if target_df.empty:
