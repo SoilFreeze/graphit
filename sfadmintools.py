@@ -439,7 +439,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 target_q = f"""
                     SELECT CurveID, Day, Temp 
                     FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE REGEXP_CONTAINS(CurveID, r'^{proj_num}.*{loc_part}$')
+                    WHERE CurveID LIKE '%{proj_num}%' 
+                      AND CurveID LIKE '%{loc_part}%'
                     ORDER BY Day
                 """
                 target_df = client.query(target_q).to_dataframe()
