@@ -412,6 +412,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             # Splits '2527-T8-Silty Sand' into parts: ['2527', 'T8', 'Silty Sand']
             parts = str(curve_id).split('-')
             
+            # Temporary debug inside the 'if' block:
+            st.write(f"DEBUG: Searching for ID starting with: {proj_num}-{loc_tag}")
+            
             # Ensure we have enough parts to avoid errors
             if len(parts) >= 2:
                 proj_num = parts[0].strip()   # '2527'
