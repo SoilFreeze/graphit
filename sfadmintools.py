@@ -1809,9 +1809,20 @@ def render_data_processing_page(selected_project):
     ])
     
     # --- TAB 1: UPLOAD LOGIC ---
-        u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx', 'zip'], key="manual_upload_main", accept_multiple_files=True) 
+    with tab_upload:
+        st.subheader("📄 Manual File Ingestion")
+        st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
+        
+        # This line must be indented exactly 8 spaces under 'with tab_upload:'
+        u_files = st.file_uploader(
+            "Select CSV or Excel files", 
+            type=['csv', 'xlsx', 'zip'], 
+            key="manual_upload_main", 
+            accept_multiple_files=True
+        ) 
     
         if u_files:
+            # All lines under 'if u_files:' must be indented at least 12 spaces
             all_processed_dfs = []
             target_table = None
     
