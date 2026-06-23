@@ -8,6 +8,8 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import re
 import numpy as np
+import zipfile
+import io
 
 # 1. CONFIGURATION & STYLING
 st.set_page_config(
@@ -1817,32 +1819,42 @@ def render_data_processing_page(selected_project):
             all_processed_dfs = []
             target_table = None
     
-            # 1. PROCESS ALL FILES
             for f in u_files:
-                try:
-                    # Format Detection
-                    is_sensorconnect, skip_rows = False, 0
-                    if f.name.endswith('.csv'):
-                        f.seek(0)
-                        for i, line in enumerate(f):
-                            if b"DATA_START" in line:
-                                is_sensorconnect, skip_rows = True, i + 1
-                                break
-                        f.seek(0)
-                    
-                    # Reading
-                    if is_sensorconnect:
-                        df_raw = pd.read_csv(f, encoding='latin1', skiprows=skip_rows, dtype=str)
-                    elif f.name.endswith('.csv'):
-                        df_raw = pd.read_csv(f, encoding='latin1', dtype=str)
-                    else:
-                        df_raw = pd.read_excel(f, dtype=str)
-    
-                    # Processing
-                    if not df_raw.empty:
-                        df_processed = pd.DataFrame()
-                        actual_headers = list(df_raw.columns)
-                        clean_headers = [str(h).strip().lower() for h in actual_headers]
+    try:
+        # A. HANDLE ZIP FILES
+        if f.name.endswith('.zip'):
+            with zipfile.ZipFile(f, 'r') as z:
+                # Find the first .csv file in the zip
+                csv_name = [name for name in z.namelist() if name.endswith('.csv')][0]
+                with z.open(csv_name) as zf:
+                    df_raw = pd.read_csv(zf, encoding='utf-8')
+                    f_identifier = csv_name # Use the internal file name (e.g., TP-0190.csv)
+        
+        # B. HANDLE STANDARD CSV/EXCEL
+        elif f.name.endswith('.csv'):
+            f.seek(0)
+            df_raw = pd.read_csv(f, encoding='latin1')
+            f_identifier = f.name
+        else:
+            df_raw = pd.read_excel(f)
+            f_identifier = f.name
+
+        # 2. PROCESSING & MAPPING
+        if not df_raw.empty:
+            df_processed = pd.DataFrame()
+            
+            # --- DETECT FORMAT ---
+            # Search for SensorPush headers: "Timestamp" and "Probe Temperature"
+            t_match = next((h for h in df_raw.columns if 'timestamp' in h.lower() or 'time' in h.lower()), None)
+            v_match = next((h for h in df_raw.columns if 'temp' in h.lower() or 'probe' in h.lower()), None)
+
+            if t_match and v_match:
+                # SENSORPUSH FORMAT
+                df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
+                df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
+                # Extract TP-0190 from TP-0190.csv
+                df_processed['NodeNum'] = f_identifier.split('/')[-1].replace('.csv', '').strip()
+                target_table = "raw_sensorpush"
                         
                         # Branching Logic
                         if is_sensorconnect:
@@ -1863,15 +1875,21 @@ def render_data_processing_page(selected_project):
                             df_processed['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
                             target_table = "raw_lord"
                             
-                        else:
-                            t_match = next((h for h in actual_headers if 'timestamp' in h.lower()), None)
-                            v_match = next((h for h in actual_headers if 'temp' in h.lower()), None)
+                       else:
+                            # Robust matching for SensorPush exports
+                            # 1. Map Timestamp: look for 'timestamp' or 'Time'
+                            t_match = next((h for h in actual_headers if 'timestamp' in h.lower() or 'time' in h.lower()), None)
+                            # 2. Map Temperature: look for 'temp' or 'probe'
+                            v_match = next((h for h in actual_headers if 'temp' in h.lower() or 'probe' in h.lower()), None)
+                            
                             if t_match and v_match:
-                                clean_name = f.name.replace(".csv", "").replace(".xlsx", "")
-                                match = re.search(r'^([^ \(\)]+)', clean_name)
+                                clean_name = f.name.replace(".csv", "").replace(".xlsx", "").replace(".zip", "")
+                                # Strip folder paths if they exist
+                                clean_name = clean_name.split('/')[-1] 
+                                
                                 df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
                                 df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
-                                df_processed['NodeNum'] = match.group(1).strip() if match else clean_name
+                                df_processed['NodeNum'] = clean_name.strip()
                                 target_table = "raw_sensorpush"
                         
                         # Sanity & Storage
