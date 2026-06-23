@@ -425,13 +425,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 WHERE CurveID LIKE '%{proj_num}%'
             """
             target_df = client.query(debug_q).to_dataframe()
-            
-            # 3. DEBUG PRINTING
-            if target_df.empty:
-                st.warning(f"No curves found containing project number '{proj_num}'.")
-            else:
-                st.write("Unique IDs found for this project:")
-                st.write(target_df['CurveID'].unique())
                 
                 # 4. FILTER IN PYTHON
                 # We filter the dataframe in memory to find the specific location
