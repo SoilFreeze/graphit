@@ -428,27 +428,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             # Stop here and see what prints
             target_df = pd.DataFrame()
                 
-                target_df = client.query(target_q).to_dataframe()
-                
-                if not target_df.empty:
-                    dash_styles = ['dashdot', 'dash', 'dot']
-                    gray_shades = ['rgba(30,30,30,0.8)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.7)']
-                    
-                    for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
-                        c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-                        c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
-                        ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                        
-                        label_clean = str(cid).replace(f"{proj_num}-", "").replace(f"-{loc_part}", "")
-                        display_label = f"Goal: {label_clean}" if label_clean != loc_part else f"Goal: {loc_part}"
-                        
-                        fig.add_trace(go.Scatter(
-                            x=c_df['timestamp'], y=ref_y, name=f"<b>{display_label}</b>", 
-                            mode='lines',
-                            line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3),
-                            legendrank=1 
-                        ))
-        except Exception: pass
+               
 
     # 4. SENSOR DATA (Naturally Sorted Group Loops)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
