@@ -409,22 +409,29 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. THEORETICAL REFERENCE CURVES (Universal Debugger)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # 1. IDENTIFY CONVENTION
-            # Extract parts: 2527-T8-Silty Sand -> parts[0]='2527', parts[1]='T8'
+            # 1. NORMALIZE ID (Bridge the T/TP and 01/1 gap)
+            # Example: '2527-TP1-SiltySand' -> proj='2527', loc='T01'
             parts = str(curve_id).split('-')
-            proj_num = parts[0].strip() if len(parts) > 0 else ""
-            loc_tag = parts[1].strip() if len(parts) > 1 else ""
+            proj_num = parts[0].strip()
+            loc_raw = parts[1].strip() # e.g., 'TP1' or 'T8'
             
-            st.write(f"--- DEBUG: Searching for Project: '{proj_num}', Loc: '{loc_tag}' ---")
+            # Extract digits and ensure 2-digit format (e.g., '1' -> '01')
+            digits = re.findall(r'\d+', loc_raw)
+            loc_norm = f"{int(digits[0]):02d}" if digits else ""
+            
+            st.write(f"--- DEBUG: Searching for '{proj_num}' with Normalized Loc: 'T{loc_norm}' ---")
             
             # 2. QUERY DATABASE
-            # We look for the Project Number first to see what the naming convention actually is
-            debug_q = f"""
+            # We look for the Project Number and the Normalized Location
+            # This SQL handles 'T8', 'T08', 'TP8', 'TP08' by finding the 'T' and the digit
+            target_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                 WHERE CurveID LIKE '%{proj_num}%'
+                AND (CurveID LIKE '%T{loc_norm}%' OR CurveID LIKE '%TP{loc_norm}%')
+                ORDER BY Day
             """
-            target_df = client.query(debug_q).to_dataframe()
+            target_df = client.query(target_q).to_dataframe()
             
             # 3. DEBUG PRINTING
             if target_df.empty:
