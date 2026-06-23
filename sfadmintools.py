@@ -409,26 +409,23 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. THEORETICAL REFERENCE CURVES (Universal Debugger)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # 1. NORMALIZE ID (Bridge the T/TP and 01/1 gap)
-            # Example: '2527-TP1-SiltySand' -> proj='2527', loc='T01'
+            # 1. IDENTIFY CONVENTION
+            # '2538-TP1-Sat Clay' -> proj='2538', loc='1' (or whatever digit is after T/TP)
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip()
-            loc_raw = parts[1].strip() # e.g., 'TP1' or 'T8'
+            loc_raw = parts[1].strip() # 'TP1' or 'T1'
             
-            # Extract digits and ensure 2-digit format (e.g., '1' -> '01')
-            digits = re.findall(r'\d+', loc_raw)
-            loc_norm = f"{int(digits[0]):02d}" if digits else ""
-            
-            st.write(f"--- DEBUG: Searching for '{proj_num}' with Normalized Loc: 'T{loc_norm}' ---")
+            # Extract just the digit (e.g., '1' from 'TP1')
+            loc_digit = re.findall(r'\d+', loc_raw)[0]
             
             # 2. QUERY DATABASE
-            # We look for the Project Number and the Normalized Location
-            # This SQL handles 'T8', 'T08', 'TP8', 'TP08' by finding the 'T' and the digit
+            # This matches anything that has the Project Number AND the Digit
+            # It bypasses the 'T' vs 'TP' prefix conflict entirely.
             target_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE CurveID LIKE '%{proj_num}%'
-                AND (CurveID LIKE '%T{loc_norm}%' OR CurveID LIKE '%TP{loc_norm}%')
+                WHERE CurveID LIKE '%{proj_num}%' 
+                  AND CurveID LIKE '%{loc_digit}%'
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
