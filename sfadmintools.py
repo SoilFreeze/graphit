@@ -104,27 +104,6 @@ def get_universal_portal_data(project_id, is_summary_page=False):
         
     return df
 
-
-@st.cache_data(ttl=600)
-def get_theoretical_data(project_id):
-    """
-    Standardized Theoretical Data Fetcher: Matches telemetry project naming.
-    """
-    client = get_bq_client()
-    # Extract root ID (e.g., '2541') to ensure it matches the broader telemetry scope
-    root_id = str(project_id).split('-')[0].strip()
-    
-    query = f"""
-        SELECT *
-        FROM `{THEORETICAL_TABLE}`
-        WHERE Project LIKE CONCAT(@root_id, '%')
-    """
-    
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("root_id", "STRING", root_id)]
-    )
-    
-    return client.query(query, job_config=job_config).to_dataframe()
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
