@@ -1809,54 +1809,44 @@ def render_data_processing_page(selected_project):
     ])
     
     # --- TAB 1: UPLOAD LOGIC ---
-    with tab_upload:
-        st.subheader("📄 Manual File Ingestion")
-        st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
-        
-        u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], key="manual_upload_main", accept_multiple_files=True) 
+        u_files = st.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx', 'zip'], key="manual_upload_main", accept_multiple_files=True) 
     
         if u_files:
             all_processed_dfs = []
             target_table = None
     
             for f in u_files:
-            try:
-                # A. HANDLE ZIP FILES
-                if f.name.endswith('.zip'):
-                    with zipfile.ZipFile(f, 'r') as z:
-                        # Find the first .csv file in the zip
-                        csv_name = [name for name in z.namelist() if name.endswith('.csv')][0]
-                        with z.open(csv_name) as zf:
-                            df_raw = pd.read_csv(zf, encoding='utf-8')
-                            f_identifier = csv_name # Use the internal file name (e.g., TP-0190.csv)
-                
-                # B. HANDLE STANDARD CSV/EXCEL
-                elif f.name.endswith('.csv'):
-                    f.seek(0)
-                    df_raw = pd.read_csv(f, encoding='latin1')
+                try:
+                    df_raw = None
                     f_identifier = f.name
-                else:
-                    df_raw = pd.read_excel(f)
-                    f_identifier = f.name
-        
-                # 2. PROCESSING & MAPPING
-                if not df_raw.empty:
-                    df_processed = pd.DataFrame()
-                    
-                    # --- DETECT FORMAT ---
-                    # Search for SensorPush headers: "Timestamp" and "Probe Temperature"
-                    t_match = next((h for h in df_raw.columns if 'timestamp' in h.lower() or 'time' in h.lower()), None)
-                    v_match = next((h for h in df_raw.columns if 'temp' in h.lower() or 'probe' in h.lower()), None)
-        
-                    if t_match and v_match:
-                        # SENSORPUSH FORMAT
-                        df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
-                        df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
-                        # Extract TP-0190 from TP-0190.csv
-                        df_processed['NodeNum'] = f_identifier.split('/')[-1].replace('.csv', '').strip()
-                        target_table = "raw_sensorpush"
+                    is_sensorconnect = False
+                    skip_rows = 0
+
+                    # 1. READ FILE INTO df_raw
+                    if f.name.endswith('.zip'):
+                        with zipfile.ZipFile(f, 'r') as z:
+                            csv_name = [name for name in z.namelist() if name.endswith('.csv')][0]
+                            with z.open(csv_name) as zf:
+                                df_raw = pd.read_csv(zf, encoding='utf-8', dtype=str)
+                                f_identifier = csv_name
+                    elif f.name.endswith('.csv'):
+                        f.seek(0)
+                        # Check for SensorConnect header
+                        for i, line in enumerate(f):
+                            if b"DATA_START" in line:
+                                is_sensorconnect, skip_rows = True, i + 1
+                                break
+                        f.seek(0)
+                        df_raw = pd.read_csv(f, encoding='latin1', skiprows=skip_rows, dtype=str)
+                    else:
+                        df_raw = pd.read_excel(f, dtype=str)
+
+                    # 2. PROCESS df_raw -> df_processed
+                    if df_raw is not None and not df_raw.empty:
+                        df_processed = pd.DataFrame()
+                        actual_headers = list(df_raw.columns)
+                        clean_headers = [str(h).strip().lower() for h in actual_headers]
                         
-                        # Branching Logic
                         if is_sensorconnect:
                             time_col = [h for h in actual_headers if 'time' in h.lower()][0]
                             value_vars = [h for h in actual_headers if h != time_col]
@@ -1875,33 +1865,24 @@ def render_data_processing_page(selected_project):
                             df_processed['temperature'] = pd.to_numeric(df_raw[temp_h], errors='coerce')
                             target_table = "raw_lord"
                             
-                       else:
-                            # Robust matching for SensorPush exports
-                            # 1. Map Timestamp: look for 'timestamp' or 'Time'
+                        else: # Generic SensorPush or similar CSV
                             t_match = next((h for h in actual_headers if 'timestamp' in h.lower() or 'time' in h.lower()), None)
-                            # 2. Map Temperature: look for 'temp' or 'probe'
                             v_match = next((h for h in actual_headers if 'temp' in h.lower() or 'probe' in h.lower()), None)
-                            
                             if t_match and v_match:
-                                clean_name = f.name.replace(".csv", "").replace(".xlsx", "").replace(".zip", "")
-                                # Strip folder paths if they exist
-                                clean_name = clean_name.split('/')[-1] 
-                                
                                 df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
                                 df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
-                                df_processed['NodeNum'] = clean_name.strip()
+                                df_processed['NodeNum'] = f_identifier.split('/')[-1].replace('.csv', '').strip()
                                 target_table = "raw_sensorpush"
                         
-                        # Sanity & Storage
                         if not df_processed.empty:
                             df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                             all_processed_dfs.append(df_processed)
-                            st.write(f"✅ Prepared {f.name}: {len(df_processed)} records.")
-    
+                            st.write(f"✅ Prepared {f_identifier}: {len(df_processed)} records.")
+                
                 except Exception as e:
                     st.error(f"❌ Error processing {f.name}: {e}")
 
-            # 2. BATCH UPLOAD (Outside the loop)
+            # 3. BATCH UPLOAD
             if all_processed_dfs and target_table:
                 combined_df = pd.concat(all_processed_dfs, ignore_index=True)
                 combined_df['temperature'] = combined_df['temperature'].round(1)
