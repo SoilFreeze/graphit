@@ -409,25 +409,24 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 3. THEORETICAL REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # Splits '2527-T8-Silty Sand' into parts: ['2527', 'T8', 'Silty Sand']
-            parts = str(curve_id).split('-')
+            proj_num = str(curve_id).split('-')[0].strip()
             
-            # Temporary debug inside the 'if' block:
-            st.write(f"DEBUG: Searching for ID starting with: {proj_num}-{loc_tag}")
+            # BROAD DEBUG: Select everything for the project number, then we inspect the strings
+            debug_q = f"""
+                SELECT DISTINCT CurveID 
+                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE CurveID LIKE '%{proj_num}%'
+                LIMIT 20
+            """
+            debug_df = client.query(debug_q).to_dataframe()
             
-            # Ensure we have enough parts to avoid errors
-            if len(parts) >= 2:
-                proj_num = parts[0].strip()   # '2527'
-                loc_tag = parts[1].strip()    # 'T8'
-                
-                # Query matches exactly the convention: Project-Location
-                # This ignores the label suffix so it finds the curve regardless of the 'Silty Sand' part
-                target_q = f"""
-                    SELECT CurveID, Day, Temp 
-                    FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                    WHERE CurveID LIKE '{proj_num}-{loc_tag}%'
-                    ORDER BY Day
-                """
+            # Show me what you see in the sidebar
+            st.write("### 🔍 Database ID Debugger")
+            st.write("Found these IDs in database for project", proj_num, ":")
+            st.write(debug_df['CurveID'].tolist())
+            
+            # Stop here and see what prints
+            target_df = pd.DataFrame()
                 
                 target_df = client.query(target_q).to_dataframe()
                 
