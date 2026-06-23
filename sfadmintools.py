@@ -406,27 +406,63 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     # 2. GLOBAL TIMELINE SYNC
     final_end_view, final_start_view = end_view, start_view
 
-    # 3. THEORETICAL REFERENCE CURVES
+    # 3. THEORETICAL REFERENCE CURVES (Universal Debugger)
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            proj_num = str(curve_id).split('-')[0].strip()
+            # 1. IDENTIFY CONVENTION
+            # Extract parts: 2527-T8-Silty Sand -> parts[0]='2527', parts[1]='T8'
+            parts = str(curve_id).split('-')
+            proj_num = parts[0].strip() if len(parts) > 0 else ""
+            loc_tag = parts[1].strip() if len(parts) > 1 else ""
             
-            # BROAD DEBUG: Select everything for the project number, then we inspect the strings
+            st.write(f"--- DEBUG: Searching for Project: '{proj_num}', Loc: '{loc_tag}' ---")
+            
+            # 2. QUERY DATABASE
+            # We look for the Project Number first to see what the naming convention actually is
             debug_q = f"""
-                SELECT DISTINCT CurveID 
+                SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                 WHERE CurveID LIKE '%{proj_num}%'
-                LIMIT 20
             """
-            debug_df = client.query(debug_q).to_dataframe()
+            target_df = client.query(debug_q).to_dataframe()
             
-            # Show me what you see in the sidebar
-            st.write("### 🔍 Database ID Debugger")
-            st.write("Found these IDs in database for project", proj_num, ":")
-            st.write(debug_df['CurveID'].tolist())
-            
-            # Stop here and see what prints
-            target_df = pd.DataFrame()
+            # 3. DEBUG PRINTING
+            if target_df.empty:
+                st.warning(f"No curves found containing project number '{proj_num}'.")
+            else:
+                st.write("Unique IDs found for this project:")
+                st.write(target_df['CurveID'].unique())
+                
+                # 4. FILTER IN PYTHON
+                # We filter the dataframe in memory to find the specific location
+                target_df = target_df[target_df['CurveID'].str.contains(loc_tag, case=False, na=False)]
+                
+                if target_df.empty:
+                    st.warning(f"Project '{proj_num}' found, but no curve matches location '{loc_tag}'.")
+                else:
+                    st.success(f"Matched {len(target_df['CurveID'].unique())} curve(s)!")
+
+                    # 5. PLOTTING LOGIC
+                    dash_styles = ['dashdot', 'dash', 'dot']
+                    gray_shades = ['rgba(30,30,30,0.8)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.7)']
+                    
+                    for c_idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
+                        c_df = c_df.copy() # Avoid SettingWithCopyWarning
+                        c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                        c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
+                        ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                        
+                        display_label = f"Goal: {cid}"
+                        
+                        fig.add_trace(go.Scatter(
+                            x=c_df['timestamp'], y=ref_y, name=f"<b>{display_label}</b>", 
+                            mode='lines',
+                            line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3),
+                            legendrank=1 
+                        ))
+                        
+        except Exception as e:
+            st.error(f"Error in Curve Loader: {e}")
                 
                
 
