@@ -221,6 +221,7 @@ if sidebar_client is not None:
             st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
         else:
             st.sidebar.markdown(f"**{scope_label}:** ⚠️ No Recent Sync")
+            st.sidebar.write("Raw Sync Data:", pulse_df['last_sync'].iloc[0])
             
     except Exception as pulse_err:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
