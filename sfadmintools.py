@@ -95,8 +95,16 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     
     # Filter by the specific Project/Phase Name requested 
     if not is_summary_page:
-        df = df[df['Raw_Project_Name'] == project_id]
+        base_project = str(project_id).split(' Phase')[0].strip()
         
+        # 1. Ensure we only keep data for the base project (e.g., '2541-Blackjack')
+        df = df[df['Raw_Project_Name'].astype(str).str.startswith(base_project, na=False)]
+        
+        # 2. If the dropdown specifically asked for a phase, filter the new Phase column
+        if " Phase" in str(project_id):
+            target_phase = "Phase " + str(project_id).split(' Phase')[1].strip()
+            df = df[df['Phase'] == target_phase]
+            
     return df
     
 ###########################
@@ -186,10 +194,18 @@ if sidebar_client is not None:
             """
             scope_label = "Last Data"
         else:
+            # THE UPGRADE: Split the string so BigQuery can match the base project and the phase column
+            base_project = selected_project.split(' Phase')[0].strip()
+            
+            phase_sql = ""
+            if " Phase" in selected_project:
+                phase_num = selected_project.split(' Phase')[1].strip()
+                phase_sql = f" AND Phase = 'Phase {phase_num}' "
+
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
                 FROM `{MASTER_VIEW}`
-                WHERE Project = '{selected_project}'
+                WHERE Project LIKE '{base_project}%' {phase_sql}
             """
             scope_label = f"Job {selected_project.split('-')[0]} Age"
 
