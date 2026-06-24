@@ -475,6 +475,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
     node_metadata = []
     skip_keywords = ['AMBIENT', 'OFFICE', 'X-TRA', 'XTRA']
+    # Add em-dash and regular dash to the skip list so they aren't treated as valid banks
+    empty_vals = ['nan', 'none', '', '—', '-']
 
     for sn in plot_df['NodeNum'].unique():
         node_df = plot_df[plot_df['NodeNum'] == sn]
@@ -482,18 +484,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         depth_val = str(node_df['Depth'].iloc[0]).strip()
         loc_val = str(node_df['Location'].iloc[0]).strip().upper()
 
-        # Strict Graph Filter: Ban ambient, office, and extra nodes
         if any(x in loc_val for x in skip_keywords) or any(x in bank_val.upper() for x in skip_keywords):
             continue
 
         # Hierarchy Rules: Banks = Priority 0 | Temp Pipes = Priority 1
-        if bank_val and bank_val.lower() not in ['nan', 'none', '']:
-            # THE FIX: Formats to exactly "R1 (TP-0001)"
+        if bank_val and bank_val.lower() not in empty_vals:
             display_name = f"{bank_val} ({sn})"
             priority = 0
             sort_val = natural_sort_key(bank_val)
-        elif depth_val and depth_val.lower() not in ['nan', 'none', '']: 
-            # THE FIX: Formats to exactly "26 ft (TP-0029)"
+        elif depth_val and depth_val.lower() not in empty_vals: 
             display_name = f"{depth_val} ft ({sn})"
             priority = 1
             try: sort_val = [float(depth_val)]
@@ -532,46 +531,42 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
     # 5. LAYOUT & TITLING
+    p_name = st.session_state.get('selected_project', 'Unknown Project')
     
-    # THE FIX: Pull project name directly from the data instead of session_state so it never drops
-    if 'Project' in plot_df.columns and not plot_df.empty:
-        p_name = str(plot_df['Project'].iloc[0])
-    elif 'Raw_Project_Name' in plot_df.columns and not plot_df.empty:
-        p_name = str(plot_df['Raw_Project_Name'].iloc[0])
-    else:
-        p_name = st.session_state.get('selected_project', 'Unknown Project')
+    # Strip any existing prefixes passed from the UI
+    clean_title = str(title).replace("Thermal Trends:", "").strip()
+    title_lower = clean_title.lower()
     
-    # THE FIX: Replaces "Thermal Trend" with "Time vs Temperature" and builds the dynamic string
-    title_lower = str(title).lower()
+    # Dynamic Title Generation
     if 'ambient' in title_lower:
-        header_text = f"Time vs Temperature - Ambient Air Temperatures"
-    elif any(x in title_lower for x in ['pipe', 'tp', 'depth']):
-        header_text = f"Time vs Temperature - Temperatures for Temperature Pipe ({title})"
+        header_text = f"Ambient Air Temperatures"
+    elif any(x in title_lower for x in ['pipe', 'tp', 'depth']) or clean_title.upper().startswith('T'):
+        header_text = f"Temperatures for Temperature Pipe {clean_title}"
     else:
-        header_text = f"Time vs Temperature - Brine Temperatures for Bank ({title})"
+        header_text = f"Temperatures for Brine Bank {clean_title}"
 
     footer_annotations = [
+        # Inset x slightly to 0.02 to ensure it doesn't clip on small screens
         dict(
-            x=0.0, y=-0.14, 
+            x=0.02, y=-0.12, 
             xref='paper', yref='paper',
             text=f"<b>Project:</b> {p_name}",
             showarrow=False, xanchor='left', yanchor='top',
             font=dict(size=13, color="#666")
         ),
         dict(
-            x=1.0, y=-0.14,
+            x=0.98, y=-0.12,
             xref='paper', yref='paper',
-            text=f"<b>Type:</b> {title}",
+            text=f"<b>Type:</b> Time vs Temperature",
             showarrow=False, xanchor='right', yanchor='top',
             font=dict(size=13, color="#666")
         )
     ]
 
     fig.update_layout(
-        # THE FIX: x=0.5 and xanchor='center' strictly centers the title on the canvas
         title=dict(text=f"<b>{header_text}</b>", x=0.5, xanchor='center', y=0.96, font=dict(size=19)),
         plot_bgcolor='white', hovermode="x unified", height=680,
-        margin=dict(l=60, r=40, t=60, b=100), 
+        margin=dict(l=60, r=40, t=80, b=120), # Increased bottom margin to give the footer plenty of room
         annotations=footer_annotations,
         xaxis=dict(range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, hoverformat='%A, %b %d, %Y', tickformat='%b %d', minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')),
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
