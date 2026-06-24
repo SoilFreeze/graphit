@@ -184,11 +184,15 @@ st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
     try:
-        # Fixed query to use a safer aggregate
+        # --- FIXED PULSE TRACKING ---
+        # 1. Get just the numeric part (e.g., "2538" from "2538-Ferndale")
+        proj_root = str(selected_project).split('-')[0].strip()
+        
+        # 2. Use LIKE to match the root, ignoring phase/suffix naming issues
         pulse_q = f"""
             SELECT MAX(timestamp) as last_sync
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE Project = '{selected_project}'
+            WHERE Project LIKE '{proj_root}%'
         """
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
