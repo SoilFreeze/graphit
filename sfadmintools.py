@@ -606,140 +606,154 @@ def apply_sanity_filter(df):
 ##############################
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
-    Renders Global Project Summary, dynamically grouped by Phase and System.
-    Hard-filtered to ONLY show Active projects, strictly excludes 'Office', 
-    and ignores sidebar project selections.
+    Renders Global Active Project Summary.
+    Driven by the Project Registry to ensure active projects show up even if offline.
+    Fixes Ambient 'ghost blocks' by injecting ambient data into valid system blocks.
     """
     st.header("🌐 Global Active Project Summary")
     
     client = get_bq_client()
     if client is None: return
 
-    # --- 1. HARDWARE CAPACITY QUERY ---
-    # Enforces Active projects only and bans 'Office'
+    # --- 1. THE CONTROL LIST: Active Projects Only ---
+    # This dictates exactly what appears on the screen, ignoring the sidebar.
+    proj_q = f"""
+        SELECT CAST(Project AS STRING) as Project, ProjectName, Date_Freezedown 
+        FROM `{PROJECT_REGISTRY_TABLE}`
+        WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
+          AND UPPER(Project) NOT LIKE '%OFFICE%'
+        ORDER BY Project
+    """
+    try: active_projs = client.query(proj_q).to_dataframe()
+    except Exception as e: return st.error(f"Project Registry failed: {e}")
+
+    if active_projs.empty:
+        return st.info("No active projects found in registry.")
+
+    # --- 2. INVENTORY POOL: Total assigned hardware ---
     pool_q = f"""
-        SELECT 
-            n.Project, n.Phase, n.System, COUNT(DISTINCT n.NodeNum) as total_assigned 
-        FROM `{NODE_REGISTRY_TABLE}` n
-        INNER JOIN `{PROJECT_REGISTRY_TABLE}` p 
-            ON STARTS_WITH(n.Project, CAST(p.Project AS STRING))
-        WHERE n.Project IS NOT NULL 
-          AND UPPER(n.Project) NOT LIKE '%OFFICE%'
-          AND UPPER(TRIM(CAST(p.ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
+        SELECT CAST(Project AS STRING) as Project, Phase, System, COUNT(DISTINCT NodeNum) as total_assigned
+        FROM `{NODE_REGISTRY_TABLE}`
+        WHERE UPPER(Project) NOT LIKE '%OFFICE%'
         GROUP BY 1, 2, 3
     """
-    try:
-        pool_df = client.query(pool_q).to_dataframe()
-    except Exception as e:
-        st.error(f"Registry query failed: {e}")
-        return
+    pool_df = client.query(pool_q).to_dataframe()
+    pool_df[['Phase', 'System']] = pool_df[['Phase', 'System']].fillna('')
 
-    # --- 2. TELEMETRY QUERY ---
-    # Joins registry to ensure we only pull data for currently active projects
+    # --- 3. TELEMETRY: Last 48 hours of data ---
     summary_q = f"""
         WITH raw_data AS (
-            SELECT 
-                m.Project, m.Phase, m.System, m.Bank, m.Location, m.Depth, m.temperature, m.timestamp, m.NodeNum
-            FROM `{MASTER_VIEW}` m
-            INNER JOIN `{PROJECT_REGISTRY_TABLE}` p 
-                ON STARTS_WITH(m.Project, CAST(p.Project AS STRING))
-            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              AND m.Project IS NOT NULL
-              AND UPPER(m.Project) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(p.ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
+            SELECT Project, Phase, System, Bank, Location, Depth, temperature, timestamp, NodeNum
+            FROM `{MASTER_VIEW}`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+              AND Project IS NOT NULL
+              AND UPPER(Project) NOT LIKE '%OFFICE%'
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
-        ),
-        LatestStats AS (
-            SELECT 
-                r.Project, r.Phase, r.System, r.Bank, r.Location, r.Depth, r.NodeNum,
-                MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as min_now,
-                MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
-                MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
-                MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
-                
-                -- THE UPGRADE: 1h, 6h, and 24h interval trackers
-                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
-                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 6 HOUR)) as checkins_6h,
-                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
-                
-                ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-                MAX(r.timestamp) as latest_ts
-            FROM raw_data r
-            CROSS JOIN MaxTime m
-            GROUP BY 1, 2, 3, 4, 5, 6, 7
         )
         SELECT 
-            ls.*,
-            p.ProjectName, 
-            p.Date_Freezedown
-        FROM LatestStats ls
-        LEFT JOIN `{PROJECT_REGISTRY_TABLE}` p 
-          ON STARTS_WITH(ls.Project, CAST(p.Project AS STRING))
+            r.Project, r.Phase, r.System, r.Bank, r.Location, r.Depth, r.NodeNum,
+            MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as min_now,
+            MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
+            MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
+            MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
+            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
+            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 6 HOUR)) as checkins_6h,
+            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
+            ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+            MAX(r.timestamp) as latest_ts
+        FROM raw_data r CROSS JOIN MaxTime m
+        GROUP BY 1, 2, 3, 4, 5, 6, 7
     """
-    
-    try:
-        df = client.query(summary_q).to_dataframe()
-        df[['Bank', 'Location', 'Phase', 'System']] = df[['Bank', 'Location', 'Phase', 'System']].fillna('')
-    except Exception as e:
-        st.error(f"Dashboard Query Failed: {e}")
-        return
+    tel_df = client.query(summary_q).to_dataframe()
+    if not tel_df.empty:
+        tel_df[['Phase', 'System', 'Bank', 'Location']] = tel_df[['Phase', 'System', 'Bank', 'Location']].fillna('')
 
-    if df.empty:
-        st.info("No active projects found with data in the last 48 hours.")
-        return
+    # --- 4. RENDER ENGINE: Iterate over the exact control list ---
+    for _, row in active_projs.iterrows():
+        p_project = str(row['Project']).strip()
+        p_name = row['ProjectName'] if pd.notnull(row['ProjectName']) else p_project
+        f_date = row['Date_Freezedown']
+        
+        job_num = p_project.split('-')[0].strip()
+        
+        # Map "Phase 2" text to the raw integer '2' used in the Node Registry
+        target_phase = ""
+        if "Phase 1" in p_project or "Phase1" in p_project: target_phase = "1"
+        elif "Phase 2" in p_project or "Phase2" in p_project: target_phase = "2"
+        elif "Phase 3" in p_project or "Phase3" in p_project: target_phase = "3"
 
-    # --- 3. RENDER UI ENGINE ---
-    for project in sorted(df['Project'].unique()):
-        proj_df = df[df['Project'] == project]
-        p_name = proj_df['ProjectName'].iloc[0] if pd.notnull(proj_df['ProjectName'].iloc[0]) else project
-        f_date = proj_df['Date_Freezedown'].iloc[0]
+        # Filter Node Pool to find out what systems actually exist in this phase
+        pool_matches = pool_df[
+            (pool_df['Project'].str.startswith(job_num)) & 
+            ((pool_df['Phase'] == target_phase) | (target_phase == ""))
+        ]
         
-        day_text, f_date_display = "", "Not Set"
-        if pd.notnull(f_date):
-            f_date_display = pd.to_datetime(f_date).strftime('%b %d, %Y')
-            days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
-            day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
-        
-        phases = [p for p in proj_df['Phase'].unique() if str(p).strip()]
-        systems = [s for s in proj_df['System'].unique() if str(s).strip()]
-        combos = proj_df[['Phase', 'System']].drop_duplicates()
-        
-        for _, row in combos.iterrows():
-            phase = row['Phase']
-            sys = row['System']
+        # Extract Systems (ignoring blanks IF there are proper systems, to avoid ghost blocks)
+        raw_systems = [str(s).strip() for s in pool_matches['System'].unique() if str(s).strip()]
+        systems = sorted(list(set(raw_systems)))
+        if not systems:
+            systems = [""] # Fallback for projects with no system categorization (like Ferndale)
+
+        # Filter Telemetry to this specific project phase
+        if tel_df.empty:
+            tel_matches = pd.DataFrame(columns=tel_df.columns)
+        else:
+            tel_matches = tel_df[
+                (tel_df['Project'].str.startswith(job_num)) & 
+                ((tel_df['Phase'] == target_phase) | (target_phase == ""))
+            ]
+
+        # Render a dashboard block for each unique System
+        for sys in systems:
+            sys_pool = pool_matches[pool_matches['System'] == sys]
+            total_assigned = sys_pool['total_assigned'].sum() if not sys_pool.empty else 0
             
-            block_df = proj_df
-            if phase: block_df = block_df[block_df['Phase'] == phase]
-            if sys: block_df = block_df[block_df['System'] == sys]
-            
-            if block_df.empty: continue
-            
+            # Isolate Telemetry for this System (AND inject ambient nodes project-wide)
+            if not tel_matches.empty:
+                is_sys = tel_matches['System'] == sys
+                is_amb = tel_matches['Location'].astype(str).str.upper() == 'AMBIENT'
+                
+                # If this is a no-system project, grab everything. Else, grab the system + ambient.
+                if sys == "": 
+                    sys_tel = tel_matches
+                else:
+                    sys_tel = tel_matches[is_sys | is_amb]
+            else:
+                sys_tel = tel_matches 
+
+            # Skip rendering if there are 0 sensors assigned AND no incoming data
+            if total_assigned == 0 and sys_tel.empty:
+                continue 
+
             title_ext = []
-            if len(phases) > 1 and phase: title_ext.append(f"Phase {phase}")
-            if len(systems) > 1 and sys: title_ext.append(f"System {sys}")
+            if target_phase: title_ext.append(f"Phase {target_phase}")
+            if sys: title_ext.append(f"System {sys}")
             title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
-            
+
+            day_text, f_date_display = "", "Not Set"
+            if pd.notnull(f_date):
+                f_date_display = pd.to_datetime(f_date).strftime('%b %d, %Y')
+                days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
+                day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
+
             with st.container(border=True):
                 h1, h2 = st.columns([2, 1])
                 h1.subheader(f"🏗️ {p_name}{title_suffix}")
                 h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
                 
-                proj_match = re.search(r'\b(\d{4})\b', str(project))
-                if proj_match:
-                    job_number = proj_match.group(1)
-                    st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_number}.streamlit.app)")
+                st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
                 
-                # --- THE UPGRADE: Advanced Hardware Status Banner ---
-                active_1h = block_df[block_df['checkins_1h'] > 0]['NodeNum'].nunique()
-                active_6h = block_df[block_df['checkins_6h'] > 0]['NodeNum'].nunique()
-                active_24h = block_df[block_df['checkins_24h'] > 0]['NodeNum'].nunique()
+                # Compute Live Hardware Metrics
+                if not sys_tel.empty:
+                    active_1h = sys_tel[sys_tel['checkins_1h'] > 0]['NodeNum'].nunique()
+                    active_6h = sys_tel[sys_tel['checkins_6h'] > 0]['NodeNum'].nunique()
+                    active_24h = sys_tel[sys_tel['checkins_24h'] > 0]['NodeNum'].nunique()
+                else:
+                    active_1h = active_6h = active_24h = 0
                 
-                match_pool = pool_df[(pool_df['Project'] == project) & (pool_df['Phase'] == phase) & (pool_df['System'] == sys)]
-                total_assigned = match_pool['total_assigned'].sum() if not match_pool.empty else 0
-                
-                status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🟠"
+                status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🔴" if active_24h == 0 else "🟠"
                 st.markdown(
                     f"{status_color} **Hardware Status:** `{active_1h}` (1h) | "
                     f"`{active_6h}` (6h) | `{active_24h}` (24h) | "
@@ -747,25 +761,29 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 )
                 st.divider() 
 
-                is_amb = block_df['Location'].astype(str).str.upper() == 'AMBIENT'
-                is_tp = block_df['Depth'].notnull() & (block_df['Depth'].astype(str).str.strip() != '') & ~is_amb
-                is_s = (block_df['Bank'].astype(str).str.startswith('S') | block_df['Location'].astype(str).str.startswith('S')) & ~is_amb & ~is_tp
-                is_r = (block_df['Bank'].astype(str).str.startswith('R') | block_df['Location'].astype(str).str.startswith('R')) & ~is_amb & ~is_tp
+                if sys_tel.empty:
+                    st.info(f"No recent telemetry received for {p_project}{title_suffix}.")
+                    continue
+
+                # Group the columns dynamically
+                is_amb_col = sys_tel['Location'].astype(str).str.upper() == 'AMBIENT'
+                is_tp_col = sys_tel['Depth'].notnull() & (sys_tel['Depth'].astype(str).str.strip() != '') & ~is_amb_col
+                is_s_col = (sys_tel['Bank'].astype(str).str.startswith('S') | sys_tel['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
+                is_r_col = (sys_tel['Bank'].astype(str).str.startswith('R') | sys_tel['Location'].astype(str).str.startswith('R')) & ~is_amb_col & ~is_tp_col
 
                 groups_data = [
-                    ("📥 Supply", block_df[is_s], -10), 
-                    ("📤 Return", block_df[is_r], 0), 
-                    ("📏 TempPipes", block_df[is_tp], 32)
+                    ("📥 Supply", sys_tel[is_s_col], -10), 
+                    ("📤 Return", sys_tel[is_r_col], 0), 
+                    ("📏 TempPipes", sys_tel[is_tp_col], 32)
                 ]
 
                 if st.session_state.get("global_show_ambient", True):
-                    groups_data.append(("☁️ Ambient", block_df[is_amb], None))
+                    groups_data.append(("☁️ Ambient", sys_tel[is_amb_col], None))
 
                 cols = st.columns(len(groups_data))
                 for idx, (title, g_df, target_temp) in enumerate(groups_data):
                     with cols[idx]:
                         render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label)
-
 
 def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
     """Helper layout compiler to handle repeating column metric sets cleanly."""
