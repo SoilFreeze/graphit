@@ -410,10 +410,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
-    - Naturally sorts Banks first, Temp Pipes second.
-    - Excludes Ambient, Office, and X-tra sensors.
-    - Fails silently if theoretical curves are missing.
     """
+    # --- FIX 1: KILL GHOST GRAPHS ---
+    # If the app tries to build a dedicated graph for Ambient or Office, we abort it immediately.
+    title_lower = str(title).lower()
+    if any(x in title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
+        return None
+        
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
@@ -430,8 +433,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig = go.Figure()
     final_end_view, final_start_view = end_view, start_view
 
-    # 2. THEORETICAL REFERENCE CURVES
-    if curve_id and curve_id != "None" and f_start_date:
+    # --- FIX 2: CURVE SHIELD ---
+    # Only allow theoretical curves to query and plot if this is specifically a Temp Pipe graph.
+    is_temp_pipe = any(x in title_lower for x in ['pipe', 'tp', 'depth']) or str(title).strip().upper().startswith('T')
+    
+    if curve_id and curve_id != "None" and f_start_date and is_temp_pipe:
         try:
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip() if len(parts) > 0 else ""
@@ -466,16 +472,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
-            # Removed the st.warning() block so missing curves fail silently
-        except Exception as e:
-            st.error(f"Error in Curve Loader: {e}")
+        except:
+            pass # Fail silently
                 
     # 3. SENSOR DATA (Prioritized & Filtered)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
     node_metadata = []
     skip_keywords = ['AMBIENT', 'OFFICE', 'X-TRA', 'XTRA']
-    # Add em-dash and regular dash to the skip list so they aren't treated as valid banks
     empty_vals = ['nan', 'none', '', '—', '-']
 
     for sn in plot_df['NodeNum'].unique():
@@ -487,7 +491,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         if any(x in loc_val for x in skip_keywords) or any(x in bank_val.upper() for x in skip_keywords):
             continue
 
-        # Hierarchy Rules: Banks = Priority 0 | Temp Pipes = Priority 1
         if bank_val and bank_val.lower() not in empty_vals:
             display_name = f"{bank_val} ({sn})"
             priority = 0
@@ -498,11 +501,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             try: sort_val = [float(depth_val)]
             except: sort_val = natural_sort_key(depth_val)
         else: 
-            continue # Drop anything that isn't cleanly defined as a Bank or Depth
+            continue 
 
         node_metadata.append({'node_num': sn, 'display_name': display_name, 'priority': priority, 'sort_key': sort_val})
 
-    # Sort based on Priority FIRST, then Natural String order
     sorted_node_configs = sorted(node_metadata, key=lambda x: (x['priority'], x['sort_key']))
 
     for i, config in enumerate(sorted_node_configs):
@@ -520,6 +522,44 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
+    # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
+    # Overlays ambient air onto the current graph directly from the database.
+    if st.session_state.get('global_show_ambient', True):
+        p_name = st.session_state.get('selected_project', '')
+        job_num = p_name.split('-')[0].strip()
+        
+        if job_num:
+            # Format start_view for SQL safely
+            start_str = pd.to_datetime(start_view).strftime('%Y-%m-%d %H:%M:%S')
+            amb_q = f"""
+                SELECT NodeNum, timestamp, temperature 
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` 
+                WHERE Project LIKE '{job_num}%' 
+                  AND UPPER(Location) = 'AMBIENT'
+                  AND timestamp >= '{start_str}'
+            """
+            try:
+                amb_df = client.query(amb_q).to_dataframe()
+                if not amb_df.empty:
+                    if amb_df['timestamp'].dt.tz is None:
+                        amb_df['timestamp'] = amb_df['timestamp'].dt.tz_localize('UTC')
+                    amb_df['timestamp'] = amb_df['timestamp'].dt.tz_convert(display_tz)
+                    
+                    for sn in amb_df['NodeNum'].unique():
+                        a_df = amb_df[amb_df['NodeNum'] == sn].sort_values('timestamp')
+                        a_df = a_df.set_index('timestamp').resample('1h').first().reset_index()
+                        
+                        fig.add_trace(go.Scatter(
+                            x=a_df['timestamp'], y=a_df['temperature'],
+                            name=f"Ambient Air ({sn})", mode='lines',
+                            connectgaps=False,
+                            line=dict(width=2.5, dash='dot', color='orange'),
+                            hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                            legendrank=99 # Push to bottom of legend
+                        ))
+            except Exception as e:
+                pass # Fail silently if query fails
+
     # 4. REFERENCE LINES
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     
@@ -531,22 +571,21 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
     # 5. LAYOUT & TITLING
-    p_name = st.session_state.get('selected_project', 'Unknown Project')
-    
-    # Strip any existing prefixes passed from the UI
-    clean_title = str(title).replace("Thermal Trends:", "").strip()
-    title_lower = clean_title.lower()
-    
-    # Dynamic Title Generation
-    if 'ambient' in title_lower:
-        header_text = f"Ambient Air Temperatures"
-    elif any(x in title_lower for x in ['pipe', 'tp', 'depth']) or clean_title.upper().startswith('T'):
-        header_text = f"Temperatures for Temperature Pipe {clean_title}"
+    if 'Project' in plot_df.columns and not plot_df.empty:
+        p_name = str(plot_df['Project'].iloc[0])
+    elif 'Raw_Project_Name' in plot_df.columns and not plot_df.empty:
+        p_name = str(plot_df['Raw_Project_Name'].iloc[0])
     else:
-        header_text = f"Temperatures for Brine Bank {clean_title}"
+        p_name = st.session_state.get('selected_project', 'Unknown Project')
+    
+    clean_title = str(title).replace("Thermal Trends:", "").strip()
+    
+    if any(x in title_lower for x in ['pipe', 'tp', 'depth']) or clean_title.upper().startswith('T'):
+        header_text = f"Time vs Temperature - Temperatures for Temperature Pipe {clean_title}"
+    else:
+        header_text = f"Time vs Temperature - Temperatures for Brine Bank {clean_title}"
 
     footer_annotations = [
-        # Inset x slightly to 0.02 to ensure it doesn't clip on small screens
         dict(
             x=0.02, y=-0.12, 
             xref='paper', yref='paper',
@@ -566,7 +605,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig.update_layout(
         title=dict(text=f"<b>{header_text}</b>", x=0.5, xanchor='center', y=0.96, font=dict(size=19)),
         plot_bgcolor='white', hovermode="x unified", height=680,
-        margin=dict(l=60, r=40, t=80, b=120), # Increased bottom margin to give the footer plenty of room
+        margin=dict(l=60, r=40, t=80, b=120), 
         annotations=footer_annotations,
         xaxis=dict(range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, hoverformat='%A, %b %d, %Y', tickformat='%b %d', minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')),
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
