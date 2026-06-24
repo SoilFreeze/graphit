@@ -523,13 +523,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         ))
 
     # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
-    # Overlays ambient air onto the current graph directly from the database.
-    if st.session_state.get('global_show_ambient', True):
-        p_name = st.session_state.get('selected_project', '')
+    # Only inject if toggled ON AND if this is a Brine/Bank graph (not a TempPipe graph)
+    is_brine_graph = not any(x in title_lower for x in ['pipe', 'tp', 'depth'])
+    
+    if st.session_state.get('global_show_ambient', True) and is_brine_graph:
+        # Use the project name passed into the function to ensure 100% accuracy
+        p_name = str(plot_df['Project'].iloc[0]) if 'Project' in plot_df.columns else ""
         job_num = p_name.split('-')[0].strip()
         
         if job_num:
-            # Format start_view for SQL safely
             start_str = pd.to_datetime(start_view).strftime('%Y-%m-%d %H:%M:%S')
             amb_q = f"""
                 SELECT NodeNum, timestamp, temperature 
@@ -555,10 +557,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                             connectgaps=False,
                             line=dict(width=2.5, dash='dot', color='orange'),
                             hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
-                            legendrank=99 # Push to bottom of legend
+                            legendrank=99 
                         ))
-            except Exception as e:
-                pass # Fail silently if query fails
+            except Exception:
+                pass
 
     # 4. REFERENCE LINES
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
