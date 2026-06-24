@@ -181,7 +181,12 @@ if sidebar_client is not None:
 # CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
 # =============================================================================
 # --- DEBUGGING CURRENT DATA AGES ---
+# --- CURRENT DATA AGES & DYNAMIC REFRESH ENGINE ---
 st.sidebar.subheader("⏱️ Current Data Ages")
+
+# Handle the "All Projects" state explicitly
+if selected_project == "All Projects":
+    st.sidebar.markdown("**Job Age:** *Global View Active*")
 
 if sidebar_client is not None:
     try:
