@@ -25,7 +25,9 @@ PROJECT_ID = "sensorpush-export"
 # Schema-Aligned Table References
 PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
 NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
-MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data_view"
+
+# THE UPGRADE: Pointing to the new flattened Phase/System view
+MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" 
 REF_CURVE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
 
 @st.cache_resource
@@ -64,31 +66,25 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     if client is None: return pd.DataFrame()
     
     # Extract the root job number (e.g., "2541" from "2541-Blackjack Phase 2")
-    # This works for any project ID format as long as it starts with digits
     root_job_id = str(project_id).split('-')[0].strip()
 
+    # THE UPGRADE: A clean, flat query against the v2 view. No JOINs required.
     query = f"""
         SELECT 
-            m.Project as Raw_Project_Name,
-            m.NodeNum,
-            m.temperature,
-            m.timestamp,
-            m.approval_status,
-            COALESCE(n.Location, m.Location, 'Unassigned') as Location,
-            COALESCE(n.Bank, m.Bank, '—') as Bank,
-            COALESCE(n.Depth, m.Depth) as Depth,
-            n.Phase,
-            n.System
-        FROM `{MASTER_VIEW}` m
-        INNER JOIN `{NODE_REGISTRY_TABLE}` n 
-            ON m.NodeNum = n.NodeNum
-            AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
-            AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
-        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-          -- The Bridge: Match telemetry to the registry by the ROOT job ID
-          AND m.Project LIKE CONCAT(@root_job_id, '%')
-          AND n.Project LIKE CONCAT(@root_job_id, '%')
-        ORDER BY m.timestamp ASC
+            Project as Raw_Project_Name,
+            NodeNum,
+            temperature,
+            timestamp,
+            COALESCE(Location, 'Unassigned') as Location,
+            COALESCE(Bank, '—') as Bank,
+            Depth,
+            Phase,
+            System,
+            Hardware
+        FROM `{MASTER_VIEW}`
+        WHERE temperature >= -30.0 AND temperature <= 120.0
+          AND Project LIKE CONCAT(@root_job_id, '%')
+        ORDER BY timestamp ASC
     """
     
     job_config = bigquery.QueryJobConfig(
@@ -97,13 +93,12 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     
     df = client.query(query, job_config=job_config).to_dataframe()
     
-    # Now, filter by the specific Project Name requested (e.g., Phase 2) 
-    # using Python to ensure accuracy
+    # Filter by the specific Project/Phase Name requested 
     if not is_summary_page:
         df = df[df['Raw_Project_Name'] == project_id]
         
     return df
-
+    
 ###########################
 # - SIDEBAR NAVIGATION -  #
 ###########################
@@ -184,28 +179,26 @@ st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
     try:
-        # Contextual switching logic based on sidebar dropdown choice
         if selected_project == "All Projects":
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                FROM `{MASTER_VIEW}`
             """
             scope_label = "Last Data"
         else:
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                FROM `{MASTER_VIEW}`
                 WHERE Project = '{selected_project}'
             """
             scope_label = f"Job {selected_project.split('-')[0]} Age"
 
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
-        # ADDED GUARD: Check if the result is valid and not null
+        # Guard: Check if the result is valid and not null
         if not pulse_df.empty and pulse_df['last_sync'].iloc[0] is not None and pd.notna(pulse_df['last_sync'].iloc[0]):
             last_sync_str = str(pulse_df['last_sync'].iloc[0])
             
-            # Now we know it's safe to convert
             last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
             now_utc = pd.Timestamp.now(tz='UTC')
             elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
