@@ -488,11 +488,13 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
         # Hierarchy Rules: Banks = Priority 0 | Temp Pipes = Priority 1
         if bank_val and bank_val.lower() not in ['nan', 'none', '']:
-            display_name = f"Bank {bank_val} ({sn})"
+            # THE FIX: Formats to exactly "R1 (TP-0001)"
+            display_name = f"{bank_val} ({sn})"
             priority = 0
             sort_val = natural_sort_key(bank_val)
         elif depth_val and depth_val.lower() not in ['nan', 'none', '']: 
-            display_name = f"Depth {depth_val}ft ({sn})"
+            # THE FIX: Formats to exactly "26 ft (TP-0029)"
+            display_name = f"{depth_val} ft ({sn})"
             priority = 1
             try: sort_val = [float(depth_val)]
             except: sort_val = natural_sort_key(depth_val)
@@ -530,15 +532,23 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
     # 5. LAYOUT & TITLING
-    p_name = st.session_state.get('selected_project', 'Project')
     
+    # THE FIX: Pull project name directly from the data instead of session_state so it never drops
+    if 'Project' in plot_df.columns and not plot_df.empty:
+        p_name = str(plot_df['Project'].iloc[0])
+    elif 'Raw_Project_Name' in plot_df.columns and not plot_df.empty:
+        p_name = str(plot_df['Raw_Project_Name'].iloc[0])
+    else:
+        p_name = st.session_state.get('selected_project', 'Unknown Project')
+    
+    # THE FIX: Replaces "Thermal Trend" with "Time vs Temperature" and builds the dynamic string
     title_lower = str(title).lower()
     if 'ambient' in title_lower:
-        header_text = f"Ambient Air Temperatures"
+        header_text = f"Time vs Temperature - Ambient Air Temperatures"
     elif any(x in title_lower for x in ['pipe', 'tp', 'depth']):
-        header_text = f"Temperatures for Temperature Pipe ({title})"
+        header_text = f"Time vs Temperature - Temperatures for Temperature Pipe ({title})"
     else:
-        header_text = f"Brine Temperatures for Bank ({title})"
+        header_text = f"Time vs Temperature - Brine Temperatures for Bank ({title})"
 
     footer_annotations = [
         dict(
@@ -558,7 +568,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     ]
 
     fig.update_layout(
-        title=dict(text=f"<b>{header_text}</b>", x=0.02, y=0.96, font=dict(size=19)),
+        # THE FIX: x=0.5 and xanchor='center' strictly centers the title on the canvas
+        title=dict(text=f"<b>{header_text}</b>", x=0.5, xanchor='center', y=0.96, font=dict(size=19)),
         plot_bgcolor='white', hovermode="x unified", height=680,
         margin=dict(l=60, r=40, t=60, b=100), 
         annotations=footer_annotations,
