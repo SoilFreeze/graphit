@@ -180,41 +180,43 @@ if sidebar_client is not None:
 # =============================================================================
 # CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
 # =============================================================================
+# --- DEBUGGING CURRENT DATA AGES ---
 st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
     try:
-        # --- FIXED PULSE TRACKING ---
-        # 1. Get just the numeric part (e.g., "2538" from "2538-Ferndale")
-        proj_root = str(selected_project).split('-')[0].strip()
+        # 1. WHAT DOES THE SIDEBAR THINK IT IS?
+        st.sidebar.write(f"Looking for: {selected_project}")
         
-        # 2. Use LIKE to match the root, ignoring phase/suffix naming issues
-        pulse_q = f"""
-            SELECT MAX(timestamp) as last_sync
+        # 2. RUN A DISCOVERY QUERY
+        # We search the table for any project that contains the first 4 chars of the selection
+        prefix = str(selected_project)[:4]
+        debug_q = f"""
+            SELECT DISTINCT Project 
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE Project LIKE '{proj_root}%'
+            WHERE Project LIKE '{prefix}%'
+            LIMIT 5
         """
-        pulse_df = sidebar_client.query(pulse_q).to_dataframe()
+        projects_found = sidebar_client.query(debug_q).to_dataframe()
         
-        # Check if the dataframe is empty or if the result is NaT (Not a Time)
-        if not pulse_df.empty and pd.notnull(pulse_df['last_sync'].iloc[0]):
-            last_sync_ts = pd.to_datetime(pulse_df['last_sync'].iloc[0], utc=True)
-            now_utc = pd.Timestamp.now(tz='UTC')
-            elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
-            
-            if elapsed_mins <= 60:
-                pulse_status = f"🟢 **Live** ({elapsed_mins}m ago)"
-            elif elapsed_mins <= 180:
-                pulse_status = f"🟠 **Delayed** ({elapsed_mins}m ago)"
-            else:
-                pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
-                
-            st.sidebar.markdown(f"**Job Age:** {pulse_status}")
+        st.sidebar.write("Projects found in DB starting with same prefix:")
+        st.sidebar.write(projects_found['Project'].tolist())
+        
+        # 3. IF FOUND, FETCH THE MAX DATE
+        if not projects_found.empty:
+            target_proj = projects_found['Project'].iloc[0]
+            pulse_q = f"""
+                SELECT MAX(timestamp) as last_sync
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                WHERE Project = '{target_proj}'
+            """
+            pulse_df = sidebar_client.query(pulse_q).to_dataframe()
+            st.sidebar.write(f"Latest timestamp for {target_proj}: {pulse_df['last_sync'].iloc[0]}")
         else:
-            st.sidebar.markdown("**Job Age:** ❌ No Data Found")
+            st.sidebar.error(f"No projects found in master_data_view starting with '{prefix}'")
             
     except Exception as pulse_err:
-        st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
+        st.sidebar.error(f"Pulse Error: {pulse_err}")
 
 # INTERACTIVE REFRESH TRIGGER
 if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
