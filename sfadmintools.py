@@ -399,22 +399,20 @@ active_refs = st.session_state.get("active_refs", [])
 # - Graph - #
 #############
 
-def natural_sort_key(s):
+def natural_sort_key(text):
     """
-    Standardized sorter: Always returns a list, ensuring consistent sorting 
-    of mixed-type location strings.
+    Splits a string into a list of integers and strings for perfect natural sorting.
+    (e.g., 'T10' becomes ['t', 10], which correctly sorts after ['t', 2])
     """
-    s = str(s)
-    match = re.match(r'([a-zA-Z\s]*)([tT])(\d+)(.*)', s)
-    if match:
-        return [str(match.group(1).lower()), str(match.group(2).lower()), int(match.group(3)), str(match.group(4).lower())]
-    
-    return [text.lower() if not text.isdigit() else int(text) for text in re.split(r'(\d+)', s)]
+    return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
     
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
+    - Naturally sorts Banks first, Temp Pipes second.
+    - Excludes Ambient, Office, and X-tra sensors.
+    - Fails silently if theoretical curves are missing.
     """
     if df.empty: return go.Figure().update_layout(title="No data available")
 
@@ -432,7 +430,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig = go.Figure()
     final_end_view, final_start_view = end_view, start_view
 
-    # 3. THEORETICAL REFERENCE CURVES
+    # 2. THEORETICAL REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
             parts = str(curve_id).split('-')
@@ -468,37 +466,43 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
-            else:
-                st.warning(f"No curves found for {proj_num} location {loc_digit}.")
-                        
+            # Removed the st.warning() block so missing curves fail silently
         except Exception as e:
             st.error(f"Error in Curve Loader: {e}")
                 
-    # 4. SENSOR DATA (Naturally Sorted Group Loops)
+    # 3. SENSOR DATA (Prioritized & Filtered)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
     node_metadata = []
+    skip_keywords = ['AMBIENT', 'OFFICE', 'X-TRA', 'XTRA']
+
     for sn in plot_df['NodeNum'].unique():
         node_df = plot_df[plot_df['NodeNum'] == sn]
-        depth_val = node_df['Depth'].iloc[0]
-        bank_val = node_df['Bank'].iloc[0]
-        loc_val = node_df['Location'].iloc[0]
+        bank_val = str(node_df['Bank'].iloc[0]).strip()
+        depth_val = str(node_df['Depth'].iloc[0]).strip()
+        loc_val = str(node_df['Location'].iloc[0]).strip().upper()
 
-        # THE UPGRADE: New Display Name Logic for Any Bank Structure
-        if pd.notnull(bank_val) and str(bank_val).strip() != '':
-            loc_label = loc_val if pd.notnull(loc_val) and str(loc_val).strip() != '' else sn
-            display_name = f"Brine Temp: Bank {bank_val} ({loc_label})"
-            sort_val = str(bank_val)  
-        elif pd.notnull(depth_val) and str(depth_val).strip() != '': 
-            display_name = f"{depth_val}ft ({sn})"
-            sort_val = f"depth_{float(depth_val):05.1f}" 
+        # Strict Graph Filter: Ban ambient, office, and extra nodes
+        if any(x in loc_val for x in skip_keywords) or any(x in bank_val.upper() for x in skip_keywords):
+            continue
+
+        # Hierarchy Rules: Banks = Priority 0 | Temp Pipes = Priority 1
+        if bank_val and bank_val.lower() not in ['nan', 'none', '']:
+            display_name = f"Bank {bank_val} ({sn})"
+            priority = 0
+            sort_val = natural_sort_key(bank_val)
+        elif depth_val and depth_val.lower() not in ['nan', 'none', '']: 
+            display_name = f"Depth {depth_val}ft ({sn})"
+            priority = 1
+            try: sort_val = [float(depth_val)]
+            except: sort_val = natural_sort_key(depth_val)
         else: 
-            display_name = f"{loc_val} ({sn})"
-            sort_val = str(display_name)
+            continue # Drop anything that isn't cleanly defined as a Bank or Depth
 
-        node_metadata.append({'node_num': sn, 'display_name': display_name, 'sort_key': sort_val})
+        node_metadata.append({'node_num': sn, 'display_name': display_name, 'priority': priority, 'sort_key': sort_val})
 
-    sorted_node_configs = sorted(node_metadata, key=lambda x: natural_sort_key(x['sort_key']))
+    # Sort based on Priority FIRST, then Natural String order
+    sorted_node_configs = sorted(node_metadata, key=lambda x: (x['priority'], x['sort_key']))
 
     for i, config in enumerate(sorted_node_configs):
         sn = config['node_num']
@@ -515,7 +519,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
 
-    # 5. REFERENCE LINES
+    # 4. REFERENCE LINES
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     
     now_ts = pd.Timestamp.now(tz=display_tz)
@@ -525,30 +529,25 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
-    # 6. LAYOUT & TITLING
+    # 5. LAYOUT & TITLING
     p_name = st.session_state.get('selected_project', 'Project')
     
-    # --- Smart Header (Title) Generator ---
     title_lower = str(title).lower()
     if 'ambient' in title_lower:
         header_text = f"Ambient Air Temperatures"
     elif any(x in title_lower for x in ['pipe', 'tp', 'depth']):
         header_text = f"Temperatures for Temperature Pipe ({title})"
     else:
-        # Defaults to Brine for standard Supply/Return or numbered banks
         header_text = f"Brine Temperatures for Bank ({title})"
 
-    # --- Graph Footers (Annotations) ---
     footer_annotations = [
-        # Lower Left Footer: Project Name & Number
         dict(
-            x=0.0, y=-0.14, # Negative Y pushes it below the X-axis
+            x=0.0, y=-0.14, 
             xref='paper', yref='paper',
             text=f"<b>Project:</b> {p_name}",
             showarrow=False, xanchor='left', yanchor='top',
             font=dict(size=13, color="#666")
         ),
-        # Lower Right Footer: Graph Type
         dict(
             x=1.0, y=-0.14,
             xref='paper', yref='paper',
@@ -561,14 +560,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig.update_layout(
         title=dict(text=f"<b>{header_text}</b>", x=0.02, y=0.96, font=dict(size=19)),
         plot_bgcolor='white', hovermode="x unified", height=680,
-        margin=dict(l=60, r=40, t=60, b=100), # Expanded bottom margin (b=100) to give the footers room to breathe
+        margin=dict(l=60, r=40, t=60, b=100), 
         annotations=footer_annotations,
         xaxis=dict(range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, hoverformat='%A, %b %d, %Y', tickformat='%b %d', minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')),
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
-
+                               
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
     """
     Fallback function for hardcoded soil types.
