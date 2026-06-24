@@ -608,7 +608,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     Renders Global Active Project Summary.
     Driven by the Project Registry to ensure active projects show up even if offline.
-    Fixes Ambient 'ghost blocks' by injecting ambient data into valid system blocks.
+    Properly counts 'Ambient' nodes in the 'Total Assigned' pool.
     """
     st.header("🌐 Global Active Project Summary")
     
@@ -616,7 +616,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     if client is None: return
 
     # --- 1. THE CONTROL LIST: Active Projects Only ---
-    # This dictates exactly what appears on the screen, ignoring the sidebar.
     proj_q = f"""
         SELECT CAST(Project AS STRING) as Project, ProjectName, Date_Freezedown 
         FROM `{PROJECT_REGISTRY_TABLE}`
@@ -631,14 +630,15 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         return st.info("No active projects found in registry.")
 
     # --- 2. INVENTORY POOL: Total assigned hardware ---
+    # THE UPGRADE: Included 'Location' so we can explicitly capture Ambient assignments
     pool_q = f"""
-        SELECT CAST(Project AS STRING) as Project, Phase, System, COUNT(DISTINCT NodeNum) as total_assigned
+        SELECT CAST(Project AS STRING) as Project, Phase, System, UPPER(CAST(Location AS STRING)) as Location, COUNT(DISTINCT NodeNum) as total_assigned
         FROM `{NODE_REGISTRY_TABLE}`
         WHERE UPPER(Project) NOT LIKE '%OFFICE%'
-        GROUP BY 1, 2, 3
+        GROUP BY 1, 2, 3, 4
     """
     pool_df = client.query(pool_q).to_dataframe()
-    pool_df[['Phase', 'System']] = pool_df[['Phase', 'System']].fillna('')
+    pool_df[['Phase', 'System', 'Location']] = pool_df[['Phase', 'System', 'Location']].fillna('')
 
     # --- 3. TELEMETRY: Last 48 hours of data ---
     summary_q = f"""
@@ -678,25 +678,21 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         
         job_num = p_project.split('-')[0].strip()
         
-        # Map "Phase 2" text to the raw integer '2' used in the Node Registry
         target_phase = ""
         if "Phase 1" in p_project or "Phase1" in p_project: target_phase = "1"
         elif "Phase 2" in p_project or "Phase2" in p_project: target_phase = "2"
         elif "Phase 3" in p_project or "Phase3" in p_project: target_phase = "3"
 
-        # Filter Node Pool to find out what systems actually exist in this phase
         pool_matches = pool_df[
             (pool_df['Project'].str.startswith(job_num)) & 
             ((pool_df['Phase'] == target_phase) | (target_phase == ""))
         ]
         
-        # Extract Systems (ignoring blanks IF there are proper systems, to avoid ghost blocks)
         raw_systems = [str(s).strip() for s in pool_matches['System'].unique() if str(s).strip()]
         systems = sorted(list(set(raw_systems)))
         if not systems:
-            systems = [""] # Fallback for projects with no system categorization (like Ferndale)
+            systems = [""] 
 
-        # Filter Telemetry to this specific project phase
         if tel_df.empty:
             tel_matches = pd.DataFrame(columns=tel_df.columns)
         else:
@@ -705,17 +701,19 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 ((tel_df['Phase'] == target_phase) | (target_phase == ""))
             ]
 
-        # Render a dashboard block for each unique System
         for sys in systems:
-            sys_pool = pool_matches[pool_matches['System'] == sys]
-            total_assigned = sys_pool['total_assigned'].sum() if not sys_pool.empty else 0
+            # THE UPGRADE: Include Ambient sensors in the registry pool math for this block
+            if sys == "":
+                block_pool = pool_matches
+            else:
+                block_pool = pool_matches[(pool_matches['System'] == sys) | (pool_matches['Location'] == 'AMBIENT')]
+                
+            total_assigned = block_pool['total_assigned'].sum() if not block_pool.empty else 0
             
-            # Isolate Telemetry for this System (AND inject ambient nodes project-wide)
             if not tel_matches.empty:
                 is_sys = tel_matches['System'] == sys
                 is_amb = tel_matches['Location'].astype(str).str.upper() == 'AMBIENT'
                 
-                # If this is a no-system project, grab everything. Else, grab the system + ambient.
                 if sys == "": 
                     sys_tel = tel_matches
                 else:
@@ -723,7 +721,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             else:
                 sys_tel = tel_matches 
 
-            # Skip rendering if there are 0 sensors assigned AND no incoming data
             if total_assigned == 0 and sys_tel.empty:
                 continue 
 
@@ -745,7 +742,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
                 
-                # Compute Live Hardware Metrics
                 if not sys_tel.empty:
                     active_1h = sys_tel[sys_tel['checkins_1h'] > 0]['NodeNum'].nunique()
                     active_6h = sys_tel[sys_tel['checkins_6h'] > 0]['NodeNum'].nunique()
@@ -765,7 +761,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                     st.info(f"No recent telemetry received for {p_project}{title_suffix}.")
                     continue
 
-                # Group the columns dynamically
                 is_amb_col = sys_tel['Location'].astype(str).str.upper() == 'AMBIENT'
                 is_tp_col = sys_tel['Depth'].notnull() & (sys_tel['Depth'].astype(str).str.strip() != '') & ~is_amb_col
                 is_s_col = (sys_tel['Bank'].astype(str).str.startswith('S') | sys_tel['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
