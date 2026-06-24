@@ -180,57 +180,48 @@ if sidebar_client is not None:
 # =============================================================================
 # CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
 # =============================================================================
-st.sidebar.subheader("🔍 Metadata Recovery")
-if st.sidebar.button("Scan All Available Tables"):
-    try:
-        # This queries the Information Schema to find tables that look like they hold telemetry
-        schema_q = f"""
-            SELECT table_name 
-            FROM `{PROJECT_ID}.{DATASET_ID}.INFORMATION_SCHEMA.TABLES`
-            WHERE table_name LIKE '%data%' OR table_name LIKE '%telemetry%'
-        """
-        tables_df = sidebar_client.query(schema_q).to_dataframe()
-        
-        st.sidebar.write("Tables found in dataset:")
-        st.sidebar.write(tables_df['table_name'].tolist())
-        
-    except Exception as e:
-        st.sidebar.error(f"Error scanning tables: {e}")
+st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
     try:
-        # 1. WHAT DOES THE SIDEBAR THINK IT IS?
-        st.sidebar.write(f"Looking for: {selected_project}")
-        
-        # 2. RUN A DISCOVERY QUERY
-        # We search the table for any project that contains the first 4 chars of the selection
-        prefix = str(selected_project)[:4]
-        debug_q = f"""
-            SELECT DISTINCT Project 
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-            WHERE Project LIKE '{prefix}%'
-            LIMIT 5
-        """
-        projects_found = sidebar_client.query(debug_q).to_dataframe()
-        
-        st.sidebar.write("Projects found in DB starting with same prefix:")
-        st.sidebar.write(projects_found['Project'].tolist())
-        
-        # 3. IF FOUND, FETCH THE MAX DATE
-        if not projects_found.empty:
-            target_proj = projects_found['Project'].iloc[0]
+        # Contextual switching logic based on sidebar dropdown choice
+        if selected_project == "All Projects":
             pulse_q = f"""
-                SELECT MAX(timestamp) as last_sync
+                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
                 FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
-                WHERE Project = '{target_proj}'
             """
-            pulse_df = sidebar_client.query(pulse_q).to_dataframe()
-            st.sidebar.write(f"Latest timestamp for {target_proj}: {pulse_df['last_sync'].iloc[0]}")
+            scope_label = "Last Data"
         else:
-            st.sidebar.error(f"No projects found in master_data_view starting with '{prefix}'")
+            pulse_q = f"""
+                SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
+                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+                WHERE Project = '{selected_project}'
+            """
+            scope_label = f"Job {selected_project.split('-')[0]} Age"
+
+        pulse_df = sidebar_client.query(pulse_q).to_dataframe()
+        
+        if not pulse_df.empty and pulse_df['last_sync'].iloc[0]:
+            last_sync_str = str(pulse_df['last_sync'].iloc[0])
+            
+            last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
+            now_utc = pd.Timestamp.now(tz='UTC')
+            elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
+            
+            if elapsed_mins <= 60:
+                pulse_status = f"🟢 **Live** ({elapsed_mins}m ago)"
+            elif elapsed_mins <= 180:
+                pulse_status = f"🟠 **Delayed** ({elapsed_mins}m ago)"
+            else:
+                pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
+                
+            st.sidebar.markdown(f"**{scope_label}:** {pulse_status}")
+            st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
+        else:
+            st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
             
     except Exception as pulse_err:
-        st.sidebar.error(f"Pulse Error: {pulse_err}")
+        st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
 
 # INTERACTIVE REFRESH TRIGGER
 if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
