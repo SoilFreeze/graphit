@@ -256,12 +256,19 @@ st.sidebar.divider()
 # 3. GLOBAL VIEW TOGGLES & INTERACTIVE LOOKBACK
 st.sidebar.subheader("👁️ Visibility Controls")
 
-# NEW: Active vs Historic Project Toggle
 show_archived = st.sidebar.toggle(
     "Show Archived Projects", 
     value=False, 
     key="global_show_archived",
     help="Display all historic projects in the project selection menu."
+)
+
+# NEW: The Ambient Toggle
+st.sidebar.toggle(
+    "Show Ambient Temp", 
+    value=True, 
+    key="global_show_ambient",
+    help="Overlay ambient air temperature on the charts."
 )
 
 st.sidebar.toggle(
@@ -398,28 +405,16 @@ def natural_sort_key(s):
     of mixed-type location strings.
     """
     s = str(s)
-    # Look for 'T' followed by numbers
     match = re.match(r'([a-zA-Z\s]*)([tT])(\d+)(.*)', s)
     if match:
-        # Return a list of consistent structure: [Prefix, 't', NumericValue, Suffix]
-        return [
-            str(match.group(1).lower()), 
-            str(match.group(2).lower()), 
-            int(match.group(3)), 
-            str(match.group(4).lower())
-        ]
+        return [str(match.group(1).lower()), str(match.group(2).lower()), int(match.group(3)), str(match.group(4).lower())]
     
-    # Fallback for standard strings (e.g., "Bank S", "Office")
     return [text.lower() if not text.isdigit() else int(text) for text in re.split(r'(\d+)', s)]
     
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
-    - Legend: Naturally sorted by logical numerical order (1, 2, ... 10).
-    - Hover: Date at top, Time only on entries.
-    - Gaps: Lines break if data is missing for > 6 hours.
-    - Style: 15-Color Palette, RoyalBlue Freeze Line, Bold Monday Grids.
     """
     if df.empty: return go.Figure().update_layout(title="No data available")
 
@@ -435,26 +430,18 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     fig = go.Figure()
-
-    # 2. GLOBAL TIMELINE SYNC
     final_end_view, final_start_view = end_view, start_view
 
     # 3. THEORETICAL REFERENCE CURVES
     if curve_id and curve_id != "None" and f_start_date:
         try:
-            # 1. IDENTIFY CONVENTION
-            # Splitting '2538-TP1-Sat Clay' -> proj='2538', loc='TP1'
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip() if len(parts) > 0 else ""
             loc_raw = parts[1].strip() if len(parts) > 1 else ""
             
-            # Extract just the digits to handle T/TP and 01/1 inconsistencies
-            # 'TP1' or 'T1' -> digits=['1']
             digits = re.findall(r'\d+', loc_raw)
             loc_digit = digits[0] if digits else ""
             
-            # 2. QUERY DATABASE
-            # Search by project and the digit so 'TP1', 'T1', 'TP01', and 'T01' all match
             target_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -465,7 +452,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             """
             target_df = client.query(target_q).to_dataframe()
             
-            # 3. FILTER & PLOT
             if not target_df.empty:
                 dash_styles = ['dashdot', 'dash', 'dot']
                 gray_shades = ['rgba(30,30,30,0.8)', 'rgba(70,70,70,0.75)', 'rgba(110,110,110,0.7)']
@@ -476,10 +462,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     
-                    display_label = f"Goal: {cid}"
-                    
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>{display_label}</b>", 
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {cid}</b>", 
                         mode='lines',
                         line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3),
                         legendrank=1 
@@ -489,8 +473,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         
         except Exception as e:
             st.error(f"Error in Curve Loader: {e}")
-               
-
+                
     # 4. SENSOR DATA (Naturally Sorted Group Loops)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
@@ -501,10 +484,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         bank_val = node_df['Bank'].iloc[0]
         loc_val = node_df['Location'].iloc[0]
 
-        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
-            display_name = f"{bank_val} ({sn})"
+        # THE UPGRADE: New Display Name Logic for Any Bank Structure
+        if pd.notnull(bank_val) and str(bank_val).strip() != '':
+            loc_label = loc_val if pd.notnull(loc_val) and str(loc_val).strip() != '' else sn
+            display_name = f"Brine Temp: Bank {bank_val} ({loc_label})"
             sort_val = str(bank_val)  
-        elif pd.notnull(depth_val) and not pd.isna(depth_val): 
+        elif pd.notnull(depth_val) and str(depth_val).strip() != '': 
             display_name = f"{depth_val}ft ({sn})"
             sort_val = f"depth_{float(depth_val):05.1f}" 
         else: 
@@ -552,9 +537,17 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     return fig
 
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
-    references = {"Silty Sand": [(0, 50), (5, 32), (14, 20), (30, 10), (60, 5)], "Clay": [(0, 50), (10, 32), (25, 25), (45, 15), (90, 10)]}
+    """
+    Fallback function for hardcoded soil types.
+    """
+    references = {
+        "Silty Sand": [(0, 50), (5, 32), (14, 20), (30, 10), (60, 5)],
+        "Clay":       [(0, 50), (10, 32), (25, 25), (45, 15), (90, 10)]
+    }
+    
     curve = references.get(soil_type, [])
     if not curve: return None, None
+        
     x_times = [pd.Timestamp(start_date) + pd.Timedelta(days=d) for d, t in curve]
     y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
     return x_times, y_temps
@@ -562,7 +555,7 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
 def run_office_auto_assignment():
     client = get_bq_client()
     sql = f"""
-        MERGE `{OVERRIDE_TABLE}` T
+        MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
         USING (
             SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
             FROM (SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` UNION ALL SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`) AS r
@@ -576,54 +569,21 @@ def run_office_auto_assignment():
     except Exception as e: st.error(f"Failed: {e}")
 
 def apply_sanity_filter(df):
-    if df.empty: return df
-    bad_condition = (df['temperature'] > 120) | (df['temperature'] < -30)
-    if 'approve' in df.columns: df.loc[bad_condition, 'approve'] = 'BADDATA'
-    elif 'approval_status' in df.columns: df.loc[bad_condition, 'approval_status'] = 'BADDATA'
-    return df
-                                
-def get_soil_reference_curves(soil_type, start_date, unit_mode):
-    """
-    Fallback function for hardcoded soil types.
-    """
-    references = {
-        "Silty Sand": [(0, 50), (5, 32), (14, 20), (30, 10), (60, 5)],
-        "Clay":       [(0, 50), (10, 32), (25, 25), (45, 15), (90, 10)]
-    }
-    
-    curve = references.get(soil_type, [])
-    if not curve:
-        return None, None
-        
-    x_times = [pd.Timestamp(start_date) + pd.Timedelta(days=d) for d, t in curve]
-    y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
-    
-    return x_times, y_temps
-
-##################
-# High temp mask #
-##################
-def apply_sanity_filter(df):
     """
     Automated filter for rogue data points.
     - Removes entries with null sensor names to ensure integrity.
     - Flags anything outside physical limits [-30°F, 120°F] as BADDATA.
     - Masks dynamic outliers +/- 20°F from the sensor line's average.
     """
-    if df.empty:
-        return df
+    if df.empty: return df
 
-    # Enforce strict data integrity before processing averages
     if 'NodeNum' in df.columns:
         df = df.dropna(subset=['NodeNum']).copy()
 
-    if df.empty:
-        return df
+    if df.empty: return df
 
-    # 1. Absolute Physical Limits -> BADDATA
     bad_condition = (df['temperature'] > 120) | (df['temperature'] < -30)
     
-    # 2. Dynamic Relative Outliers -> MASKED
     if 'NodeNum' in df.columns:
         node_means = df.groupby('NodeNum')['temperature'].transform('mean')
         outlier_condition = (df['temperature'] > node_means + 20) | (df['temperature'] < node_means - 20)
@@ -631,25 +591,194 @@ def apply_sanity_filter(df):
         avg_temp = df['temperature'].mean()
         outlier_condition = (df['temperature'] > avg_temp + 20) | (df['temperature'] < avg_temp - 20)
 
-    # Determine the active status column in the current view
     mask_col = 'approve' if 'approve' in df.columns else 'approval_status' if 'approval_status' in df.columns else None
     
     if mask_col:
-        # Apply dynamic line outliers first
         df.loc[outlier_condition, mask_col] = 'MASKED'
-        # Overwrite with absolute physical failures as a higher priority flag
         df.loc[bad_condition, mask_col] = 'BADDATA'
 
     return df
 
 
-def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
-    """Helper layout compiler to handle repeating column metric sets."""
+            
+##############################
+# Page 1 - Dashboard Summary #
+##############################
+def render_summary_dashboard(unit_label, unit_mode, display_tz):
+    """
+    Renders Global Project Summary, dynamically grouped by Phase and System.
+    Uses true assigned counts from the registry and strictly isolates ambient data.
+    """
+    st.header("🌐 Global Project Summary")
+    
+    client = get_bq_client()
+    if client is None: return
+
+    selected_project = st.session_state.get('selected_project', 'All Projects')
+
+    # --- 1. DYNAMIC FILTERS ---
+    proj_filter = ""
+    pool_filter = ""
+    if selected_project != "All Projects":
+        # Extract base job number (e.g., '2541') to bypass naming inconsistencies
+        job_num = selected_project.split('-')[0].strip()
+        
+        phase_sql = ""
+        if "Phase 1" in selected_project: phase_sql = " AND Phase = '1' "
+        elif "Phase 2" in selected_project or "Phase2" in selected_project: phase_sql = " AND Phase = '2' "
+        
+        proj_filter = f"AND Project LIKE '{job_num}%' {phase_sql}"
+        pool_filter = f"AND Project LIKE '{job_num}%' {phase_sql}"
+
+    # --- 2. HARDWARE CAPACITY QUERY ---
+    # Asks the registry for the true pool size of assigned sensors
+    pool_q = f"""
+        SELECT Project, Phase, System, COUNT(DISTINCT NodeNum) as total_assigned 
+        FROM `{NODE_REGISTRY_TABLE}` 
+        WHERE Project IS NOT NULL {pool_filter}
+        GROUP BY 1, 2, 3
+    """
+    try:
+        pool_df = client.query(pool_q).to_dataframe()
+    except Exception as e:
+        st.error(f"Registry query failed: {e}")
+        return
+
+    # --- 3. TELEMETRY QUERY ---
+    # Pulls the last 48 hours of data from the flattened v2 view
+    summary_q = f"""
+        WITH raw_data AS (
+            SELECT Project, Phase, System, Bank, Location, Depth, temperature, timestamp, NodeNum
+            FROM `{MASTER_VIEW}`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+              AND Project IS NOT NULL
+              {proj_filter}
+        ),
+        MaxTime AS (
+            SELECT MAX(timestamp) as max_ts FROM raw_data
+        ),
+        LatestStats AS (
+            SELECT 
+                r.Project, r.Phase, r.System, r.Bank, r.Location, r.Depth, r.NodeNum,
+                MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as min_now,
+                MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
+                MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
+                MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
+                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
+                ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+                MAX(r.timestamp) as latest_ts
+            FROM raw_data r
+            CROSS JOIN MaxTime m
+            GROUP BY 1, 2, 3, 4, 5, 6, 7
+        )
+        SELECT 
+            ls.*,
+            p.ProjectName, 
+            p.Date_Freezedown
+        FROM LatestStats ls
+        LEFT JOIN `{PROJECT_REGISTRY_TABLE}` p 
+          ON STARTS_WITH(ls.Project, CAST(p.Project AS STRING))
+    """
+    
+    try:
+        df = client.query(summary_q).to_dataframe()
+        df[['Bank', 'Location', 'Phase', 'System']] = df[['Bank', 'Location', 'Phase', 'System']].fillna('')
+    except Exception as e:
+        st.error(f"Dashboard Query Failed: {e}")
+        return
+
+    if df.empty:
+        st.info("No projects found with active data in the last 48 hours.")
+        return
+
+    # --- 4. RENDER UI ENGINE ---
+    for project in sorted(df['Project'].unique()):
+        proj_df = df[df['Project'] == project]
+        p_name = proj_df['ProjectName'].iloc[0] if pd.notnull(proj_df['ProjectName'].iloc[0]) else project
+        f_date = proj_df['Date_Freezedown'].iloc[0]
+        
+        # Calculate Freezedown Days
+        day_text, f_date_display = "", "Not Set"
+        if pd.notnull(f_date):
+            f_date_display = pd.to_datetime(f_date).strftime('%b %d, %Y')
+            days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
+            day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
+        
+        # Determine Hierarchy: Do we need to split by Phase/System?
+        phases = [p for p in proj_df['Phase'].unique() if str(p).strip()]
+        systems = [s for s in proj_df['System'].unique() if str(s).strip()]
+        
+        combos = proj_df[['Phase', 'System']].drop_duplicates()
+        
+        for _, row in combos.iterrows():
+            phase = row['Phase']
+            sys = row['System']
+            
+            # Isolate the data block for this specific System & Phase
+            block_df = proj_df
+            if phase: block_df = block_df[block_df['Phase'] == phase]
+            if sys: block_df = block_df[block_df['System'] == sys]
+            
+            if block_df.empty: continue
+            
+            # Build Dynamic Header (Ignores phase/system labels if there is only 1 in the project)
+            title_ext = []
+            if len(phases) > 1 and phase: title_ext.append(f"Phase {phase}")
+            if len(systems) > 1 and sys: title_ext.append(f"System {sys}")
+            title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
+            
+            with st.container(border=True):
+                h1, h2 = st.columns([2, 1])
+                h1.subheader(f"🏗️ {p_name}{title_suffix}")
+                h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
+                
+                # External Client Portal Link
+                proj_match = re.search(r'\b(\d{4})\b', str(project))
+                if proj_match:
+                    job_number = proj_match.group(1)
+                    st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_number}.streamlit.app)")
+                
+                # Compare Active nodes vs Total Assigned in Registry
+                active_24h = block_df[block_df['checkins_24h'] > 0]['NodeNum'].nunique()
+                match_pool = pool_df[(pool_df['Project'] == project) & (pool_df['Phase'] == phase) & (pool_df['System'] == sys)]
+                total_assigned = match_pool['total_assigned'].sum() if not match_pool.empty else 0
+                
+                status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🟠"
+                st.markdown(f"{status_color} **Hardware Status:** `{active_24h}` nodes pinged in the last 24h (Total Assigned: `{total_assigned}`)")
+                st.divider() 
+
+                # --- STRICT AMBIENT ISOLATION ---
+                is_amb = block_df['Location'].astype(str).str.upper() == 'AMBIENT'
+                is_tp = block_df['Depth'].notnull() & (block_df['Depth'].astype(str).str.strip() != '') & ~is_amb
+                is_s = (block_df['Bank'].astype(str).str.startswith('S') | block_df['Location'].astype(str).str.startswith('S')) & ~is_amb & ~is_tp
+                is_r = (block_df['Bank'].astype(str).str.startswith('R') | block_df['Location'].astype(str).str.startswith('R')) & ~is_amb & ~is_tp
+
+                # Structure columns with their target temperatures for the KPI math
+                groups_data = [
+                    ("📥 Supply", block_df[is_s], -10), 
+                    ("📤 Return", block_df[is_r], 0), 
+                    ("📏 TempPipes", block_df[is_tp], 32)
+                ]
+
+                # Append Ambient column dynamically only if toggled ON in sidebar
+                if st.session_state.get("global_show_ambient", True):
+                    groups_data.append(("☁️ Ambient", block_df[is_amb], None))
+
+                # Render dynamic column layout based on available groups
+                cols = st.columns(len(groups_data))
+                for idx, (title, g_df, target_temp) in enumerate(groups_data):
+                    with cols[idx]:
+                        render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label)
+
+
+def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
+    """Helper layout compiler to handle repeating column metric sets cleanly."""
     st.markdown(f"**{title}**")
     if g_df.empty or g_df['latest_temp'].isnull().all():
         st.caption("No recent data")
         return
     
+    # Mathematical averages strictly use the dataframe passed in, zero cross-contamination
     latest_val = g_df['latest_temp'].mean()
     c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
     m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
@@ -662,10 +791,14 @@ def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label
 
     st.metric("Avg (Latest)", f"{l_conv:.1f}{unit_label}")
     
-    if kpi_col:
-        pct = g_df[kpi_col].iloc[0]
-        color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
-        st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
+    # Calculate % of nodes meeting target goal directly in Python
+    if target_temp is not None:
+        total_valid_nodes = g_df['NodeNum'].nunique()
+        if total_valid_nodes > 0:
+            nodes_meeting_target = g_df[g_df['latest_temp'] <= target_temp]['NodeNum'].nunique()
+            pct = (nodes_meeting_target / total_valid_nodes) * 100
+            color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
+            st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {target_temp}°F</p>", unsafe_allow_html=True)
 
     range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'><b>Normal Ranges:</b><br>"
     if c_min is not None and c_max is not None:
@@ -681,7 +814,6 @@ def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label
     st.markdown(range_html, unsafe_allow_html=True)
     st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
 
-
 def get_trend_arrow(current, previous):
     """Helper to generate trend icons with updated blue downward arrow."""
     if pd.isnull(current) or pd.isnull(previous): return "N/A"
@@ -689,6 +821,7 @@ def get_trend_arrow(current, previous):
     if delta > 0.1: return f"🔺 +{delta:.1f}"
     if delta < -0.1: return f"🔹 {delta:.1f}"
     return "➡️ 0.0"
+
 
 #############################
 # - 2. PAGE: TIME vs TEMP - #
@@ -1049,197 +1182,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             )
             
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_{selected_project}_{loc}")
-            
-##############################
-# Page 1 - Dashboard Summary #
-##############################
-def render_summary_dashboard(unit_label, unit_mode, display_tz):
-    """
-    Renders Global Project Summary.
-    Cleaned up: Removed the broken 'active projects' CTE and regex matching.
-    """
-    st.header("🌐 Global Project Summary")
-    
-    client = get_bq_client()
-    if client is None: return
-
-    mobile_mode = st.session_state.get("mobile_optimized_toggle", False)
-
-    # Simplified Query: Stripped the active projects CTE. 
-    # Just pulls recent data and joins registry smoothly for names and dates.
-    summary_q = f"""
-        WITH raw_data AS (
-            SELECT 
-                m.Project, n.Bank, n.Location, n.Depth, m.temperature, m.timestamp, m.NodeNum
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            INNER JOIN `{NODE_REGISTRY_TABLE}` n 
-              ON m.NodeNum = n.NodeNum
-              -- TIME-BOUND LOCK: Only match telemetry to the registry window for that sensor
-              AND m.timestamp >= CAST(n.Start_Date AS TIMESTAMP)
-              AND (m.timestamp <= CAST(n.End_Date AS TIMESTAMP) OR n.End_Date IS NULL)
-            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0')
-              AND NOT (m.temperature > 120.0 AND NOT STARTS_WITH(m.NodeNum, 'SP'))
-              AND UPPER(m.Project) NOT LIKE '%OFFICE%'
-              AND m.Project IS NOT NULL
-        ),
-        MaxTime AS (
-            SELECT MAX(timestamp) as max_ts FROM raw_data
-        ),
-        LatestStats AS (
-            SELECT 
-                r.Project, r.Bank, r.Location, r.Depth, r.NodeNum,
-                AVG(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as avg_now,
-                AVG(CASE WHEN r.timestamp BETWEEN TIMESTAMP_SUB(m.max_ts, INTERVAL 2 HOUR) AND TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as avg_1h,
-                AVG(CASE WHEN r.timestamp BETWEEN TIMESTAMP_SUB(m.max_ts, INTERVAL 7 HOUR) AND TIMESTAMP_SUB(m.max_ts, INTERVAL 6 HOUR) THEN r.temperature END) as avg_6h,
-                AVG(CASE WHEN r.timestamp BETWEEN TIMESTAMP_SUB(m.max_ts, INTERVAL 25 HOUR) AND TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as avg_24h,
-                MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as min_now,
-                MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
-                MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
-                MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
-                
-                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
-                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
-                
-                ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-                MAX(r.timestamp) as latest_ts
-            FROM raw_data r
-            CROSS JOIN MaxTime m
-            GROUP BY 1, 2, 3, 4, 5
-        )
-        SELECT 
-            ls.*,
-            p.ProjectName, 
-            p.Date_Freezedown,
-            (COUNTIF(ls.Bank LIKE 'S%' AND ls.latest_temp <= -10) OVER(PARTITION BY ls.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'S%') OVER(PARTITION BY ls.Project), 0)) * 100 as supply_kpi,
-            (COUNTIF(ls.Bank LIKE 'R%' AND ls.latest_temp <= 0) OVER(PARTITION BY ls.Project) / NULLIF(COUNTIF(ls.Bank LIKE 'R%') OVER(PARTITION BY ls.Project), 0)) * 100 as return_kpi,
-            (COUNTIF(ls.Depth IS NOT NULL AND ls.latest_temp <= 32) OVER(PARTITION BY ls.Project) / NULLIF(COUNTIF(ls.Depth IS NOT NULL) OVER(PARTITION BY ls.Project), 0)) * 100 as freeze_kpi
-        FROM LatestStats ls
-        LEFT JOIN `{PROJECT_REGISTRY_TABLE}` p 
-          ON STARTS_WITH(ls.Project, CAST(p.Project AS STRING))
-    """
-    
-    try:
-        df = client.query(summary_q).to_dataframe()
-        df[['Bank', 'Location']] = df[['Bank', 'Location']].fillna('')
-    except Exception as e:
-        st.error(f"Dashboard Query Failed: {e}")
-        return
-
-    if df.empty:
-        st.info("No projects found with active data in the last 48 hours.")
-        return
-
-    for project in sorted(df['Project'].unique()):
-        p_df = df[df['Project'] == project]
-        p_name = p_df['ProjectName'].iloc[0] if pd.notnull(p_df['ProjectName'].iloc[0]) else project
-        f_date = p_df['Date_Freezedown'].iloc[0]
-        
-        day_text, f_date_display = "", "Not Set"
-        if pd.notnull(f_date):
-            f_date_display = pd.to_datetime(f_date).strftime('%b %d, %Y')
-            days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
-            day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
-        
-        with st.container(border=True):
-            h1, h2 = st.columns([2, 1])
-            h1.subheader(f"🏗️ {p_name}")
-            h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
-            
-            # --- CLIENT PORTAL LINK INJECTION ENGINE ---
-            proj_match = re.search(r'\b(\d{4})\b', str(project))
-            if proj_match:
-                job_number = proj_match.group(1)
-                portal_url = f"https://sf{job_number}.streamlit.app"
-                st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link]({portal_url})")
-            
-            # --- ACCURATE CHECK-IN COUNTERS ---
-            active_1h = p_df[p_df['checkins_1h'] > 0]['NodeNum'].nunique()
-            active_24h = p_df[p_df['checkins_24h'] > 0]['NodeNum'].nunique()
-            total_nodes = p_df['NodeNum'].dropna().nunique()
-            
-            st.markdown(
-                f"📡 **Hardware Status:** `{active_1h}` nodes pinged in the last hour | "
-                f"`{active_24h}` nodes pinged in the last 24h (Total Pool: `{total_nodes}` registered)"
-            )
-            st.divider() 
-
-            # Data isolation
-            is_amb = p_df['Bank'].str.contains('Amb', case=False) | p_df['Location'].str.contains('Amb', case=False)
-            
-            # Prioritize valid numeric Depths for TempPipes
-            is_tp = p_df['Depth'].notnull() & (p_df['Depth'].astype(str).str.strip() != '') & ~is_amb
-            is_s = (p_df['Bank'].str.startswith('S') | p_df['Location'].str.startswith('S')) & ~is_amb & ~is_tp
-            is_r = (p_df['Bank'].str.startswith('R') | p_df['Location'].str.startswith('R')) & ~is_amb & ~is_tp
-
-            groups_data = [
-                ("📥 Supply", p_df[is_s], "supply_kpi", -10), 
-                ("📤 Return", p_df[is_r], "return_kpi", 0), 
-                ("📏 TempPipes", p_df[is_tp], "freeze_kpi", 32), 
-                ("☁️ Ambient", p_df[is_amb], None, None)
-            ]
-
-            if mobile_mode:
-                for title, g_df, kpi_col, kpi_val in groups_data:
-                    render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
-                    st.markdown("<hr style='border: 1px dashed #ccc; margin: 15px 0;'>", unsafe_allow_html=True)
-            else:
-                cols = st.columns([1, 0.1, 1, 0.1, 1, 0.1, 1])
-                col_mappings = [0, 2, 4, 6]
-                spacer_mappings = [1, 3, 5]
-                
-                for s_idx in spacer_mappings:
-                    cols[s_idx].markdown("<div style='border-left: 1px solid #ddd; height: 320px; margin: auto;'></div>", unsafe_allow_html=True)
-                
-                for idx, (title, g_df, kpi_col, kpi_val) in enumerate(groups_data):
-                    with cols[col_mappings[idx]]:
-                        render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label)
-
-def render_dashboard_column(title, g_df, kpi_col, kpi_val, unit_mode, unit_label):
-    """Helper layout compiler to handle repeating column metric sets."""
-    st.markdown(f"**{title}**")
-    if g_df.empty or g_df['latest_temp'].isnull().all():
-        st.caption("No recent data")
-        return
-    
-    latest_val = g_df['latest_temp'].mean()
-    c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
-    m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
-
-    def convert(v):
-        if pd.isnull(v) or pd.isna(v): return None
-        return (v - 32) * 5/9 if unit_mode == "Celsius" else v
-
-    l_conv, c_min, c_max, m24, x24 = map(convert, [latest_val, c_min, c_max, m24, x24])
-
-    st.metric("Avg (Latest)", f"{l_conv:.1f}{unit_label}")
-    
-    if kpi_col:
-        pct = g_df[kpi_col].iloc[0]
-        color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
-        st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {kpi_val}°F</p>", unsafe_allow_html=True)
-
-    range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'><b>Normal Ranges:</b><br>"
-    if c_min is not None and c_max is not None:
-        range_html += f"Current: {c_min:.1f} to {c_max:.1f}{unit_label}<br>"
-    else:
-        range_html += "Current: No Data<br>"
-    
-    if m24 is not None and x24 is not None:
-        range_html += f"24h Range: {m24:.1f} to {x24:.1f}{unit_label}"
-    else:
-        range_html += "24h Range: No Data"
-    range_html += "</div>"
-    st.markdown(range_html, unsafe_allow_html=True)
-    st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
-
-def get_trend_arrow(current, previous):
-    """Helper to generate trend icons with updated blue downward arrow."""
-    if pd.isnull(current) or pd.isnull(previous): return "N/A"
-    delta = current - previous
-    if delta > 0.1: return f"🔺 +{delta:.1f}"
-    if delta < -0.1: return f"🔹 {delta:.1f}"
-    return "➡️ 0.0"
 
 # =============================================================================
 # WORKSPACE PAGE 4: SENSOR STATUS COMPONENT LIST
@@ -1437,117 +1379,6 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
     except Exception as e:
         st.error(f"Sensor Status Error: {e}")
-
-
-def render_project_status_dashboard(client, selected_project, unit_label, target_registry):
-    """Renders high-level project summaries segmented by structural hardware groupings."""
-    st.subheader("📊 Project Status Summary")
-    
-    query = f"""
-        SELECT 
-            n.NodeNum, n.Bank, n.Location, n.Depth,
-            CASE 
-                WHEN (n.Bank LIKE 'S%' OR n.Location LIKE 'S%') AND (n.Bank NOT LIKE '%Amb%' AND n.Location NOT LIKE '%Amb%') THEN 'Supply'
-                WHEN (n.Bank LIKE 'R%' OR n.Location LIKE 'R%') AND (n.Bank NOT LIKE '%Amb%' AND n.Location NOT LIKE '%Amb%') THEN 'Return'
-                WHEN (n.Bank LIKE '%Amb%' OR n.Location LIKE '%Amb%') THEN 'Ambient'
-                WHEN n.Depth IS NOT NULL THEN 'TempPipes'
-                ELSE 'Other'
-            END as hardware_type,
-            AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
-            MIN(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as min_now,
-            MAX(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as max_now,
-            MIN(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN m.temperature END) as min_24h,
-            MAX(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN m.temperature END) as max_24h,
-            AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev,
-            AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN m.temperature END) as avg_6h_prev,
-            COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
-            ARRAY_AGG(m.temperature ORDER BY m.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-            MAX(m.timestamp) as latest_ts
-        FROM `{target_registry}` n
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m 
-          ON n.NodeNum = m.NodeNum AND m.NodeNum IS NOT NULL
-        WHERE n.Project = @proj_id AND (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
-        GROUP BY 1, 2, 3, 4, 5
-    """
-    
-    try:
-        df = client.query(query, job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-        )).to_dataframe()
-    except Exception as e:
-        st.error(f"Dashboard Query Failed: {e}")
-        return
-
-    if df.empty:
-        st.info("No active nodes found for dashboard summary.")
-        return
-
-    cols = st.columns(4)
-    type_map = {"Supply": (cols[0], "📥"), "Return": (cols[1], "📤"), "TempPipes": (cols[2], "📏"), "Ambient": (cols[3], "☁️")}
-    now_utc = pd.Timestamp.now(tz='UTC')
-
-    for h_type, (col, icon) in type_map.items():
-        g_df = df[df['hardware_type'] == h_type]
-        with col:
-            st.markdown(f"#### {icon} {h_type}")
-            if g_df.empty or g_df['latest_ts'].isna().all():
-                st.caption("No recent data")
-                continue
-            
-            latest_time = g_df['latest_ts'].max()
-            if latest_time.tzinfo is None:
-                latest_time = latest_time.tz_localize('UTC')
-            else:
-                latest_time = latest_time.tz_convert('UTC')
-            
-            lag_hrs = (now_utc - latest_time).total_seconds() / 3600
-            val = g_df['avg_now'].mean() if pd.notnull(g_df['avg_now'].mean()) else g_df['latest_temp'].mean()
-            
-            if lag_hrs > 1.1: 
-                st.subheader(f"⚠️ Offline {int(lag_hrs)}h")
-            else: 
-                unit_mode = st.session_state.get('unit_mode', 'Fahrenheit')
-                display_val = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-                st.title(f"{display_val:.1f}{unit_label}")
-            
-            active_1h = int(g_df['avg_now'].notnull().sum())
-            active_24h = int((g_df['pings_24h'] > 0).sum())
-            st.write(f"**{active_1h}/{len(g_df)}** (1h) | **{active_24h}/{len(g_df)}** (24h)")
-            
-            min_now_val = g_df['min_now'].min()
-            max_now_val = g_df['max_now'].max()
-            min_24h_val = g_df['min_24h'].min()
-            max_24h_val = g_df['max_24h'].max()
-            
-            if pd.notnull(min_now_val) and pd.notnull(max_now_val):
-                mn = (min_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_now_val
-                mx = (max_now_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_now_val
-                st.caption(f"Cur: {mn:.1f} to {mx:.1f}{unit_label}")
-            else:
-                st.caption(f"Cur: N/A to N/A")
-                
-            if pd.notnull(min_24h_val) and pd.notnull(max_24h_val):
-                mn24 = (min_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else min_24h_val
-                mx24 = (max_24h_val - 32) * 5/9 if st.session_state.get('unit_mode') == "Celsius" else max_24h_val
-                st.caption(f"24h: {mn24:.1f} to {mx24:.1f}{unit_label}")
-            else:
-                st.caption(f"24h: N/A to N/A")
-            
-            t_row = st.columns(2)
-            try:
-                prev_1h = g_df['avg_1h_prev'].mean()
-                arrow_1h = get_trend_arrow(val, prev_1h) if pd.notnull(prev_1h) else "➡️ N/A"
-                t_row[0].caption(f"1h\n{arrow_1h}")
-            except Exception:
-                t_row[0].caption("1h\n➡️ N/A")
-                
-            try:
-                prev_6h = g_df['avg_6h_prev'].mean()
-                arrow_6h = get_trend_arrow(val, prev_6h) if pd.notnull(prev_6h) else "➡️ N/A"
-                t_row[1].caption(f"6h\n{arrow_6h}")
-            except Exception:
-                t_row[1].caption("6h\n➡️ N/A")
-
 
 def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
     """Renders a detailed table showing connectivity, coverage, and recent activity sorted by latency."""
