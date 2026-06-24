@@ -607,35 +607,25 @@ def apply_sanity_filter(df):
 def render_summary_dashboard(unit_label, unit_mode, display_tz):
     """
     Renders Global Project Summary, dynamically grouped by Phase and System.
-    Uses true assigned counts from the registry and strictly isolates ambient data.
+    Hard-filtered to ONLY show Active projects, strictly excludes 'Office', 
+    and ignores sidebar project selections.
     """
-    st.header("🌐 Global Project Summary")
+    st.header("🌐 Global Active Project Summary")
     
     client = get_bq_client()
     if client is None: return
 
-    selected_project = st.session_state.get('selected_project', 'All Projects')
-
-    # --- 1. DYNAMIC FILTERS ---
-    proj_filter = ""
-    pool_filter = ""
-    if selected_project != "All Projects":
-        # Extract base job number (e.g., '2541') to bypass naming inconsistencies
-        job_num = selected_project.split('-')[0].strip()
-        
-        phase_sql = ""
-        if "Phase 1" in selected_project: phase_sql = " AND Phase = '1' "
-        elif "Phase 2" in selected_project or "Phase2" in selected_project: phase_sql = " AND Phase = '2' "
-        
-        proj_filter = f"AND Project LIKE '{job_num}%' {phase_sql}"
-        pool_filter = f"AND Project LIKE '{job_num}%' {phase_sql}"
-
-    # --- 2. HARDWARE CAPACITY QUERY ---
-    # Asks the registry for the true pool size of assigned sensors
+    # --- 1. HARDWARE CAPACITY QUERY ---
+    # Enforces Active projects only and bans 'Office'
     pool_q = f"""
-        SELECT Project, Phase, System, COUNT(DISTINCT NodeNum) as total_assigned 
-        FROM `{NODE_REGISTRY_TABLE}` 
-        WHERE Project IS NOT NULL {pool_filter}
+        SELECT 
+            n.Project, n.Phase, n.System, COUNT(DISTINCT n.NodeNum) as total_assigned 
+        FROM `{NODE_REGISTRY_TABLE}` n
+        INNER JOIN `{PROJECT_REGISTRY_TABLE}` p 
+            ON STARTS_WITH(n.Project, CAST(p.Project AS STRING))
+        WHERE n.Project IS NOT NULL 
+          AND UPPER(n.Project) NOT LIKE '%OFFICE%'
+          AND UPPER(TRIM(CAST(p.ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
         GROUP BY 1, 2, 3
     """
     try:
@@ -644,15 +634,19 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         st.error(f"Registry query failed: {e}")
         return
 
-    # --- 3. TELEMETRY QUERY ---
-    # Pulls the last 48 hours of data from the flattened v2 view
+    # --- 2. TELEMETRY QUERY ---
+    # Joins registry to ensure we only pull data for currently active projects
     summary_q = f"""
         WITH raw_data AS (
-            SELECT Project, Phase, System, Bank, Location, Depth, temperature, timestamp, NodeNum
-            FROM `{MASTER_VIEW}`
-            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
-              AND Project IS NOT NULL
-              {proj_filter}
+            SELECT 
+                m.Project, m.Phase, m.System, m.Bank, m.Location, m.Depth, m.temperature, m.timestamp, m.NodeNum
+            FROM `{MASTER_VIEW}` m
+            INNER JOIN `{PROJECT_REGISTRY_TABLE}` p 
+                ON STARTS_WITH(m.Project, CAST(p.Project AS STRING))
+            WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+              AND m.Project IS NOT NULL
+              AND UPPER(m.Project) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(p.ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
@@ -664,7 +658,12 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
                 MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
                 MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
+                
+                -- THE UPGRADE: 1h, 6h, and 24h interval trackers
+                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
+                COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 6 HOUR)) as checkins_6h,
                 COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
+                
                 ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
                 MAX(r.timestamp) as latest_ts
             FROM raw_data r
@@ -688,40 +687,35 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         return
 
     if df.empty:
-        st.info("No projects found with active data in the last 48 hours.")
+        st.info("No active projects found with data in the last 48 hours.")
         return
 
-    # --- 4. RENDER UI ENGINE ---
+    # --- 3. RENDER UI ENGINE ---
     for project in sorted(df['Project'].unique()):
         proj_df = df[df['Project'] == project]
         p_name = proj_df['ProjectName'].iloc[0] if pd.notnull(proj_df['ProjectName'].iloc[0]) else project
         f_date = proj_df['Date_Freezedown'].iloc[0]
         
-        # Calculate Freezedown Days
         day_text, f_date_display = "", "Not Set"
         if pd.notnull(f_date):
             f_date_display = pd.to_datetime(f_date).strftime('%b %d, %Y')
             days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
             day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
         
-        # Determine Hierarchy: Do we need to split by Phase/System?
         phases = [p for p in proj_df['Phase'].unique() if str(p).strip()]
         systems = [s for s in proj_df['System'].unique() if str(s).strip()]
-        
         combos = proj_df[['Phase', 'System']].drop_duplicates()
         
         for _, row in combos.iterrows():
             phase = row['Phase']
             sys = row['System']
             
-            # Isolate the data block for this specific System & Phase
             block_df = proj_df
             if phase: block_df = block_df[block_df['Phase'] == phase]
             if sys: block_df = block_df[block_df['System'] == sys]
             
             if block_df.empty: continue
             
-            # Build Dynamic Header (Ignores phase/system labels if there is only 1 in the project)
             title_ext = []
             if len(phases) > 1 and phase: title_ext.append(f"Phase {phase}")
             if len(systems) > 1 and sys: title_ext.append(f"System {sys}")
@@ -732,39 +726,41 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 h1.subheader(f"🏗️ {p_name}{title_suffix}")
                 h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
                 
-                # External Client Portal Link
                 proj_match = re.search(r'\b(\d{4})\b', str(project))
                 if proj_match:
                     job_number = proj_match.group(1)
                     st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_number}.streamlit.app)")
                 
-                # Compare Active nodes vs Total Assigned in Registry
+                # --- THE UPGRADE: Advanced Hardware Status Banner ---
+                active_1h = block_df[block_df['checkins_1h'] > 0]['NodeNum'].nunique()
+                active_6h = block_df[block_df['checkins_6h'] > 0]['NodeNum'].nunique()
                 active_24h = block_df[block_df['checkins_24h'] > 0]['NodeNum'].nunique()
+                
                 match_pool = pool_df[(pool_df['Project'] == project) & (pool_df['Phase'] == phase) & (pool_df['System'] == sys)]
                 total_assigned = match_pool['total_assigned'].sum() if not match_pool.empty else 0
                 
                 status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🟠"
-                st.markdown(f"{status_color} **Hardware Status:** `{active_24h}` nodes pinged in the last 24h (Total Assigned: `{total_assigned}`)")
+                st.markdown(
+                    f"{status_color} **Hardware Status:** `{active_1h}` (1h) | "
+                    f"`{active_6h}` (6h) | `{active_24h}` (24h) | "
+                    f"Assigned Pool: `{total_assigned}`"
+                )
                 st.divider() 
 
-                # --- STRICT AMBIENT ISOLATION ---
                 is_amb = block_df['Location'].astype(str).str.upper() == 'AMBIENT'
                 is_tp = block_df['Depth'].notnull() & (block_df['Depth'].astype(str).str.strip() != '') & ~is_amb
                 is_s = (block_df['Bank'].astype(str).str.startswith('S') | block_df['Location'].astype(str).str.startswith('S')) & ~is_amb & ~is_tp
                 is_r = (block_df['Bank'].astype(str).str.startswith('R') | block_df['Location'].astype(str).str.startswith('R')) & ~is_amb & ~is_tp
 
-                # Structure columns with their target temperatures for the KPI math
                 groups_data = [
                     ("📥 Supply", block_df[is_s], -10), 
                     ("📤 Return", block_df[is_r], 0), 
                     ("📏 TempPipes", block_df[is_tp], 32)
                 ]
 
-                # Append Ambient column dynamically only if toggled ON in sidebar
                 if st.session_state.get("global_show_ambient", True):
                     groups_data.append(("☁️ Ambient", block_df[is_amb], None))
 
-                # Render dynamic column layout based on available groups
                 cols = st.columns(len(groups_data))
                 for idx, (title, g_df, target_temp) in enumerate(groups_data):
                     with cols[idx]:
