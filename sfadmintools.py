@@ -95,15 +95,17 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     
     # Filter by the specific Project/Phase Name requested 
     if not is_summary_page:
-        base_project = str(project_id).split(' Phase')[0].strip()
+        # Extract the root job number (e.g., '2541')
+        job_num = str(project_id).split('-')[0].strip() 
         
-        # 1. Ensure we only keep data for the base project (e.g., '2541-Blackjack')
-        df = df[df['Raw_Project_Name'].astype(str).str.startswith(base_project, na=False)]
+        # 1. Strip away everything else, just keep rows matching '2541'
+        df = df[df['Raw_Project_Name'].astype(str).str.startswith(job_num, na=False)]
         
-        # 2. If the dropdown specifically asked for a phase, filter the new Phase column
-        if " Phase" in str(project_id):
-            target_phase = "Phase " + str(project_id).split(' Phase')[1].strip()
-            df = df[df['Phase'] == target_phase]
+        # 2. Filter by the raw integer phase stored in the database
+        if "Phase 1" in str(project_id):
+            df = df[df['Phase'].astype(str).str.strip() == '1']
+        elif "Phase 2" in str(project_id) or "Phase2" in str(project_id):
+            df = df[df['Phase'].astype(str).str.strip() == '2']
             
     return df
     
@@ -138,6 +140,10 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
+        # Determine the filter based on the new toggle
+        # Assumes your boolean column is named 'ShowActive'
+        status_filter = "" if st.session_state.get('global_show_archived', False) else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
+
         proj_q = f"""
             SELECT 
                 CAST(Project AS STRING) as Project, 
@@ -148,14 +154,11 @@ if sidebar_client is not None:
             FROM `{PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
-              AND (
-                  UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1') 
-                  OR UPPER(CAST(Project AS STRING)) LIKE '%OFFICE%'
-              )
+              {status_filter}
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
-        # Python fix: Strip whitespace and filter out non-values to kill "No Project"
+        # Python fix: Strip whitespace and filter out non-values
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
@@ -194,20 +197,23 @@ if sidebar_client is not None:
             """
             scope_label = "Last Data"
         else:
-            # THE UPGRADE: Split the string so BigQuery can match the base project and the phase column
-            base_project = selected_project.split(' Phase')[0].strip()
+            # Extract just the '2541'
+            job_num = selected_project.split('-')[0].strip()
             
+            # Map the dropdown selection to the raw database integer
             phase_sql = ""
-            if " Phase" in selected_project:
-                phase_num = selected_project.split(' Phase')[1].strip()
-                phase_sql = f" AND Phase = 'Phase {phase_num}' "
+            if "Phase 1" in selected_project:
+                phase_sql = " AND Phase = '1' "
+            elif "Phase 2" in selected_project or "Phase2" in selected_project:
+                phase_sql = " AND Phase = '2' "
 
+            # Search by job number and phase integer, ignoring the messy project strings
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
                 FROM `{MASTER_VIEW}`
-                WHERE Project LIKE '{base_project}%' {phase_sql}
+                WHERE Project LIKE '{job_num}%' {phase_sql}
             """
-            scope_label = f"Job {selected_project.split('-')[0]} Age"
+            scope_label = f"Job {job_num} Age"
 
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
@@ -245,8 +251,18 @@ if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
         
 st.sidebar.divider()
 
+st.sidebar.divider()
+
 # 3. GLOBAL VIEW TOGGLES & INTERACTIVE LOOKBACK
 st.sidebar.subheader("👁️ Visibility Controls")
+
+# NEW: Active vs Historic Project Toggle
+show_archived = st.sidebar.toggle(
+    "Show Archived Projects", 
+    value=False, 
+    key="global_show_archived",
+    help="Display all historic projects in the project selection menu."
+)
 
 st.sidebar.toggle(
     "Show Theoretical Curves", 
@@ -260,12 +276,6 @@ st.sidebar.toggle(
     value=False, 
     key="global_show_masked",
     help="Display data points manually hidden by admins."
-)
-
-st.sidebar.toggle(
-    "Mobile Layout", 
-    value=False, 
-    key="mobile_optimized_toggle"
 )
 
 st.sidebar.divider()
