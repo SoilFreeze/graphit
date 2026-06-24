@@ -180,13 +180,30 @@ if sidebar_client is not None:
 # =============================================================================
 # CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
 # =============================================================================
-# --- DEBUGGING CURRENT DATA AGES ---
-# --- CURRENT DATA AGES & DYNAMIC REFRESH ENGINE ---
-st.sidebar.subheader("⏱️ Current Data Ages")
-
-# Handle the "All Projects" state explicitly
-if selected_project == "All Projects":
-    st.sidebar.markdown("**Job Age:** *Global View Active*")
+st.sidebar.subheader("🔍 Database Inspection")
+if st.sidebar.button("Run Global Diagnostic"):
+    try:
+        # Check what the first 5 projects are in the table
+        diag_q = f"""
+            SELECT DISTINCT Project 
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+            LIMIT 5
+        """
+        diag_df = sidebar_client.query(diag_q).to_dataframe()
+        
+        st.sidebar.write("First 5 Projects in DB:")
+        st.sidebar.write(diag_df['Project'].tolist())
+        
+        # Get the latest timestamp in the entire table
+        latest_q = f"""
+            SELECT MAX(timestamp) as last_seen
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view`
+        """
+        latest_df = sidebar_client.query(latest_q).to_dataframe()
+        st.sidebar.write(f"Global Last Seen: {latest_df['last_seen'].iloc[0]}")
+        
+    except Exception as e:
+        st.sidebar.error(f"Diagnostic failed: {e}")
 
 if sidebar_client is not None:
     try:
