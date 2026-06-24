@@ -201,9 +201,11 @@ if sidebar_client is not None:
 
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
-        if not pulse_df.empty and pulse_df['last_sync'].iloc[0]:
+        # ADDED GUARD: Check if the result is valid and not null
+        if not pulse_df.empty and pulse_df['last_sync'].iloc[0] is not None and pd.notna(pulse_df['last_sync'].iloc[0]):
             last_sync_str = str(pulse_df['last_sync'].iloc[0])
             
+            # Now we know it's safe to convert
             last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
             now_utc = pd.Timestamp.now(tz='UTC')
             elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
@@ -218,7 +220,7 @@ if sidebar_client is not None:
             st.sidebar.markdown(f"**{scope_label}:** {pulse_status}")
             st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
         else:
-            st.sidebar.markdown(f"**{scope_label}:** ❌ No Sync Records")
+            st.sidebar.markdown(f"**{scope_label}:** ⚠️ No Recent Sync")
             
     except Exception as pulse_err:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
