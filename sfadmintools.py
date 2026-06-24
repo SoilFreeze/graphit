@@ -527,9 +527,42 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # 6. LAYOUT & TITLING
     p_name = st.session_state.get('selected_project', 'Project')
+    
+    # --- Smart Header (Title) Generator ---
+    title_lower = str(title).lower()
+    if 'ambient' in title_lower:
+        header_text = f"Ambient Air Temperatures"
+    elif any(x in title_lower for x in ['pipe', 'tp', 'depth']):
+        header_text = f"Temperatures for Temperature Pipe ({title})"
+    else:
+        # Defaults to Brine for standard Supply/Return or numbered banks
+        header_text = f"Brine Temperatures for Bank ({title})"
+
+    # --- Graph Footers (Annotations) ---
+    footer_annotations = [
+        # Lower Left Footer: Project Name & Number
+        dict(
+            x=0.0, y=-0.14, # Negative Y pushes it below the X-axis
+            xref='paper', yref='paper',
+            text=f"<b>Project:</b> {p_name}",
+            showarrow=False, xanchor='left', yanchor='top',
+            font=dict(size=13, color="#666")
+        ),
+        # Lower Right Footer: Graph Type
+        dict(
+            x=1.0, y=-0.14,
+            xref='paper', yref='paper',
+            text=f"<b>Type:</b> {title}",
+            showarrow=False, xanchor='right', yanchor='top',
+            font=dict(size=13, color="#666")
+        )
+    ]
+
     fig.update_layout(
-        title=dict(text=f"<b>{p_name} - Thermal Trend - {title}</b>", x=0.02, y=0.98, font=dict(size=18)),
-        plot_bgcolor='white', hovermode="x unified", height=650,
+        title=dict(text=f"<b>{header_text}</b>", x=0.02, y=0.96, font=dict(size=19)),
+        plot_bgcolor='white', hovermode="x unified", height=680,
+        margin=dict(l=60, r=40, t=60, b=100), # Expanded bottom margin (b=100) to give the footers room to breathe
+        annotations=footer_annotations,
         xaxis=dict(range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, hoverformat='%A, %b %d, %Y', tickformat='%b %d', minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')),
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
