@@ -523,11 +523,19 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
     # Only inject if toggled ON AND if this is a Brine/Bank graph (not a TempPipe graph)
+    # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
     is_brine_graph = not is_temp_pipe
     
     if st.session_state.get('global_show_ambient', True) and is_brine_graph:
-    # Use the project name passed into the function to ensure 100% accuracy
-        p_name = str(plot_df['Project'].iloc[0]) if 'Project' in plot_df.columns else ""
+        # THE FIX: Accurately grab the project name using the correct dataframe column
+        p_name = ""
+        if 'Project' in plot_df.columns and not plot_df.empty:
+            p_name = str(plot_df['Project'].iloc[0])
+        elif 'Raw_Project_Name' in plot_df.columns and not plot_df.empty:
+            p_name = str(plot_df['Raw_Project_Name'].iloc[0])
+        else:
+            p_name = st.session_state.get('selected_project', '')
+            
         job_num = p_name.split('-')[0].strip()
         
         if job_num:
@@ -982,7 +990,10 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     # One more aggressive scrub to catch any strange casing variations
     p_df = p_df[~p_df['Location'].astype(str).str.upper().str.contains('AMBIENT', na=False)]
 
-    locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()], key=natural_sort_key)
+    # THE FIX: Force Location column to pure strings to prevent pandas type-matching failures
+    p_df['Location'] = p_df['Location'].astype(str).str.strip()
+
+    locations = sorted(p_df['Location'].unique(), key=natural_sort_key)
 
     for i, loc in enumerate(locations):
         with st.expander(f"📍 Location: {loc}", expanded=True):
