@@ -1052,12 +1052,13 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
         return
 
-    st.sidebar.subheader("📐 Profile Settings")
-    lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
-
+    # THE FIX: Stop using a local slider. Read the global one from the sidebar.
+    lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
+    st.sidebar.caption(f"📏 Depth Charts using Global {lookback_weeks}-week window.")
+    
     with st.spinner("Fetching historical telemetry..."):
         p_df = get_universal_portal_data(selected_project)
-
+        
     if p_df is None or p_df.empty:
         st.warning("No data found for this project.")
         return
