@@ -1177,33 +1177,30 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
 
             # --- C. HISTORICAL SNAPSHOTS ---
+            # THE FIX: We must use the 'mondays' list we calculated based on the slider, 
+            # not a fixed iteration of periods.
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
                 
+                # Skip if this date matches our special snapshots
                 if current_loop_date == baseline_date_str or current_loop_date == recent_6am_date_str:
                     continue
                     
+                # Search a 24-hour window around the Monday 6 AM mark
                 window = loc_data[
                     (loc_data['timestamp_local'] >= target_ts - pd.Timedelta(hours=12)) & 
                     (loc_data['timestamp_local'] <= target_ts + pd.Timedelta(hours=12))
                 ]
                 
                 if not window.empty:
+                    # Pick the data point closest to 6 AM in that window
                     snap_week = (
                         window.assign(diff=(window['timestamp_local'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
                         .drop_duplicates('NodeNum')
                         .sort_values('Depth_Num')
                     )
-                    
-                    if snap_week.empty:
-                        snap_week = (
-                            window.assign(hour_dist=(window['timestamp_local'].dt.hour - 6).abs())
-                            .sort_values(by=['hour_dist', 'timestamp_local'])
-                            .drop_duplicates('NodeNum')
-                            .sort_values('Depth_Num')
-                        )
                     
                     temps = snap_week['temperature']
                     if unit_mode == "Celsius": temps = (temps - 32) * 5/9
