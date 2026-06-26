@@ -1301,11 +1301,19 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     Page Name: Sensor Status
     Strictly locked to: project_registry, master_data_view, and manual_rejections.
     """
-    # 1. HEADER LOGIC (Source: project_registry via Sidebar Session State)
+    # 1. HEADER & PHASE LOGIC (Place this logic here)
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
         return
+
+    # Extract phase from project name if available
+    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+    phase_filter_sql = ""
+    if phase_match:
+        target_phase = phase_match.group(1)
+        phase_filter_sql = f"AND m.Phase = '{target_phase}'"
+        st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
 
     p_name = p_meta.get('ProjectName', selected_project)
     f_date = p_meta.get('Date_Freezedown')
@@ -1322,6 +1330,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             WHERE m.Project = @proj_id 
+              {phase_filter_sql}
               AND m.NodeNum IS NOT NULL
         ),
         GapAnalysis AS (
