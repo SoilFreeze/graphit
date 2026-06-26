@@ -974,14 +974,15 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     elif len(avail_systems) == 1:
         st.caption(f"Showing data for System: **{avail_systems[0]}**")
 
-    # 4. FILTERING
-    trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
+    # 5. LOCATION-BASED PLOTTING LOOP
+    # Purge trash locations and Ambient entirely before building the container list
+    trash_locations = ['Dead Stock', 'Elizabeth', 'Office', 'Ambient', 'AMBIENT']
     p_df = p_df[~p_df['Location'].isin(trash_locations)].copy()
     
-    # THE FIX: Exclude 'Ambient' from generating its own standalone graph container,
-    # as it is injected directly into Brine/Bank graphs as a layer.
-    raw_locations = p_df['Location'].dropna().unique()
-    locations = sorted([str(loc) for loc in raw_locations if 'ambient' not in str(loc).lower()], key=natural_sort_key)
+    # One more aggressive scrub to catch any strange casing variations
+    p_df = p_df[~p_df['Location'].astype(str).str.upper().str.contains('AMBIENT', na=False)]
+
+    locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()], key=natural_sort_key)
 
     for i, loc in enumerate(locations):
         with st.expander(f"📍 Location: {loc}", expanded=True):
