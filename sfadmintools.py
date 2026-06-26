@@ -522,8 +522,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         ))
 
     # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
-    # Only inject if toggled ON AND if this is a Brine/Bank graph (not a TempPipe graph)
-    # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
     is_brine_graph = not is_temp_pipe
     
     if st.session_state.get('global_show_ambient', True) and is_brine_graph:
