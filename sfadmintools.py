@@ -957,12 +957,14 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     # --- AUTO-FILTER BY PHASE FROM PROJECT TITLE ---
+    # We strip any whitespace and handle the Phase as a STRING to match the schema
     import re
     phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
     
     if phase_match:
         target_phase = phase_match.group(1)
-        p_df = p_df[p_df['Phase'].astype(str) == target_phase]
+        # Using string matching explicitly since the schema defines Phase as STRING
+        p_df = p_df[p_df['Phase'].astype(str).str.strip() == target_phase]
         st.caption(f"🎯 Auto-filtered to **Phase {target_phase}** based on project selection.")
     
     # --- MANUAL SYSTEM FILTER ---
