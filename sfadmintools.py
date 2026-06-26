@@ -1330,14 +1330,19 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         phase_sql = f"AND TRIM(CAST(m.Phase AS STRING)) = '{target_phase}'"
         st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
 
-    # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view_v2)
+    # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view_v2 and node_registry)
     query = f"""
         WITH BaseReporting AS (
             SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
             FROM `{MASTER_VIEW}` m
+            JOIN `sensorpush-export.Temperture.node_registry` n 
+              -- Map inventory by isolating the ID prefix before any periods
+              ON SPLIT(CAST(m.NodeNum AS STRING), '.')[OFFSET(0)] = SPLIT(CAST(n.NodeNum AS STRING), '.')[OFFSET(0)]
             WHERE m.Project LIKE CONCAT(@job_num, '%') 
               {phase_sql}
               AND m.NodeNum IS NOT NULL
+              -- Strictly filter to active hardware
+              AND UPPER(CAST(n.Status AS STRING)) = 'ON PROJECT'
         ),
         GapAnalysis AS (
             SELECT *, LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
