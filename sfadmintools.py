@@ -1303,19 +1303,11 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     Page Name: Sensor Status
     Strictly locked to: project_registry, master_data_view_v2, and manual_rejections.
     """
-    # 1. HEADER & PHASE LOGIC (Place this logic here)
+    # 1. HEADER LOGIC
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
         return
-
-    # Extract phase from project name if available
-    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
-    phase_filter_sql = ""
-    if phase_match:
-        target_phase = phase_match.group(1)
-        phase_filter_sql = f"AND m.Phase = '{target_phase}'"
-        st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
 
     p_name = p_meta.get('ProjectName', selected_project)
     f_date = p_meta.get('Date_Freezedown')
@@ -1326,15 +1318,25 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
+    # --- THE FIX: Extract Job Number and Phase for accurate v2 querying ---
+    job_num = str(selected_project).split('-')[0].strip()
+    
+    import re
+    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+    phase_sql = ""
+    if phase_match:
+        target_phase = phase_match.group(1)
+        # Safely cast to string and trim to match your v2 schema perfectly
+        phase_sql = f"AND TRIM(CAST(m.Phase AS STRING)) = '{target_phase}'"
+        st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
+
     # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view_v2)
-    # The fix: Updated table reference to point to MASTER_VIEW
-    # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view_v2)
-    # The fix: Updated table reference to MASTER_VIEW and used LIKE for partial matching
     query = f"""
         WITH BaseReporting AS (
             SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
             FROM `{MASTER_VIEW}` m
-            WHERE m.Project LIKE CONCAT(@proj_id, '%') 
+            WHERE m.Project LIKE CONCAT(@job_num, '%') 
+              {phase_sql}
               AND m.NodeNum IS NOT NULL
         ),
         GapAnalysis AS (
@@ -1369,9 +1371,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     """
 
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
     )
-
     try:
         df = client.query(query, job_config=job_config).to_dataframe()
         if df.empty:
