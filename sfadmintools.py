@@ -1299,7 +1299,7 @@ def assign_row_color(hours):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Strictly locked to: project_registry, master_data_view, and manual_rejections.
+    Strictly locked to: project_registry, master_data_view_v2, and manual_rejections.
     """
     # 1. HEADER & PHASE LOGIC (Place this logic here)
     p_meta = st.session_state.get('project_metadata')
@@ -1371,7 +1371,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     try:
         df = client.query(query, job_config=job_config).to_dataframe()
         if df.empty:
-            st.warning("No data found in master_data_view for this project.")
+            st.warning("No data found in master_data_view_v2 for this project.")
             return
 
         # 3. STATUS & LAG CALCULATIONS
@@ -1498,7 +1498,7 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
             AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
             AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev
         FROM `{target_registry}` n
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m 
+        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
           ON n.NodeNum = m.NodeNum AND m.NodeNum IS NOT NULL
         WHERE n.Project = @proj_id AND (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
         GROUP BY 1, 2, 3, 4, 5
@@ -2206,7 +2206,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     """
     # Establish explicit table paths mapped directly out of your data view catalog
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
-    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" 
 
     st.title("⚡ Bulk Approval and Database Maintenance")
     st.divider()
@@ -2533,7 +2533,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider(); st.markdown("### 🏗️ Active Deployment Overview Matrix")
         try:
-            sum_q = f"SELECT p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown, COUNT(DISTINCT n.NodeNum) as Mapped_Sensors, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_6h, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h FROM `{PROJECT_REGISTRY_TABLE}` p LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON p.Project = n.Project LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '') AND p.ShowActive IS TRUE AND UPPER(p.Project) NOT LIKE '%OFFICE%' GROUP BY 1,2,3,4 ORDER BY p.Project ASC"
+            sum_q = f"SELECT p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown, COUNT(DISTINCT n.NodeNum) as Mapped_Sensors, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_6h, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h FROM `{PROJECT_REGISTRY_TABLE}` p LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON p.Project = n.Project LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m ON n.NodeNum = m.NodeNum WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '') AND p.ShowActive IS TRUE AND UPPER(p.Project) NOT LIKE '%OFFICE%' GROUP BY 1,2,3,4 ORDER BY p.Project ASC"
             rows = []
             for _, r in client.query(sum_q).to_dataframe().iterrows():
                 elapsed = max(0, (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(r['Date_Freezedown']).date()).days) if pd.notnull(r['Date_Freezedown']) else 0
@@ -2645,7 +2645,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                 st.write("📅 Checking historical system check-in history benchmarks...")
                 try:
-                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` GROUP BY NodeNum"
+                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` GROUP BY NodeNum"
                     for row in client.query(time_q):
                         if row.max_time:
                             db_max_timestamps[str(row.NodeNum)] = str(row.max_time)
@@ -2828,7 +2828,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                 st.write("📅 Checking Database For Last Known Data Points...")
                 try:
-                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` GROUP BY NodeNum"
+                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` GROUP BY NodeNum"
                     for row in client.query(time_q):
                         if row.max_time:
                             db_max_timestamps[str(row.NodeNum)] = str(row.max_time)
