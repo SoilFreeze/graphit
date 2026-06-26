@@ -411,9 +411,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     """
     Engineering-grade Trend Graph.
     """
-    # --- FIX 1: KILL GHOST GRAPHS ---
-    # If the app tries to build a dedicated graph for Ambient or Office, we abort it immediately.
     title_lower = str(title).lower()
+    
+    # FIX 1: KILL GHOST GRAPHS
     if any(x in title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
         return None
         
@@ -433,16 +433,16 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig = go.Figure()
     final_end_view, final_start_view = end_view, start_view
 
-    # --- FIX 2: CURVE SHIELD ---
-    # Only allow theoretical curves to query and plot if this is specifically a Temp Pipe graph.
-    is_temp_pipe = any(x in title_lower for x in ['pipe', 'tp', 'depth']) or str(title).strip().upper().startswith('T')
+    # FIX 2: IMPROVED CURVE SHIELD
+    # Define what constitutes a Temp Pipe
+    is_temp_pipe = any(x in title_lower for x in ['pipe', 'tp', 'depth']) or title_lower.startswith('t')
     
-    if curve_id and curve_id != "None" and f_start_date and is_temp_pipe:
+    # Only allow curves if this IS a Temp Pipe graph AND the toggle is ON
+    if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and st.session_state.get('global_show_ref', True):
         try:
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip() if len(parts) > 0 else ""
             loc_raw = parts[1].strip() if len(parts) > 1 else ""
-            
             digits = re.findall(r'\d+', loc_raw)
             loc_digit = digits[0] if digits else ""
             
@@ -473,7 +473,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         legendrank=1 
                     ))
         except:
-            pass # Fail silently
+            pass
                 
     # 3. SENSOR DATA (Prioritized & Filtered)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
@@ -524,10 +524,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
     # Only inject if toggled ON AND if this is a Brine/Bank graph (not a TempPipe graph)
-    is_brine_graph = not any(x in title_lower for x in ['pipe', 'tp', 'depth'])
+    is_brine_graph = not is_temp_pipe
     
     if st.session_state.get('global_show_ambient', True) and is_brine_graph:
-        # Use the project name passed into the function to ensure 100% accuracy
+    # Use the project name passed into the function to ensure 100% accuracy
         p_name = str(plot_df['Project'].iloc[0]) if 'Project' in plot_df.columns else ""
         job_num = p_name.split('-')[0].strip()
         
