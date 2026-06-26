@@ -1041,7 +1041,6 @@ def render_global_overview(selected_project, project_metadata, display_tz):
 #########################
 # Page 3 - Depth Charts #
 #########################
-
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Vertical Temperature Profiles.
@@ -1082,9 +1081,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
 
     # Convert native view Depth values straight into a graph-safe float coordinate
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-
-    # Convert native view Depth values straight into a graph-safe float coordinate
-    p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
     p_df = p_df[p_df['temperature'] <= 120.0]
     
     # --- INTERCEPT: Actively strip out Banks and Ambient sensors ---
@@ -1113,7 +1109,11 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     
     now_utc = pd.Timestamp.now(tz='UTC')
-    mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
+    
+    # THE FIX 1: Calculate strict historical cutoff window based on the slider
+    cutoff_date = now_utc - pd.Timedelta(weeks=lookback_weeks)
+    mondays = pd.date_range(start=cutoff_date, end=now_utc, freq='W-MON')
+    
     locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
     
     for loc in locations:
@@ -1126,7 +1126,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             
             fig = go.Figure()
 
-            # --- A. BASELINE Snapshots ---
+            # --- A. BASELINE Snapshots (Always renders absolute oldest point) ---
             baseline_ts = loc_data['timestamp_local'].min()
             b_window = loc_data[
                 (loc_data['timestamp_local'] >= baseline_ts - pd.Timedelta(hours=12)) & 
@@ -1251,10 +1251,12 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
+            # THE FIX 2: Added explicit padding margins (l, r, t, b) so the right mirror border isn't cut off
             fig.update_layout(
                 title=f"<b>Temp vs Depth - {loc}</b>",
                 plot_bgcolor='white', 
                 height=800,
+                margin=dict(l=60, r=40, t=80, b=80), 
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
                     range=[-20, 80], dtick=10,
