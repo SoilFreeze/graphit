@@ -1324,13 +1324,13 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view)
+    # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view_v2)
+    # The fix: Updated table reference to point to MASTER_VIEW
     query = f"""
         WITH BaseReporting AS (
             SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            WHERE m.Project = @proj_id 
-              {phase_filter_sql}
+            FROM `{MASTER_VIEW}` m
+            WHERE m.Project LIKE CONCAT(@proj_id, '%') 
               AND m.NodeNum IS NOT NULL
         ),
         GapAnalysis AS (
@@ -1350,7 +1350,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h_f,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h_f,
 
-                -- Hourly Coverage Calculation (Distinct hours seen / Total hours in period)
+                -- Hourly Coverage Calculation
                 (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
                 (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 168 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 168.0) * 100 as coverage_7d,
 
