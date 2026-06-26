@@ -978,6 +978,15 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
     p_df = p_df[~p_df['Location'].isin(trash_locations)].copy()
     
+    # THE FIX: Exclude 'Ambient' from generating its own standalone graph container,
+    # as it is injected directly into Brine/Bank graphs as a layer.
+    raw_locations = p_df['Location'].dropna().unique()
+    locations = sorted([str(loc) for loc in raw_locations if 'ambient' not in str(loc).lower()], key=natural_sort_key)
+
+    for i, loc in enumerate(locations):
+        with st.expander(f"📍 Location: {loc}", expanded=True):
+            loc_df = p_df[p_df['Location'] == loc].copy()
+    
     mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
     if not show_masked and mask_col in p_df.columns:
         p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
