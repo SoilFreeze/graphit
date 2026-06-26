@@ -251,8 +251,6 @@ if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
         
 st.sidebar.divider()
 
-st.sidebar.divider()
-
 # 3. GLOBAL VIEW TOGGLES & INTERACTIVE LOOKBACK
 st.sidebar.subheader("👁️ Visibility Controls")
 
@@ -583,7 +581,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
     clean_title = str(title).replace("Thermal Trends:", "").strip()
     
-    if any(x in title_lower for x in ['pipe', 'tp', 'depth']) or clean_title.upper().startswith('T'):
+    # --- THE FIX: Use the variable we already defined above ---
+    if is_temp_pipe:
         header_text = f"Time vs Temperature - Temperatures for Temperature Pipe {clean_title}"
     else:
         header_text = f"Time vs Temperature - Temperatures for Brine Bank {clean_title}"
