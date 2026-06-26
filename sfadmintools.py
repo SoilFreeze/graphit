@@ -990,19 +990,46 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     # One more aggressive scrub to catch any strange casing variations
     p_df = p_df[~p_df['Location'].astype(str).str.upper().str.contains('AMBIENT', na=False)]
 
-    # THE FIX: Force Location column to pure strings to prevent pandas type-matching failures
+    # Force string types, and drop any pure garbage string anomalies
     p_df['Location'] = p_df['Location'].astype(str).str.strip()
-
-    locations = sorted(p_df['Location'].unique(), key=natural_sort_key)
+    valid_locations = [loc for loc in p_df['Location'].unique() if loc.lower() not in ['nan', 'none', '', 'unassigned']]
+    locations = sorted(valid_locations, key=natural_sort_key)
 
     for i, loc in enumerate(locations):
-        with st.expander(f"📍 Location: {loc}", expanded=True):
-            loc_df = p_df[p_df['Location'] == loc].copy()
-    
-    mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
-    if not show_masked and mask_col in p_df.columns:
-        p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
+        loc_df = p_df[p_df['Location'] == loc].copy()
+        
+        if loc_df.empty:
+            continue
+            
+        clean_proj_id = str(selected_project).split('-')[0]
+        clean_loc_num = "".join(re.findall(r'\d+', loc))
+        normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
+        search_id = f"{clean_proj_id}-{normalized_loc}"
+        is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R", "AMB"])
 
+        # THE FIX: Generate the figure in memory FIRST
+        fig = build_high_speed_graph(
+            df=loc_df, 
+            title=f"Thermal Trends: {loc}", 
+            start_view=start_view, 
+            end_view=end_view, 
+            active_refs=active_refs, 
+            unit_mode=unit_mode, 
+            unit_label=unit_label, 
+            display_tz=display_tz,
+            mobile_mode=False, 
+            f_start_date=f_start_date,
+            curve_id=search_id if (show_ref and is_temp_pipe) else None
+        )
+        
+        # THE FIX: Only draw the expander UI if the graph actually successfully generated valid data lines
+        if fig is not None and hasattr(fig, 'data') and len(fig.data) > 0:
+            with st.expander(f"📍 Location: {loc}", expanded=True):
+                st.plotly_chart(
+                    fig, 
+                    use_container_width=True, 
+                    key=f"tvt_{selected_project}_{loc}_{i}"
+                )
     lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
     now_local = pd.Timestamp.now(tz=display_tz)
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
