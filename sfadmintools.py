@@ -1326,6 +1326,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
     # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view_v2)
     # The fix: Updated table reference to point to MASTER_VIEW
+    # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view_v2)
+    # The fix: Updated table reference to MASTER_VIEW and used LIKE for partial matching
     query = f"""
         WITH BaseReporting AS (
             SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
