@@ -411,10 +411,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     """
     Engineering-grade Trend Graph.
     """
-    title_lower = str(title).lower()
+    # STRIP THE PREFIX BEFORE CHECKING GRAPH TYPE
+    clean_title_lower = str(title).lower().replace("thermal trends:", "").strip()
     
-    # FIX 1: KILL GHOST GRAPHS
-    if any(x in title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
+    # --- FIX 1: KILL GHOST GRAPHS ---
+    if any(x in clean_title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
         return None
         
     if df.empty: return go.Figure().update_layout(title="No data available")
@@ -433,16 +434,16 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig = go.Figure()
     final_end_view, final_start_view = end_view, start_view
 
-    # FIX 2: IMPROVED CURVE SHIELD
-    # Define what constitutes a Temp Pipe
-    is_temp_pipe = any(x in title_lower for x in ['pipe', 'tp', 'depth']) or title_lower.startswith('t')
+    # --- FIX 2: CURVE SHIELD ---
+    # Now it checks the actual location name (e.g., "t1" instead of "thermal trends: t1")
+    is_temp_pipe = any(x in clean_title_lower for x in ['pipe', 'tp', 'depth']) or clean_title_lower.startswith('t')
     
-    # Only allow curves if this IS a Temp Pipe graph AND the toggle is ON
     if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and st.session_state.get('global_show_ref', True):
         try:
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip() if len(parts) > 0 else ""
             loc_raw = parts[1].strip() if len(parts) > 1 else ""
+            
             digits = re.findall(r'\d+', loc_raw)
             loc_digit = digits[0] if digits else ""
             
@@ -473,7 +474,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         legendrank=1 
                     ))
         except:
-            pass
+            pass # Fail silently
                 
     # 3. SENSOR DATA (Prioritized & Filtered)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
