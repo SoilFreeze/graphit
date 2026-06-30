@@ -1879,7 +1879,11 @@ def render_data_processing_page(selected_project):
                         if not df_processed.empty:
                             df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                             all_processed_dfs.append(df_processed)
-                            st.write(f"✅ Prepared {f_identifier}: {len(df_processed)} records.")
+                            
+                            # Grab the actual parsed node number for the UI message
+                            display_name = df_processed['NodeNum'].iloc[0] if 'NodeNum' in df_processed.columns else f_identifier
+                            
+                            st.write(f"✅ Prepared {display_name}: {len(df_processed)} records.")
                 
                 except Exception as e:
                     st.error(f"❌ Error processing {f.name}: {e}")
