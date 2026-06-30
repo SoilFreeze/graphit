@@ -1863,7 +1863,17 @@ def render_data_processing_page(selected_project):
                             if t_match and v_match:
                                 df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
                                 df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
-                                df_processed['NodeNum'] = f_identifier.split('/')[-1].replace('.csv', '').strip()
+                                
+                                # --- THE FIX: Clean SensorPush Export Filenames ---
+                                raw_filename = f_identifier.split('/')[-1].replace('.csv', '').strip()
+                                
+                                # If the filename contains '-starts-', split it and only keep the first part (the Node ID)
+                                if '-starts-' in raw_filename:
+                                    clean_node_num = raw_filename.split('-starts-')[0].strip()
+                                else:
+                                    clean_node_num = raw_filename
+                                    
+                                df_processed['NodeNum'] = clean_node_num
                                 target_table = "raw_sensorpush"
                         
                         if not df_processed.empty:
