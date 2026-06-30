@@ -3199,13 +3199,13 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     st.error(f"Performance Analysis Compiler Error: {e}")
 
     # =========================================================================
-    # TAB 3: ASSET EXCEPTION ALERTS
+    # TAB 3: NODE ALERT
     # =========================================================================
-    with tab_alerts:
-        st.subheader("⚠️ System Infrastructure Exception Monitoring Dashboard")
-        st.write("Real-time exception tracking scanning the active sensor pool for telemetry dropout connections, raw thermal limits thresholds violations, and anomalous 24-hour sensor spikes.")
+    with tab_alerts: # Note: Update your st.tabs declaration above to name this "⚠️ Node Alert"
+        st.subheader("⚠️ Node Alert Dashboard")
+        st.write("Real-time tracking for telemetry dropouts, extreme temperature limits, and anomalous data spikes.")
         
-        # Build comprehensive multi-risk detection anomaly query block across the hardware fleet limits parameters
+        # Build comprehensive multi-risk detection query
         alert_q = f"""
             WITH NodeTimelineHistory AS (
                 SELECT 
@@ -3219,8 +3219,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     Project, NodeNum, Location, Bank, Depth,
                     MAX(timestamp) as last_seen_ts,
                     ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-                    MIN(temperature) as min_temp_24h,
-                    MAX(temperature) as max_temp_24h,
                     MAX(ABS(temperature - last_temp_val)) as max_single_spike_24h
                 FROM NodeTimelineHistory
                 GROUP BY Project, NodeNum, Location, Bank, Depth
@@ -3232,54 +3230,54 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             ORDER BY Project ASC, Location ASC
         """
         
-        with st.spinner("Scanning active arrays for anomaly exceptions profiles..."):
+        with st.spinner("Scanning active arrays for node alerts..."):
             try:
                 alert_df = client.query(alert_q).to_dataframe()
                 
                 if alert_df.empty:
-                    st.success("🎉 Outstanding Hardware Integrity Status! 0 active anomaly flag exception logs recorded across monitored fleet nodes matrices limits.")
+                    st.success("🎉 All clear! 0 active node alerts recorded across the monitored fleet.")
                 else:
                     alert_records_output_rows = []
                     now_utc = pd.Timestamp.now(tz='UTC')
                     
                     for _, r in alert_df.iterrows():
-                        reasons_detected = []
+                        issues = []
                         
-                        # Condition A: Latency dropout limits checks
+                        # Condition 1: Not Seen (>= 24 hours latency)
                         ts_aware = r['last_seen_ts'] if r['last_seen_ts'].tzinfo else r['last_seen_ts'].tz_localize('UTC')
                         latency_hours = (now_utc - ts_aware).total_seconds() / 3600.0
-                        
                         if latency_hours >= 24.0:
-                            reasons_detected.append(f"📡 Connection Lost Offline (无信号 ({latency_hours:.1f}h ago)")
+                            issues.append("Not Seen")
                             
-                        # Condition B: Extreme boundary limits metrics safety parameters violation checks
-                        if r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0:
-                            reasons_detected.append(f"🌡️ Physical Extreme Bounds Threshold Violation ({r['latest_temp']:.1f}°F)")
+                        # Condition 2: High/Low Extreme
+                        if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
+                            issues.append("High/Low Extreme")
                             
-                        # Condition C: Rate of change data spiking variance jump checks
+                        # Condition 3: Spiking data (>= 8°F jump in consecutive readings)
                         if pd.notnull(r['max_single_spike_24h']) and r['max_single_spike_24h'] >= 8.0:
-                            reasons_detected.append(f"📈 Erratic Chronological Spike Detected (ΔT: {r['max_single_spike_24h']:.1f}°F)")
+                            issues.append("Spiking data")
                             
-                        # Format row entries block for user UI visibility display output matrix
-                        pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and r['Depth'] != '') else f"Bank {r['Bank']}"
+                        # Format position label safely
+                        pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
                         
+                        # Append to dictionary in the exact requested column order
                         alert_records_output_rows.append({
-                            "Project ID": str(r['Project']),
-                            "Node ID": str(r['NodeNum']),
-                            "Location Reference": str(r['Location']),
-                            "Position Coordinates": pos_lbl,
-                            "Last Known Telemetry Ping": ts_aware.tz_convert(display_tz).strftime('%m/%d %H:%M'),
-                            "Detected Safety Anomaly Triggers": " | ".join(reasons_detected)
+                            "Node": str(r['NodeNum']),
+                            "Location": str(r['Location']),
+                            "Position": pos_lbl,
+                            "Last Seen": ts_aware.tz_convert(display_tz).strftime('%m/%d %H:%M'),
+                            "Project": str(r['Project']),
+                            "Issue": " | ".join(issues)
                         })
                         
-                    # Format output summary block table view frame layout elements
+                    # Render the final dataframe
                     st.dataframe(
                         pd.DataFrame(alert_records_output_rows),
                         use_container_width=True,
                         hide_index=True
                     )
             except Exception as e:
-                st.error(f"Asset Exception Anomaly Parser Fault Engine Error: {e}")
+                st.error(f"Alert Parser Error: {e}")
                 
 # =============================================================================
 # 12. MASTER LAYOUT FRAMEWORK PAGE ROUTER
