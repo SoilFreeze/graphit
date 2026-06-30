@@ -3042,7 +3042,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             with c_header:
                 st.markdown(f"##### 📈 Telemetry History for Node: `{target_node}`")
             with c_time:
-                # 2. Add dynamic timeline amounts
+                # Add dynamic timeline amounts
                 time_opt = st.selectbox("Historical Window:", ["30 Days", "60 Days", "90 Days", "1 Year", "All Time"], index=0)
                 
             days_map = {"30 Days": 30, "60 Days": 60, "90 Days": 90, "1 Year": 365, "All Time": 5000}
@@ -3082,7 +3082,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 m3.metric("Latest Project", str(meta_row['Project']))
                 m4.metric("Scanned Records", f"{len(node_history):,}")
 
-                # 3. Compile the Historical Placements Table
+                # Compile the Historical Placements Table
                 st.markdown("#### 🗺️ Historical Placements")
                 
                 # Copy and fill NA to ensure GroupBy works without dropping records
@@ -3110,13 +3110,25 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 st.dataframe(disp_placements, use_container_width=True, hide_index=True)
 
                 st.markdown("#### 📉 Temperature Trend")
+                
+                # Calculate exact bounds for the chart's X-axis to force the view window
+                now_ts = pd.Timestamp.now(tz=display_tz)
+                start_ts = now_ts - pd.Timedelta(days=lookback_days)
+                
                 fig = px.line(
                     node_history, x='timestamp', y='temperature',
                     labels={'timestamp': 'Time', 'temperature': f'Temperature ({unit_label})'},
                     color_discrete_sequence=['#1f77b4']
                 )
+                
                 fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
-                fig.update_xaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+                
+                # Force the x-axis range to strictly match the selected time window
+                fig.update_xaxes(
+                    range=[start_ts, now_ts],
+                    showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True
+                )
+                
                 fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
                 
                 # Overlay standard freezing marker reference point bounds
@@ -3124,10 +3136,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue")
                 
                 st.plotly_chart(fig, use_container_width=True)
-                
-                # Expandable Detailed Storage Ledger
-                with st.expander("🗄️ Inspect Consolidated Raw Historical Data Ledger", expanded=False):
-                    st.dataframe(node_history, use_container_width=True, hide_index=False)
 
     # =========================================================================
     # TAB 2: THERMAL PERFORMANCE METRICS
