@@ -1863,13 +1863,27 @@ def render_data_processing_page(selected_project):
                             if t_match and v_match:
                                 df_processed['timestamp'] = pd.to_datetime(df_raw[t_match], errors='coerce', utc=True)
                                 df_processed['temperature'] = pd.to_numeric(df_raw[v_match], errors='coerce')
-                                df_processed['NodeNum'] = f_identifier.split('/')[-1].replace('.csv', '').strip()
+                                
+                                # --- THE FIX: Clean SensorPush Export Filenames ---
+                                raw_filename = f_identifier.split('/')[-1].replace('.csv', '').strip()
+                                
+                                # If the filename contains '-starts-', split it and only keep the first part (the Node ID)
+                                if '-starts-' in raw_filename:
+                                    clean_node_num = raw_filename.split('-starts-')[0].strip()
+                                else:
+                                    clean_node_num = raw_filename
+                                    
+                                df_processed['NodeNum'] = clean_node_num
                                 target_table = "raw_sensorpush"
                         
                         if not df_processed.empty:
                             df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
                             all_processed_dfs.append(df_processed)
-                            st.write(f"✅ Prepared {f_identifier}: {len(df_processed)} records.")
+                            
+                            # Grab the actual parsed node number for the UI message
+                            display_name = df_processed['NodeNum'].iloc[0] if 'NodeNum' in df_processed.columns else f_identifier
+                            
+                            st.write(f"✅ {display_name}: {len(df_processed)} records.")
                 
                 except Exception as e:
                     st.error(f"❌ Error processing {f.name}: {e}")
@@ -2231,7 +2245,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     )
     
     # Split utilities into clean side-by-side management columns
-    clean_col1, clean_col2 = st.columns(2)
+    clean_col1, clean_col2, clean_col3 = st.columns(3)
     
     with clean_col1:
         st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
@@ -2242,6 +2256,13 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
         st.write("##### 🧼 Approval String Casing Standardization")
         st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
         run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
+
+    with clean_col3:
+        st.write("##### 🧠 Smart TempPipe Spike Filter")
+        st.caption("Auto-masks TempPipe readings that jump >5°F from adjacent records.")
+        run_smart_filter = st.button("🤖 Run TempPipe Smart Masking", use_container_width=True)
+
+    
 
     # --- PATHWAY A: COMPREHENSIVE HOURLY HOOD CONSOLIDATION ENGINE ---
     if run_telemetry_cleanup:
@@ -2337,6 +2358,52 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
             status_box_str.empty()
             st.error(f"Text String Cleanup Operation Failed: {e}")
 
+    # --- PATHWAY C: SMART FILTER ANOMALY MASKING ---
+    if run_smart_filter:
+        status_box_smart = st.empty()
+        try:
+            status_box_smart.markdown("🧠 **Scanning TempPipes for >5°F anomalies...**")
+            
+            # Uses LAG (previous) and LEAD (next) to compare chronological neighbors
+            spike_sql = f"""
+                MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
+                USING (
+                    WITH OrderedData AS (
+                        SELECT 
+                            NodeNum, 
+                            timestamp, 
+                            temperature,
+                            LAG(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp) as prev_temp,
+                            LEAD(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp) as next_temp
+                        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+                        -- Isolate TempPipes: Has depth, not ambient, not a bank
+                        WHERE Depth IS NOT NULL 
+                          AND TRIM(CAST(Depth AS STRING)) != '' 
+                          AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%'
+                    )
+                    SELECT DISTINCT NodeNum, timestamp
+                    FROM OrderedData
+                    WHERE (prev_temp IS NOT NULL AND ABS(temperature - prev_temp) > 5.0)
+                       OR (next_temp IS NOT NULL AND ABS(temperature - next_temp) > 5.0)
+                ) S
+                ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                WHEN MATCHED THEN UPDATE SET approve = 'MASKED'
+                WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, 'MASKED')
+            """
+            
+            job = client.query(spike_sql)
+            job.result()
+            
+            status_box_smart.empty()
+            st.success(f"🎉 Smart Filter applied! Successfully masked {job.num_dml_affected_rows:,} anomalous TempPipe records.")
+            st.cache_data.clear()
+            time.sleep(0.5)
+            st.rerun()
+            
+        except Exception as e:
+            status_box_smart.empty()
+            st.error(f"Smart Filter Operation Failed: {e}")
+    
     st.divider()
 
     # =========================================================================
@@ -2892,7 +2959,504 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_proj_master:
         st.subheader("🗄️ Complete Master Project Lifecycle Directory")
         st.dataframe(client.query(f"SELECT Project as `Project ID`, ProjectName as `Friendly Name`, ProjectStatus as `Operational Phase`, Date_Freezedown as `Freezedown Date`, City, Timezone FROM `{PROJECT_REGISTRY_TABLE}` ORDER BY Project ASC").to_dataframe(), use_container_width=True, hide_index=True)
+##################################
+# Page: Node Diagnostics (New)   #
+##################################
+def render_node_diagnostics(selected_project, display_tz, unit_label):
+    """
+    Diagnostic supervisor console for deep device investigation.
+    Provides three distinct tabs: raw history inspection, phase performance metrics, 
+    and real-time exception alerting.
+    """
+    st.header("🔬 Node Diagnostics Workspace")
+    
+    client = get_bq_client()
+    if client is None:
+        st.error("Database link offline.")
+        return
 
+    # Load down node inventory definitions for filter mappings
+    try:
+        reg_df = client.query(f"SELECT NodeNum, Project, Location, Depth, Bank FROM `{NODE_REGISTRY_TABLE}` WHERE End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = ''").to_dataframe()
+    except Exception as e:
+        st.error(f"Failed to fetch active registry for dropdown paths: {e}")
+        return
+
+    # Establish the three core tabs
+    tab_lookup, tab_performance, tab_alerts = st.tabs([
+        "🔍 Data Lookup", 
+        "📊 Thermal Performance Metrics", 
+        "⚠️ Node Alerts"
+    ])
+
+    # =========================================================================
+    # TAB 1: DATA LOOKUP ENGINE
+    # =========================================================================
+    with tab_lookup:
+        st.subheader("🔍 Individual Node Telemetry Inspection")
+        
+        # 1. Tie Project Scope to the Sidebar Context
+        scope_label = "Global Fleet" if selected_project == "All Projects" else selected_project
+        st.info(f"🎯 **Search Scope:** {scope_label} (Change in sidebar)")
+        
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            search_mode = st.radio("Search Method", ["Filter Mappings", "Search by Node ID"], horizontal=True)
+            
+        target_node = None
+        
+        # Filter registry based on the sidebar selection
+        if selected_project == "All Projects":
+            proj_filtered = reg_df 
+        else:
+            job_num = str(selected_project).split('-')[0].strip()
+            proj_filtered = reg_df[reg_df['Project'].astype(str).str.startswith(job_num)]
+            
+        if search_mode == "Filter Mappings":
+            with c2:
+                avail_locs = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
+                f_loc = st.selectbox("Physical Location Context", avail_locs, key="diag_f_loc")
+                
+            matching_nodes = sorted(proj_filtered[proj_filtered['Location'] == f_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+            if matching_nodes:
+                target_node = st.selectbox("Select Target Node to Inspect", matching_nodes, key="diag_node_select_dropdown")
+            else:
+                st.warning("No nodes match this configuration.")
+                
+        else:
+            with c2:
+                all_active_nodes = sorted(proj_filtered['NodeNum'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
+                selected_search_node = st.selectbox(
+                    "Type Node ID to Search:", 
+                    options=[""] + all_active_nodes,
+                    index=0,
+                    key="diag_direct_node_search"
+                )
+                if selected_search_node != "":
+                    target_node = selected_search_node
+
+        if target_node:
+            st.divider()
+            
+            c_header, c_time = st.columns([3, 1])
+            with c_header:
+                st.markdown(f"##### 📈 Telemetry History for Node: `{target_node}`")
+            with c_time:
+                # Add dynamic timeline amounts
+                time_opt = st.selectbox("Historical Window:", ["30 Days", "60 Days", "90 Days", "1 Year", "All Time"], index=0)
+                
+            days_map = {"30 Days": 30, "60 Days": 60, "90 Days": 90, "1 Year": 365, "All Time": 5000}
+            lookback_days = days_map[time_opt]
+            
+            # Master read query pulling localized node history down
+            node_q = f"""
+                SELECT timestamp, temperature, Location, Bank, Depth, Project, SensorStatus
+                FROM `{MASTER_VIEW}`
+                WHERE NodeNum = @target_node
+                  AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+                ORDER BY timestamp DESC
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("target_node", "STRING", target_node),
+                    bigquery.ScalarQueryParameter("lookback_days", "INTEGER", int(lookback_days))
+                ]
+            )
+            
+            with st.spinner(f"Fetching {time_opt} of node history..."):
+                node_history = client.query(node_q, job_config=job_config).to_dataframe()
+            
+            if node_history.empty:
+                st.warning(f"No telemetry data found for Node `{target_node}` in the past {time_opt}.")
+            else:
+                # Localize and convert time for entire dataframe first so aggregation works cleanly
+                if node_history['timestamp'].dt.tz is None:
+                    node_history['timestamp'] = node_history['timestamp'].dt.tz_localize('UTC')
+                node_history['timestamp'] = node_history['timestamp'].dt.tz_convert(display_tz)
+
+                # Meta overview statistics boxes
+                meta_row = node_history.iloc[0]
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
+                m2.metric("Latest Location", str(meta_row['Location']))
+                m3.metric("Latest Project", str(meta_row['Project']))
+                m4.metric("Scanned Records", f"{len(node_history):,}")
+
+                # Compile the Historical Placements Table
+                st.markdown("#### 🗺️ Historical Placements")
+                
+                # Copy and fill NA to ensure GroupBy works without dropping records
+                hist_df = node_history.copy()
+                hist_df[['Project', 'Location', 'Bank', 'Depth']] = hist_df[['Project', 'Location', 'Bank', 'Depth']].fillna('')
+                
+                placements = hist_df.groupby(['Project', 'Location', 'Bank', 'Depth']).agg(
+                    First_Seen=('timestamp', 'min'),
+                    Last_Seen=('timestamp', 'max'),
+                    Records=('timestamp', 'count')
+                ).reset_index().sort_values('Last_Seen', ascending=False)
+                
+                # Format coordinates and timestamps for display
+                def format_pos(r):
+                    if r['Depth']: return f"{r['Depth']}ft"
+                    if r['Bank']: return f"Bank {r['Bank']}"
+                    return "-"
+                    
+                placements['Position'] = placements.apply(format_pos, axis=1)
+                placements['First Seen'] = placements['First_Seen'].dt.strftime('%m/%d/%Y %H:%M')
+                placements['Last Seen'] = placements['Last_Seen'].dt.strftime('%m/%d/%Y %H:%M')
+                
+                # Reorder and display the clean matrix
+                disp_placements = placements[['Project', 'Location', 'Position', 'First Seen', 'Last Seen', 'Records']]
+                st.dataframe(disp_placements, use_container_width=True, hide_index=True)
+
+                st.markdown("#### 📉 Temperature Trend")
+                
+                # Calculate exact bounds for the chart's X-axis to force the view window
+                now_ts = pd.Timestamp.now(tz=display_tz)
+                start_ts = now_ts - pd.Timedelta(days=lookback_days)
+                
+                fig = px.line(
+                    node_history, x='timestamp', y='temperature',
+                    labels={'timestamp': 'Time', 'temperature': f'Temperature ({unit_label})'},
+                    color_discrete_sequence=['#1f77b4']
+                )
+                
+                fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
+                
+                # Force the x-axis range to strictly match the selected time window
+                fig.update_xaxes(
+                    range=[start_ts, now_ts],
+                    showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True
+                )
+                
+                fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+                
+                # Overlay standard freezing marker reference point bounds
+                freeze_pt = 0 if st.session_state.get("unit_mode") == "Celsius" else 32
+                fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue")
+                
+                st.plotly_chart(fig, use_container_width=True)
+
+    # =========================================================================
+    # TAB 2: THERMAL PERFORMANCE METRICS
+    # =========================================================================
+    # =========================================================================
+    # TAB 2: THERMAL PERFORMANCE METRICS (UPDATED)
+    # =========================================================================
+    with tab_performance:
+        st.subheader("📊 Ground Freezing System Performance")
+        
+        if selected_project == "All Projects":
+            st.info("💡 Please select a specific project in the sidebar.")
+        else:
+            job_num = str(selected_project).split('-')[0].strip()
+            
+            # This query pulls the rolling performance history for the last 7 days
+            perf_q = f"""
+                WITH RollingStats AS (
+                    SELECT 
+                        NodeNum, Location, temperature, timestamp,
+                        CASE WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType,
+                        AVG(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as mu,
+                        STDDEV(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as sigma
+                    FROM `{MASTER_VIEW}`
+                    WHERE Project LIKE CONCAT(@job_num, '%')
+                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                      AND temperature BETWEEN -30 AND 120
+                )
+                SELECT *, 
+                    (temperature - mu) / NULLIF(sigma, 0) as z_score,
+                    ABS(temperature - mu) as absolute_drift
+                FROM RollingStats
+            """
+            
+            perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
+            )).to_dataframe()
+
+            # --- GRAPHICAL SECTION: THERMODYNAMIC TRENDS ---
+            st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
+            
+            # Select specific nodes to compare drift
+            all_nodes = sorted(perf_df['NodeNum'].unique().tolist())
+            selected_nodes = st.multiselect("Compare Stability Trends for Nodes:", all_nodes, default=all_nodes[:3])
+            
+            if selected_nodes:
+                trend_df = perf_df[perf_df['NodeNum'].isin(selected_nodes)].copy()
+                
+                # Plot 1: Absolute Drift (Stability)
+                fig_drift = px.line(trend_df, x="timestamp", y="absolute_drift", color="NodeNum",
+                                   title="Thermal Drift (Abs Dev from 7d Mean)")
+                fig_drift.add_hline(y=2.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
+                st.plotly_chart(fig_drift, use_container_width=True)
+                
+                # Plot 2: Z-Score (Divergence from Cluster behavior)
+                fig_z = px.line(trend_df, x="timestamp", y="z_score", color="NodeNum",
+                                title="Z-Score (Statistical Divergence)")
+                fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange")
+                fig_z.add_hline(y=-2.0, line_dash="dot", line_color="orange")
+                st.plotly_chart(fig_z, use_container_width=True)
+
+            # [Keep your existing Data Grid code here...]
+            with st.spinner("Processing thermodynamic array calculus equations..."):
+                try:
+                    perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
+                        query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
+                    )).to_dataframe()
+                    
+                    if perf_df.empty:
+                        st.warning("Telemetry samples window dataset pool limits populated empty for this context scope window.")
+                    else:
+                        unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+                        
+                        def convert_t(v):
+                            if pd.isnull(v): return np.nan
+                            return (v - 32) * 5/9 if unit_mode == "Celsius" else v
+                            
+                        perf_df['Current Temp'] = perf_df['current_temp'].apply(convert_t)
+                        perf_df['7d Mean (μ)'] = perf_df['rolling_avg_7d'].apply(convert_t)
+                        perf_df['3h Slope (dT/dt)'] = perf_df['cooling_velocity_3h'] if unit_mode == "Fahrenheit" else perf_df['cooling_velocity_3h'] * 5/9
+                        perf_df['7d StdDev (σ)'] = perf_df['rolling_std_7d'] if unit_mode == "Fahrenheit" else perf_df['rolling_std_7d'] * 5/9
+                        perf_df['Cluster Deviation'] = perf_df['cluster_divergence_delta'] if unit_mode == "Fahrenheit" else perf_df['cluster_divergence_delta'] * 5/9
+                        
+                        # 4. Refined Urgent Metrics Classification
+                        def classify_performance_status(row):
+                            if row['3h Slope (dT/dt)'] >= 1.5: return "🔥 Rapid Warming (Urgent)"
+                            if abs(row['Cluster Deviation']) >= 4.0: return "🚨 Cluster Divergence"
+                            if pd.notnull(row['7d StdDev (σ)']) and pd.notnull(row['7d Mean (μ)']):
+                                upper_bound = row['rolling_avg_7d'] + (2 * row['rolling_std_7d'])
+                                if row['current_temp'] > upper_bound: return "⚠️ Thermal Drift"
+                            if row['3h Slope (dT/dt)'] <= -0.5: return "❄️ Freezing Active"
+                            return "🟢 Stable Maintenance"
+                            
+                        perf_df['Operational Assessment'] = perf_df.apply(classify_performance_status, axis=1)
+                        
+                        # 2. Hardcoded Color Palette Mapping
+                        status_color_map = {
+                            "🔥 Rapid Warming (Urgent)": "#8b0000", # Dark Red
+                            "🚨 Cluster Divergence": "#d62728",     # Bright Red
+                            "⚠️ Thermal Drift": "#ff7f0e",          # Orange
+                            "❄️ Freezing Active": "#1f77b4",        # Blue
+                            "🟢 Stable Maintenance": "#2ca02c"      # Green
+                        }
+
+                        # --- UI: DATA BREAKDOWN FILTERS ---
+                        c_filt, _ = st.columns([1, 2])
+                        with c_filt:
+                            pipe_filter = st.radio("Component Filter:", ["Temp Pipes", "Brine Banks", "All Components"], horizontal=True)
+                            
+                        if pipe_filter == "Temp Pipes":
+                            disp_df = perf_df[perf_df['PipeType'] == 'TempPipe']
+                        elif pipe_filter == "Brine Banks":
+                            disp_df = perf_df[perf_df['PipeType'] == 'Brine']
+                        else:
+                            disp_df = perf_df
+
+                        if disp_df.empty:
+                            st.info(f"No {pipe_filter} found for this project phase.")
+                        else:
+                            # 3. OVERALL SCORES: Location Performance Summary
+                            st.markdown(f"### 📍 Location Array Summary ({pipe_filter})")
+                            
+                            summary_rows = []
+                            for loc, loc_group in disp_df.groupby('Location'):
+                                total = len(loc_group)
+                                urgent = len(loc_group[loc_group['Operational Assessment'] == "🔥 Rapid Warming (Urgent)"])
+                                div_drift = len(loc_group[loc_group['Operational Assessment'].isin(["🚨 Cluster Divergence", "⚠️ Thermal Drift"])])
+                                freezing = len(loc_group[loc_group['Operational Assessment'] == "❄️ Freezing Active"])
+                                stable = len(loc_group[loc_group['Operational Assessment'] == "🟢 Stable Maintenance"])
+                                
+                                summary_rows.append({
+                                    "Location": str(loc),
+                                    "Total Nodes": total,
+                                    "🟢 Stable": stable,
+                                    "❄️ Freezing": freezing,
+                                    "⚠️ Drift/Divergence": div_drift,
+                                    "🔥 Urgent Action": urgent
+                                })
+                            
+                            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+                            # --- UI: GRAPHICAL ANALYSIS ---
+                            st.markdown("### 📈 Visual Thermodynamics")
+                            g1, g2 = st.columns(2)
+                            
+                            with g1:
+                                fig_scatter = px.scatter(
+                                    disp_df, x="Current Temp", y="3h Slope (dT/dt)", 
+                                    color="Operational Assessment",
+                                    color_discrete_map=status_color_map,
+                                    hover_data=["NodeNum", "Location", "position_label"],
+                                    title=f"Cooling Velocity vs Current Temp"
+                                )
+                                fig_scatter.add_hline(y=0, line_dash="dot", line_width=1, line_color="black")
+                                fig_scatter.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
+                                st.plotly_chart(fig_scatter, use_container_width=True)
+                                
+                            with g2:
+                                fig_bar = px.histogram(
+                                    disp_df, x="Location", color="Operational Assessment",
+                                    color_discrete_map=status_color_map,
+                                    title=f"Node Health Distribution by Location",
+                                    barmode="stack"
+                                )
+                                fig_bar.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
+                                st.plotly_chart(fig_bar, use_container_width=True)
+
+                            # --- UI: DATA GRID ---
+                            st.markdown("### 🗄️ Raw Mathematical Evaluation")
+                            output_cols = ["NodeNum", "Location", "position_label", "PipeType", "Current Temp", "3h Slope (dT/dt)", "7d Mean (μ)", "7d StdDev (σ)", "Cluster Deviation", "Operational Assessment"]
+                            
+                            st.dataframe(
+                                disp_df[output_cols].style.format({
+                                    "Current Temp": f"{{:.1f}}{unit_label}",
+                                    "3h Slope (dT/dt)": f"{{:+.2f}}{unit_label}/3h",
+                                    "7d Mean (μ)": f"{{:.1f}}{unit_label}",
+                                    "7d StdDev (σ)": "{:.2f}",
+                                    "Cluster Deviation": f"{{:+.1f}}{unit_label}"
+                                }),
+                                use_container_width=True, hide_index=True
+                            )
+                except Exception as e:
+                    st.error(f"Performance Analysis Compiler Error: {e}")
+
+    # =========================================================================
+    # TAB 3: NODE ALERT
+    # =========================================================================
+    with tab_alerts:
+        st.subheader("⚠️ Node Alert Dashboard")
+        st.write("Real-time tracking for telemetry dropouts, extreme temperature limits, and anomalous data spikes.")
+        
+        # FIX: Explicitly pull units from session_state to avoid local scope errors
+        unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+        unit_label = st.session_state.get("unit_label", "°F")
+        
+        archived_toggle = st.session_state.get('global_show_archived', False)
+        
+        # 1. Master Diagnostic Query
+        active_sql = "1=1" if archived_toggle else "UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
+        
+        alert_q = f"""
+            WITH ActiveJobs AS (
+                SELECT CAST(Project AS STRING) as FullProjectID, TRIM(SPLIT(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)], ' ')[OFFSET(0)]) as RootJob
+                FROM `{PROJECT_REGISTRY_TABLE}` WHERE {active_sql}
+            ),
+            BaseNodes AS (
+                SELECT n.NodeNum, CAST(n.Project AS STRING) as RawProject, n.Phase, n.Location, n.Bank, n.Depth,
+                CASE WHEN n.Depth IS NOT NULL AND TRIM(CAST(n.Depth AS STRING)) != '' AND UPPER(CAST(n.Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType
+                FROM `{NODE_REGISTRY_TABLE}` n
+                WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '') AND n.NodeNum IS NOT NULL
+            ),
+            MappedNodes AS (
+                SELECT b.NodeNum, b.RawProject, b.Location, b.Bank, b.Depth, b.PipeType, a.FullProjectID,
+                ROW_NUMBER() OVER(
+                    PARTITION BY b.NodeNum ORDER BY CASE WHEN a.FullProjectID IS NULL THEN 99 WHEN b.Phase IS NULL OR TRIM(CAST(b.Phase AS STRING)) = '' THEN 1 WHEN UPPER(a.FullProjectID) LIKE CONCAT('%PHASE%', TRIM(CAST(b.Phase AS STRING))) THEN 1 WHEN UPPER(a.FullProjectID) LIKE CONCAT('%PHASE %', TRIM(CAST(b.Phase AS STRING))) THEN 1 ELSE 2 END ASC
+                ) as rn
+                FROM BaseNodes b LEFT JOIN ActiveJobs a ON TRIM(b.RawProject) LIKE CONCAT(a.RootJob, '%')
+            ),
+            RegisteredNodes AS (
+                SELECT NodeNum, Location, Bank, Depth, PipeType, COALESCE(FullProjectID, RawProject) as FinalProjectLabel
+                FROM MappedNodes WHERE rn = 1 AND (FullProjectID IS NOT NULL OR UPPER(RawProject) LIKE '%OFFICE%')
+            ),
+            NodeTimelineHistory AS (
+                SELECT m.NodeNum, m.temperature, m.timestamp,
+                LAG(m.temperature) OVER (PARTITION BY m.NodeNum ORDER BY m.timestamp ASC) as last_temp_val
+                FROM `{MASTER_VIEW}` m WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+            ),
+            NodeAggregates AS (
+                SELECT h.NodeNum, MAX(h.timestamp) as last_seen_ts,
+                ARRAY_AGG(h.temperature ORDER BY h.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+                MAX(CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ABS(h.temperature - h.last_temp_val) ELSE 0 END) as max_single_spike_24h,
+                COUNT(DISTINCT CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(h.timestamp, HOUR) END) as hours_with_data_24h
+                FROM NodeTimelineHistory h GROUP BY h.NodeNum
+            ),
+            SpikeCounts AS (
+                SELECT h.NodeNum, COUNTIF(h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) AND h.last_temp_val IS NOT NULL AND ((r.PipeType = 'TempPipe' AND ABS(h.temperature - h.last_temp_val) > 1.0) OR (r.PipeType = 'Brine' AND ABS(h.temperature - h.last_temp_val) > 8.0))) as spike_count_24h
+                FROM NodeTimelineHistory h JOIN RegisteredNodes r ON h.NodeNum = r.NodeNum GROUP BY h.NodeNum
+            )
+            SELECT r.FinalProjectLabel as Project, r.NodeNum, r.Location, r.Bank, r.Depth, r.PipeType,
+            a.last_seen_ts, a.latest_temp, a.max_single_spike_24h, 
+            COALESCE(a.hours_with_data_24h, 0) as hours_with_data_24h,
+            COALESCE(s.spike_count_24h, 0) as spike_count_24h
+            FROM RegisteredNodes r
+            LEFT JOIN NodeAggregates a ON r.NodeNum = a.NodeNum
+            LEFT JOIN SpikeCounts s ON r.NodeNum = s.NodeNum
+            ORDER BY r.FinalProjectLabel ASC, r.Location ASC
+        """
+        
+        with st.spinner("Scanning active arrays for node alerts..."):
+            try:
+                alert_df = client.query(alert_q).to_dataframe()
+                
+                if alert_df.empty:
+                    st.info("No active registered nodes found matching the current active filters.")
+                else:
+                    missing_rows, extreme_rows, spiking_rows = [], [], []
+                    project_summary = {}
+                    now_utc = pd.Timestamp.now(tz='UTC')
+                    
+                    # Helper for temp conversion
+                    def convert_t(val):
+                        if pd.isnull(val): return val
+                        return (val - 32) * 5/9 if unit_mode == "Celsius" else val
+
+                    for _, r in alert_df.iterrows():
+                        proj_label = str(r['Project']) 
+                        if proj_label not in project_summary:
+                            project_summary[proj_label] = {"Total": 0, "Working Fine": 0, "Missing": 0, "Extreme": 0, "Spiking": 0}
+                        project_summary[proj_label]["Total"] += 1
+                        
+                        is_in_scope = (selected_project == "All Projects" or proj_label.strip().lower() == selected_project.strip().lower())
+                        pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
+                        
+                        last_seen_str, latency_hours = "❌ Never", 999.0
+                        if pd.notnull(r['last_seen_ts']):
+                            ts_aware = r['last_seen_ts'] if r['last_seen_ts'].tzinfo else r['last_seen_ts'].tz_localize('UTC')
+                            latency_hours = (now_utc - ts_aware).total_seconds() / 3600.0
+                            if latency_hours <= 1.0: last_seen_str = f"🟢 {latency_hours:.1f}h"
+                            elif latency_hours <= 6.0: last_seen_str = f"🟠 {latency_hours:.1f}h"
+                            else: last_seen_str = f"🔴 {latency_hours:.1f}h"
+
+                        node_has_issue = False
+
+                        if latency_hours > 24.0:
+                            node_has_issue = True
+                            project_summary[proj_label]["Missing"] += 1
+                            if is_in_scope:
+                                missing_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str})
+                            
+                        if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
+                            node_has_issue = True
+                            project_summary[proj_label]["Extreme"] += 1
+                            if is_in_scope:
+                                extreme_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str, "Current Temp": f"{convert_t(r['latest_temp']):.1f}{unit_label}"})
+                            
+                        spike_val, spike_count, hours_with_data = r['max_single_spike_24h'], int(r['spike_count_24h']), int(r['hours_with_data_24h'])
+                        if pd.notnull(spike_val) and spike_count > 0:
+                            node_has_issue = True
+                            project_summary[proj_label]["Spiking"] += 1
+                            if is_in_scope:
+                                spiking_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str, "Max Δ Temp": f"{convert_t(spike_val):.1f}{unit_label}", "Spike Count (24h)": f"{spike_count}x in {hours_with_data}h"})
+                        
+                        if not node_has_issue: project_summary[proj_label]["Working Fine"] += 1
+
+                    # UI RENDER
+                    st.markdown("#### 📊 Fleet Health Summary")
+                    sum_df_rows = [{"Project": p, **stats} for p, stats in project_summary.items()]
+                    st.dataframe(pd.DataFrame(sum_df_rows), use_container_width=True, hide_index=True)
+                    st.divider()
+
+                    scope_label = "Global Fleet" if selected_project == "All Projects" else selected_project
+                    st.markdown(f"### 🔍 Alerts: {scope_label}")
+                    
+                    for title, data in [("📡 Missing Nodes", missing_rows), ("🌡️ Extreme Temps", extreme_rows), ("📈 Spiking Data", spiking_rows)]:
+                        st.markdown(f"#### {title}")
+                        if data: st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+                        else: st.success(f"✅ Clear.")
+                        st.divider()
+            except Exception as e:
+                st.error(f"Alert Parser Error: {e}")
+                
 # =============================================================================
 # 12. MASTER LAYOUT FRAMEWORK PAGE ROUTER
 # =============================================================================
