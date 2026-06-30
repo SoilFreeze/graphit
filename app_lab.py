@@ -3205,31 +3205,17 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         st.subheader("⚠️ Node Alert Dashboard")
         st.write("Real-time tracking for telemetry dropouts, extreme temperature limits, and anomalous data spikes.")
         
-        # 1. Scope and Phase context handling
-        job_num_filter = ""
-        phase_filter = ""
-        
-        if selected_project != "All Projects":
-            job_num = str(selected_project).split('-')[0].strip()
-            job_num_filter = f"AND TRIM(CAST(n.Project AS STRING)) LIKE '{job_num}%'"
-            
-            import re
-            phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
-            if phase_match:
-                target_phase = phase_match.group(1)
-                phase_filter = f"AND TRIM(CAST(n.Phase AS STRING)) = '{target_phase}'"
-            
+        # Global toggle for showing archived/active projects
         archived_toggle = st.session_state.get('global_show_archived', False)
         
-        # 2. Master Diagnostic Query - Refactored for Best-Fit Joining
+        # 1. Master Diagnostic Query - Fetches the ENTIRE fleet for the Summary Table
         active_sql = "1=1" if archived_toggle else "UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
         
         alert_q = f"""
             WITH ActiveJobs AS (
                 SELECT 
                     CAST(Project AS STRING) as FullProjectID,
-                    TRIM(SPLIT(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)], ' ')[OFFSET(0)]) as RootJob,
-                    COALESCE(ProjectName, CAST(Project AS STRING)) as FriendlyName
+                    TRIM(SPLIT(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)], ' ')[OFFSET(0)]) as RootJob
                 FROM `{PROJECT_REGISTRY_TABLE}`
                 WHERE {active_sql}
             ),
@@ -3240,13 +3226,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 FROM `{NODE_REGISTRY_TABLE}` n
                 WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
                   AND n.NodeNum IS NOT NULL
-                  {job_num_filter}
-                  {phase_filter}
             ),
             MappedNodes AS (
                 SELECT 
                     b.NodeNum, b.RawProject, b.Location, b.Bank, b.Depth, b.PipeType,
-                    a.FriendlyName,
+                    a.FullProjectID,
                     ROW_NUMBER() OVER(
                         PARTITION BY b.NodeNum 
                         ORDER BY 
@@ -3265,10 +3249,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             RegisteredNodes AS (
                 SELECT 
                     NodeNum, Location, Bank, Depth, PipeType,
-                    COALESCE(FriendlyName, RawProject) as FinalProjectLabel
+                    -- Directly maps to the full Project ID from the registry
+                    COALESCE(FullProjectID, RawProject) as FinalProjectLabel
                 FROM MappedNodes
                 WHERE rn = 1
-                  AND (FriendlyName IS NOT NULL OR UPPER(RawProject) LIKE '%OFFICE%')
+                  AND (FullProjectID IS NOT NULL OR UPPER(RawProject) LIKE '%OFFICE%')
             ),
             NodeTimelineHistory AS (
                 SELECT 
@@ -3319,7 +3304,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 alert_df = client.query(alert_q).to_dataframe()
                 
                 if alert_df.empty:
-                    st.info("No active registered nodes found matching the current project scope and active filters.")
+                    st.info("No active registered nodes found matching the current active filters.")
                 else:
                     missing_rows, extreme_rows, spiking_rows = [], [], []
                     project_summary = {}
@@ -3328,14 +3313,17 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     for _, r in alert_df.iterrows():
                         proj_label = str(r['Project']) 
                             
+                        # 2. Accumulate ALL projects for the Top Summary Table
                         if proj_label not in project_summary:
                             project_summary[proj_label] = {"Total": 0, "Working Fine": 0, "Missing": 0, "Extreme": 0, "Spiking": 0}
                             
                         project_summary[proj_label]["Total"] += 1
                         
+                        # Apply Python-level scope filtering for the Detail Tables
+                        is_in_scope = (selected_project == "All Projects" or proj_label.strip().lower() == selected_project.strip().lower())
+                        
                         pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
                         
-                        # Apply the Sensor Status logic for the "Last Seen" column
                         last_seen_str = "❌ Never"
                         latency_hours = 999.0
                         
@@ -3362,25 +3350,27 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
                         node_has_issue = False
 
-                        # 1. EVALUATE MISSING
+                        # EVALUATE MISSING
                         if latency_hours > 24.0:
                             node_has_issue = True
                             project_summary[proj_label]["Missing"] += 1
-                            row_copy = base_row.copy()
-                            row_copy["Issue"] = "Missing"
-                            row_copy["Details"] = f"Offline for {latency_hours:.1f}h" if latency_hours < 900 else "No Recent Data"
-                            missing_rows.append(row_copy)
+                            if is_in_scope:
+                                row_copy = base_row.copy()
+                                row_copy["Issue"] = "Missing"
+                                row_copy["Details"] = f"Offline for {latency_hours:.1f}h" if latency_hours < 900 else "No Recent Data"
+                                missing_rows.append(row_copy)
                             
-                        # 2. EVALUATE EXTREME
+                        # EVALUATE EXTREME
                         if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
                             node_has_issue = True
                             project_summary[proj_label]["Extreme"] += 1
-                            row_copy = base_row.copy()
-                            row_copy["Issue"] = "Extreme Temp"
-                            row_copy["Details"] = f"{r['latest_temp']:.1f}°F"
-                            extreme_rows.append(row_copy)
+                            if is_in_scope:
+                                row_copy = base_row.copy()
+                                row_copy["Issue"] = "Extreme Temp"
+                                row_copy["Details"] = f"{r['latest_temp']:.1f}°F"
+                                extreme_rows.append(row_copy)
                             
-                        # 3. EVALUATE SPIKING
+                        # EVALUATE SPIKING
                         spike_val = r['max_single_spike_24h']
                         spike_count = int(r['spike_count_24h'])
                         hours_with_data = int(r['hours_with_data_24h'])
@@ -3389,21 +3379,21 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             is_temp_pipe = (r['PipeType'] == 'TempPipe')
                             node_has_issue = True
                             project_summary[proj_label]["Spiking"] += 1
-                            row_copy = base_row.copy()
-                            type_label = "TempPipe" if is_temp_pipe else "Brine"
-                            
-                            row_copy["Issue"] = f"{type_label} Spike"
-                            row_copy["Details"] = f"Max Δ {spike_val:.1f}°F | {spike_count}x in {hours_with_data}h"
-                            spiking_rows.append(row_copy)
+                            if is_in_scope:
+                                row_copy = base_row.copy()
+                                type_label = "TempPipe" if is_temp_pipe else "Brine"
+                                row_copy["Issue"] = f"{type_label} Spike"
+                                row_copy["Details"] = f"Max Δ {spike_val:.1f}°F | {spike_count}x in {hours_with_data}h"
+                                spiking_rows.append(row_copy)
                         
-                        # 4. EVALUATE HEALTHY
+                        # EVALUATE HEALTHY
                         if not node_has_issue:
                             project_summary[proj_label]["Working Fine"] += 1
 
                     # ==========================================
                     # UI RENDER: SUMMARY TOP-LEVEL TABLE
                     # ==========================================
-                    st.markdown("#### 📊 Project Health Summary")
+                    st.markdown("#### 📊 Fleet Health Summary (All Projects)")
                     sum_df_rows = []
                     for p, stats in project_summary.items():
                         sum_df_rows.append({
@@ -3422,11 +3412,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     # ==========================================
                     # UI RENDER: DETAILED ISSUE TABLES
                     # ==========================================
+                    scope_label = "Global Fleet" if selected_project == "All Projects" else selected_project
+                    st.markdown(f"### 🔍 Detailed Alerts: {scope_label}")
+                    
                     st.markdown("#### 📡 Missing Nodes (> 24 Hours or Never Seen)")
                     if missing_rows:
                         st.dataframe(pd.DataFrame(missing_rows), use_container_width=True, hide_index=True)
                     else:
-                        st.success("✅ No missing nodes detected.")
+                        st.success(f"✅ No missing nodes detected for {scope_label}.")
                         
                     st.divider()
                         
@@ -3434,7 +3427,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     if extreme_rows:
                         st.dataframe(pd.DataFrame(extreme_rows), use_container_width=True, hide_index=True)
                     else:
-                        st.success("✅ All active sensors reporting within normal physical limits.")
+                        st.success(f"✅ All active sensors reporting within normal physical limits for {scope_label}.")
                         
                     st.divider()
 
@@ -3442,7 +3435,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     if spiking_rows:
                         st.dataframe(pd.DataFrame(spiking_rows), use_container_width=True, hide_index=True)
                     else:
-                        st.success("✅ No anomalous temperature spikes detected.")
+                        st.success(f"✅ No anomalous temperature spikes detected for {scope_label}.")
 
             except Exception as e:
                 st.error(f"Alert Parser Error: {e}")
