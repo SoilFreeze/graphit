@@ -2997,14 +2997,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
-            search_mode = st.radio("Search Method", ["Filter Mappings", "Direct ID Entry"], horizontal=True)
+            search_mode = st.radio("Search Method", ["Filter Mappings", "Search by Node ID"], horizontal=True)
             
         target_node = None
         
         if search_mode == "Filter Mappings":
             with c2:
                 avail_projs = ["All Projects"] + sorted(reg_df['Project'].dropna().unique().tolist())
-                # Syncing default filter behavior with sidebar context selection if available
+                # Sync default filter behavior with sidebar context selection if available
                 default_proj_idx = avail_projs.index(selected_project) if selected_project in avail_projs else 0
                 f_proj = st.selectbox("Project Scope Context", avail_projs, index=default_proj_idx, key="diag_f_proj")
                 
@@ -3022,7 +3022,16 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 
         else:
             with c2:
-                target_node = st.text_input("Enter Exact Node ID (e.g., SP01 or Lord ID):", key="diag_direct_node_input").strip()
+                # Upgraded to a searchable selectbox loaded with the entire active fleet
+                all_active_nodes = sorted(reg_df['NodeNum'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
+                selected_search_node = st.selectbox(
+                    "Type Node ID to Search:", 
+                    options=[""] + all_active_nodes,
+                    index=0,
+                    key="diag_direct_node_search"
+                )
+                if selected_search_node != "":
+                    target_node = selected_search_node
 
         if target_node:
             # Re-read global history timeframe variables from sidebar memory space
