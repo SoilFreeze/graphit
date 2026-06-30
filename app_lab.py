@@ -3205,32 +3205,61 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         st.subheader("⚠️ Node Alert Dashboard")
         st.write("Real-time tracking for telemetry dropouts, extreme temperature limits, and anomalous data spikes.")
         
-        # Pull 7 days of history so nodes that died >24h ago are still caught by the latency check.
-        # Classifies TempPipes vs Brine directly in the query to handle different thermal thresholds.
+        # 1. Scope context handling
+        job_num_filter = ""
+        if selected_project != "All Projects":
+            job_num = str(selected_project).split('-')[0].strip()
+            job_num_filter = f"AND n.Project LIKE '{job_num}%'"
+            
+        archived_toggle = st.session_state.get('global_show_archived', False)
+        status_filter = "" if archived_toggle else "AND UPPER(TRIM(CAST(p.ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
+
+        # 2. Master Diagnostic Query
+        # Left joins the master registry to the 7-day telemetry window to ensure offline nodes are caught
         alert_q = f"""
-            WITH NodeTimelineHistory AS (
+            WITH ActiveProjects AS (
+                SELECT CAST(Project AS STRING) as Project 
+                FROM `{PROJECT_REGISTRY_TABLE}` p
+                WHERE Project IS NOT NULL 
+                  AND TRIM(CAST(Project AS STRING)) != ''
+                  {status_filter}
+            ),
+            RegisteredNodes AS (
+                SELECT n.NodeNum, n.Project, n.Location, n.Bank, n.Depth
+                FROM `{NODE_REGISTRY_TABLE}` n
+                JOIN ActiveProjects p ON n.Project = p.Project
+                WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
+                  AND n.NodeNum IS NOT NULL
+                  AND UPPER(n.Project) NOT LIKE '%OFFICE%'
+                  {job_num_filter}
+            ),
+            NodeTimelineHistory AS (
                 SELECT 
-                    Project, NodeNum, Location, Bank, Depth, temperature, timestamp,
-                    LAG(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as last_temp_val
-                FROM `{MASTER_VIEW}`
-                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                    m.NodeNum, m.temperature, m.timestamp,
+                    LAG(m.temperature) OVER (PARTITION BY m.NodeNum ORDER BY m.timestamp ASC) as last_temp_val
+                FROM `{MASTER_VIEW}` m
+                WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
             ),
             NodeAggregates AS (
                 SELECT 
-                    Project, NodeNum, Location, Bank, Depth,
+                    NodeNum,
                     MAX(timestamp) as last_seen_ts,
                     ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
                     MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
                              THEN ABS(temperature - last_temp_val) ELSE 0 END) as max_single_spike_24h
                 FROM NodeTimelineHistory
-                GROUP BY Project, NodeNum, Location, Bank, Depth
+                GROUP BY NodeNum
             )
-            SELECT *,
+            SELECT 
+                r.Project, r.NodeNum, r.Location, r.Bank, r.Depth,
+                a.last_seen_ts, a.latest_temp, a.max_single_spike_24h,
                 CASE 
-                    WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe'
+                    WHEN r.Depth IS NOT NULL AND TRIM(CAST(r.Depth AS STRING)) != '' AND UPPER(CAST(r.Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe'
                     ELSE 'Brine'
                 END as PipeType
-            FROM NodeAggregates
+            FROM RegisteredNodes r
+            LEFT JOIN NodeAggregates a ON r.NodeNum = a.NodeNum
+            ORDER BY r.Project ASC, r.Location ASC
         """
         
         with st.spinner("Scanning active arrays for node alerts..."):
@@ -3238,15 +3267,23 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 alert_df = client.query(alert_q).to_dataframe()
                 
                 if alert_df.empty:
-                    st.success("🎉 All clear! 0 active node alerts recorded across the monitored fleet.")
+                    st.info("No active registered nodes found matching the current project scope and active filters.")
                 else:
                     missing_rows, extreme_rows, spiking_rows = [], [], []
+                    
+                    # Dictionary to track project-level summary stats
+                    project_summary = {}
                     now_utc = pd.Timestamp.now(tz='UTC')
                     
                     for _, r in alert_df.iterrows():
-                        # Format Base Display Columns
-                        pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
+                        proj = str(r['Project'])
+                        if proj not in project_summary:
+                            project_summary[proj] = {"Total": 0, "Working Fine": 0, "Missing": 0, "Extreme": 0, "Spiking": 0}
+                            
+                        project_summary[proj]["Total"] += 1
                         
+                        # Formatting helpers
+                        pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
                         last_seen_str = "Never"
                         latency_hours = 999.0
                         
@@ -3260,35 +3297,67 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             "Location": str(r['Location']),
                             "Position": pos_lbl,
                             "Last Seen": last_seen_str,
-                            "Project": str(r['Project'])
+                            "Project": proj
                         }
 
-                        # 1. TABLE ROUTING: Not Seen (> 24 hours)
+                        node_has_issue = False
+
+                        # 1. EVALUATE MISSING
                         if latency_hours > 24.0:
+                            node_has_issue = True
+                            project_summary[proj]["Missing"] += 1
                             row_copy = base_row.copy()
-                            row_copy["Issue"] = f"Missing for {latency_hours:.1f}h"
+                            row_copy["Issue"] = f"Missing for {latency_hours:.1f}h" if latency_hours < 900 else "No Recent Data"
                             missing_rows.append(row_copy)
                             
-                        # 2. TABLE ROUTING: High/Low Extreme
+                        # 2. EVALUATE EXTREME
                         if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
+                            node_has_issue = True
+                            project_summary[proj]["Extreme"] += 1
                             row_copy = base_row.copy()
                             row_copy["Issue"] = f"Extreme Bounds ({r['latest_temp']:.1f}°F)"
                             extreme_rows.append(row_copy)
                             
-                        # 3. TABLE ROUTING: Spiking Data (Dynamic Thresholds)
+                        # 3. EVALUATE SPIKING
                         spike_val = r['max_single_spike_24h']
                         if pd.notnull(spike_val):
                             is_temp_pipe = (r['PipeType'] == 'TempPipe')
-                            
-                            # TempPipes trigger at > 1.0°F/hr | Brine triggers at > 8.0°F/hr
                             if (is_temp_pipe and spike_val > 1.0) or (not is_temp_pipe and spike_val > 8.0):
+                                node_has_issue = True
+                                project_summary[proj]["Spiking"] += 1
                                 row_copy = base_row.copy()
                                 type_label = "TempPipe" if is_temp_pipe else "Brine"
                                 row_copy["Issue"] = f"{type_label} Spike (Δ {spike_val:.1f}°F)"
                                 spiking_rows.append(row_copy)
-                                
-                    # --- RENDER TABLE 1: MISSING ---
-                    st.markdown("#### 📡 Missing Nodes (> 24 Hours)")
+                        
+                        # 4. EVALUATE HEALTHY
+                        if not node_has_issue:
+                            project_summary[proj]["Working Fine"] += 1
+
+                    # ==========================================
+                    # UI RENDER: SUMMARY TOP-LEVEL TABLE
+                    # ==========================================
+                    st.markdown("#### 📊 Project Health Summary")
+                    sum_df_rows = []
+                    for p, stats in project_summary.items():
+                        sum_df_rows.append({
+                            "Project": p,
+                            "Total Sensors": stats["Total"],
+                            "🟢 Working Fine": stats["Working Fine"],
+                            "📡 Missing": stats["Missing"],
+                            "🌡️ Extreme": stats["Extreme"],
+                            "📈 Spiking": stats["Spiking"]
+                        })
+                    
+                    sum_df = pd.DataFrame(sum_df_rows)
+                    st.dataframe(sum_df, use_container_width=True, hide_index=True)
+                    st.divider()
+
+                    # ==========================================
+                    # UI RENDER: DETAILED ISSUE TABLES
+                    # ==========================================
+                    # --- TABLE 1: MISSING ---
+                    st.markdown("#### 📡 Missing Nodes (> 24 Hours or Never Seen)")
                     if missing_rows:
                         st.dataframe(pd.DataFrame(missing_rows), use_container_width=True, hide_index=True)
                     else:
@@ -3296,16 +3365,16 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         
                     st.divider()
                         
-                    # --- RENDER TABLE 2: EXTREMES ---
+                    # --- TABLE 2: EXTREMES ---
                     st.markdown("#### 🌡️ Extreme Temperatures (<-25°F or >105°F)")
                     if extreme_rows:
                         st.dataframe(pd.DataFrame(extreme_rows), use_container_width=True, hide_index=True)
                     else:
-                        st.success("✅ All sensors reporting within normal physical limits.")
+                        st.success("✅ All active sensors reporting within normal physical limits.")
                         
                     st.divider()
 
-                    # --- RENDER TABLE 3: SPIKING ---
+                    # --- TABLE 3: SPIKING ---
                     st.markdown("#### 📈 Spiking Data (Last 24h)")
                     if spiking_rows:
                         st.dataframe(pd.DataFrame(spiking_rows), use_container_width=True, hide_index=True)
