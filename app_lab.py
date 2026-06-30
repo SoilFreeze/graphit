@@ -3211,7 +3211,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         
         if selected_project != "All Projects":
             job_num = str(selected_project).split('-')[0].strip()
-            # FIX: Use LIKE instead of exact match to safely catch string variations
             job_num_filter = f"AND TRIM(CAST(n.Project AS STRING)) LIKE '{job_num}%'"
             
             import re
@@ -3222,7 +3221,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             
         archived_toggle = st.session_state.get('global_show_archived', False)
         
-        # 2. Master Diagnostic Query
+        # 2. Master Diagnostic Query - Refactored to de-correlate subqueries
         active_sql = "1=1" if archived_toggle else "UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
         
         alert_q = f"""
@@ -3234,36 +3233,38 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 FROM `{PROJECT_REGISTRY_TABLE}`
                 WHERE {active_sql}
             ),
-            RegisteredNodes AS (
+            BaseNodes AS (
                 SELECT 
                     n.NodeNum, CAST(n.Project AS STRING) as RawProject, n.Phase, n.Location, n.Bank, n.Depth,
-                    CASE WHEN n.Depth IS NOT NULL AND TRIM(CAST(n.Depth AS STRING)) != '' AND UPPER(CAST(n.Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType,
-                    -- Advanced subquery to map the exact Friendly Name safely
-                    COALESCE(
-                        (SELECT FriendlyName 
-                         FROM ActiveJobs a 
-                         WHERE TRIM(CAST(n.Project AS STRING)) LIKE CONCAT(a.RootJob, '%')
-                           AND (
-                               n.Phase IS NULL OR TRIM(CAST(n.Phase AS STRING)) = '' 
-                               OR UPPER(a.FullProjectID) LIKE CONCAT('%PHASE%', TRIM(CAST(n.Phase AS STRING)))
-                               OR UPPER(a.FullProjectID) LIKE CONCAT('%PHASE %', TRIM(CAST(n.Phase AS STRING)))
-                           )
-                         LIMIT 1
-                        ), 
-                        CAST(n.Project AS STRING)
-                    ) as FinalProjectLabel
+                    CASE WHEN n.Depth IS NOT NULL AND TRIM(CAST(n.Depth AS STRING)) != '' AND UPPER(CAST(n.Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType
                 FROM `{NODE_REGISTRY_TABLE}` n
                 WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
                   AND n.NodeNum IS NOT NULL
-                  AND (
-                      EXISTS (
-                          SELECT 1 FROM ActiveJobs a 
-                          WHERE TRIM(CAST(n.Project AS STRING)) LIKE CONCAT(a.RootJob, '%')
-                      )
-                      OR UPPER(CAST(n.Project AS STRING)) LIKE '%OFFICE%'
-                  )
                   {job_num_filter}
                   {phase_filter}
+            ),
+            MappedNodes AS (
+                SELECT 
+                    b.NodeNum, b.RawProject, b.Location, b.Bank, b.Depth, b.PipeType,
+                    a.FriendlyName,
+                    ROW_NUMBER() OVER(PARTITION BY b.NodeNum ORDER BY CASE WHEN a.FriendlyName IS NOT NULL THEN 1 ELSE 2 END) as rn
+                FROM BaseNodes b
+                LEFT JOIN ActiveJobs a 
+                  ON TRIM(b.RawProject) LIKE CONCAT(a.RootJob, '%')
+                  AND (
+                     b.Phase IS NULL 
+                     OR TRIM(CAST(b.Phase AS STRING)) = '' 
+                     OR UPPER(a.FullProjectID) LIKE CONCAT('%PHASE%', TRIM(CAST(b.Phase AS STRING)))
+                     OR UPPER(a.FullProjectID) LIKE CONCAT('%PHASE %', TRIM(CAST(b.Phase AS STRING)))
+                  )
+            ),
+            RegisteredNodes AS (
+                SELECT 
+                    NodeNum, Location, Bank, Depth, PipeType,
+                    COALESCE(FriendlyName, RawProject) as FinalProjectLabel
+                FROM MappedNodes
+                WHERE rn = 1
+                  AND (FriendlyName IS NOT NULL OR UPPER(RawProject) LIKE '%OFFICE%')
             ),
             NodeTimelineHistory AS (
                 SELECT 
@@ -3321,7 +3322,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     now_utc = pd.Timestamp.now(tz='UTC')
                     
                     for _, r in alert_df.iterrows():
-                        # The SQL query now perfectly formats the name, so we just pull it directly
                         proj_label = str(r['Project']) 
                             
                         if proj_label not in project_summary:
