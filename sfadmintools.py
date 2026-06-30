@@ -1335,7 +1335,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
               {phase_sql}
               AND m.NodeNum IS NOT NULL
               -- Status is now natively in the view!
-              AND UPPER(CAST(m.Status AS STRING)) = 'ON PROJECT'
+              AND UPPER(CAST(m.SensorStatus AS STRING)) = 'ON PROJECT'
         ),
         GapAnalysis AS (
             SELECT *, LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
