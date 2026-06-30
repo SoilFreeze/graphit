@@ -3201,33 +3201,36 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
     # =========================================================================
     # TAB 3: NODE ALERT
     # =========================================================================
-    with tab_alerts: # Note: Update your st.tabs declaration above to name this "⚠️ Node Alert"
+    with tab_alerts:
         st.subheader("⚠️ Node Alert Dashboard")
         st.write("Real-time tracking for telemetry dropouts, extreme temperature limits, and anomalous data spikes.")
         
-        # Build comprehensive multi-risk detection query
+        # Pull 7 days of history so nodes that died >24h ago are still caught by the latency check.
+        # Classifies TempPipes vs Brine directly in the query to handle different thermal thresholds.
         alert_q = f"""
             WITH NodeTimelineHistory AS (
                 SELECT 
                     Project, NodeNum, Location, Bank, Depth, temperature, timestamp,
                     LAG(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as last_temp_val
                 FROM `{MASTER_VIEW}`
-                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
             ),
             NodeAggregates AS (
                 SELECT 
                     Project, NodeNum, Location, Bank, Depth,
                     MAX(timestamp) as last_seen_ts,
                     ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-                    MAX(ABS(temperature - last_temp_val)) as max_single_spike_24h
+                    MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
+                             THEN ABS(temperature - last_temp_val) ELSE 0 END) as max_single_spike_24h
                 FROM NodeTimelineHistory
                 GROUP BY Project, NodeNum, Location, Bank, Depth
             )
-            SELECT * FROM NodeAggregates
-            WHERE TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), last_seen_ts, HOUR) >= 24
-               OR latest_temp < -25.0 OR latest_temp > 105.0
-               OR max_single_spike_24h >= 8.0
-            ORDER BY Project ASC, Location ASC
+            SELECT *,
+                CASE 
+                    WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe'
+                    ELSE 'Brine'
+                END as PipeType
+            FROM NodeAggregates
         """
         
         with st.spinner("Scanning active arrays for node alerts..."):
@@ -3237,45 +3240,78 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 if alert_df.empty:
                     st.success("🎉 All clear! 0 active node alerts recorded across the monitored fleet.")
                 else:
-                    alert_records_output_rows = []
+                    missing_rows, extreme_rows, spiking_rows = [], [], []
                     now_utc = pd.Timestamp.now(tz='UTC')
                     
                     for _, r in alert_df.iterrows():
-                        issues = []
-                        
-                        # Condition 1: Not Seen (>= 24 hours latency)
-                        ts_aware = r['last_seen_ts'] if r['last_seen_ts'].tzinfo else r['last_seen_ts'].tz_localize('UTC')
-                        latency_hours = (now_utc - ts_aware).total_seconds() / 3600.0
-                        if latency_hours >= 24.0:
-                            issues.append("Not Seen")
-                            
-                        # Condition 2: High/Low Extreme
-                        if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
-                            issues.append("High/Low Extreme")
-                            
-                        # Condition 3: Spiking data (>= 8°F jump in consecutive readings)
-                        if pd.notnull(r['max_single_spike_24h']) and r['max_single_spike_24h'] >= 8.0:
-                            issues.append("Spiking data")
-                            
-                        # Format position label safely
+                        # Format Base Display Columns
                         pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
                         
-                        # Append to dictionary in the exact requested column order
-                        alert_records_output_rows.append({
+                        last_seen_str = "Never"
+                        latency_hours = 999.0
+                        
+                        if pd.notnull(r['last_seen_ts']):
+                            ts_aware = r['last_seen_ts'] if r['last_seen_ts'].tzinfo else r['last_seen_ts'].tz_localize('UTC')
+                            latency_hours = (now_utc - ts_aware).total_seconds() / 3600.0
+                            last_seen_str = ts_aware.tz_convert(display_tz).strftime('%m/%d %H:%M')
+                            
+                        base_row = {
                             "Node": str(r['NodeNum']),
                             "Location": str(r['Location']),
                             "Position": pos_lbl,
-                            "Last Seen": ts_aware.tz_convert(display_tz).strftime('%m/%d %H:%M'),
-                            "Project": str(r['Project']),
-                            "Issue": " | ".join(issues)
-                        })
+                            "Last Seen": last_seen_str,
+                            "Project": str(r['Project'])
+                        }
+
+                        # 1. TABLE ROUTING: Not Seen (> 24 hours)
+                        if latency_hours > 24.0:
+                            row_copy = base_row.copy()
+                            row_copy["Issue"] = f"Missing for {latency_hours:.1f}h"
+                            missing_rows.append(row_copy)
+                            
+                        # 2. TABLE ROUTING: High/Low Extreme
+                        if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
+                            row_copy = base_row.copy()
+                            row_copy["Issue"] = f"Extreme Bounds ({r['latest_temp']:.1f}°F)"
+                            extreme_rows.append(row_copy)
+                            
+                        # 3. TABLE ROUTING: Spiking Data (Dynamic Thresholds)
+                        spike_val = r['max_single_spike_24h']
+                        if pd.notnull(spike_val):
+                            is_temp_pipe = (r['PipeType'] == 'TempPipe')
+                            
+                            # TempPipes trigger at > 1.0°F/hr | Brine triggers at > 8.0°F/hr
+                            if (is_temp_pipe and spike_val > 1.0) or (not is_temp_pipe and spike_val > 8.0):
+                                row_copy = base_row.copy()
+                                type_label = "TempPipe" if is_temp_pipe else "Brine"
+                                row_copy["Issue"] = f"{type_label} Spike (Δ {spike_val:.1f}°F)"
+                                spiking_rows.append(row_copy)
+                                
+                    # --- RENDER TABLE 1: MISSING ---
+                    st.markdown("#### 📡 Missing Nodes (> 24 Hours)")
+                    if missing_rows:
+                        st.dataframe(pd.DataFrame(missing_rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.success("✅ No missing nodes detected.")
                         
-                    # Render the final dataframe
-                    st.dataframe(
-                        pd.DataFrame(alert_records_output_rows),
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                    st.divider()
+                        
+                    # --- RENDER TABLE 2: EXTREMES ---
+                    st.markdown("#### 🌡️ Extreme Temperatures (<-25°F or >105°F)")
+                    if extreme_rows:
+                        st.dataframe(pd.DataFrame(extreme_rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.success("✅ All sensors reporting within normal physical limits.")
+                        
+                    st.divider()
+
+                    # --- RENDER TABLE 3: SPIKING ---
+                    st.markdown("#### 📈 Spiking Data (Last 24h)")
+                    if spiking_rows:
+                        st.dataframe(pd.DataFrame(spiking_rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.success("✅ No anomalous temperature spikes detected.")
+
             except Exception as e:
                 st.error(f"Alert Parser Error: {e}")
                 
