@@ -3323,9 +3323,15 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
     # =========================================================================
     with tab_alerts:
         st.subheader("⚠️ Node Alert Dashboard")
-        st.write("Real-time tracking for telemetry dropouts, extreme limits, anomalous data spikes, and thermal degradation.")
+        st.write("Real-time tracking for telemetry dropouts, extreme temperature limits, and anomalous data spikes.")
+        
+        # FIX: Explicitly pull units from session_state to avoid local scope errors
+        unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+        unit_label = st.session_state.get("unit_label", "°F")
         
         archived_toggle = st.session_state.get('global_show_archived', False)
+        
+        # 1. Master Diagnostic Query
         active_sql = "1=1" if archived_toggle else "UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
         
         alert_q = f"""
@@ -3359,35 +3365,24 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 SELECT h.NodeNum, MAX(h.timestamp) as last_seen_ts,
                 ARRAY_AGG(h.temperature ORDER BY h.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
                 MAX(CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ABS(h.temperature - h.last_temp_val) ELSE 0 END) as max_single_spike_24h,
-                COUNT(DISTINCT CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(h.timestamp, HOUR) END) as hours_with_data_24h,
-                AVG(h.temperature) as rolling_avg_7d,
-                STDDEV(h.temperature) as rolling_std_7d
+                COUNT(DISTINCT CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(h.timestamp, HOUR) END) as hours_with_data_24h
                 FROM NodeTimelineHistory h GROUP BY h.NodeNum
             ),
             SpikeCounts AS (
                 SELECT h.NodeNum, COUNTIF(h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) AND h.last_temp_val IS NOT NULL AND ((r.PipeType = 'TempPipe' AND ABS(h.temperature - h.last_temp_val) > 1.0) OR (r.PipeType = 'Brine' AND ABS(h.temperature - h.last_temp_val) > 8.0))) as spike_count_24h
                 FROM NodeTimelineHistory h JOIN RegisteredNodes r ON h.NodeNum = r.NodeNum GROUP BY h.NodeNum
-            ),
-            ClusterData AS (
-                SELECT r.Location, AVG(a.latest_temp) as cluster_median_temp
-                FROM RegisteredNodes r JOIN NodeAggregates a ON r.NodeNum = a.NodeNum
-                WHERE a.latest_temp IS NOT NULL AND UPPER(r.Location) NOT LIKE '%AMBIENT%'
-                GROUP BY r.Location
             )
-            SELECT 
-                r.FinalProjectLabel as Project, r.NodeNum, r.Location, r.Bank, r.Depth, r.PipeType,
-                a.last_seen_ts, a.latest_temp, a.max_single_spike_24h, 
-                COALESCE(a.hours_with_data_24h, 0) as hours_with_data_24h,
-                COALESCE(s.spike_count_24h, 0) as spike_count_24h,
-                a.rolling_avg_7d, a.rolling_std_7d, c.cluster_median_temp
+            SELECT r.FinalProjectLabel as Project, r.NodeNum, r.Location, r.Bank, r.Depth, r.PipeType,
+            a.last_seen_ts, a.latest_temp, a.max_single_spike_24h, 
+            COALESCE(a.hours_with_data_24h, 0) as hours_with_data_24h,
+            COALESCE(s.spike_count_24h, 0) as spike_count_24h
             FROM RegisteredNodes r
             LEFT JOIN NodeAggregates a ON r.NodeNum = a.NodeNum
             LEFT JOIN SpikeCounts s ON r.NodeNum = s.NodeNum
-            LEFT JOIN ClusterData c ON r.Location = c.Location
             ORDER BY r.FinalProjectLabel ASC, r.Location ASC
         """
         
-        with st.spinner("Scanning active arrays for hardware and thermal alerts..."):
+        with st.spinner("Scanning active arrays for node alerts..."):
             try:
                 alert_df = client.query(alert_q).to_dataframe()
                 
@@ -3395,19 +3390,21 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     st.info("No active registered nodes found matching the current active filters.")
                 else:
                     missing_rows, extreme_rows, spiking_rows = [], [], []
-                    drift_rows, divergence_rows = [], []
                     project_summary = {}
                     now_utc = pd.Timestamp.now(tz='UTC')
                     
+                    # Helper for temp conversion
+                    def convert_t(val):
+                        if pd.isnull(val): return val
+                        return (val - 32) * 5/9 if unit_mode == "Celsius" else val
+
                     for _, r in alert_df.iterrows():
                         proj_label = str(r['Project']) 
-                        
                         if proj_label not in project_summary:
-                            project_summary[proj_label] = {"Total": 0, "Working Fine": 0, "Missing": 0, "Extreme": 0, "Spiking": 0, "Drifting": 0, "Divergent": 0}
-                            
+                            project_summary[proj_label] = {"Total": 0, "Working Fine": 0, "Missing": 0, "Extreme": 0, "Spiking": 0}
                         project_summary[proj_label]["Total"] += 1
-                        is_in_scope = (selected_project == "All Projects" or proj_label.strip().lower() == selected_project.strip().lower())
                         
+                        is_in_scope = (selected_project == "All Projects" or proj_label.strip().lower() == selected_project.strip().lower())
                         pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
                         
                         last_seen_str, latency_hours = "❌ Never", 999.0
@@ -3420,91 +3417,41 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
                         node_has_issue = False
 
-                        # 1. MISSING
                         if latency_hours > 24.0:
                             node_has_issue = True
                             project_summary[proj_label]["Missing"] += 1
                             if is_in_scope:
                                 missing_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str})
                             
-                        # 2. EXTREME
                         if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
                             node_has_issue = True
                             project_summary[proj_label]["Extreme"] += 1
                             if is_in_scope:
-                                extreme_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str, "Current Temp": f"{r['latest_temp']:.1f}°F"})
+                                extreme_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str, "Current Temp": f"{convert_t(r['latest_temp']):.1f}{unit_label}"})
                             
-                        # 3. SPIKING
                         spike_val, spike_count, hours_with_data = r['max_single_spike_24h'], int(r['spike_count_24h']), int(r['hours_with_data_24h'])
                         if pd.notnull(spike_val) and spike_count > 0:
-                            is_temp_pipe = (r['PipeType'] == 'TempPipe')
                             node_has_issue = True
                             project_summary[proj_label]["Spiking"] += 1
                             if is_in_scope:
-                                spiking_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str, "Type": "TempPipe" if is_temp_pipe else "Brine", "Max Δ Temp": f"{spike_val:.1f}°F", "Spike Count (24h)": f"{spike_count}x in {hours_with_data}h"})
-
-                        # 4. THERMAL DRIFT (Current Temp > Baseline Mean + 2*StdDev)
-                        if pd.notnull(r['rolling_avg_7d']) and pd.notnull(r['rolling_std_7d']) and pd.notnull(r['latest_temp']):
-                            if r['latest_temp'] > (r['rolling_avg_7d'] + (2 * r['rolling_std_7d'])):
-                                node_has_issue = True
-                                project_summary[proj_label]["Drifting"] += 1
-                                if is_in_scope:
-                                    disp_t = (r['latest_temp'] - 32) * 5/9 if unit_mode == "Celsius" else r['latest_temp']
-                                    disp_mu = (r['rolling_avg_7d'] - 32) * 5/9 if unit_mode == "Celsius" else r['rolling_avg_7d']
-                                    disp_sigma = r['rolling_std_7d'] * 5/9 if unit_mode == "Celsius" else r['rolling_std_7d']
-                                    drift_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Current Temp": f"{disp_t:.1f}{unit_label}", "Baseline Profile (7d)": f"Mean: {disp_mu:.1f}{unit_label} | StdDev: {disp_sigma:.2f}"})
-
-                        # 5. CLUSTER DIVERGENCE (Current Temp vs Location Median)
-                        if pd.notnull(r['latest_temp']) and pd.notnull(r['cluster_median_temp']) and str(r['Location']).upper() != 'AMBIENT':
-                            diff = r['latest_temp'] - r['cluster_median_temp']
-                            if abs(diff) >= 4.0:
-                                node_has_issue = True
-                                project_summary[proj_label]["Divergent"] += 1
-                                if is_in_scope:
-                                    disp_t = (r['latest_temp'] - 32) * 5/9 if unit_mode == "Celsius" else r['latest_temp']
-                                    disp_med = (r['cluster_median_temp'] - 32) * 5/9 if unit_mode == "Celsius" else r['cluster_median_temp']
-                                    disp_diff = diff * 5/9 if unit_mode == "Celsius" else diff
-                                    divergence_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Current Temp": f"{disp_t:.1f}{unit_label}", "Cluster Variance": f"Δ {disp_diff:+.1f}{unit_label} (Median: {disp_med:.1f}{unit_label})"})
-
-                        # HEALTHY
+                                spiking_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str, "Max Δ Temp": f"{convert_t(spike_val):.1f}{unit_label}", "Spike Count (24h)": f"{spike_count}x in {hours_with_data}h"})
+                        
                         if not node_has_issue: project_summary[proj_label]["Working Fine"] += 1
 
-                    # --- UI RENDER: SUMMARY TOP-LEVEL TABLE ---
-                    st.markdown("#### 📊 Fleet Health Summary (All Projects)")
-                    sum_df_rows = []
-                    for p, stats in project_summary.items():
-                        sum_df_rows.append({"Project": p, "Total Sensors": stats["Total"], "🟢 Working Fine": stats["Working Fine"], "📡 Missing": stats["Missing"], "🌡️ Extreme": stats["Extreme"], "📈 Spiking": stats["Spiking"], "⚠️ Drifting": stats["Drifting"], "🚨 Divergent": stats["Divergent"]})
+                    # UI RENDER
+                    st.markdown("#### 📊 Fleet Health Summary")
+                    sum_df_rows = [{"Project": p, **stats} for p, stats in project_summary.items()]
                     st.dataframe(pd.DataFrame(sum_df_rows), use_container_width=True, hide_index=True)
                     st.divider()
 
-                    # --- UI RENDER: DETAILED ISSUE TABLES ---
                     scope_label = "Global Fleet" if selected_project == "All Projects" else selected_project
-                    st.markdown(f"### 🔍 Detailed Alerts: {scope_label}")
+                    st.markdown(f"### 🔍 Alerts: {scope_label}")
                     
-                    st.markdown("#### 📡 Missing Nodes (> 24 Hours or Never Seen)")
-                    if missing_rows: st.dataframe(pd.DataFrame(missing_rows), use_container_width=True, hide_index=True)
-                    else: st.success(f"✅ No missing nodes detected for {scope_label}.")
-                    st.divider()
-                        
-                    st.markdown("#### 🌡️ Extreme Temperatures (<-25°F or >105°F)")
-                    if extreme_rows: st.dataframe(pd.DataFrame(extreme_rows), use_container_width=True, hide_index=True)
-                    else: st.success(f"✅ All active sensors reporting within normal physical limits for {scope_label}.")
-                    st.divider()
-
-                    st.markdown("#### 📈 Spiking Data (Last 24h)")
-                    if spiking_rows: st.dataframe(pd.DataFrame(spiking_rows), use_container_width=True, hide_index=True)
-                    else: st.success(f"✅ No anomalous temperature spikes detected for {scope_label}.")
-                    st.divider()
-                    
-                    st.markdown("#### ⚠️ Thermal Drift (Warming beyond established baseline)")
-                    if drift_rows: st.dataframe(pd.DataFrame(drift_rows), use_container_width=True, hide_index=True)
-                    else: st.success(f"✅ No localized thermal degradation patterns detected for {scope_label}.")
-                    st.divider()
-                    
-                    st.markdown("#### 🚨 Cluster Divergence (Anomalous variance vs immediate neighbors)")
-                    if divergence_rows: st.dataframe(pd.DataFrame(divergence_rows), use_container_width=True, hide_index=True)
-                    else: st.success(f"✅ All arrays operating synchronously with local spatial clusters for {scope_label}.")
-
+                    for title, data in [("📡 Missing Nodes", missing_rows), ("🌡️ Extreme Temps", extreme_rows), ("📈 Spiking Data", spiking_rows)]:
+                        st.markdown(f"#### {title}")
+                        if data: st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+                        else: st.success(f"✅ Clear.")
+                        st.divider()
             except Exception as e:
                 st.error(f"Alert Parser Error: {e}")
                 
