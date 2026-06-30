@@ -3221,14 +3221,15 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             
         archived_toggle = st.session_state.get('global_show_archived', False)
         
-        # 2. Master Diagnostic Query - Refactored to de-correlate subqueries
+        # 2. Master Diagnostic Query - Refactored for Best-Fit Joining
         active_sql = "1=1" if archived_toggle else "UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
         
         alert_q = f"""
             WITH ActiveJobs AS (
                 SELECT 
                     CAST(Project AS STRING) as FullProjectID,
-                    TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob,
+                    -- Extracts the absolute root (first word/number) before any hyphen OR space
+                    TRIM(SPLIT(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)], ' ')[OFFSET(0)]) as RootJob,
                     COALESCE(ProjectName, CAST(Project AS STRING)) as FriendlyName
                 FROM `{PROJECT_REGISTRY_TABLE}`
                 WHERE {active_sql}
@@ -3247,16 +3248,22 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 SELECT 
                     b.NodeNum, b.RawProject, b.Location, b.Bank, b.Depth, b.PipeType,
                     a.FriendlyName,
-                    ROW_NUMBER() OVER(PARTITION BY b.NodeNum ORDER BY CASE WHEN a.FriendlyName IS NOT NULL THEN 1 ELSE 2 END) as rn
+                    -- Resolves Blackjack phases safely without punishing projects that don't use phases
+                    ROW_NUMBER() OVER(
+                        PARTITION BY b.NodeNum 
+                        ORDER BY 
+                            CASE 
+                                WHEN a.FullProjectID IS NULL THEN 99
+                                WHEN b.Phase IS NULL OR TRIM(CAST(b.Phase AS STRING)) = '' THEN 1
+                                WHEN UPPER(a.FullProjectID) LIKE CONCAT('%PHASE%', TRIM(CAST(b.Phase AS STRING))) THEN 1
+                                WHEN UPPER(a.FullProjectID) LIKE CONCAT('%PHASE %', TRIM(CAST(b.Phase AS STRING))) THEN 1
+                                ELSE 2 
+                            END ASC
+                    ) as rn
                 FROM BaseNodes b
                 LEFT JOIN ActiveJobs a 
+                  -- Link via the extracted root identifier 
                   ON TRIM(b.RawProject) LIKE CONCAT(a.RootJob, '%')
-                  AND (
-                     b.Phase IS NULL 
-                     OR TRIM(CAST(b.Phase AS STRING)) = '' 
-                     OR UPPER(a.FullProjectID) LIKE CONCAT('%PHASE%', TRIM(CAST(b.Phase AS STRING)))
-                     OR UPPER(a.FullProjectID) LIKE CONCAT('%PHASE %', TRIM(CAST(b.Phase AS STRING)))
-                  )
             ),
             RegisteredNodes AS (
                 SELECT 
