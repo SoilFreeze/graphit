@@ -130,8 +130,6 @@ page = st.sidebar.selectbox(
     key="nav_page"
 )
 
-st.sidebar.divider()
-
 # 2. PROJECT SELECTION
 selected_project = "All Projects"
 project_metadata = None  
@@ -248,8 +246,6 @@ if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
         st.toast("System cache completely cleared!", icon="🔄")
         time.sleep(0.5)
         st.rerun()
-        
-st.sidebar.divider()
 
 # 3. GLOBAL VIEW TOGGLES & INTERACTIVE LOOKBACK
 st.sidebar.subheader("👁️ Visibility Controls")
