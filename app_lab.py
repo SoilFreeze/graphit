@@ -3249,7 +3249,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             RegisteredNodes AS (
                 SELECT 
                     NodeNum, Location, Bank, Depth, PipeType,
-                    -- Directly maps to the full Project ID from the registry
                     COALESCE(FullProjectID, RawProject) as FinalProjectLabel
                 FROM MappedNodes
                 WHERE rn = 1
@@ -3337,16 +3336,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 last_seen_str = f"🟠 {latency_hours:.1f}h"
                             else:
                                 last_seen_str = f"🔴 {latency_hours:.1f}h"
-                            
-                        base_row = {
-                            "Node": str(r['NodeNum']),
-                            "Location": str(r['Location']),
-                            "Position": pos_lbl,
-                            "Last Seen": last_seen_str,
-                            "Project": proj_label,
-                            "Issue": "",
-                            "Details": "-"
-                        }
 
                         node_has_issue = False
 
@@ -3355,20 +3344,27 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             node_has_issue = True
                             project_summary[proj_label]["Missing"] += 1
                             if is_in_scope:
-                                row_copy = base_row.copy()
-                                row_copy["Issue"] = "Missing"
-                                row_copy["Details"] = f"Offline for {latency_hours:.1f}h" if latency_hours < 900 else "No Recent Data"
-                                missing_rows.append(row_copy)
+                                missing_rows.append({
+                                    "Project": proj_label,
+                                    "Location": str(r['Location']),
+                                    "Node": str(r['NodeNum']),
+                                    "Position": pos_lbl,
+                                    "Last Seen": last_seen_str
+                                })
                             
                         # EVALUATE EXTREME
                         if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
                             node_has_issue = True
                             project_summary[proj_label]["Extreme"] += 1
                             if is_in_scope:
-                                row_copy = base_row.copy()
-                                row_copy["Issue"] = "Extreme Temp"
-                                row_copy["Details"] = f"{r['latest_temp']:.1f}°F"
-                                extreme_rows.append(row_copy)
+                                extreme_rows.append({
+                                    "Project": proj_label,
+                                    "Location": str(r['Location']),
+                                    "Node": str(r['NodeNum']),
+                                    "Position": pos_lbl,
+                                    "Last Seen": last_seen_str,
+                                    "Current Temp": f"{r['latest_temp']:.1f}°F"
+                                })
                             
                         # EVALUATE SPIKING
                         spike_val = r['max_single_spike_24h']
@@ -3380,11 +3376,16 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             node_has_issue = True
                             project_summary[proj_label]["Spiking"] += 1
                             if is_in_scope:
-                                row_copy = base_row.copy()
-                                type_label = "TempPipe" if is_temp_pipe else "Brine"
-                                row_copy["Issue"] = f"{type_label} Spike"
-                                row_copy["Details"] = f"Max Δ {spike_val:.1f}°F | {spike_count}x in {hours_with_data}h"
-                                spiking_rows.append(row_copy)
+                                spiking_rows.append({
+                                    "Project": proj_label,
+                                    "Location": str(r['Location']),
+                                    "Node": str(r['NodeNum']),
+                                    "Position": pos_lbl,
+                                    "Last Seen": last_seen_str,
+                                    "Type": "TempPipe" if is_temp_pipe else "Brine",
+                                    "Max Δ Temp": f"{spike_val:.1f}°F",
+                                    "Spike Count (24h)": f"{spike_count}x in {hours_with_data}h"
+                                })
                         
                         # EVALUATE HEALTHY
                         if not node_has_issue:
