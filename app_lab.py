@@ -2986,7 +2986,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
     tab_lookup, tab_performance, tab_alerts = st.tabs([
         "🔍 Data Lookup", 
         "📊 Thermal Performance Metrics", 
-        "⚠️ Asset Exception Alerts"
+        "⚠️ Node Alerts"
     ])
 
     # =========================================================================
