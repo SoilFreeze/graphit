@@ -3209,28 +3209,33 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         job_num_filter = ""
         if selected_project != "All Projects":
             job_num = str(selected_project).split('-')[0].strip()
-            job_num_filter = f"AND n.Project LIKE '{job_num}%'"
+            job_num_filter = f"AND TRIM(CAST(n.Project AS STRING)) LIKE '{job_num}%'"
             
         archived_toggle = st.session_state.get('global_show_archived', False)
-        status_filter = "" if archived_toggle else "AND UPPER(TRIM(CAST(p.ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
-
+        
         # 2. Master Diagnostic Query
-        # Left joins the master registry to the 7-day telemetry window to ensure offline nodes are caught
+        # Uses a subquery to match against ShowActive, with a hardcoded bypass for 'Office'
+        active_sql = "1=1" if archived_toggle else "UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
+        
         alert_q = f"""
-            WITH ActiveProjects AS (
-                SELECT CAST(Project AS STRING) as Project 
-                FROM `{PROJECT_REGISTRY_TABLE}` p
-                WHERE Project IS NOT NULL 
-                  AND TRIM(CAST(Project AS STRING)) != ''
-                  {status_filter}
-            ),
-            RegisteredNodes AS (
-                SELECT n.NodeNum, n.Project, n.Location, n.Bank, n.Depth
+            WITH RegisteredNodes AS (
+                SELECT 
+                    n.NodeNum, 
+                    CAST(n.Project AS STRING) as Project, 
+                    n.Location, 
+                    n.Bank, 
+                    n.Depth
                 FROM `{NODE_REGISTRY_TABLE}` n
-                JOIN ActiveProjects p ON n.Project = p.Project
                 WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
                   AND n.NodeNum IS NOT NULL
-                  AND UPPER(n.Project) NOT LIKE '%OFFICE%'
+                  AND (
+                      TRIM(CAST(n.Project AS STRING)) IN (
+                          SELECT TRIM(CAST(Project AS STRING)) 
+                          FROM `{PROJECT_REGISTRY_TABLE}` 
+                          WHERE {active_sql}
+                      )
+                      OR UPPER(CAST(n.Project AS STRING)) LIKE '%OFFICE%'
+                  )
                   {job_num_filter}
             ),
             NodeTimelineHistory AS (
