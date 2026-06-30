@@ -1883,7 +1883,7 @@ def render_data_processing_page(selected_project):
                             # Grab the actual parsed node number for the UI message
                             display_name = df_processed['NodeNum'].iloc[0] if 'NodeNum' in df_processed.columns else f_identifier
                             
-                            st.write(f"✅ Prepared {display_name}: {len(df_processed)} records.")
+                            st.write(f"✅ {display_name}: {len(df_processed)} records.")
                 
                 except Exception as e:
                     st.error(f"❌ Error processing {f.name}: {e}")
