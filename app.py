@@ -130,8 +130,6 @@ page = st.sidebar.selectbox(
     key="nav_page"
 )
 
-st.sidebar.divider()
-
 # 2. PROJECT SELECTION
 selected_project = "All Projects"
 project_metadata = None  
@@ -248,10 +246,6 @@ if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
         st.toast("System cache completely cleared!", icon="🔄")
         time.sleep(0.5)
         st.rerun()
-        
-st.sidebar.divider()
-
-st.sidebar.divider()
 
 # 3. GLOBAL VIEW TOGGLES & INTERACTIVE LOOKBACK
 st.sidebar.subheader("👁️ Visibility Controls")
@@ -411,10 +405,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     """
     Engineering-grade Trend Graph.
     """
+    # STRIP THE PREFIX BEFORE CHECKING GRAPH TYPE
+    clean_title_lower = str(title).lower().replace("thermal trends:", "").strip()
+    
     # --- FIX 1: KILL GHOST GRAPHS ---
-    # If the app tries to build a dedicated graph for Ambient or Office, we abort it immediately.
-    title_lower = str(title).lower()
-    if any(x in title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
+    if any(x in clean_title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
         return None
         
     if df.empty: return go.Figure().update_layout(title="No data available")
@@ -434,10 +429,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     final_end_view, final_start_view = end_view, start_view
 
     # --- FIX 2: CURVE SHIELD ---
-    # Only allow theoretical curves to query and plot if this is specifically a Temp Pipe graph.
-    is_temp_pipe = any(x in title_lower for x in ['pipe', 'tp', 'depth']) or str(title).strip().upper().startswith('T')
+    # Now it checks the actual location name (e.g., "t1" instead of "thermal trends: t1")
+    is_temp_pipe = any(x in clean_title_lower for x in ['pipe', 'tp', 'depth']) or clean_title_lower.startswith('t')
     
-    if curve_id and curve_id != "None" and f_start_date and is_temp_pipe:
+    if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and st.session_state.get('global_show_ref', True):
         try:
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip() if len(parts) > 0 else ""
@@ -523,12 +518,18 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         ))
 
     # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
-    # Only inject if toggled ON AND if this is a Brine/Bank graph (not a TempPipe graph)
-    is_brine_graph = not any(x in title_lower for x in ['pipe', 'tp', 'depth'])
+    is_brine_graph = not is_temp_pipe
     
     if st.session_state.get('global_show_ambient', True) and is_brine_graph:
-        # Use the project name passed into the function to ensure 100% accuracy
-        p_name = str(plot_df['Project'].iloc[0]) if 'Project' in plot_df.columns else ""
+        # THE FIX: Accurately grab the project name using the correct dataframe column
+        p_name = ""
+        if 'Project' in plot_df.columns and not plot_df.empty:
+            p_name = str(plot_df['Project'].iloc[0])
+        elif 'Raw_Project_Name' in plot_df.columns and not plot_df.empty:
+            p_name = str(plot_df['Raw_Project_Name'].iloc[0])
+        else:
+            p_name = st.session_state.get('selected_project', '')
+            
         job_num = p_name.split('-')[0].strip()
         
         if job_num:
@@ -582,7 +583,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
     clean_title = str(title).replace("Thermal Trends:", "").strip()
     
-    if any(x in title_lower for x in ['pipe', 'tp', 'depth']) or clean_title.upper().startswith('T'):
+    # --- THE FIX: Use the variable we already defined above ---
+    if is_temp_pipe:
         header_text = f"Time vs Temperature - Temperatures for Temperature Pipe {clean_title}"
     else:
         header_text = f"Time vs Temperature - Temperatures for Brine Bank {clean_title}"
@@ -951,22 +953,20 @@ def render_global_overview(selected_project, project_metadata, display_tz):
         return
 
     # --- AUTO-FILTER BY PHASE FROM PROJECT TITLE ---
-    # Looks for the word "Phase" followed by optional spaces and a number
+    # We strip any whitespace and handle the Phase as a STRING to match the schema
     import re
     phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
     
     if phase_match:
         target_phase = phase_match.group(1)
-        # Force exact match on the Phase column
-        p_df = p_df[p_df['Phase'].astype(str) == target_phase]
+        # Using string matching explicitly since the schema defines Phase as STRING
+        p_df = p_df[p_df['Phase'].astype(str).str.strip() == target_phase]
         st.caption(f"🎯 Auto-filtered to **Phase {target_phase}** based on project selection.")
     
     # --- MANUAL SYSTEM FILTER ---
     st.markdown("### 🎛️ System Filters")
-    # --- MANUAL SYSTEM FILTER (Conditional) ---
     avail_systems = sorted([str(s) for s in p_df['System'].dropna().unique() if str(s).strip()])
     
-    # Only show the filter if there are actually multiple systems to choose from
     if len(avail_systems) > 1:
         sel_systems = st.multiselect("Filter by System", avail_systems, default=avail_systems)
         if sel_systems:
@@ -974,73 +974,71 @@ def render_global_overview(selected_project, project_metadata, display_tz):
     elif len(avail_systems) == 1:
         st.caption(f"Showing data for System: **{avail_systems[0]}**")
 
-    # 4. FILTERING
-    trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
-    p_df = p_df[~p_df['Location'].isin(trash_locations)].copy()
-    
+    # 4. FILTERING & TIMING WINDOW
     mask_col = 'approval_status' if 'approval_status' in p_df.columns else 'approve'
     if not show_masked and mask_col in p_df.columns:
         p_df = p_df[p_df[mask_col].astype(str).str.upper() != 'MASKED'].copy()
 
+    # Re-establishing the missing view variables here!
     lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
     now_local = pd.Timestamp.now(tz=display_tz)
     end_view = (now_local + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     start_view = end_view - pd.Timedelta(weeks=lookback_weeks)
 
-    # 5. FIXED LOOP
     # 5. LOCATION-BASED PLOTTING LOOP
-    # Filter trash locations before creating the list
-    trash_locations = ['Dead Stock', 'Elizabeth', 'Office']
+    # Purge trash locations and Ambient entirely before building the container list
+    trash_locations = ['Dead Stock', 'Elizabeth', 'Office', 'Ambient', 'AMBIENT']
     p_df = p_df[~p_df['Location'].isin(trash_locations)].copy()
     
-    locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()], key=natural_sort_key)
+    # One more aggressive scrub to catch any strange casing variations
+    p_df = p_df[~p_df['Location'].astype(str).str.upper().str.contains('AMBIENT', na=False)]
+
+    # Force string types, and drop any pure garbage string anomalies (Fixes the Ghost Graphs)
+    p_df['Location'] = p_df['Location'].astype(str).str.strip()
+    valid_locations = [loc for loc in p_df['Location'].unique() if loc.lower() not in ['nan', 'none', '', 'unassigned']]
+    locations = sorted(valid_locations, key=natural_sort_key)
 
     for i, loc in enumerate(locations):
-        with st.expander(f"📍 Location: {loc}", expanded=True):
-            loc_df = p_df[p_df['Location'] == loc].copy()
+        loc_df = p_df[p_df['Location'] == loc].copy()
+        
+        if loc_df.empty:
+            continue
             
-            # Integrity guard
-            if loc_df.empty or not isinstance(loc_df, pd.DataFrame):
-                st.warning(f"No valid data found for {loc}.")
-                continue
-            
-            clean_proj_id = str(selected_project).split('-')[0]
-            clean_loc_num = "".join(re.findall(r'\d+', loc))
-            normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
-            search_id = f"{clean_proj_id}-{normalized_loc}"
-            is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R", "AMB"])
+        clean_proj_id = str(selected_project).split('-')[0]
+        clean_loc_num = "".join(re.findall(r'\d+', loc))
+        normalized_loc = f"T{clean_loc_num}" if clean_loc_num else loc
+        search_id = f"{clean_proj_id}-{normalized_loc}"
+        is_temp_pipe = not any(x in loc.upper() for x in ["SUPPLY", "RETURN", "BANK S", "BANK R", "AMB"])
 
-            # Full parameter mapping to prevent TypeError
-            fig = build_high_speed_graph(
-                df=loc_df, 
-                title=f"Thermal Trends: {loc}", 
-                start_view=start_view, 
-                end_view=end_view, 
-                active_refs=active_refs, 
-                unit_mode=unit_mode, 
-                unit_label=unit_label, 
-                display_tz=display_tz,
-                mobile_mode=False, 
-                f_start_date=f_start_date,
-                curve_id=search_id if (show_ref and is_temp_pipe) else None
-            )
-            
-            # Consolidated safety check
-            if fig is not None and hasattr(fig, 'data') and len(fig.data) > 0:
+        # Generate the figure in memory FIRST
+        fig = build_high_speed_graph(
+            df=loc_df, 
+            title=f"Thermal Trends: {loc}", 
+            start_view=start_view, 
+            end_view=end_view, 
+            active_refs=active_refs, 
+            unit_mode=unit_mode, 
+            unit_label=unit_label, 
+            display_tz=display_tz,
+            mobile_mode=False, 
+            f_start_date=f_start_date,
+            curve_id=search_id if (show_ref and is_temp_pipe) else None
+        )
+        
+        # Only draw the expander UI if the graph actually successfully generated valid data lines
+        if fig is not None and hasattr(fig, 'data') and len(fig.data) > 0:
+            with st.expander(f"📍 Location: {loc}", expanded=True):
                 st.plotly_chart(
                     fig, 
                     use_container_width=True, 
                     key=f"tvt_{selected_project}_{loc}_{i}"
                 )
-            else:
-                st.warning(f"⚠️ Could not generate graph for {loc}. Data may be missing or invalid.")
                 
                 
 
 #########################
 # Page 3 - Depth Charts #
 #########################
-
 def render_depth_charts(selected_project, unit_label, display_tz):
     """
     Vertical Temperature Profiles.
@@ -1052,12 +1050,13 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
         return
 
-    st.sidebar.subheader("📐 Profile Settings")
-    lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
-
+    # THE FIX: Stop using a local slider. Read the global one from the sidebar.
+    lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
+    st.sidebar.caption(f"📏 Depth Charts using Global {lookback_weeks}-week window.")
+    
     with st.spinner("Fetching historical telemetry..."):
         p_df = get_universal_portal_data(selected_project)
-
+        
     if p_df is None or p_df.empty:
         st.warning("No data found for this project.")
         return
@@ -1078,9 +1077,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         sel_systems = st.sidebar.multiselect("Filter by System", avail_systems, default=avail_systems, key="depth_sys")
         if sel_systems:
             p_df = p_df[p_df['System'].astype(str).isin(sel_systems)]
-
-    # Convert native view Depth values straight into a graph-safe float coordinate
-    p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
 
     # Convert native view Depth values straight into a graph-safe float coordinate
     p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
@@ -1112,7 +1108,11 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     
     now_utc = pd.Timestamp.now(tz='UTC')
-    mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
+    
+    # THE FIX 1: Calculate strict historical cutoff window based on the slider
+    cutoff_date = now_utc - pd.Timedelta(weeks=lookback_weeks)
+    mondays = pd.date_range(start=cutoff_date, end=now_utc, freq='W-MON')
+    
     locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
     
     for loc in locations:
@@ -1125,7 +1125,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             
             fig = go.Figure()
 
-            # --- A. BASELINE Snapshots ---
+            # --- A. BASELINE Snapshots (Always renders absolute oldest point) ---
             baseline_ts = loc_data['timestamp_local'].min()
             b_window = loc_data[
                 (loc_data['timestamp_local'] >= baseline_ts - pd.Timedelta(hours=12)) & 
@@ -1176,33 +1176,30 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
 
             # --- C. HISTORICAL SNAPSHOTS ---
+            # THE FIX: We must use the 'mondays' list we calculated based on the slider, 
+            # not a fixed iteration of periods.
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
                 
+                # Skip if this date matches our special snapshots
                 if current_loop_date == baseline_date_str or current_loop_date == recent_6am_date_str:
                     continue
                     
+                # Search a 24-hour window around the Monday 6 AM mark
                 window = loc_data[
                     (loc_data['timestamp_local'] >= target_ts - pd.Timedelta(hours=12)) & 
                     (loc_data['timestamp_local'] <= target_ts + pd.Timedelta(hours=12))
                 ]
                 
                 if not window.empty:
+                    # Pick the data point closest to 6 AM in that window
                     snap_week = (
                         window.assign(diff=(window['timestamp_local'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
                         .drop_duplicates('NodeNum')
                         .sort_values('Depth_Num')
                     )
-                    
-                    if snap_week.empty:
-                        snap_week = (
-                            window.assign(hour_dist=(window['timestamp_local'].dt.hour - 6).abs())
-                            .sort_values(by=['hour_dist', 'timestamp_local'])
-                            .drop_duplicates('NodeNum')
-                            .sort_values('Depth_Num')
-                        )
                     
                     temps = snap_week['temperature']
                     if unit_mode == "Celsius": temps = (temps - 32) * 5/9
@@ -1250,10 +1247,12 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
+            # THE FIX 2: Added explicit padding margins (l, r, t, b) so the right mirror border isn't cut off
             fig.update_layout(
                 title=f"<b>Temp vs Depth - {loc}</b>",
                 plot_bgcolor='white', 
                 height=800,
+                margin=dict(l=60, r=40, t=80, b=80), 
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", 
                     range=[-20, 80], dtick=10,
@@ -1298,9 +1297,9 @@ def assign_row_color(hours):
 def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
     """
     Page Name: Sensor Status
-    Strictly locked to: project_registry, master_data_view, and manual_rejections.
+    Strictly locked to: project_registry, master_data_view_v2, and manual_rejections.
     """
-    # 1. HEADER LOGIC (Source: project_registry via Sidebar Session State)
+    # 1. HEADER LOGIC
     p_meta = st.session_state.get('project_metadata')
     if not p_meta or selected_project == "All Projects":
         st.info("💡 Please select a specific project in the sidebar to view sensor health.")
@@ -1315,13 +1314,28 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
     st.divider()
 
-    # 2. TELEMETRY & COVERAGE QUERY (Uses master_data_view)
+    # --- THE FIX: Extract Job Number and Phase for accurate v2 querying ---
+    job_num = str(selected_project).split('-')[0].strip()
+    
+    import re
+    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+    phase_sql = ""
+    if phase_match:
+        target_phase = phase_match.group(1)
+        # Safely cast to string and trim to match your v2 schema perfectly
+        phase_sql = f"AND TRIM(CAST(m.Phase AS STRING)) = '{target_phase}'"
+        st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
+
+    # 2. TELEMETRY & COVERAGE QUERY (Uses updated master_data_view_v2)
     query = f"""
         WITH BaseReporting AS (
             SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            WHERE m.Project = @proj_id 
+            FROM `{MASTER_VIEW}` m
+            WHERE m.Project LIKE CONCAT(@job_num, '%') 
+              {phase_sql}
               AND m.NodeNum IS NOT NULL
+              -- Status is now natively in the view!
+              AND UPPER(CAST(m.SensorStatus AS STRING)) = 'ON PROJECT'
         ),
         GapAnalysis AS (
             SELECT *, LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
@@ -1340,7 +1354,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h_f,
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h_f,
 
-                -- Hourly Coverage Calculation (Distinct hours seen / Total hours in period)
+                -- Hourly Coverage Calculation
                 (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
                 (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 168 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 168.0) * 100 as coverage_7d,
 
@@ -1355,13 +1369,12 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     """
 
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
+        query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
     )
-
     try:
         df = client.query(query, job_config=job_config).to_dataframe()
         if df.empty:
-            st.warning("No data found in master_data_view for this project.")
+            st.warning("No data found in master_data_view_v2 for this project.")
             return
 
         # 3. STATUS & LAG CALCULATIONS
@@ -1488,7 +1501,7 @@ def render_hardware_integrity_table(client, selected_project, unit_mode, unit_la
             AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
             AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev
         FROM `{target_registry}` n
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m 
+        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
           ON n.NodeNum = m.NodeNum AND m.NodeNum IS NOT NULL
         WHERE n.Project = @proj_id AND (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
         GROUP BY 1, 2, 3, 4, 5
@@ -2196,7 +2209,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     """
     # Establish explicit table paths mapped directly out of your data view catalog
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
-    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view" 
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" 
 
     st.title("⚡ Bulk Approval and Database Maintenance")
     st.divider()
@@ -2523,7 +2536,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider(); st.markdown("### 🏗️ Active Deployment Overview Matrix")
         try:
-            sum_q = f"SELECT p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown, COUNT(DISTINCT n.NodeNum) as Mapped_Sensors, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_6h, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h FROM `{PROJECT_REGISTRY_TABLE}` p LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON p.Project = n.Project LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view` m ON n.NodeNum = m.NodeNum WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '') AND p.ShowActive IS TRUE AND UPPER(p.Project) NOT LIKE '%OFFICE%' GROUP BY 1,2,3,4 ORDER BY p.Project ASC"
+            sum_q = f"SELECT p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown, COUNT(DISTINCT n.NodeNum) as Mapped_Sensors, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_6h, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h FROM `{PROJECT_REGISTRY_TABLE}` p LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON p.Project = n.Project LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m ON n.NodeNum = m.NodeNum WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '') AND p.ShowActive IS TRUE AND UPPER(p.Project) NOT LIKE '%OFFICE%' GROUP BY 1,2,3,4 ORDER BY p.Project ASC"
             rows = []
             for _, r in client.query(sum_q).to_dataframe().iterrows():
                 elapsed = max(0, (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(r['Date_Freezedown']).date()).days) if pd.notnull(r['Date_Freezedown']) else 0
@@ -2635,7 +2648,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                 st.write("📅 Checking historical system check-in history benchmarks...")
                 try:
-                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` GROUP BY NodeNum"
+                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` GROUP BY NodeNum"
                     for row in client.query(time_q):
                         if row.max_time:
                             db_max_timestamps[str(row.NodeNum)] = str(row.max_time)
@@ -2818,7 +2831,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
                 st.write("📅 Checking Database For Last Known Data Points...")
                 try:
-                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` GROUP BY NodeNum"
+                    time_q = f"SELECT NodeNum, FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as max_time FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` GROUP BY NodeNum"
                     for row in client.query(time_q):
                         if row.max_time:
                             db_max_timestamps[str(row.NodeNum)] = str(row.max_time)
