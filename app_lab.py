@@ -3140,62 +3140,64 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
     # =========================================================================
     # TAB 2: THERMAL PERFORMANCE METRICS
     # =========================================================================
+    # =========================================================================
+    # TAB 2: THERMAL PERFORMANCE METRICS (UPDATED)
+    # =========================================================================
     with tab_performance:
         st.subheader("📊 Ground Freezing System Performance")
-        st.write("Mathematical evaluation of freezing velocity, baseline stability, and thermal cluster variance.")
         
         if selected_project == "All Projects":
-            st.info("💡 Please select a specific project context from the sidebar menu to view project performance metrics calculations.")
+            st.info("💡 Please select a specific project in the sidebar.")
         else:
-            # 1. Phase and Job Context Extraction
             job_num = str(selected_project).split('-')[0].strip()
             
-            import re
-            phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
-            phase_sql = ""
-            if phase_match:
-                target_phase = phase_match.group(1)
-                phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
-                st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
-            
+            # This query pulls the rolling performance history for the last 7 days
             perf_q = f"""
-                WITH HistoricalWindow AS (
+                WITH RollingStats AS (
                     SELECT 
-                        NodeNum, Location, Bank, Depth, temperature, timestamp,
+                        NodeNum, Location, temperature, timestamp,
                         CASE WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType,
-                        LAG(temperature, 3) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as temp_prev_3h,
-                        AVG(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as rolling_avg_7d,
-                        STDDEV(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as rolling_std_7d
+                        AVG(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as mu,
+                        STDDEV(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as sigma
                     FROM `{MASTER_VIEW}`
                     WHERE Project LIKE CONCAT(@job_num, '%')
-                      {phase_sql}
-                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 8 DAY)
-                      AND temperature >= -30.0 AND temperature <= 120.0
-                      AND UPPER(Location) NOT LIKE '%AMBIENT%'
-                ),
-                LatestSnap AS (
-                    SELECT *, ROW_NUMBER() OVER (PARTITION BY NodeNum ORDER BY timestamp DESC) as rn
-                    FROM HistoricalWindow
-                ),
-                SpatialClusters AS (
-                    SELECT Location, AVG(temperature) as cluster_median_temp
-                    FROM LatestSnap WHERE rn = 1
-                    GROUP BY Location
+                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                      AND temperature BETWEEN -30 AND 120
                 )
-                SELECT 
-                    l.NodeNum, l.Location, l.PipeType,
-                    CASE WHEN l.Depth IS NOT NULL AND TRIM(CAST(l.Depth AS STRING)) != '' THEN CONCAT(l.Depth, ' ft') ELSE CONCAT('Bank ', l.Bank) END as position_label,
-                    l.temperature as current_temp,
-                    (l.temperature - l.temp_prev_3h) as cooling_velocity_3h,
-                    l.rolling_avg_7d,
-                    l.rolling_std_7d,
-                    (l.temperature - c.cluster_median_temp) as cluster_divergence_delta
-                FROM LatestSnap l
-                JOIN SpatialClusters c ON l.Location = c.Location
-                WHERE l.rn = 1
-                ORDER BY l.Location, l.Depth ASC, l.Bank ASC
+                SELECT *, 
+                    (temperature - mu) / NULLIF(sigma, 0) as z_score,
+                    ABS(temperature - mu) as absolute_drift
+                FROM RollingStats
             """
             
+            perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
+            )).to_dataframe()
+
+            # --- GRAPHICAL SECTION: THERMODYNAMIC TRENDS ---
+            st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
+            
+            # Select specific nodes to compare drift
+            all_nodes = sorted(perf_df['NodeNum'].unique().tolist())
+            selected_nodes = st.multiselect("Compare Stability Trends for Nodes:", all_nodes, default=all_nodes[:3])
+            
+            if selected_nodes:
+                trend_df = perf_df[perf_df['NodeNum'].isin(selected_nodes)].copy()
+                
+                # Plot 1: Absolute Drift (Stability)
+                fig_drift = px.line(trend_df, x="timestamp", y="absolute_drift", color="NodeNum",
+                                   title="Thermal Drift (Abs Dev from 7d Mean)")
+                fig_drift.add_hline(y=2.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
+                st.plotly_chart(fig_drift, use_container_width=True)
+                
+                # Plot 2: Z-Score (Divergence from Cluster behavior)
+                fig_z = px.line(trend_df, x="timestamp", y="z_score", color="NodeNum",
+                                title="Z-Score (Statistical Divergence)")
+                fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange")
+                fig_z.add_hline(y=-2.0, line_dash="dot", line_color="orange")
+                st.plotly_chart(fig_z, use_container_width=True)
+
+            # [Keep your existing Data Grid code here...]
             with st.spinner("Processing thermodynamic array calculus equations..."):
                 try:
                     perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
