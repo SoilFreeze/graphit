@@ -3147,7 +3147,16 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         if selected_project == "All Projects":
             st.info("💡 Please select a specific project context from the sidebar menu to view project performance metrics calculations.")
         else:
+            # 1. Phase and Job Context Extraction
             job_num = str(selected_project).split('-')[0].strip()
+            
+            import re
+            phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+            phase_sql = ""
+            if phase_match:
+                target_phase = phase_match.group(1)
+                phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
+                st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
             
             perf_q = f"""
                 WITH HistoricalWindow AS (
@@ -3159,6 +3168,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         STDDEV(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as rolling_std_7d
                     FROM `{MASTER_VIEW}`
                     WHERE Project LIKE CONCAT(@job_num, '%')
+                      {phase_sql}
                       AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 8 DAY)
                       AND temperature >= -30.0 AND temperature <= 120.0
                       AND UPPER(Location) NOT LIKE '%AMBIENT%'
@@ -3207,16 +3217,27 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         perf_df['7d StdDev (σ)'] = perf_df['rolling_std_7d'] if unit_mode == "Fahrenheit" else perf_df['rolling_std_7d'] * 5/9
                         perf_df['Cluster Deviation'] = perf_df['cluster_divergence_delta'] if unit_mode == "Fahrenheit" else perf_df['cluster_divergence_delta'] * 5/9
                         
+                        # 4. Refined Urgent Metrics Classification
                         def classify_performance_status(row):
-                            if row['3h Slope (dT/dt)'] <= -0.5: return "❄️ Freezing Active"
+                            if row['3h Slope (dT/dt)'] >= 1.5: return "🔥 Rapid Warming (Urgent)"
+                            if abs(row['Cluster Deviation']) >= 4.0: return "🚨 Cluster Divergence"
                             if pd.notnull(row['7d StdDev (σ)']) and pd.notnull(row['7d Mean (μ)']):
                                 upper_bound = row['rolling_avg_7d'] + (2 * row['rolling_std_7d'])
                                 if row['current_temp'] > upper_bound: return "⚠️ Thermal Drift"
-                            if abs(row['Cluster Deviation']) >= 4.0: return "🚨 Cluster Divergence"
+                            if row['3h Slope (dT/dt)'] <= -0.5: return "❄️ Freezing Active"
                             return "🟢 Stable Maintenance"
                             
                         perf_df['Operational Assessment'] = perf_df.apply(classify_performance_status, axis=1)
                         
+                        # 2. Hardcoded Color Palette Mapping
+                        status_color_map = {
+                            "🔥 Rapid Warming (Urgent)": "#8b0000", # Dark Red
+                            "🚨 Cluster Divergence": "#d62728",     # Bright Red
+                            "⚠️ Thermal Drift": "#ff7f0e",          # Orange
+                            "❄️ Freezing Active": "#1f77b4",        # Blue
+                            "🟢 Stable Maintenance": "#2ca02c"      # Green
+                        }
+
                         # --- UI: DATA BREAKDOWN FILTERS ---
                         c_filt, _ = st.columns([1, 2])
                         with c_filt:
@@ -3230,8 +3251,30 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             disp_df = perf_df
 
                         if disp_df.empty:
-                            st.info(f"No {pipe_filter} found for this project.")
+                            st.info(f"No {pipe_filter} found for this project phase.")
                         else:
+                            # 3. OVERALL SCORES: Location Performance Summary
+                            st.markdown(f"### 📍 Location Array Summary ({pipe_filter})")
+                            
+                            summary_rows = []
+                            for loc, loc_group in disp_df.groupby('Location'):
+                                total = len(loc_group)
+                                urgent = len(loc_group[loc_group['Operational Assessment'] == "🔥 Rapid Warming (Urgent)"])
+                                div_drift = len(loc_group[loc_group['Operational Assessment'].isin(["🚨 Cluster Divergence", "⚠️ Thermal Drift"])])
+                                freezing = len(loc_group[loc_group['Operational Assessment'] == "❄️ Freezing Active"])
+                                stable = len(loc_group[loc_group['Operational Assessment'] == "🟢 Stable Maintenance"])
+                                
+                                summary_rows.append({
+                                    "Location": str(loc),
+                                    "Total Nodes": total,
+                                    "🟢 Stable": stable,
+                                    "❄️ Freezing": freezing,
+                                    "⚠️ Drift/Divergence": div_drift,
+                                    "🔥 Urgent Action": urgent
+                                })
+                            
+                            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
                             # --- UI: GRAPHICAL ANALYSIS ---
                             st.markdown("### 📈 Visual Thermodynamics")
                             g1, g2 = st.columns(2)
@@ -3240,8 +3283,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 fig_scatter = px.scatter(
                                     disp_df, x="Current Temp", y="3h Slope (dT/dt)", 
                                     color="Operational Assessment",
+                                    color_discrete_map=status_color_map,
                                     hover_data=["NodeNum", "Location", "position_label"],
-                                    title=f"Cooling Velocity vs Current Temp ({pipe_filter})"
+                                    title=f"Cooling Velocity vs Current Temp"
                                 )
                                 fig_scatter.add_hline(y=0, line_dash="dot", line_width=1, line_color="black")
                                 fig_scatter.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
@@ -3250,7 +3294,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             with g2:
                                 fig_bar = px.histogram(
                                     disp_df, x="Location", color="Operational Assessment",
-                                    title=f"Node Health Distribution by Location ({pipe_filter})",
+                                    color_discrete_map=status_color_map,
+                                    title=f"Node Health Distribution by Location",
                                     barmode="stack"
                                 )
                                 fig_bar.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
