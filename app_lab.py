@@ -3211,9 +3211,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         
         if selected_project != "All Projects":
             job_num = str(selected_project).split('-')[0].strip()
-            job_num_filter = f"AND TRIM(CAST(n.Project AS STRING)) = '{job_num}'"
+            # FIX: Use LIKE instead of exact match to safely catch string variations
+            job_num_filter = f"AND TRIM(CAST(n.Project AS STRING)) LIKE '{job_num}%'"
             
-            # Extract phase from selected project string to match the Node Registry schema
             import re
             phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
             if phase_match:
@@ -3227,20 +3227,39 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         
         alert_q = f"""
             WITH ActiveJobs AS (
-                -- Extract just the root job number (e.g., '2541') from the full project string
-                SELECT DISTINCT TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob
+                SELECT 
+                    CAST(Project AS STRING) as FullProjectID,
+                    TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob,
+                    COALESCE(ProjectName, CAST(Project AS STRING)) as FriendlyName
                 FROM `{PROJECT_REGISTRY_TABLE}`
                 WHERE {active_sql}
             ),
             RegisteredNodes AS (
                 SELECT 
-                    n.NodeNum, CAST(n.Project AS STRING) as Project, n.Phase, n.Location, n.Bank, n.Depth,
-                    CASE WHEN n.Depth IS NOT NULL AND TRIM(CAST(n.Depth AS STRING)) != '' AND UPPER(CAST(n.Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType
+                    n.NodeNum, CAST(n.Project AS STRING) as RawProject, n.Phase, n.Location, n.Bank, n.Depth,
+                    CASE WHEN n.Depth IS NOT NULL AND TRIM(CAST(n.Depth AS STRING)) != '' AND UPPER(CAST(n.Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType,
+                    -- Advanced subquery to map the exact Friendly Name safely
+                    COALESCE(
+                        (SELECT FriendlyName 
+                         FROM ActiveJobs a 
+                         WHERE TRIM(CAST(n.Project AS STRING)) LIKE CONCAT(a.RootJob, '%')
+                           AND (
+                               n.Phase IS NULL OR TRIM(CAST(n.Phase AS STRING)) = '' 
+                               OR UPPER(a.FullProjectID) LIKE CONCAT('%PHASE%', TRIM(CAST(n.Phase AS STRING)))
+                               OR UPPER(a.FullProjectID) LIKE CONCAT('%PHASE %', TRIM(CAST(n.Phase AS STRING)))
+                           )
+                         LIMIT 1
+                        ), 
+                        CAST(n.Project AS STRING)
+                    ) as FinalProjectLabel
                 FROM `{NODE_REGISTRY_TABLE}` n
                 WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
                   AND n.NodeNum IS NOT NULL
                   AND (
-                      TRIM(CAST(n.Project AS STRING)) IN (SELECT RootJob FROM ActiveJobs)
+                      EXISTS (
+                          SELECT 1 FROM ActiveJobs a 
+                          WHERE TRIM(CAST(n.Project AS STRING)) LIKE CONCAT(a.RootJob, '%')
+                      )
                       OR UPPER(CAST(n.Project AS STRING)) LIKE '%OFFICE%'
                   )
                   {job_num_filter}
@@ -3280,14 +3299,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 GROUP BY h.NodeNum
             )
             SELECT 
-                r.Project, r.Phase, r.NodeNum, r.Location, r.Bank, r.Depth, r.PipeType,
+                r.FinalProjectLabel as Project, r.NodeNum, r.Location, r.Bank, r.Depth, r.PipeType,
                 a.last_seen_ts, a.latest_temp, a.max_single_spike_24h, 
                 COALESCE(a.hours_with_data_24h, 0) as hours_with_data_24h,
                 COALESCE(s.spike_count_24h, 0) as spike_count_24h
             FROM RegisteredNodes r
             LEFT JOIN NodeAggregates a ON r.NodeNum = a.NodeNum
             LEFT JOIN SpikeCounts s ON r.NodeNum = s.NodeNum
-            ORDER BY r.Project ASC, r.Phase ASC, r.Location ASC
+            ORDER BY r.FinalProjectLabel ASC, r.Location ASC
         """
         
         with st.spinner("Scanning active arrays for node alerts..."):
@@ -3302,10 +3321,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     now_utc = pd.Timestamp.now(tz='UTC')
                     
                     for _, r in alert_df.iterrows():
-                        # Construct a clean Project label (e.g., "2541 Phase 2")
-                        proj_label = str(r['Project'])
-                        if pd.notnull(r['Phase']) and str(r['Phase']).strip() != "":
-                            proj_label += f" Phase {str(r['Phase']).strip()}"
+                        # The SQL query now perfectly formats the name, so we just pull it directly
+                        proj_label = str(r['Project']) 
                             
                         if proj_label not in project_summary:
                             project_summary[proj_label] = {"Total": 0, "Working Fine": 0, "Missing": 0, "Extreme": 0, "Spiking": 0}
