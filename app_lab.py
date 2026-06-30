@@ -2995,35 +2995,37 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
     with tab_lookup:
         st.subheader("🔍 Individual Node Telemetry Inspection")
         
-        c1, c2, c3 = st.columns([1, 1, 1])
+        # 1. Tie Project Scope to the Sidebar Context
+        scope_label = "Global Fleet" if selected_project == "All Projects" else selected_project
+        st.info(f"🎯 **Search Scope:** {scope_label} (Change in sidebar)")
+        
+        c1, c2 = st.columns([1, 1])
         with c1:
             search_mode = st.radio("Search Method", ["Filter Mappings", "Search by Node ID"], horizontal=True)
             
         target_node = None
         
+        # Filter registry based on the sidebar selection
+        if selected_project == "All Projects":
+            proj_filtered = reg_df 
+        else:
+            job_num = str(selected_project).split('-')[0].strip()
+            proj_filtered = reg_df[reg_df['Project'].astype(str).str.startswith(job_num)]
+            
         if search_mode == "Filter Mappings":
             with c2:
-                avail_projs = ["All Projects"] + sorted(reg_df['Project'].dropna().unique().tolist())
-                # Sync default filter behavior with sidebar context selection if available
-                default_proj_idx = avail_projs.index(selected_project) if selected_project in avail_projs else 0
-                f_proj = st.selectbox("Project Scope Context", avail_projs, index=default_proj_idx, key="diag_f_proj")
-                
-            with c3:
-                proj_filtered = reg_df if f_proj == "All Projects" else reg_df[reg_df['Project'] == f_proj]
                 avail_locs = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
                 f_loc = st.selectbox("Physical Location Context", avail_locs, key="diag_f_loc")
                 
-            # Filter nodes by chosen configuration mapping bounds
             matching_nodes = sorted(proj_filtered[proj_filtered['Location'] == f_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
             if matching_nodes:
                 target_node = st.selectbox("Select Target Node to Inspect", matching_nodes, key="diag_node_select_dropdown")
             else:
-                st.info("No nodes map back to this specific configuration selection.")
+                st.warning("No nodes match this configuration.")
                 
         else:
             with c2:
-                # Upgraded to a searchable selectbox loaded with the entire active fleet
-                all_active_nodes = sorted(reg_df['NodeNum'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
+                all_active_nodes = sorted(proj_filtered['NodeNum'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
                 selected_search_node = st.selectbox(
                     "Type Node ID to Search:", 
                     options=[""] + all_active_nodes,
@@ -3034,12 +3036,19 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     target_node = selected_search_node
 
         if target_node:
-            # Re-read global history timeframe variables from sidebar memory space
-            lookback_days = st.session_state.get("global_lookback_days", 35)
+            st.divider()
             
-            st.markdown(f"##### 📈 Timeline History for Node: `{target_node}` (Past {lookback_days} Days)")
+            c_header, c_time = st.columns([3, 1])
+            with c_header:
+                st.markdown(f"##### 📈 Telemetry History for Node: `{target_node}`")
+            with c_time:
+                # 2. Add dynamic timeline amounts
+                time_opt = st.selectbox("Historical Window:", ["30 Days", "60 Days", "90 Days", "1 Year", "All Time"], index=0)
+                
+            days_map = {"30 Days": 30, "60 Days": 60, "90 Days": 90, "1 Year": 365, "All Time": 5000}
+            lookback_days = days_map[time_opt]
             
-            # Master read query pulling localized node history down for graphing
+            # Master read query pulling localized node history down
             node_q = f"""
                 SELECT timestamp, temperature, Location, Bank, Depth, Project, SensorStatus
                 FROM `{MASTER_VIEW}`
@@ -3054,31 +3063,59 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 ]
             )
             
-            node_history = client.query(node_q, job_config=job_config).to_dataframe()
+            with st.spinner(f"Fetching {time_opt} of node history..."):
+                node_history = client.query(node_q, job_config=job_config).to_dataframe()
             
             if node_history.empty:
-                st.warning(f"No logged telemetry data entries found inside storage for Node `{target_node}` within this time window.")
+                st.warning(f"No telemetry data found for Node `{target_node}` in the past {time_opt}.")
             else:
-                # Meta overview statistics boxes
-                meta_row = node_history.iloc[0]
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
-                m2.metric("Assigned Allocation Location", str(meta_row['Location']))
-                m3.metric("Project Boundary Workspace", str(meta_row['Project']))
-                m4.metric("Total Records Scanned", f"{len(node_history):,}")
-
-                # Build Time vs Temp Interactive Scatter Layout Spline
+                # Localize and convert time for entire dataframe first so aggregation works cleanly
                 if node_history['timestamp'].dt.tz is None:
                     node_history['timestamp'] = node_history['timestamp'].dt.tz_localize('UTC')
                 node_history['timestamp'] = node_history['timestamp'].dt.tz_convert(display_tz)
 
+                # Meta overview statistics boxes
+                meta_row = node_history.iloc[0]
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
+                m2.metric("Latest Location", str(meta_row['Location']))
+                m3.metric("Latest Project", str(meta_row['Project']))
+                m4.metric("Scanned Records", f"{len(node_history):,}")
+
+                # 3. Compile the Historical Placements Table
+                st.markdown("#### 🗺️ Historical Placements")
+                
+                # Copy and fill NA to ensure GroupBy works without dropping records
+                hist_df = node_history.copy()
+                hist_df[['Project', 'Location', 'Bank', 'Depth']] = hist_df[['Project', 'Location', 'Bank', 'Depth']].fillna('')
+                
+                placements = hist_df.groupby(['Project', 'Location', 'Bank', 'Depth']).agg(
+                    First_Seen=('timestamp', 'min'),
+                    Last_Seen=('timestamp', 'max'),
+                    Records=('timestamp', 'count')
+                ).reset_index().sort_values('Last_Seen', ascending=False)
+                
+                # Format coordinates and timestamps for display
+                def format_pos(r):
+                    if r['Depth']: return f"{r['Depth']}ft"
+                    if r['Bank']: return f"Bank {r['Bank']}"
+                    return "-"
+                    
+                placements['Position'] = placements.apply(format_pos, axis=1)
+                placements['First Seen'] = placements['First_Seen'].dt.strftime('%m/%d/%Y %H:%M')
+                placements['Last Seen'] = placements['Last_Seen'].dt.strftime('%m/%d/%Y %H:%M')
+                
+                # Reorder and display the clean matrix
+                disp_placements = placements[['Project', 'Location', 'Position', 'First Seen', 'Last Seen', 'Records']]
+                st.dataframe(disp_placements, use_container_width=True, hide_index=True)
+
+                st.markdown("#### 📉 Temperature Trend")
                 fig = px.line(
                     node_history, x='timestamp', y='temperature',
-                    title=f"Detailed Micro-Trend Tracking Vector for Node {target_node}",
                     labels={'timestamp': 'Time', 'temperature': f'Temperature ({unit_label})'},
                     color_discrete_sequence=['#1f77b4']
                 )
-                fig.update_layout(plot_bgcolor='white', hovermode='x unified')
+                fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
                 fig.update_xaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
                 fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
                 
@@ -3088,8 +3125,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Expandable Detailed Storage Ledger Row View Component
-                with st.expander("🗄️ Inspect Consolidated Raw Historical Data Ledger Columns", expanded=False):
+                # Expandable Detailed Storage Ledger
+                with st.expander("🗄️ Inspect Consolidated Raw Historical Data Ledger", expanded=False):
                     st.dataframe(node_history, use_container_width=True, hide_index=False)
 
     # =========================================================================
