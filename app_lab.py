@@ -3228,7 +3228,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             WITH ActiveJobs AS (
                 SELECT 
                     CAST(Project AS STRING) as FullProjectID,
-                    -- Extracts the absolute root (first word/number) before any hyphen OR space
                     TRIM(SPLIT(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)], ' ')[OFFSET(0)]) as RootJob,
                     COALESCE(ProjectName, CAST(Project AS STRING)) as FriendlyName
                 FROM `{PROJECT_REGISTRY_TABLE}`
@@ -3248,7 +3247,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 SELECT 
                     b.NodeNum, b.RawProject, b.Location, b.Bank, b.Depth, b.PipeType,
                     a.FriendlyName,
-                    -- Resolves Blackjack phases safely without punishing projects that don't use phases
                     ROW_NUMBER() OVER(
                         PARTITION BY b.NodeNum 
                         ORDER BY 
@@ -3262,7 +3260,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     ) as rn
                 FROM BaseNodes b
                 LEFT JOIN ActiveJobs a 
-                  -- Link via the extracted root identifier 
                   ON TRIM(b.RawProject) LIKE CONCAT(a.RootJob, '%')
             ),
             RegisteredNodes AS (
@@ -3337,13 +3334,21 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         project_summary[proj_label]["Total"] += 1
                         
                         pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
-                        last_seen_str = "Never"
+                        
+                        # Apply the Sensor Status logic for the "Last Seen" column
+                        last_seen_str = "❌ Never"
                         latency_hours = 999.0
                         
                         if pd.notnull(r['last_seen_ts']):
                             ts_aware = r['last_seen_ts'] if r['last_seen_ts'].tzinfo else r['last_seen_ts'].tz_localize('UTC')
                             latency_hours = (now_utc - ts_aware).total_seconds() / 3600.0
-                            last_seen_str = ts_aware.tz_convert(display_tz).strftime('%m/%d %H:%M')
+                            
+                            if latency_hours <= 1.0:
+                                last_seen_str = f"🟢 {latency_hours:.1f}h"
+                            elif latency_hours <= 6.0:
+                                last_seen_str = f"🟠 {latency_hours:.1f}h"
+                            else:
+                                last_seen_str = f"🔴 {latency_hours:.1f}h"
                             
                         base_row = {
                             "Node": str(r['NodeNum']),
