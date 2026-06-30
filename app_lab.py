@@ -3205,31 +3205,46 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         st.subheader("⚠️ Node Alert Dashboard")
         st.write("Real-time tracking for telemetry dropouts, extreme temperature limits, and anomalous data spikes.")
         
-        # 1. Scope context handling
+        # 1. Scope and Phase context handling
         job_num_filter = ""
+        phase_filter = ""
+        
         if selected_project != "All Projects":
             job_num = str(selected_project).split('-')[0].strip()
-            job_num_filter = f"AND TRIM(CAST(n.Project AS STRING)) LIKE '{job_num}%'"
+            job_num_filter = f"AND TRIM(CAST(n.Project AS STRING)) = '{job_num}'"
+            
+            # Extract phase from selected project string to match the Node Registry schema
+            import re
+            phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+            if phase_match:
+                target_phase = phase_match.group(1)
+                phase_filter = f"AND TRIM(CAST(n.Phase AS STRING)) = '{target_phase}'"
             
         archived_toggle = st.session_state.get('global_show_archived', False)
         
         # 2. Master Diagnostic Query
-        # Includes advanced sub-queries to count exact spike occurrences and hours with data
         active_sql = "1=1" if archived_toggle else "UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
         
         alert_q = f"""
-            WITH RegisteredNodes AS (
+            WITH ActiveJobs AS (
+                -- Extract just the root job number (e.g., '2541') from the full project string
+                SELECT DISTINCT TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob
+                FROM `{PROJECT_REGISTRY_TABLE}`
+                WHERE {active_sql}
+            ),
+            RegisteredNodes AS (
                 SELECT 
-                    n.NodeNum, CAST(n.Project AS STRING) as Project, n.Location, n.Bank, n.Depth,
+                    n.NodeNum, CAST(n.Project AS STRING) as Project, n.Phase, n.Location, n.Bank, n.Depth,
                     CASE WHEN n.Depth IS NOT NULL AND TRIM(CAST(n.Depth AS STRING)) != '' AND UPPER(CAST(n.Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType
                 FROM `{NODE_REGISTRY_TABLE}` n
                 WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
                   AND n.NodeNum IS NOT NULL
                   AND (
-                      TRIM(CAST(n.Project AS STRING)) IN (SELECT TRIM(CAST(Project AS STRING)) FROM `{PROJECT_REGISTRY_TABLE}` WHERE {active_sql})
+                      TRIM(CAST(n.Project AS STRING)) IN (SELECT RootJob FROM ActiveJobs)
                       OR UPPER(CAST(n.Project AS STRING)) LIKE '%OFFICE%'
                   )
                   {job_num_filter}
+                  {phase_filter}
             ),
             NodeTimelineHistory AS (
                 SELECT 
@@ -3265,14 +3280,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 GROUP BY h.NodeNum
             )
             SELECT 
-                r.Project, r.NodeNum, r.Location, r.Bank, r.Depth, r.PipeType,
+                r.Project, r.Phase, r.NodeNum, r.Location, r.Bank, r.Depth, r.PipeType,
                 a.last_seen_ts, a.latest_temp, a.max_single_spike_24h, 
                 COALESCE(a.hours_with_data_24h, 0) as hours_with_data_24h,
                 COALESCE(s.spike_count_24h, 0) as spike_count_24h
             FROM RegisteredNodes r
             LEFT JOIN NodeAggregates a ON r.NodeNum = a.NodeNum
             LEFT JOIN SpikeCounts s ON r.NodeNum = s.NodeNum
-            ORDER BY r.Project ASC, r.Location ASC
+            ORDER BY r.Project ASC, r.Phase ASC, r.Location ASC
         """
         
         with st.spinner("Scanning active arrays for node alerts..."):
@@ -3283,16 +3298,19 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     st.info("No active registered nodes found matching the current project scope and active filters.")
                 else:
                     missing_rows, extreme_rows, spiking_rows = [], [], []
-                    
                     project_summary = {}
                     now_utc = pd.Timestamp.now(tz='UTC')
                     
                     for _, r in alert_df.iterrows():
-                        proj = str(r['Project'])
-                        if proj not in project_summary:
-                            project_summary[proj] = {"Total": 0, "Working Fine": 0, "Missing": 0, "Extreme": 0, "Spiking": 0}
+                        # Construct a clean Project label (e.g., "2541 Phase 2")
+                        proj_label = str(r['Project'])
+                        if pd.notnull(r['Phase']) and str(r['Phase']).strip() != "":
+                            proj_label += f" Phase {str(r['Phase']).strip()}"
                             
-                        project_summary[proj]["Total"] += 1
+                        if proj_label not in project_summary:
+                            project_summary[proj_label] = {"Total": 0, "Working Fine": 0, "Missing": 0, "Extreme": 0, "Spiking": 0}
+                            
+                        project_summary[proj_label]["Total"] += 1
                         
                         pos_lbl = f"{r['Depth']}ft" if (pd.notnull(r['Depth']) and str(r['Depth']).strip() != '') else f"Bank {r['Bank']}"
                         last_seen_str = "Never"
@@ -3308,7 +3326,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             "Location": str(r['Location']),
                             "Position": pos_lbl,
                             "Last Seen": last_seen_str,
-                            "Project": proj
+                            "Project": proj_label,
+                            "Issue": "",
+                            "Details": "-"
                         }
 
                         node_has_issue = False
@@ -3316,17 +3336,19 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         # 1. EVALUATE MISSING
                         if latency_hours > 24.0:
                             node_has_issue = True
-                            project_summary[proj]["Missing"] += 1
+                            project_summary[proj_label]["Missing"] += 1
                             row_copy = base_row.copy()
-                            row_copy["Issue"] = f"Missing for {latency_hours:.1f}h" if latency_hours < 900 else "No Recent Data"
+                            row_copy["Issue"] = "Missing"
+                            row_copy["Details"] = f"Offline for {latency_hours:.1f}h" if latency_hours < 900 else "No Recent Data"
                             missing_rows.append(row_copy)
                             
                         # 2. EVALUATE EXTREME
                         if pd.notnull(r['latest_temp']) and (r['latest_temp'] < -25.0 or r['latest_temp'] > 105.0):
                             node_has_issue = True
-                            project_summary[proj]["Extreme"] += 1
+                            project_summary[proj_label]["Extreme"] += 1
                             row_copy = base_row.copy()
-                            row_copy["Issue"] = f"Extreme Bounds ({r['latest_temp']:.1f}°F)"
+                            row_copy["Issue"] = "Extreme Temp"
+                            row_copy["Details"] = f"{r['latest_temp']:.1f}°F"
                             extreme_rows.append(row_copy)
                             
                         # 3. EVALUATE SPIKING
@@ -3337,17 +3359,17 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         if pd.notnull(spike_val) and spike_count > 0:
                             is_temp_pipe = (r['PipeType'] == 'TempPipe')
                             node_has_issue = True
-                            project_summary[proj]["Spiking"] += 1
+                            project_summary[proj_label]["Spiking"] += 1
                             row_copy = base_row.copy()
                             type_label = "TempPipe" if is_temp_pipe else "Brine"
                             
-                            # Embed the new contextual data into the Issue column
-                            row_copy["Issue"] = f"{type_label} Spike (Max Δ {spike_val:.1f}°F | {spike_count} times in {hours_with_data}h of data)"
+                            row_copy["Issue"] = f"{type_label} Spike"
+                            row_copy["Details"] = f"Max Δ {spike_val:.1f}°F | {spike_count}x in {hours_with_data}h"
                             spiking_rows.append(row_copy)
                         
                         # 4. EVALUATE HEALTHY
                         if not node_has_issue:
-                            project_summary[proj]["Working Fine"] += 1
+                            project_summary[proj_label]["Working Fine"] += 1
 
                     # ==========================================
                     # UI RENDER: SUMMARY TOP-LEVEL TABLE
