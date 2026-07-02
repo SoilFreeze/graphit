@@ -3370,6 +3370,15 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 "🟢 Stable Maintenance": "#2ca02c"
                             }
                             
+                            # We update the status logic to use the new Ferndale-style metrics
+                            def classify_performance_status(row):
+                                if row['thermal_velocity'] >= 2.0: return "🔥 Rapid Warming (Urgent)"
+                                if abs(row['cluster_divergence']) >= 4.0: return "⚠️ Thermal Drift"
+                                if row['thermal_velocity'] <= -1.5: return "❄️ Freezing Active"
+                                return "🟢 Stable Maintenance"
+                                
+                            latest_filtered['Operational Assessment'] = latest_filtered.apply(classify_performance_status, axis=1)
+                            
                             summary_rows = []
                             for loc, loc_group in latest_filtered.groupby('Location'):
                                 summary_rows.append({
@@ -3386,14 +3395,17 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             g1, g2 = st.columns(2)
                             
                             with g1:
+                                # Updated Scatter to show Data Spread vs Velocity
                                 fig_scatter = px.scatter(
-                                    latest_filtered, x="current_temp", y="normalized_drift", 
+                                    latest_filtered, x="cluster_divergence", y="thermal_velocity", 
                                     color="Operational Assessment",
                                     color_discrete_map=status_color_map,
-                                    hover_data=["NodeNum", "Location"],
-                                    title="Deviation vs Current Temp"
+                                    hover_data=["NodeNum", "Location", "current_temp"],
+                                    title="Thermal Velocity vs Data Spread",
+                                    labels={"cluster_divergence": "Data Spread (from Median)", "thermal_velocity": "24h Velocity"}
                                 )
                                 fig_scatter.add_hline(y=0, line_dash="dot", line_width=1, line_color="black")
+                                fig_scatter.add_vline(x=0, line_dash="dot", line_width=1, line_color="black")
                                 fig_scatter.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
                                 st.plotly_chart(fig_scatter, use_container_width=True)
                                 
@@ -3408,18 +3420,18 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 st.plotly_chart(fig_bar, use_container_width=True)
 
                             st.markdown("### 🗄️ Raw Mathematical Evaluation")
-                            output_cols = ["NodeNum", "Location", "PipeType", "current_temp", "normalized_drift", "Operational Assessment"]
+                            # Updated grid to show the two new metric columns
+                            output_cols = ["NodeNum", "Location", "PipeType", "current_temp", "cluster_divergence", "thermal_velocity", "Operational Assessment"]
                             
                             unit_label = "°C" if st.session_state.get("unit_mode") == "Celsius" else "°F"
                             st.dataframe(
                                 latest_filtered[output_cols].style.format({
                                     "current_temp": f"{{:.1f}}{unit_label}",
-                                    "normalized_drift": f"{{:+.2f}}{unit_label}"
+                                    "cluster_divergence": f"{{:+.2f}}{unit_label}",
+                                    "thermal_velocity": f"{{:+.2f}}{unit_label}/day"
                                 }),
                                 use_container_width=True, hide_index=True
                             )
-                except Exception as e:
-                    st.error(f"Performance Analysis Compiler Error: {e}")
 
     # =========================================================================
     # TAB 3: NODE ALERT
