@@ -3309,17 +3309,24 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
                         
                         if selected_nodes:
-                            # Plot 1: Absolute Drift Magnitude
-                            fig_drift = px.line(perf_filtered, x="timestamp", y="abs_deviation_score", color="NodeNum",
-                                                title="Thermal Drift Magnitude (Distance from Median)")
+                            # Plot 1: Absolute Drift Magnitude (Uses new abs_normalized_drift)
+                            fig_drift = px.line(perf_filtered, x="timestamp", y="abs_normalized_drift", color="NodeNum",
+                                                title="Normalized Thermal Drift Magnitude")
                             fig_drift.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
+                            
+                            # Enable the Timeline Navigation Window
+                            fig_drift.update_xaxes(rangeslider_visible=True)
                             st.plotly_chart(fig_drift, use_container_width=True)
                             
-                            # Plot 2: Directional Divergence
-                            fig_z = px.line(perf_filtered, x="timestamp", y="deviation_score", color="NodeNum",
-                                            title="Directional Divergence (Actual vs Location Median)")
-                            fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange")
-                            fig_z.add_hline(y=-2.0, line_dash="dot", line_color="orange")
+                            # Plot 2: Directional Divergence (Uses new normalized_drift)
+                            fig_z = px.line(perf_filtered, x="timestamp", y="normalized_drift", color="NodeNum",
+                                            title="Zero-Centered Divergence (Flatline = Stable Behavior)")
+                            fig_z.add_hline(y=0, line_width=2, line_color="black") # Hard Zero baseline
+                            fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange", annotation_text="Warming Drift")
+                            fig_z.add_hline(y=-2.0, line_dash="dot", line_color="blue", annotation_text="Cooling Drift")
+                            
+                            # Enable the Timeline Navigation Window
+                            fig_z.update_xaxes(rangeslider_visible=True)
                             st.plotly_chart(fig_z, use_container_width=True)
                         else:
                             st.info("👆 Please select at least one sensor from the filters above to view the historical drift charts.")
