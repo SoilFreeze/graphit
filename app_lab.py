@@ -3180,9 +3180,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 st.plotly_chart(fig, use_container_width=True)
 
     # =========================================================================
-    # TAB 2: THERMAL PERFORMANCE METRICS
-    # =========================================================================
-    # =========================================================================
     # TAB 2: THERMAL PERFORMANCE METRICS (UPDATED)
     # =========================================================================
     with tab_performance:
@@ -3193,93 +3190,80 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         else:
             job_num = str(selected_project).split('-')[0].strip()
             
-            # This query pulls the rolling performance history for the last 7 days
+            # 1. Pull the pre-calculated analytics directly from the master view
             perf_q = f"""
-                WITH RollingStats AS (
-                    SELECT 
-                        NodeNum, Location, temperature, timestamp,
-                        CASE WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType,
-                        AVG(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as mu,
-                        STDDEV(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as sigma
-                    FROM `{MASTER_VIEW}`
-                    WHERE Project LIKE CONCAT(@job_num, '%')
-                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-                      AND temperature BETWEEN -30 AND 120
-                )
-                SELECT *, 
-                    (temperature - mu) / NULLIF(sigma, 0) as z_score,
-                    ABS(temperature - mu) as absolute_drift
-                FROM RollingStats
+                SELECT 
+                    NodeNum, Location, temperature AS current_temp, timestamp,
+                    location_median_temp, deviation_score, abs_deviation_score,
+                    CASE 
+                        WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' 
+                        ELSE 'Brine' 
+                    END as PipeType
+                FROM `{MASTER_VIEW}`
+                WHERE Project LIKE CONCAT(@job_num, '%')
+                  AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                ORDER BY timestamp DESC
             """
             
-            perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
-                query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
-            )).to_dataframe()
-
-            # --- GRAPHICAL SECTION: THERMODYNAMIC TRENDS ---
-            st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
-            
-            # Select specific nodes to compare drift
-            all_nodes = sorted(perf_df['NodeNum'].unique().tolist())
-            selected_nodes = st.multiselect("Compare Stability Trends for Nodes:", all_nodes, default=all_nodes[:3])
-            
-            if selected_nodes:
-                trend_df = perf_df[perf_df['NodeNum'].isin(selected_nodes)].copy()
-                
-                # Plot 1: Absolute Drift (Stability)
-                fig_drift = px.line(trend_df, x="timestamp", y="absolute_drift", color="NodeNum",
-                                   title="Thermal Drift (Abs Dev from 7d Mean)")
-                fig_drift.add_hline(y=2.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
-                st.plotly_chart(fig_drift, use_container_width=True)
-                
-                # Plot 2: Z-Score (Divergence from Cluster behavior)
-                fig_z = px.line(trend_df, x="timestamp", y="z_score", color="NodeNum",
-                                title="Z-Score (Statistical Divergence)")
-                fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange")
-                fig_z.add_hline(y=-2.0, line_dash="dot", line_color="orange")
-                st.plotly_chart(fig_z, use_container_width=True)
-
-            # [Keep your existing Data Grid code here...]
-            with st.spinner("Processing thermodynamic array calculus equations..."):
+            with st.spinner("Fetching thermodynamic arrays..."):
                 try:
                     perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
                         query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
                     )).to_dataframe()
                     
                     if perf_df.empty:
-                        st.warning("Telemetry samples window dataset pool limits populated empty for this context scope window.")
+                        st.warning("No telemetry samples found for this project in the past 7 days.")
                     else:
+                        # Convert timezones for plotting
+                        if perf_df['timestamp'].dt.tz is None:
+                            perf_df['timestamp'] = perf_df['timestamp'].dt.tz_localize('UTC')
+                        perf_df['timestamp'] = perf_df['timestamp'].dt.tz_convert(display_tz)
+
+                        # --- GRAPHICAL SECTION: THERMODYNAMIC TRENDS (Historical) ---
+                        st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
+                        
+                        all_nodes = sorted(perf_df['NodeNum'].unique().tolist())
+                        selected_nodes = st.multiselect("Compare Stability Trends for Nodes:", all_nodes, default=all_nodes[:3])
+                        
+                        if selected_nodes:
+                            trend_df = perf_df[perf_df['NodeNum'].isin(selected_nodes)].copy()
+                            
+                            # Plot 1: Absolute Drift (Magnitude of divergence)
+                            fig_drift = px.line(trend_df, x="timestamp", y="abs_deviation_score", color="NodeNum",
+                                                title="Thermal Drift Magnitude (Distance from Median)")
+                            fig_drift.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
+                            st.plotly_chart(fig_drift, use_container_width=True)
+                            
+                            # Plot 2: Directional Deviation (Warmer or Colder than median)
+                            fig_z = px.line(trend_df, x="timestamp", y="deviation_score", color="NodeNum",
+                                            title="Directional Divergence (Actual vs Location Median)")
+                            fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange")
+                            fig_z.add_hline(y=-2.0, line_dash="dot", line_color="orange")
+                            st.plotly_chart(fig_z, use_container_width=True)
+
+                        # --- SNAPSHOT SECTION: CURRENT FLEET STATUS ---
+                        # Extract only the single most recent row for each node to build the dashboard
+                        latest_df = perf_df.drop_duplicates(subset=['NodeNum'], keep='first').copy()
+                        
                         unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
                         
-                        def convert_t(v):
-                            if pd.isnull(v): return np.nan
-                            return (v - 32) * 5/9 if unit_mode == "Celsius" else v
-                            
-                        perf_df['Current Temp'] = perf_df['current_temp'].apply(convert_t)
-                        perf_df['7d Mean (μ)'] = perf_df['rolling_avg_7d'].apply(convert_t)
-                        perf_df['3h Slope (dT/dt)'] = perf_df['cooling_velocity_3h'] if unit_mode == "Fahrenheit" else perf_df['cooling_velocity_3h'] * 5/9
-                        perf_df['7d StdDev (σ)'] = perf_df['rolling_std_7d'] if unit_mode == "Fahrenheit" else perf_df['rolling_std_7d'] * 5/9
-                        perf_df['Cluster Deviation'] = perf_df['cluster_divergence_delta'] if unit_mode == "Fahrenheit" else perf_df['cluster_divergence_delta'] * 5/9
-                        
-                        # 4. Refined Urgent Metrics Classification
+                        # 2. Refined Urgent Metrics Classification based on Median Deviation
                         def classify_performance_status(row):
-                            if row['3h Slope (dT/dt)'] >= 1.5: return "🔥 Rapid Warming (Urgent)"
-                            if abs(row['Cluster Deviation']) >= 4.0: return "🚨 Cluster Divergence"
-                            if pd.notnull(row['7d StdDev (σ)']) and pd.notnull(row['7d Mean (μ)']):
-                                upper_bound = row['rolling_avg_7d'] + (2 * row['rolling_std_7d'])
-                                if row['current_temp'] > upper_bound: return "⚠️ Thermal Drift"
-                            if row['3h Slope (dT/dt)'] <= -0.5: return "❄️ Freezing Active"
+                            # Positive deviation means the node is warmer than the rest of the site
+                            if row['deviation_score'] >= 5.0: return "🔥 Rapid Warming (Urgent)"
+                            if row['deviation_score'] >= 2.0: return "⚠️ Thermal Drift"
+                            # Negative deviation means it's over-performing / colder than the site median
+                            if row['deviation_score'] <= -2.0: return "❄️ Freezing Active"
                             return "🟢 Stable Maintenance"
                             
-                        perf_df['Operational Assessment'] = perf_df.apply(classify_performance_status, axis=1)
+                        latest_df['Operational Assessment'] = latest_df.apply(classify_performance_status, axis=1)
                         
-                        # 2. Hardcoded Color Palette Mapping
                         status_color_map = {
-                            "🔥 Rapid Warming (Urgent)": "#8b0000", # Dark Red
-                            "🚨 Cluster Divergence": "#d62728",     # Bright Red
-                            "⚠️ Thermal Drift": "#ff7f0e",          # Orange
-                            "❄️ Freezing Active": "#1f77b4",        # Blue
-                            "🟢 Stable Maintenance": "#2ca02c"      # Green
+                            "🔥 Rapid Warming (Urgent)": "#8b0000",
+                            "🚨 Cluster Divergence": "#d62728",
+                            "⚠️ Thermal Drift": "#ff7f0e",
+                            "❄️ Freezing Active": "#1f77b4",
+                            "🟢 Stable Maintenance": "#2ca02c"
                         }
 
                         # --- UI: DATA BREAKDOWN FILTERS ---
@@ -3288,11 +3272,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             pipe_filter = st.radio("Component Filter:", ["Temp Pipes", "Brine Banks", "All Components"], horizontal=True)
                             
                         if pipe_filter == "Temp Pipes":
-                            disp_df = perf_df[perf_df['PipeType'] == 'TempPipe']
+                            disp_df = latest_df[latest_df['PipeType'] == 'TempPipe']
                         elif pipe_filter == "Brine Banks":
-                            disp_df = perf_df[perf_df['PipeType'] == 'Brine']
+                            disp_df = latest_df[latest_df['PipeType'] == 'Brine']
                         else:
-                            disp_df = perf_df
+                            disp_df = latest_df
 
                         if disp_df.empty:
                             st.info(f"No {pipe_filter} found for this project phase.")
@@ -3302,19 +3286,13 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             
                             summary_rows = []
                             for loc, loc_group in disp_df.groupby('Location'):
-                                total = len(loc_group)
-                                urgent = len(loc_group[loc_group['Operational Assessment'] == "🔥 Rapid Warming (Urgent)"])
-                                div_drift = len(loc_group[loc_group['Operational Assessment'].isin(["🚨 Cluster Divergence", "⚠️ Thermal Drift"])])
-                                freezing = len(loc_group[loc_group['Operational Assessment'] == "❄️ Freezing Active"])
-                                stable = len(loc_group[loc_group['Operational Assessment'] == "🟢 Stable Maintenance"])
-                                
                                 summary_rows.append({
                                     "Location": str(loc),
-                                    "Total Nodes": total,
-                                    "🟢 Stable": stable,
-                                    "❄️ Freezing": freezing,
-                                    "⚠️ Drift/Divergence": div_drift,
-                                    "🔥 Urgent Action": urgent
+                                    "Total Nodes": len(loc_group),
+                                    "🟢 Stable": len(loc_group[loc_group['Operational Assessment'] == "🟢 Stable Maintenance"]),
+                                    "❄️ Freezing": len(loc_group[loc_group['Operational Assessment'] == "❄️ Freezing Active"]),
+                                    "⚠️ Drift/Divergence": len(loc_group[loc_group['Operational Assessment'].isin(["🚨 Cluster Divergence", "⚠️ Thermal Drift"])]),
+                                    "🔥 Urgent Action": len(loc_group[loc_group['Operational Assessment'] == "🔥 Rapid Warming (Urgent)"])
                                 })
                             
                             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
@@ -3325,11 +3303,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             
                             with g1:
                                 fig_scatter = px.scatter(
-                                    disp_df, x="Current Temp", y="3h Slope (dT/dt)", 
+                                    disp_df, x="current_temp", y="deviation_score", 
                                     color="Operational Assessment",
                                     color_discrete_map=status_color_map,
-                                    hover_data=["NodeNum", "Location", "position_label"],
-                                    title=f"Cooling Velocity vs Current Temp"
+                                    hover_data=["NodeNum", "Location"],
+                                    title="Deviation vs Current Temp"
                                 )
                                 fig_scatter.add_hline(y=0, line_dash="dot", line_width=1, line_color="black")
                                 fig_scatter.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
@@ -3339,7 +3317,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 fig_bar = px.histogram(
                                     disp_df, x="Location", color="Operational Assessment",
                                     color_discrete_map=status_color_map,
-                                    title=f"Node Health Distribution by Location",
+                                    title="Node Health Distribution by Location",
                                     barmode="stack"
                                 )
                                 fig_bar.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
@@ -3347,15 +3325,13 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
                             # --- UI: DATA GRID ---
                             st.markdown("### 🗄️ Raw Mathematical Evaluation")
-                            output_cols = ["NodeNum", "Location", "position_label", "PipeType", "Current Temp", "3h Slope (dT/dt)", "7d Mean (μ)", "7d StdDev (σ)", "Cluster Deviation", "Operational Assessment"]
+                            output_cols = ["NodeNum", "Location", "PipeType", "current_temp", "location_median_temp", "deviation_score", "Operational Assessment"]
                             
                             st.dataframe(
                                 disp_df[output_cols].style.format({
-                                    "Current Temp": f"{{:.1f}}{unit_label}",
-                                    "3h Slope (dT/dt)": f"{{:+.2f}}{unit_label}/3h",
-                                    "7d Mean (μ)": f"{{:.1f}}{unit_label}",
-                                    "7d StdDev (σ)": "{:.2f}",
-                                    "Cluster Deviation": f"{{:+.1f}}{unit_label}"
+                                    "current_temp": f"{{:.1f}}{unit_label}",
+                                    "location_median_temp": f"{{:.1f}}{unit_label}",
+                                    "deviation_score": f"{{:+.2f}}{unit_label}"
                                 }),
                                 use_container_width=True, hide_index=True
                             )
