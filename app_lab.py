@@ -3127,18 +3127,41 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     color_discrete_sequence=['#1f77b4']
                 )
 
-                # Append the Ambient data to the figure if checked
+                # Fetch and Append the Ambient data to the figure if checked
                 if show_ambient:
-                    # NOTE: You will need to define `get_ambient_data()` or run your specific BigQuery call here
-                    # Example structure:
-                    # ambient_df = get_ambient_data(start_ts, now_ts)
-                    # if not ambient_df.empty:
-                    #     fig.add_scatter(
-                    #         x=ambient_df['timestamp'], y=ambient_df['temperature'],
-                    #         mode='lines', name="Ambient Office",
-                    #         line=dict(color='orange', dash='dot')
-                    #     )
-                    pass # Replace 'pass' with your actual ambient data fetching logic as outlined above
+                    ambient_q = f"""
+                        SELECT timestamp, temperature
+                        FROM `{MASTER_VIEW}`
+                        WHERE Project = 'Office' 
+                          AND Location = 'Ambient'
+                          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+                        ORDER BY timestamp DESC
+                    """
+                    amb_job_config = bigquery.QueryJobConfig(
+                        query_parameters=[
+                            bigquery.ScalarQueryParameter("lookback_days", "INTEGER", int(lookback_days))
+                        ]
+                    )
+                    
+                    with st.spinner("Fetching ambient office data..."):
+                        ambient_df = client.query(ambient_q, job_config=amb_job_config).to_dataframe()
+                    
+                    if not ambient_df.empty:
+                        # Localize timezone to match the node_history so the graph aligns perfectly
+                        if ambient_df['timestamp'].dt.tz is None:
+                            ambient_df['timestamp'] = ambient_df['timestamp'].dt.tz_localize('UTC')
+                        ambient_df['timestamp'] = ambient_df['timestamp'].dt.tz_convert(display_tz)
+                        
+                        # Add the trace to the Plotly figure
+                        fig.add_scatter(
+                            x=ambient_df['timestamp'], 
+                            y=ambient_df['temperature'],
+                            mode='lines', 
+                            name="Ambient Office",
+                            line=dict(color='orange', dash='dot')
+                        )
+                    else:
+                        st.toast("No ambient data found for 'Office/Ambient' in this timeframe.", icon="⚠️")
                 
                 fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
                 
