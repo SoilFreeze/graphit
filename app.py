@@ -2995,9 +2995,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
     with tab_lookup:
         st.subheader("🔍 Individual Node Telemetry Inspection")
         
-        # 1. Tie Project Scope to the Sidebar Context
         scope_label = "Global Fleet" if selected_project == "All Projects" else selected_project
-        st.info(f"🎯 **Search Scope:** {scope_label} (Change in sidebar)")
+        st.info(f"🎯 **Search Scope:** {scope_label}")
         
         c1, c2 = st.columns([1, 1])
         with c1:
@@ -3005,7 +3004,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             
         target_node = None
         
-        # Filter registry based on the sidebar selection
+        # Filter registry
         if selected_project == "All Projects":
             proj_filtered = reg_df 
         else:
@@ -3016,39 +3015,35 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             with c2:
                 avail_locs = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
                 f_loc = st.selectbox("Physical Location Context", avail_locs, key="diag_f_loc")
-                
-            matching_nodes = sorted(proj_filtered[proj_filtered['Location'] == f_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
-            if matching_nodes:
-                target_node = st.selectbox("Select Target Node to Inspect", matching_nodes, key="diag_node_select_dropdown")
-            else:
-                st.warning("No nodes match this configuration.")
-                
+                matching_nodes = sorted(proj_filtered[proj_filtered['Location'] == f_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+                if matching_nodes:
+                    target_node = st.selectbox("Select Target Node to Inspect", matching_nodes, key="diag_node_select_dropdown")
+                else:
+                    st.warning("No nodes match this configuration.")
         else:
             with c2:
                 all_active_nodes = sorted(proj_filtered['NodeNum'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
-                selected_search_node = st.selectbox(
-                    "Type Node ID to Search:", 
-                    options=[""] + all_active_nodes,
-                    index=0,
-                    key="diag_direct_node_search"
-                )
+                selected_search_node = st.selectbox("Type Node ID to Search:", [""] + all_active_nodes, index=0, key="diag_direct_node_search")
                 if selected_search_node != "":
                     target_node = selected_search_node
 
         if target_node:
             st.divider()
             
-            c_header, c_time = st.columns([3, 1])
+            # Header and Control Row
+            c_header, c_time, c_opt = st.columns([2, 1, 1])
             with c_header:
                 st.markdown(f"##### 📈 Telemetry History for Node: `{target_node}`")
             with c_time:
-                # Add dynamic timeline amounts
                 time_opt = st.selectbox("Historical Window:", ["30 Days", "60 Days", "90 Days", "1 Year", "All Time"], index=0)
-                
+            with c_opt:
+                st.write("###") # Alignment spacer
+                show_ambient = st.checkbox("Show Office Ambient", value=False)
+            
             days_map = {"30 Days": 30, "60 Days": 60, "90 Days": 90, "1 Year": 365, "All Time": 5000}
             lookback_days = days_map[time_opt]
             
-            # Master read query pulling localized node history down
+            # Data Fetching
             node_q = f"""
                 SELECT timestamp, temperature, Location, Bank, Depth, Project, SensorStatus
                 FROM `{MASTER_VIEW}`
@@ -3069,12 +3064,12 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             if node_history.empty:
                 st.warning(f"No telemetry data found for Node `{target_node}` in the past {time_opt}.")
             else:
-                # Localize and convert time for entire dataframe first so aggregation works cleanly
+                # Time conversion
                 if node_history['timestamp'].dt.tz is None:
                     node_history['timestamp'] = node_history['timestamp'].dt.tz_localize('UTC')
                 node_history['timestamp'] = node_history['timestamp'].dt.tz_convert(display_tz)
 
-                # Meta overview statistics boxes
+                # Meta stats
                 meta_row = node_history.iloc[0]
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
@@ -3082,61 +3077,49 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 m3.metric("Latest Project", str(meta_row['Project']))
                 m4.metric("Scanned Records", f"{len(node_history):,}")
 
-                # Compile the Historical Placements Table
+                # Historical Placements
                 st.markdown("#### 🗺️ Historical Placements")
-                
-                # Copy and fill NA to ensure GroupBy works without dropping records
                 hist_df = node_history.copy()
                 hist_df[['Project', 'Location', 'Bank', 'Depth']] = hist_df[['Project', 'Location', 'Bank', 'Depth']].fillna('')
-                
                 placements = hist_df.groupby(['Project', 'Location', 'Bank', 'Depth']).agg(
-                    First_Seen=('timestamp', 'min'),
-                    Last_Seen=('timestamp', 'max'),
-                    Records=('timestamp', 'count')
+                    First_Seen=('timestamp', 'min'), Last_Seen=('timestamp', 'max'), Records=('timestamp', 'count')
                 ).reset_index().sort_values('Last_Seen', ascending=False)
                 
-                # Format coordinates and timestamps for display
                 def format_pos(r):
                     if r['Depth']: return f"{r['Depth']}ft"
                     if r['Bank']: return f"Bank {r['Bank']}"
                     return "-"
-                    
                 placements['Position'] = placements.apply(format_pos, axis=1)
-                placements['First Seen'] = placements['First_Seen'].dt.strftime('%m/%d/%Y %H:%M')
-                placements['Last Seen'] = placements['Last_Seen'].dt.strftime('%m/%d/%Y %H:%M')
-                
-                # Reorder and display the clean matrix
-                disp_placements = placements[['Project', 'Location', 'Position', 'First Seen', 'Last Seen', 'Records']]
+                disp_placements = placements[['Project', 'Location', 'Position', 'First_Seen', 'Last_Seen', 'Records']]
                 st.dataframe(disp_placements, use_container_width=True, hide_index=True)
-
-                st.markdown("#### 📉 Temperature Trend")
                 
-                # Calculate exact bounds for the chart's X-axis to force the view window
+                # Temperature Trend
+                st.markdown("#### 📉 Temperature Trend")
                 now_ts = pd.Timestamp.now(tz=display_tz)
                 start_ts = now_ts - pd.Timedelta(days=lookback_days)
                 
-                fig = px.line(
-                    node_history, x='timestamp', y='temperature',
-                    labels={'timestamp': 'Time', 'temperature': f'Temperature ({unit_label})'},
-                    color_discrete_sequence=['#1f77b4']
-                )
+                import plotly.graph_objects as go
+                fig = go.Figure()
+
+                # Add Node Data
+                fig.add_trace(go.Scatter(x=node_history['timestamp'], y=node_history['temperature'], 
+                                         name=f"Node {target_node}", line=dict(color='#1f77b4', width=2)))
+
+                # Add Ambient Data (Optional)
+                if show_ambient:
+                    ambient_df = get_ambient_data(start_ts, now_ts) # Ensure this helper is defined
+                    fig.add_trace(go.Scatter(x=ambient_df['timestamp'], y=ambient_df['temperature'], 
+                                             name="Office Ambient", line=dict(color='orange', width=2, dash='dot')))
                 
-                fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
-                
-                # Force the x-axis range to strictly match the selected time window
-                fig.update_xaxes(
-                    range=[start_ts, now_ts],
-                    showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True
-                )
-                
-                fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
-                
-                # Overlay standard freezing marker reference point bounds
+                # Freeze line
                 freeze_pt = 0 if st.session_state.get("unit_mode") == "Celsius" else 32
                 fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue")
                 
+                fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
+                fig.update_xaxes(range=[start_ts, now_ts], showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+                fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+                
                 st.plotly_chart(fig, use_container_width=True)
-
     # =========================================================================
     # TAB 2: THERMAL PERFORMANCE METRICS
     # =========================================================================
