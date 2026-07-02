@@ -3219,40 +3219,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             perf_df['timestamp'] = perf_df['timestamp'].dt.tz_localize('UTC')
                         perf_df['timestamp'] = perf_df['timestamp'].dt.tz_convert(display_tz)
 
-                        # --- GRAPHICAL SECTION: THERMODYNAMIC TRENDS (Historical) ---
-                        st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
-                        
-                        all_nodes = sorted(perf_df['NodeNum'].unique().tolist())
-                        selected_nodes = st.multiselect("Compare Stability Trends for Nodes:", all_nodes, default=all_nodes[:3])
-                        
-                        if selected_nodes:
-                            trend_df = perf_df[perf_df['NodeNum'].isin(selected_nodes)].copy()
-                            
-                            # Plot 1: Absolute Drift (Magnitude of divergence)
-                            fig_drift = px.line(trend_df, x="timestamp", y="abs_deviation_score", color="NodeNum",
-                                                title="Thermal Drift Magnitude (Distance from Median)")
-                            fig_drift.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
-                            st.plotly_chart(fig_drift, use_container_width=True)
-                            
-                            # Plot 2: Directional Deviation (Warmer or Colder than median)
-                            fig_z = px.line(trend_df, x="timestamp", y="deviation_score", color="NodeNum",
-                                            title="Directional Divergence (Actual vs Location Median)")
-                            fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange")
-                            fig_z.add_hline(y=-2.0, line_dash="dot", line_color="orange")
-                            st.plotly_chart(fig_z, use_container_width=True)
-
-                        # --- SNAPSHOT SECTION: CURRENT FLEET STATUS ---
-                        # Extract only the single most recent row for each node to build the dashboard
+                        # Create the Snapshot DataFrame for the lower sections
                         latest_df = perf_df.drop_duplicates(subset=['NodeNum'], keep='first').copy()
-                        
                         unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
                         
-                        # 2. Refined Urgent Metrics Classification based on Median Deviation
+                        # Apply Status Classifications
                         def classify_performance_status(row):
-                            # Positive deviation means the node is warmer than the rest of the site
                             if row['deviation_score'] >= 5.0: return "🔥 Rapid Warming (Urgent)"
                             if row['deviation_score'] >= 2.0: return "⚠️ Thermal Drift"
-                            # Negative deviation means it's over-performing / colder than the site median
                             if row['deviation_score'] <= -2.0: return "❄️ Freezing Active"
                             return "🟢 Stable Maintenance"
                             
@@ -3266,53 +3240,96 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             "🟢 Stable Maintenance": "#2ca02c"
                         }
 
-                        # --- UI: DATA BREAKDOWN FILTERS ---
+                        # ==========================================
+                        # GLOBAL TAB FILTERS (Location -> Node Cascade)
+                        # ==========================================
                         st.markdown("### 🎛️ Dashboard Filters")
-                        
                         c_loc, c_node, c_pipe = st.columns([2, 3, 2])
                         
-                        # 1. Location Filter
+                        # Filter 1: Location
                         with c_loc:
-                            unique_locations = sorted(latest_df['Location'].dropna().unique().tolist())
+                            unique_locations = sorted(perf_df['Location'].dropna().unique().tolist())
                             selected_location = st.selectbox("1. Select Location:", ["All Locations"] + unique_locations)
                         
-                        # 2. Node Filter (Cascades based on Location)
+                        # Apply Location Filter to datasets
+                        if selected_location != "All Locations":
+                            perf_filtered = perf_df[perf_df['Location'] == selected_location]
+                            latest_filtered = latest_df[latest_df['Location'] == selected_location]
+                        else:
+                            perf_filtered = perf_df
+                            latest_filtered = latest_df
+
+                        # Filter 2: Node Cascade
                         with c_node:
-                            if selected_location == "All Locations":
-                                st.write("###") # Spacer to align with the selectbox
-                                st.caption("Select a specific location to filter individual sensors.")
-                                loc_filtered_df = latest_df
-                            else:
-                                loc_filtered_df = latest_df[latest_df['Location'] == selected_location]
-                                available_nodes = sorted(loc_filtered_df['NodeNum'].unique().tolist())
-                                selected_nodes = st.multiselect(
-                                    "2. Select Specific Sensors:", 
-                                    options=available_nodes,
-                                    placeholder="Showing all sensors in location..."
-                                )
-                                # Apply the node filter if the user selected any specific nodes
-                                if selected_nodes:
-                                    loc_filtered_df = loc_filtered_df[loc_filtered_df['NodeNum'].isin(selected_nodes)]
-
-                        # 3. Component Type Filter
-                        with c_pipe:
-                            st.write("###") # Spacer
-                            pipe_filter = st.radio("3. Component Type:", ["All Components", "Temp Pipes", "Brine Banks"], horizontal=True)
+                            available_nodes = sorted(latest_filtered['NodeNum'].unique().tolist())
                             
-                        # Apply the final pipe filter
-                        if pipe_filter == "Temp Pipes":
-                            disp_df = loc_filtered_df[loc_filtered_df['PipeType'] == 'TempPipe']
-                        elif pipe_filter == "Brine Banks":
-                            disp_df = loc_filtered_df[loc_filtered_df['PipeType'] == 'Brine']
-                        else:
-                            disp_df = loc_filtered_df
+                            # Default to the first 3 nodes if a specific location is picked, otherwise prompt user
+                            default_nodes = available_nodes[:3] if selected_location != "All Locations" and available_nodes else []
+                            
+                            selected_nodes = st.multiselect(
+                                "2. Select Specific Sensors:", 
+                                options=available_nodes,
+                                default=default_nodes,
+                                placeholder="Select nodes to view drift charts..."
+                            )
 
-                        if disp_df.empty:
-                            st.info("No sensors match these specific filter criteria.")
+                        # Filter 3: Component Type
+                        with c_pipe:
+                            st.write("###") # Vertical alignment spacer
+                            pipe_filter = st.radio("3. Component Type:", ["All", "Temp Pipes", "Brine Banks"], horizontal=True)
+
+                        # Apply Node & Pipe Filters to final display datasets
+                        if selected_nodes:
+                            perf_filtered = perf_filtered[perf_filtered['NodeNum'].isin(selected_nodes)]
+                            latest_filtered = latest_filtered[latest_filtered['NodeNum'].isin(selected_nodes)]
+
+                        if pipe_filter == "Temp Pipes":
+                            latest_filtered = latest_filtered[latest_filtered['PipeType'] == 'TempPipe']
+                        elif pipe_filter == "Brine Banks":
+                            latest_filtered = latest_filtered[latest_filtered['PipeType'] == 'Brine']
+
+                        st.divider()
+
+                        # ==========================================
+                        # GRAPHICAL SECTION: THERMODYNAMIC TRENDS
+                        # ==========================================
+                        st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
+                        
+                        if selected_nodes:
+                            # Plot 1: Absolute Drift Magnitude
+                            fig_drift = px.line(perf_filtered, x="timestamp", y="abs_deviation_score", color="NodeNum",
+                                                title="Thermal Drift Magnitude (Distance from Median)")
+                            fig_drift.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
+                            st.plotly_chart(fig_drift, use_container_width=True)
+                            
+                            # Plot 2: Directional Divergence
+                            fig_z = px.line(perf_filtered, x="timestamp", y="deviation_score", color="NodeNum",
+                                            title="Directional Divergence (Actual vs Location Median)")
+                            fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange")
+                            fig_z.add_hline(y=-2.0, line_dash="dot", line_color="orange")
+                            st.plotly_chart(fig_z, use_container_width=True)
                         else:
-                            # --- CONTINUES TO YOUR EXISTING SUMMARY, CHARTS, AND GRID ---
-                            # 3. OVERALL SCORES: Location Performance Summary
+                            st.info("👆 Please select at least one sensor from the filters above to view the historical drift charts.")
+
+                        # ==========================================
+                        # SNAPSHOT SECTION: CURRENT FLEET STATUS
+                        # ==========================================
+                        if latest_filtered.empty:
+                            st.warning("No sensors match your specific filter criteria.")
+                        else:
                             st.markdown(f"### 📍 Array Summary")
+                            
+                            summary_rows = []
+                            for loc, loc_group in latest_filtered.groupby('Location'):
+                                summary_rows.append({
+                                    "Location": str(loc),
+                                    "Total Nodes": len(loc_group),
+                                    "🟢 Stable": len(loc_group[loc_group['Operational Assessment'] == "🟢 Stable Maintenance"]),
+                                    "❄️ Freezing": len(loc_group[loc_group['Operational Assessment'] == "❄️ Freezing Active"]),
+                                    "⚠️ Drift": len(loc_group[loc_group['Operational Assessment'].isin(["🚨 Cluster Divergence", "⚠️ Thermal Drift"])]),
+                                    "🔥 Urgent": len(loc_group[loc_group['Operational Assessment'] == "🔥 Rapid Warming (Urgent)"])
+                                })
+                            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
                             # --- UI: GRAPHICAL ANALYSIS ---
                             st.markdown("### 📈 Visual Thermodynamics")
@@ -3320,7 +3337,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             
                             with g1:
                                 fig_scatter = px.scatter(
-                                    disp_df, x="current_temp", y="deviation_score", 
+                                    latest_filtered, x="current_temp", y="deviation_score", 
                                     color="Operational Assessment",
                                     color_discrete_map=status_color_map,
                                     hover_data=["NodeNum", "Location"],
@@ -3332,7 +3349,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 
                             with g2:
                                 fig_bar = px.histogram(
-                                    disp_df, x="Location", color="Operational Assessment",
+                                    latest_filtered, x="Location", color="Operational Assessment",
                                     color_discrete_map=status_color_map,
                                     title="Node Health Distribution by Location",
                                     barmode="stack"
@@ -3345,7 +3362,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             output_cols = ["NodeNum", "Location", "PipeType", "current_temp", "location_median_temp", "deviation_score", "Operational Assessment"]
                             
                             st.dataframe(
-                                disp_df[output_cols].style.format({
+                                latest_filtered[output_cols].style.format({
                                     "current_temp": f"{{:.1f}}{unit_label}",
                                     "location_median_temp": f"{{:.1f}}{unit_label}",
                                     "deviation_score": f"{{:+.2f}}{unit_label}"
