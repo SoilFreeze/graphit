@@ -3190,12 +3190,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         else:
             job_num = str(selected_project).split('-')[0].strip()
             
-            # 1. Pull analytics and calculate Normalized Drift on the fly
+            # 1. Pull analytics and calculate Self-Normalized Drift on the fly
             perf_q = f"""
                 WITH BaseData AS (
                     SELECT 
                         NodeNum, Location, temperature AS current_temp, timestamp,
-                        location_median_temp, deviation_score,
                         CASE 
                             WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' 
                             ELSE 'Brine' 
@@ -3206,14 +3205,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 )
                 SELECT 
                     *,
-                    -- Calculate the average offset for this specific node over this specific time window
-                    AVG(deviation_score) OVER(PARTITION BY NodeNum) AS node_period_avg_offset,
+                    -- Subtract the sensor's own average from its current reading to flatten stable lines to zero
+                    current_temp - AVG(current_temp) OVER(PARTITION BY NodeNum) AS normalized_drift,
                     
-                    -- Subtract the average offset from the current deviation to flatten the line to zero
-                    deviation_score - AVG(deviation_score) OVER(PARTITION BY NodeNum) AS normalized_drift,
-                    
-                    -- Calculate the absolute value of the normalized drift for magnitude thresholding
-                    ABS(deviation_score - AVG(deviation_score) OVER(PARTITION BY NodeNum)) AS abs_normalized_drift
+                    -- Absolute value for magnitude thresholds
+                    ABS(current_temp - AVG(current_temp) OVER(PARTITION BY NodeNum)) AS abs_normalized_drift
                 FROM BaseData
                 ORDER BY timestamp DESC
             """
@@ -3234,25 +3230,16 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
                         # Create the Snapshot DataFrame for the lower sections
                         latest_df = perf_df.drop_duplicates(subset=['NodeNum'], keep='first').copy()
-                        unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
                         
-                        # Apply Status Classifications
+                        # Apply Status Classifications based on the new isolated logic
                         def classify_performance_status(row):
-                            if row['deviation_score'] >= 5.0: return "🔥 Rapid Warming (Urgent)"
-                            if row['deviation_score'] >= 2.0: return "⚠️ Thermal Drift"
-                            if row['deviation_score'] <= -2.0: return "❄️ Freezing Active"
+                            if row['normalized_drift'] >= 3.0: return "🔥 Rapid Warming (Urgent)"
+                            if row['normalized_drift'] >= 1.5: return "⚠️ Thermal Drift"
+                            if row['normalized_drift'] <= -1.5: return "❄️ Freezing Active"
                             return "🟢 Stable Maintenance"
                             
                         latest_df['Operational Assessment'] = latest_df.apply(classify_performance_status, axis=1)
                         
-                        status_color_map = {
-                            "🔥 Rapid Warming (Urgent)": "#8b0000",
-                            "🚨 Cluster Divergence": "#d62728",
-                            "⚠️ Thermal Drift": "#ff7f0e",
-                            "❄️ Freezing Active": "#1f77b4",
-                            "🟢 Stable Maintenance": "#2ca02c"
-                        }
-
                         # ==========================================
                         # GLOBAL TAB FILTERS (Location -> Node Cascade)
                         # ==========================================
@@ -3304,33 +3291,50 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         st.divider()
 
                         # ==========================================
-                        # GRAPHICAL SECTION: THERMODYNAMIC TRENDS
+                        # GRAPHICAL SECTION: THERMODYNAMICS
                         # ==========================================
-                        st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
-                        
                         if selected_nodes:
-                            # Plot 1: Absolute Drift Magnitude (Uses new abs_normalized_drift)
-                            fig_drift = px.line(perf_filtered, x="timestamp", y="abs_normalized_drift", color="NodeNum",
-                                                title="Normalized Thermal Drift Magnitude")
-                            fig_drift.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
+                            # --- 1. NEW TOP CHART: RAW TIME VS TEMPERATURE ---
+                            st.markdown("### 🌡️ Time vs Temperature")
+                            fig_temp = px.line(
+                                perf_filtered, x="timestamp", y="current_temp", color="NodeNum",
+                                title="Raw Temperature Telemetry"
+                            )
+                            freeze_pt = 0 if st.session_state.get("unit_mode") == "Celsius" else 32
+                            fig_temp.add_hline(y=freeze_pt, line_dash="dash", line_color="RoyalBlue", annotation_text="Freeze Line")
+                            fig_temp.update_layout(plot_bgcolor='white', hovermode='x unified', height=500)
+                            fig_temp.update_xaxes(rangeslider_visible=True)
+                            st.plotly_chart(fig_temp, use_container_width=True)
                             
-                            # Enable the Timeline Navigation Window
-                            fig_drift.update_xaxes(rangeslider_visible=True)
-                            st.plotly_chart(fig_drift, use_container_width=True)
+                            st.divider()
+
+                            # --- 2. ISOLATED DRIFT CHARTS ---
+                            st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
                             
-                            # Plot 2: Directional Divergence (Uses new normalized_drift)
-                            fig_z = px.line(perf_filtered, x="timestamp", y="normalized_drift", color="NodeNum",
-                                            title="Zero-Centered Divergence (Flatline = Stable Behavior)")
+                            # Plot A: Zero-Centered Divergence
+                            fig_z = px.line(
+                                perf_filtered, x="timestamp", y="normalized_drift", color="NodeNum",
+                                title="Zero-Centered Divergence (Flatline = Stable Behavior)"
+                            )
                             fig_z.add_hline(y=0, line_width=2, line_color="black") # Hard Zero baseline
                             fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange", annotation_text="Warming Drift")
                             fig_z.add_hline(y=-2.0, line_dash="dot", line_color="blue", annotation_text="Cooling Drift")
-                            
-                            # Enable the Timeline Navigation Window
+                            fig_z.update_layout(plot_bgcolor='white', hovermode='x unified', height=400)
                             fig_z.update_xaxes(rangeslider_visible=True)
                             st.plotly_chart(fig_z, use_container_width=True)
-                        else:
-                            st.info("👆 Please select at least one sensor from the filters above to view the historical drift charts.")
 
+                            # Plot B: Absolute Drift Magnitude
+                            fig_drift = px.line(
+                                perf_filtered, x="timestamp", y="abs_normalized_drift", color="NodeNum",
+                                title="Normalized Thermal Drift Magnitude"
+                            )
+                            fig_drift.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
+                            fig_drift.update_layout(plot_bgcolor='white', hovermode='x unified', height=400)
+                            fig_drift.update_xaxes(rangeslider_visible=True)
+                            st.plotly_chart(fig_drift, use_container_width=True)
+
+                        else:
+                            st.info("👆 Please select at least one sensor from the filters above to view the thermodynamics.")
                         # ==========================================
                         # SNAPSHOT SECTION: CURRENT FLEET STATUS
                         # ==========================================
