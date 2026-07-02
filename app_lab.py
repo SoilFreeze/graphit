@@ -3109,7 +3109,13 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 disp_placements = placements[['Project', 'Location', 'Position', 'First Seen', 'Last Seen', 'Records']]
                 st.dataframe(disp_placements, use_container_width=True, hide_index=True)
 
+                # ==========================================
+                # TEMPERATURE TREND & AMBIENT TOGGLE
+                # ==========================================
                 st.markdown("#### 📉 Temperature Trend")
+                
+                # The checkbox is placed directly above the graph
+                show_ambient = st.checkbox("Show Ambient Office Temperature", value=False, key="toggle_ambient_temp")
                 
                 # Calculate exact bounds for the chart's X-axis to force the view window
                 now_ts = pd.Timestamp.now(tz=display_tz)
@@ -3120,6 +3126,19 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     labels={'timestamp': 'Time', 'temperature': f'Temperature ({unit_label})'},
                     color_discrete_sequence=['#1f77b4']
                 )
+
+                # Append the Ambient data to the figure if checked
+                if show_ambient:
+                    # NOTE: You will need to define `get_ambient_data()` or run your specific BigQuery call here
+                    # Example structure:
+                    # ambient_df = get_ambient_data(start_ts, now_ts)
+                    # if not ambient_df.empty:
+                    #     fig.add_scatter(
+                    #         x=ambient_df['timestamp'], y=ambient_df['temperature'],
+                    #         mode='lines', name="Ambient Office",
+                    #         line=dict(color='orange', dash='dot')
+                    #     )
+                    pass # Replace 'pass' with your actual ambient data fetching logic as outlined above
                 
                 fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
                 
