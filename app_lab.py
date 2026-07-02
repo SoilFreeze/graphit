@@ -3190,8 +3190,19 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             st.info("💡 Please select a specific project in the sidebar.")
         else:
             job_num = str(selected_project).split('-')[0].strip()
+
+            st.markdown("### 🎛️ Dashboard Filters")
             
-            # 1. Pull analytics and calculate Self-Normalized Drift on the fly
+            # --- 1. TIME WINDOW FILTER (Executes before the database query) ---
+            time_opt = st.selectbox(
+                "1. Historical Window:", 
+                ["7 Days", "14 Days", "30 Days", "60 Days", "90 Days", "180 Days"], 
+                index=0
+            )
+            # Extract the integer from the selection string
+            lookback_days = int(time_opt.split()[0])
+
+            # --- 2. DYNAMIC BIGQUERY FETCH ---
             perf_q = f"""
                 WITH BaseData AS (
                     SELECT 
@@ -3202,11 +3213,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         END as PipeType
                     FROM `{MASTER_VIEW}`
                     WHERE Project LIKE CONCAT(@job_num, '%')
-                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
                 )
                 SELECT 
                     *,
-                    -- Subtract the sensor's own average from its current reading to flatten stable lines to zero
+                    -- Subtract the sensor's own average (over the selected timeframe) to flatten stable lines
                     current_temp - AVG(current_temp) OVER(PARTITION BY NodeNum) AS normalized_drift,
                     
                     -- Absolute value for magnitude thresholds
@@ -3215,24 +3226,28 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 ORDER BY timestamp DESC
             """
             
-            with st.spinner("Fetching thermodynamic arrays..."):
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("job_num", "STRING", job_num),
+                    bigquery.ScalarQueryParameter("lookback_days", "INTEGER", lookback_days)
+                ]
+            )
+            
+            with st.spinner(f"Fetching {time_opt} of thermodynamic arrays..."):
                 try:
-                    perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
-                        query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
-                    )).to_dataframe()
+                    perf_df = client.query(perf_q, job_config=job_config).to_dataframe()
                     
                     if perf_df.empty:
-                        st.warning("No telemetry samples found for this project in the past 7 days.")
+                        st.warning(f"No telemetry samples found for this project in the past {time_opt}.")
                     else:
                         # Convert timezones for plotting
                         if perf_df['timestamp'].dt.tz is None:
                             perf_df['timestamp'] = perf_df['timestamp'].dt.tz_localize('UTC')
                         perf_df['timestamp'] = perf_df['timestamp'].dt.tz_convert(display_tz)
 
-                        # Create the Snapshot DataFrame for the lower sections
+                        # Create Snapshot DataFrame for the lower sections
                         latest_df = perf_df.drop_duplicates(subset=['NodeNum'], keep='first').copy()
                         
-                        # Apply Status Classifications based on the new isolated logic
                         def classify_performance_status(row):
                             if row['normalized_drift'] >= 3.0: return "🔥 Rapid Warming (Urgent)"
                             if row['normalized_drift'] >= 1.5: return "⚠️ Thermal Drift"
@@ -3240,19 +3255,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             return "🟢 Stable Maintenance"
                             
                         latest_df['Operational Assessment'] = latest_df.apply(classify_performance_status, axis=1)
-                        
-                        # ==========================================
-                        # GLOBAL TAB FILTERS (Location -> Node Cascade)
-                        # ==========================================
-                        st.markdown("### 🎛️ Dashboard Filters")
+
+                        # --- 3. COMPONENT & LOCATION FILTERS ---
                         c_loc, c_node, c_pipe = st.columns([2, 3, 2])
                         
-                        # Filter 1: Location
                         with c_loc:
                             unique_locations = sorted(perf_df['Location'].dropna().unique().tolist())
-                            selected_location = st.selectbox("1. Select Location:", ["All Locations"] + unique_locations)
+                            selected_location = st.selectbox("2. Select Location:", ["All Locations"] + unique_locations)
                         
-                        # Apply Location Filter to datasets
                         if selected_location != "All Locations":
                             perf_filtered = perf_df[perf_df['Location'] == selected_location]
                             latest_filtered = latest_df[latest_df['Location'] == selected_location]
@@ -3260,26 +3270,21 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             perf_filtered = perf_df
                             latest_filtered = latest_df
 
-                        # Filter 2: Node Cascade
                         with c_node:
                             available_nodes = sorted(latest_filtered['NodeNum'].unique().tolist())
-                            
-                            # Default to the first 3 nodes if a specific location is picked, otherwise prompt user
                             default_nodes = available_nodes[:3] if selected_location != "All Locations" and available_nodes else []
                             
                             selected_nodes = st.multiselect(
-                                "2. Select Specific Sensors:", 
+                                "3. Select Specific Sensors:", 
                                 options=available_nodes,
                                 default=default_nodes,
                                 placeholder="Select nodes to view drift charts..."
                             )
 
-                        # Filter 3: Component Type
                         with c_pipe:
-                            st.write("###") # Vertical alignment spacer
-                            pipe_filter = st.radio("3. Component Type:", ["All", "Temp Pipes", "Brine Banks"], horizontal=True)
+                            st.write("###") 
+                            pipe_filter = st.radio("4. Component Type:", ["All", "Temp Pipes", "Brine Banks"], horizontal=True)
 
-                        # Apply Node & Pipe Filters to final display datasets
                         if selected_nodes:
                             perf_filtered = perf_filtered[perf_filtered['NodeNum'].isin(selected_nodes)]
                             latest_filtered = latest_filtered[latest_filtered['NodeNum'].isin(selected_nodes)]
@@ -3295,8 +3300,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         # GRAPHICAL SECTION: THERMODYNAMICS
                         # ==========================================
                         if selected_nodes:
-                            # --- 1. NEW TOP CHART: RAW TIME VS TEMPERATURE ---
-                            st.markdown("### 🌡️ Time vs Temperature")
+                            st.markdown(f"### 🌡️ {time_opt} Time vs Temperature")
                             fig_temp = px.line(
                                 perf_filtered, x="timestamp", y="current_temp", color="NodeNum",
                                 title="Raw Temperature Telemetry"
@@ -3309,15 +3313,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             
                             st.divider()
 
-                            # --- 2. ISOLATED DRIFT CHARTS ---
-                            st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
+                            st.markdown(f"### 📉 {time_opt} Thermodynamic Stability & Drift Trends")
                             
                             # Plot A: Zero-Centered Divergence
                             fig_z = px.line(
                                 perf_filtered, x="timestamp", y="normalized_drift", color="NodeNum",
                                 title="Zero-Centered Divergence (Flatline = Stable Behavior)"
                             )
-                            fig_z.add_hline(y=0, line_width=2, line_color="black") # Hard Zero baseline
+                            fig_z.add_hline(y=0, line_width=2, line_color="black")
                             fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange", annotation_text="Warming Drift")
                             fig_z.add_hline(y=-2.0, line_dash="dot", line_color="blue", annotation_text="Cooling Drift")
                             fig_z.update_layout(plot_bgcolor='white', hovermode='x unified', height=400)
@@ -3336,13 +3339,22 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
                         else:
                             st.info("👆 Please select at least one sensor from the filters above to view the thermodynamics.")
+                            
                         # ==========================================
                         # SNAPSHOT SECTION: CURRENT FLEET STATUS
                         # ==========================================
                         if latest_filtered.empty:
                             st.warning("No sensors match your specific filter criteria.")
                         else:
-                            st.markdown(f"### 📍 Array Summary")
+                            st.markdown("### 📍 Array Summary (Latest Readings)")
+                            
+                            status_color_map = {
+                                "🔥 Rapid Warming (Urgent)": "#8b0000",
+                                "🚨 Cluster Divergence": "#d62728",
+                                "⚠️ Thermal Drift": "#ff7f0e",
+                                "❄️ Freezing Active": "#1f77b4",
+                                "🟢 Stable Maintenance": "#2ca02c"
+                            }
                             
                             summary_rows = []
                             for loc, loc_group in latest_filtered.groupby('Location'):
@@ -3356,13 +3368,12 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 })
                             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-                            # --- UI: GRAPHICAL ANALYSIS ---
                             st.markdown("### 📈 Visual Thermodynamics")
                             g1, g2 = st.columns(2)
                             
                             with g1:
                                 fig_scatter = px.scatter(
-                                    latest_filtered, x="current_temp", y="deviation_score", 
+                                    latest_filtered, x="current_temp", y="normalized_drift", 
                                     color="Operational Assessment",
                                     color_discrete_map=status_color_map,
                                     hover_data=["NodeNum", "Location"],
@@ -3382,15 +3393,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 fig_bar.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
                                 st.plotly_chart(fig_bar, use_container_width=True)
 
-                            # --- UI: DATA GRID ---
                             st.markdown("### 🗄️ Raw Mathematical Evaluation")
-                            output_cols = ["NodeNum", "Location", "PipeType", "current_temp", "location_median_temp", "deviation_score", "Operational Assessment"]
+                            output_cols = ["NodeNum", "Location", "PipeType", "current_temp", "normalized_drift", "Operational Assessment"]
                             
+                            unit_label = "°C" if st.session_state.get("unit_mode") == "Celsius" else "°F"
                             st.dataframe(
                                 latest_filtered[output_cols].style.format({
                                     "current_temp": f"{{:.1f}}{unit_label}",
-                                    "location_median_temp": f"{{:.1f}}{unit_label}",
-                                    "deviation_score": f"{{:+.2f}}{unit_label}"
+                                    "normalized_drift": f"{{:+.2f}}{unit_label}"
                                 }),
                                 use_container_width=True, hide_index=True
                             )
