@@ -3214,15 +3214,29 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     FROM `{MASTER_VIEW}`
                     WHERE Project LIKE CONCAT(@job_num, '%')
                       AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+                ),
+                EnrichedData AS (
+                    SELECT 
+                        *,
+                        -- Metric 1 Setup: Median of peers in the same pipe type and location
+                        PERCENTILE_CONT(current_temp, 0.5) OVER(PARTITION BY Location, PipeType, timestamp) AS peer_median,
+                        
+                        -- Metric 2 Setup: The average temp of this specific node over the previous 24 hours
+                        AVG(current_temp) OVER(
+                            PARTITION BY NodeNum 
+                            ORDER BY UNIX_SECONDS(timestamp) 
+                            RANGE BETWEEN 86400 PRECEDING AND 3600 PRECEDING
+                        ) AS past_24h_avg
+                    FROM BaseData
                 )
                 SELECT 
                     *,
-                    -- Subtract the sensor's own average (over the selected timeframe) to flatten stable lines
-                    current_temp - AVG(current_temp) OVER(PARTITION BY NodeNum) AS normalized_drift,
+                    -- Metric 1: Data Spread (Distance from neighbors)
+                    current_temp - peer_median AS cluster_divergence,
                     
-                    -- Absolute value for magnitude thresholds
-                    ABS(current_temp - AVG(current_temp) OVER(PARTITION BY NodeNum)) AS abs_normalized_drift
-                FROM BaseData
+                    -- Metric 2: Ups and Downs (24-hour rate of change)
+                    current_temp - past_24h_avg AS thermal_velocity
+                FROM EnrichedData
                 ORDER BY timestamp DESC
             """
             
