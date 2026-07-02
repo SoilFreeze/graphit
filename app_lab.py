@@ -3267,35 +3267,52 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         }
 
                         # --- UI: DATA BREAKDOWN FILTERS ---
-                        c_filt, _ = st.columns([1, 2])
-                        with c_filt:
-                            pipe_filter = st.radio("Component Filter:", ["Temp Pipes", "Brine Banks", "All Components"], horizontal=True)
+                        st.markdown("### 🎛️ Dashboard Filters")
+                        
+                        c_loc, c_node, c_pipe = st.columns([2, 3, 2])
+                        
+                        # 1. Location Filter
+                        with c_loc:
+                            unique_locations = sorted(latest_df['Location'].dropna().unique().tolist())
+                            selected_location = st.selectbox("1. Select Location:", ["All Locations"] + unique_locations)
+                        
+                        # 2. Node Filter (Cascades based on Location)
+                        with c_node:
+                            if selected_location == "All Locations":
+                                st.write("###") # Spacer to align with the selectbox
+                                st.caption("Select a specific location to filter individual sensors.")
+                                loc_filtered_df = latest_df
+                            else:
+                                loc_filtered_df = latest_df[latest_df['Location'] == selected_location]
+                                available_nodes = sorted(loc_filtered_df['NodeNum'].unique().tolist())
+                                selected_nodes = st.multiselect(
+                                    "2. Select Specific Sensors:", 
+                                    options=available_nodes,
+                                    placeholder="Showing all sensors in location..."
+                                )
+                                # Apply the node filter if the user selected any specific nodes
+                                if selected_nodes:
+                                    loc_filtered_df = loc_filtered_df[loc_filtered_df['NodeNum'].isin(selected_nodes)]
+
+                        # 3. Component Type Filter
+                        with c_pipe:
+                            st.write("###") # Spacer
+                            pipe_filter = st.radio("3. Component Type:", ["All Components", "Temp Pipes", "Brine Banks"], horizontal=True)
                             
+                        # Apply the final pipe filter
                         if pipe_filter == "Temp Pipes":
-                            disp_df = latest_df[latest_df['PipeType'] == 'TempPipe']
+                            disp_df = loc_filtered_df[loc_filtered_df['PipeType'] == 'TempPipe']
                         elif pipe_filter == "Brine Banks":
-                            disp_df = latest_df[latest_df['PipeType'] == 'Brine']
+                            disp_df = loc_filtered_df[loc_filtered_df['PipeType'] == 'Brine']
                         else:
-                            disp_df = latest_df
+                            disp_df = loc_filtered_df
 
                         if disp_df.empty:
-                            st.info(f"No {pipe_filter} found for this project phase.")
+                            st.info("No sensors match these specific filter criteria.")
                         else:
+                            # --- CONTINUES TO YOUR EXISTING SUMMARY, CHARTS, AND GRID ---
                             # 3. OVERALL SCORES: Location Performance Summary
-                            st.markdown(f"### 📍 Location Array Summary ({pipe_filter})")
-                            
-                            summary_rows = []
-                            for loc, loc_group in disp_df.groupby('Location'):
-                                summary_rows.append({
-                                    "Location": str(loc),
-                                    "Total Nodes": len(loc_group),
-                                    "🟢 Stable": len(loc_group[loc_group['Operational Assessment'] == "🟢 Stable Maintenance"]),
-                                    "❄️ Freezing": len(loc_group[loc_group['Operational Assessment'] == "❄️ Freezing Active"]),
-                                    "⚠️ Drift/Divergence": len(loc_group[loc_group['Operational Assessment'].isin(["🚨 Cluster Divergence", "⚠️ Thermal Drift"])]),
-                                    "🔥 Urgent Action": len(loc_group[loc_group['Operational Assessment'] == "🔥 Rapid Warming (Urgent)"])
-                                })
-                            
-                            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+                            st.markdown(f"### 📍 Array Summary")
 
                             # --- UI: GRAPHICAL ANALYSIS ---
                             st.markdown("### 📈 Visual Thermodynamics")
