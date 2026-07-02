@@ -2977,7 +2977,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
     # Load down node inventory definitions for filter mappings
     try:
-        reg_df = client.query(f"SELECT NodeNum, Project, Location, Depth, Bank FROM `{NODE_REGISTRY_TABLE}` WHERE End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = ''").to_dataframe()
+        # Change this in your app.py:
+        reg_df = client.query("SELECT * FROM `sensorpush-export.Temperature.node_registry_synced`").to_dataframe()
     except Exception as e:
         st.error(f"Failed to fetch active registry for dropdown paths: {e}")
         return
