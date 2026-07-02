@@ -3433,6 +3433,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 use_container_width=True, hide_index=True
                             )
 
+                except Exception as e:
+                    st.error(f"Performance Analysis Compiler Error: {e}")
+
     # =========================================================================
     # TAB 3: NODE ALERT
     # =========================================================================
