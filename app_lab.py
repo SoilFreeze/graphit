@@ -3262,10 +3262,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         # Create Snapshot DataFrame for the lower sections
                         latest_df = perf_df.drop_duplicates(subset=['NodeNum'], keep='first').copy()
                         
+                        # Apply Status Classifications based on the new Ferndale-style logic
                         def classify_performance_status(row):
-                            if row['normalized_drift'] >= 3.0: return "🔥 Rapid Warming (Urgent)"
-                            if row['normalized_drift'] >= 1.5: return "⚠️ Thermal Drift"
-                            if row['normalized_drift'] <= -1.5: return "❄️ Freezing Active"
+                            if row['thermal_velocity'] >= 2.0: return "🔥 Rapid Warming (Urgent)"
+                            if abs(row['cluster_divergence']) >= 4.0: return "⚠️ Thermal Drift"
+                            if row['thermal_velocity'] <= -1.5: return "❄️ Freezing Active"
                             return "🟢 Stable Maintenance"
                             
                         latest_df['Operational Assessment'] = latest_df.apply(classify_performance_status, axis=1)
