@@ -3203,10 +3203,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             lookback_days = int(time_opt.split()[0])
 
             # --- 2. DYNAMIC BIGQUERY FETCH ---
+            # We add 'Depth' here so we can include the position in the graph legend
             perf_q = f"""
                 WITH BaseData AS (
                     SELECT 
-                        NodeNum, Location, temperature AS current_temp, timestamp,
+                        NodeNum, Location, Depth, temperature AS current_temp, timestamp,
                         CASE 
                             WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' 
                             ELSE 'Brine' 
@@ -3218,10 +3219,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 EnrichedData AS (
                     SELECT 
                         *,
-                        -- Metric 1 Setup: Median of peers in the same pipe type and location
                         PERCENTILE_CONT(current_temp, 0.5) OVER(PARTITION BY Location, PipeType, timestamp) AS peer_median,
-                        
-                        -- Metric 2 Setup: The average temp of this specific node over the previous 24 hours
                         AVG(current_temp) OVER(
                             PARTITION BY NodeNum 
                             ORDER BY UNIX_SECONDS(timestamp) 
@@ -3231,10 +3229,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 )
                 SELECT 
                     *,
-                    -- Metric 1: Data Spread (Distance from neighbors)
                     current_temp - peer_median AS cluster_divergence,
-                    
-                    -- Metric 2: Ups and Downs (24-hour rate of change)
                     current_temp - past_24h_avg AS thermal_velocity
                 FROM EnrichedData
                 ORDER BY timestamp DESC
@@ -3258,11 +3253,16 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         if perf_df['timestamp'].dt.tz is None:
                             perf_df['timestamp'] = perf_df['timestamp'].dt.tz_localize('UTC')
                         perf_df['timestamp'] = perf_df['timestamp'].dt.tz_convert(display_tz)
+                        
+                        # Create a clean display label for the unified legend (e.g. "2181-ch8 (24ft)")
+                        perf_df['DisplayLabel'] = perf_df.apply(
+                            lambda r: f"{r['NodeNum']} ({r['Depth']}ft)" if pd.notnull(r['Depth']) and str(r['Depth']).strip() else r['NodeNum'], 
+                            axis=1
+                        )
 
-                        # Create Snapshot DataFrame for the lower sections
+                        # Create Snapshot DataFrame
                         latest_df = perf_df.drop_duplicates(subset=['NodeNum'], keep='first').copy()
                         
-                        # Apply Status Classifications based on the new Ferndale-style logic
                         def classify_performance_status(row):
                             if row['thermal_velocity'] >= 2.0: return "🔥 Rapid Warming (Urgent)"
                             if abs(row['cluster_divergence']) >= 4.0: return "⚠️ Thermal Drift"
@@ -3287,7 +3287,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
                         with c_node:
                             available_nodes = sorted(latest_filtered['NodeNum'].unique().tolist())
-                            default_nodes = available_nodes[:3] if selected_location != "All Locations" and available_nodes else []
+                            
+                            # FIX 1: By removing the "[:3]", we default to selecting ALL nodes in the location
+                            default_nodes = available_nodes if selected_location != "All Locations" and available_nodes else []
                             
                             selected_nodes = st.multiselect(
                                 "3. Select Specific Sensors:", 
@@ -3312,45 +3314,82 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         st.divider()
 
                         # ==========================================
-                        # GRAPHICAL SECTION: THERMODYNAMICS
+                        # GRAPHICAL SECTION: UNIFIED MASTER DASHBOARD
                         # ==========================================
                         if selected_nodes:
-                            st.markdown(f"### 🌡️ {time_opt} Time vs Temperature")
-                            fig_temp = px.line(
-                                perf_filtered, x="timestamp", y="current_temp", color="NodeNum",
-                                title="Raw Temperature Telemetry"
+                            st.markdown(f"### 🌡️ {time_opt} Thermodynamic Master View")
+                            
+                            from plotly.subplots import make_subplots
+                            import plotly.graph_objects as go
+                            import plotly.express as px
+                            
+                            # FIX 2 & 3: Create a 3-row stacked chart with a shared X-axis
+                            fig = make_subplots(
+                                rows=3, cols=1, 
+                                shared_xaxes=True,
+                                vertical_spacing=0.08,
+                                subplot_titles=(
+                                    "1. Raw Temperature Telemetry", 
+                                    "2. Data Spread (Distance from Pipe Median)", 
+                                    "3. Thermal Velocity (24-Hour Rate of Change)"
+                                )
                             )
+                            
+                            colors = px.colors.qualitative.Plotly
+                            
+                            # Iterate through nodes to tie their colors and legend groups together across all 3 subplots
+                            for i, node in enumerate(selected_nodes):
+                                node_data = perf_filtered[perf_filtered['NodeNum'] == node]
+                                if node_data.empty: continue
+                                    
+                                label = node_data['DisplayLabel'].iloc[0]
+                                line_color = colors[i % len(colors)]
+                                
+                                # Row 1: Raw Temp
+                                fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['current_temp'],
+                                                         name=label, legendgroup=label, mode='lines',
+                                                         line=dict(color=line_color, width=2)),
+                                              row=1, col=1)
+                                
+                                # Row 2: Data Spread (showlegend=False hides duplicates in the master legend)
+                                fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['cluster_divergence'],
+                                                         name=label, legendgroup=label, mode='lines', showlegend=False,
+                                                         line=dict(color=line_color, width=2)),
+                                              row=2, col=1)
+                                              
+                                # Row 3: Thermal Velocity
+                                fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['thermal_velocity'],
+                                                         name=label, legendgroup=label, mode='lines', showlegend=False,
+                                                         line=dict(color=line_color, width=2)),
+                                              row=3, col=1)
+
+                            # --- Add Reference Threshold Lines ---
                             freeze_pt = 0 if st.session_state.get("unit_mode") == "Celsius" else 32
-                            fig_temp.add_hline(y=freeze_pt, line_dash="dash", line_color="RoyalBlue", annotation_text="Freeze Line")
-                            fig_temp.update_layout(plot_bgcolor='white', hovermode='x unified', height=500)
-                            fig_temp.update_xaxes(rangeslider_visible=True)
-                            st.plotly_chart(fig_temp, use_container_width=True)
+                            fig.add_hline(y=freeze_pt, line_dash="dash", line_color="RoyalBlue", row=1, col=1)
                             
-                            st.divider()
-
-                            st.markdown(f"### 📉 {time_opt} Thermodynamic Stability & Drift Trends")
+                            fig.add_hline(y=0, line_width=2, line_color="black", row=2, col=1)
+                            fig.add_hline(y=4.0, line_dash="dot", line_color="orange", row=2, col=1)
+                            fig.add_hline(y=-4.0, line_dash="dot", line_color="blue", row=2, col=1)
                             
-                            # Plot A: Zero-Centered Divergence
-                            fig_z = px.line(
-                                perf_filtered, x="timestamp", y="normalized_drift", color="NodeNum",
-                                title="Zero-Centered Divergence (Flatline = Stable Behavior)"
-                            )
-                            fig_z.add_hline(y=0, line_width=2, line_color="black")
-                            fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange", annotation_text="Warming Drift")
-                            fig_z.add_hline(y=-2.0, line_dash="dot", line_color="blue", annotation_text="Cooling Drift")
-                            fig_z.update_layout(plot_bgcolor='white', hovermode='x unified', height=400)
-                            fig_z.update_xaxes(rangeslider_visible=True)
-                            st.plotly_chart(fig_z, use_container_width=True)
+                            fig.add_hline(y=0, line_width=2, line_color="black", row=3, col=1)
+                            fig.add_hline(y=2.0, line_dash="dash", line_color="red", row=3, col=1)
+                            fig.add_hline(y=-2.0, line_dash="dash", line_color="cyan", row=3, col=1)
 
-                            # Plot B: Absolute Drift Magnitude
-                            fig_drift = px.line(
-                                perf_filtered, x="timestamp", y="abs_normalized_drift", color="NodeNum",
-                                title="Normalized Thermal Drift Magnitude"
+                            # Configure overall layout to stack cleanly and attach the slider to the bottom
+                            fig.update_layout(
+                                height=900,  # Taller total height to accommodate 3 graphs
+                                hovermode='x unified',
+                                plot_bgcolor='white',
+                                legend_title_text="Node (Depth)",
+                                margin=dict(t=40, b=0, l=0, r=0)
                             )
-                            fig_drift.add_hline(y=3.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
-                            fig_drift.update_layout(plot_bgcolor='white', hovermode='x unified', height=400)
-                            fig_drift.update_xaxes(rangeslider_visible=True)
-                            st.plotly_chart(fig_drift, use_container_width=True)
+                            fig.update_xaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black')
+                            fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black')
+                            
+                            # Attach the timeline scrubber only to the bottom chart
+                            fig.update_xaxes(rangeslider_visible=True, row=3, col=1)
+                            
+                            st.plotly_chart(fig, use_container_width=True)
 
                         else:
                             st.info("👆 Please select at least one sensor from the filters above to view the thermodynamics.")
@@ -3371,15 +3410,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 "🟢 Stable Maintenance": "#2ca02c"
                             }
                             
-                            # We update the status logic to use the new Ferndale-style metrics
-                            def classify_performance_status(row):
-                                if row['thermal_velocity'] >= 2.0: return "🔥 Rapid Warming (Urgent)"
-                                if abs(row['cluster_divergence']) >= 4.0: return "⚠️ Thermal Drift"
-                                if row['thermal_velocity'] <= -1.5: return "❄️ Freezing Active"
-                                return "🟢 Stable Maintenance"
-                                
-                            latest_filtered['Operational Assessment'] = latest_filtered.apply(classify_performance_status, axis=1)
-                            
                             summary_rows = []
                             for loc, loc_group in latest_filtered.groupby('Location'):
                                 summary_rows.append({
@@ -3396,14 +3426,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             g1, g2 = st.columns(2)
                             
                             with g1:
-                                # Updated Scatter to show Data Spread vs Velocity
+                                # FIX 4: Replaced normalized_drift with the correct new metric columns
                                 fig_scatter = px.scatter(
                                     latest_filtered, x="cluster_divergence", y="thermal_velocity", 
                                     color="Operational Assessment",
                                     color_discrete_map=status_color_map,
-                                    hover_data=["NodeNum", "Location", "current_temp"],
-                                    title="Thermal Velocity vs Data Spread",
-                                    labels={"cluster_divergence": "Data Spread (from Median)", "thermal_velocity": "24h Velocity"}
+                                    hover_data=["DisplayLabel", "Location", "current_temp"],
+                                    title="Velocity vs Data Spread",
+                                    labels={"cluster_divergence": "Data Spread", "thermal_velocity": "24h Velocity"}
                                 )
                                 fig_scatter.add_hline(y=0, line_dash="dot", line_width=1, line_color="black")
                                 fig_scatter.add_vline(x=0, line_dash="dot", line_width=1, line_color="black")
@@ -3421,8 +3451,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 st.plotly_chart(fig_bar, use_container_width=True)
 
                             st.markdown("### 🗄️ Raw Mathematical Evaluation")
-                            # Updated grid to show the two new metric columns
-                            output_cols = ["NodeNum", "Location", "PipeType", "current_temp", "cluster_divergence", "thermal_velocity", "Operational Assessment"]
+                            
+                            output_cols = ["DisplayLabel", "Location", "PipeType", "current_temp", "cluster_divergence", "thermal_velocity", "Operational Assessment"]
                             
                             unit_label = "°C" if st.session_state.get("unit_mode") == "Celsius" else "°F"
                             st.dataframe(
@@ -3433,7 +3463,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 }),
                                 use_container_width=True, hide_index=True
                             )
-
                 except Exception as e:
                     st.error(f"Performance Analysis Compiler Error: {e}")
 
