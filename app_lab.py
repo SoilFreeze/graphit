@@ -3190,18 +3190,31 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         else:
             job_num = str(selected_project).split('-')[0].strip()
             
-            # 1. Pull the pre-calculated analytics directly from the master view
+            # 1. Pull analytics and calculate Normalized Drift on the fly
             perf_q = f"""
+                WITH BaseData AS (
+                    SELECT 
+                        NodeNum, Location, temperature AS current_temp, timestamp,
+                        location_median_temp, deviation_score,
+                        CASE 
+                            WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' 
+                            ELSE 'Brine' 
+                        END as PipeType
+                    FROM `{MASTER_VIEW}`
+                    WHERE Project LIKE CONCAT(@job_num, '%')
+                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                )
                 SELECT 
-                    NodeNum, Location, temperature AS current_temp, timestamp,
-                    location_median_temp, deviation_score, abs_deviation_score,
-                    CASE 
-                        WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' 
-                        ELSE 'Brine' 
-                    END as PipeType
-                FROM `{MASTER_VIEW}`
-                WHERE Project LIKE CONCAT(@job_num, '%')
-                  AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                    *,
+                    -- Calculate the average offset for this specific node over this specific time window
+                    AVG(deviation_score) OVER(PARTITION BY NodeNum) AS node_period_avg_offset,
+                    
+                    -- Subtract the average offset from the current deviation to flatten the line to zero
+                    deviation_score - AVG(deviation_score) OVER(PARTITION BY NodeNum) AS normalized_drift,
+                    
+                    -- Calculate the absolute value of the normalized drift for magnitude thresholding
+                    ABS(deviation_score - AVG(deviation_score) OVER(PARTITION BY NodeNum)) AS abs_normalized_drift
+                FROM BaseData
                 ORDER BY timestamp DESC
             """
             
