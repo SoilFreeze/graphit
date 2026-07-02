@@ -10,6 +10,9 @@ import re
 import numpy as np
 import zipfile
 import io
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+import plotly.express as px
 
 # 1. CONFIGURATION & STYLING
 st.set_page_config(
@@ -3319,9 +3322,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         if selected_nodes:
                             st.markdown(f"### 🌡️ {time_opt} Thermodynamic Master View")
                             
-                            from plotly.subplots import make_subplots
-                            import plotly.graph_objects as go
-                            import plotly.express as px
+                            
                             
                             # FIX 2 & 3: Create a 3-row stacked chart with a shared X-axis
                             fig = make_subplots(
