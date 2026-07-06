@@ -3194,7 +3194,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         else:
             job_num = str(selected_project).split('-')[0].strip()
 
-           st.markdown("### 🎛️ Dashboard Filters")
+            st.markdown("### 🎛️ Dashboard Filters")
             
             # --- 1. TIME WINDOW FILTERS ---
             st.markdown("##### ⏳ Timeline & Baselines")
