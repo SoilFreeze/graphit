@@ -3194,17 +3194,29 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         else:
             job_num = str(selected_project).split('-')[0].strip()
 
-            st.markdown("### 🎛️ Dashboard Filters")
+           st.markdown("### 🎛️ Dashboard Filters")
             
-            # --- 1. TIME WINDOW FILTER (Executes before the database query) ---
-            time_opt = st.selectbox(
-                "1. Historical Window:", 
-                ["7 Days", "14 Days", "30 Days", "60 Days", "90 Days", "180 Days"], 
-                index=0
-            )
-            # Extract the integer from the selection string
-            lookback_days = int(time_opt.split()[0])
-
+            # --- 1. TIME WINDOW FILTERS ---
+            st.markdown("##### ⏳ Timeline & Baselines")
+            
+            t1, t2 = st.columns(2)
+            with t1:
+                history_weeks = st.slider(
+                    "Select History Window (Weeks)", 
+                    min_value=1, max_value=12, value=2
+                )
+            with t2:
+                # The new adjustable slider for your baseline window
+                baseline_days = st.slider(
+                    "Cluster Baseline Window (Days)", 
+                    min_value=1, max_value=14, value=1,
+                    help="How many days back should the baseline comparison look?"
+                )
+            
+            lookback_days = history_weeks * 7
+            baseline_seconds = baseline_days * 86400 # Convert days to seconds for BigQuery
+            time_opt = f"{history_weeks} Week{'s' if history_weeks > 1 else ''}"
+        
             # --- 2. DYNAMIC BIGQUERY FETCH ---
             # We add 'Depth' here so we can include the position in the graph legend
             perf_q = f"""
