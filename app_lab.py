@@ -3217,45 +3217,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             baseline_seconds = baseline_days * 86400 # Convert days to seconds for BigQuery
             time_opt = f"{history_weeks} Week{'s' if history_weeks > 1 else ''}"
         
-            # --- 2. DYNAMIC BIGQUERY FETCH ---
-            # We add 'Depth' here so we can include the position in the graph legend
-            perf_q = f"""
-                WITH BaseData AS (
-                    SELECT 
-                        NodeNum, Location, Depth, temperature AS current_temp, timestamp,
-                        CASE 
-                            WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' 
-                            ELSE 'Brine' 
-                        END as PipeType
-                    FROM `{MASTER_VIEW}`
-                    WHERE Project LIKE CONCAT(@job_num, '%')
-                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
-                ),
-                EnrichedData AS (
-                    SELECT 
-                        *,
-                        PERCENTILE_CONT(current_temp, 0.5) OVER(PARTITION BY Location, PipeType, timestamp) AS peer_median,
-                        AVG(current_temp) OVER(
-                            PARTITION BY NodeNum 
-                            ORDER BY UNIX_SECONDS(timestamp) 
-                            RANGE BETWEEN 86400 PRECEDING AND 3600 PRECEDING
-                        ) AS past_24h_avg
-                    FROM BaseData
-                )
-                SELECT 
-                    *,
-                    current_temp - peer_median AS cluster_divergence,
-                    current_temp - past_24h_avg AS thermal_velocity
-                FROM EnrichedData
-                ORDER BY timestamp DESC
-            """
-            
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("job_num", "STRING", job_num),
-                    bigquery.ScalarQueryParameter("lookback_days", "INTEGER", lookback_days)
-                ]
-            )
+                        )
             
             with st.spinner(f"Fetching {time_opt} of thermodynamic arrays..."):
                 try:
