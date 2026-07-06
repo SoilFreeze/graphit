@@ -3215,6 +3215,10 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             lookback_days = history_weeks * 7
             baseline_seconds = baseline_days * 86400
             time_opt = f"{history_weeks} Week{'s' if history_weeks > 1 else ''}"
+            
+            # We must pull extra historical data so the window function has data 
+            # to calculate the baseline for the very first day of your visual graph.
+            total_fetch_days = lookback_days + baseline_days
 
             # --- 2. DYNAMIC BIGQUERY FETCH ---
             perf_q = f"""
@@ -3227,35 +3231,53 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         END as PipeType
                     FROM `{MASTER_VIEW}`
                     WHERE Project LIKE CONCAT(@job_num, '%')
-                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @total_fetch_days DAY)
                 ),
-                EnrichedData AS (
+                InstantDivergence AS (
                     SELECT 
                         *,
-                        AVG(current_temp) OVER(
-                            PARTITION BY Location, PipeType 
+                        -- 1. Find the instantaneous median of the pipe at this exact second
+                        PERCENTILE_CONT(current_temp, 0.5) OVER(PARTITION BY Location, PipeType, timestamp) AS peer_median
+                    FROM BaseData
+                ),
+                RollingMetrics AS (
+                    SELECT 
+                        *,
+                        -- 2. Calculate this node's raw distance from the median
+                        current_temp - peer_median AS raw_divergence,
+                        
+                        -- 3. Calculate the average of that distance over the past X days
+                        AVG(current_temp - peer_median) OVER(
+                            PARTITION BY NodeNum 
                             ORDER BY UNIX_SECONDS(timestamp) 
                             RANGE BETWEEN @baseline_seconds PRECEDING AND CURRENT ROW
-                        ) AS peer_rolling_baseline,
+                        ) AS baseline_divergence_avg,
                         
+                        -- 4. Keep the 24-hour thermal velocity for sudden spikes
                         AVG(current_temp) OVER(
                             PARTITION BY NodeNum 
                             ORDER BY UNIX_SECONDS(timestamp) 
                             RANGE BETWEEN 86400 PRECEDING AND 3600 PRECEDING
                         ) AS past_24h_avg
-                    FROM BaseData
+                    FROM InstantDivergence
                 )
                 SELECT 
                     *,
-                    current_temp - peer_rolling_baseline AS cluster_divergence,
+                    -- 5. Subtract the baseline average from the current divergence to flatten the line
+                    raw_divergence - baseline_divergence_avg AS cluster_divergence,
+                    
+                    -- Velocity remains the same
                     current_temp - past_24h_avg AS thermal_velocity
-                FROM EnrichedData
+                FROM RollingMetrics
+                -- 6. Filter the final output so the graph matches the timeline slider exactly
+                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
                 ORDER BY timestamp DESC
             """
             
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ScalarQueryParameter("job_num", "STRING", job_num),
+                    bigquery.ScalarQueryParameter("total_fetch_days", "INTEGER", total_fetch_days),
                     bigquery.ScalarQueryParameter("lookback_days", "INTEGER", lookback_days),
                     bigquery.ScalarQueryParameter("baseline_seconds", "INTEGER", baseline_seconds)
                 ]
