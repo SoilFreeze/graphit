@@ -3216,7 +3216,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             lookback_days = history_weeks * 7
             baseline_seconds = baseline_days * 86400 # Convert days to seconds for BigQuery
             time_opt = f"{history_weeks} Week{'s' if history_weeks > 1 else ''}"
-        
+
             # --- 2. DYNAMIC BIGQUERY FETCH ---
             perf_q = f"""
                 WITH BaseData AS (
