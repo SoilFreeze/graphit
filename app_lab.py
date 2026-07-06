@@ -3206,7 +3206,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     min_value=1, max_value=12, value=2
                 )
             with t2:
-                # The new adjustable slider for your baseline window
                 baseline_days = st.slider(
                     "Cluster Baseline Window (Days)", 
                     min_value=1, max_value=14, value=1,
@@ -3214,7 +3213,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 )
             
             lookback_days = history_weeks * 7
-            baseline_seconds = baseline_days * 86400 # Convert days to seconds for BigQuery
+            baseline_seconds = baseline_days * 86400
             time_opt = f"{history_weeks} Week{'s' if history_weeks > 1 else ''}"
 
             # --- 2. DYNAMIC BIGQUERY FETCH ---
@@ -3269,18 +3268,15 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     if perf_df.empty:
                         st.warning(f"No telemetry samples found for this project in the past {time_opt}.")
                     else:
-                        # Convert timezones for plotting
                         if perf_df['timestamp'].dt.tz is None:
                             perf_df['timestamp'] = perf_df['timestamp'].dt.tz_localize('UTC')
                         perf_df['timestamp'] = perf_df['timestamp'].dt.tz_convert(display_tz)
                         
-                        # Create a clean display label for the unified legend (e.g. "2181-ch8 (24ft)")
                         perf_df['DisplayLabel'] = perf_df.apply(
                             lambda r: f"{r['NodeNum']} ({r['Depth']}ft)" if pd.notnull(r['Depth']) and str(r['Depth']).strip() else r['NodeNum'], 
                             axis=1
                         )
 
-                        # Create Snapshot DataFrame
                         latest_df = perf_df.drop_duplicates(subset=['NodeNum'], keep='first').copy()
                         
                         def classify_performance_status(row):
@@ -3307,8 +3303,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
                         with c_node:
                             available_nodes = sorted(latest_filtered['NodeNum'].unique().tolist())
-                            
-                            # FIX 1: By removing the "[:3]", we default to selecting ALL nodes in the location
                             default_nodes = available_nodes if selected_location != "All Locations" and available_nodes else []
                             
                             selected_nodes = st.multiselect(
@@ -3339,23 +3333,19 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         if selected_nodes:
                             st.markdown(f"### 🌡️ {time_opt} Thermodynamic Master View")
                             
-                            
-                            
-                            # FIX 2 & 3: Create a 3-row stacked chart with a shared X-axis
                             fig = make_subplots(
                                 rows=3, cols=1, 
                                 shared_xaxes=True,
                                 vertical_spacing=0.08,
                                 subplot_titles=(
                                     "1. Raw Temperature Telemetry", 
-                                    "2. Data Spread (Distance from Pipe Median)", 
+                                    "2. Data Spread (Distance from Pipe Baseline)", 
                                     "3. Thermal Velocity (24-Hour Rate of Change)"
                                 )
                             )
                             
                             colors = px.colors.qualitative.Plotly
                             
-                            # Iterate through nodes to tie their colors and legend groups together across all 3 subplots
                             for i, node in enumerate(selected_nodes):
                                 node_data = perf_filtered[perf_filtered['NodeNum'] == node]
                                 if node_data.empty: continue
@@ -3363,25 +3353,21 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                                 label = node_data['DisplayLabel'].iloc[0]
                                 line_color = colors[i % len(colors)]
                                 
-                                # Row 1: Raw Temp
                                 fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['current_temp'],
                                                          name=label, legendgroup=label, mode='lines',
                                                          line=dict(color=line_color, width=2)),
                                               row=1, col=1)
                                 
-                                # Row 2: Data Spread (showlegend=False hides duplicates in the master legend)
                                 fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['cluster_divergence'],
                                                          name=label, legendgroup=label, mode='lines', showlegend=False,
                                                          line=dict(color=line_color, width=2)),
                                               row=2, col=1)
                                               
-                                # Row 3: Thermal Velocity
                                 fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['thermal_velocity'],
                                                          name=label, legendgroup=label, mode='lines', showlegend=False,
                                                          line=dict(color=line_color, width=2)),
                                               row=3, col=1)
 
-                            # --- Add Reference Threshold Lines ---
                             freeze_pt = 0 if st.session_state.get("unit_mode") == "Celsius" else 32
                             fig.add_hline(y=freeze_pt, line_dash="dash", line_color="RoyalBlue", row=1, col=1)
                             
@@ -3393,9 +3379,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             fig.add_hline(y=2.0, line_dash="dash", line_color="red", row=3, col=1)
                             fig.add_hline(y=-2.0, line_dash="dash", line_color="cyan", row=3, col=1)
 
-                            # Configure overall layout to stack cleanly and attach the slider to the bottom
                             fig.update_layout(
-                                height=900,  # Taller total height to accommodate 3 graphs
+                                height=900, 
                                 hovermode='x unified',
                                 plot_bgcolor='white',
                                 legend_title_text="Node (Depth)",
@@ -3404,7 +3389,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             fig.update_xaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black')
                             fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black')
                             
-                            # Attach the timeline scrubber only to the bottom chart
                             fig.update_xaxes(rangeslider_visible=True, row=3, col=1)
                             
                             st.plotly_chart(fig, use_container_width=True)
@@ -3444,7 +3428,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             g1, g2 = st.columns(2)
                             
                             with g1:
-                                # FIX 4: Replaced normalized_drift with the correct new metric columns
                                 fig_scatter = px.scatter(
                                     latest_filtered, x="cluster_divergence", y="thermal_velocity", 
                                     color="Operational Assessment",
