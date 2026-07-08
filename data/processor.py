@@ -73,3 +73,34 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             df = df[df['Phase'].astype(str).str.strip() == '2']
             
     return df
+
+def apply_sanity_filter(df):
+    """
+    Automated filter for rogue data points.
+    - Removes entries with null sensor names to ensure integrity.
+    - Flags anything outside physical limits [-30°F, 120°F] as BADDATA.
+    - Masks dynamic outliers +/- 20°F from the sensor line's average.
+    """
+    if df.empty: return df
+
+    if 'NodeNum' in df.columns:
+        df = df.dropna(subset=['NodeNum']).copy()
+
+    if df.empty: return df
+
+    bad_condition = (df['temperature'] > 120) | (df['temperature'] < -30)
+    
+    if 'NodeNum' in df.columns:
+        node_means = df.groupby('NodeNum')['temperature'].transform('mean')
+        outlier_condition = (df['temperature'] > node_means + 20) | (df['temperature'] < node_means - 20)
+    else:
+        avg_temp = df['temperature'].mean()
+        outlier_condition = (df['temperature'] > avg_temp + 20) | (df['temperature'] < avg_temp - 20)
+
+    mask_col = 'approve' if 'approve' in df.columns else 'approval_status' if 'approval_status' in df.columns else None
+    
+    if mask_col:
+        df.loc[outlier_condition, mask_col] = 'MASKED'
+        df.loc[bad_condition, mask_col] = 'BADDATA'
+
+    return df
