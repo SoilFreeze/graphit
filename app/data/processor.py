@@ -6,7 +6,22 @@ from app.utils import config
 
 @st.cache_resource
 def get_bq_client():
-    return bigquery.Client(project=config.PROJECT_ID)
+    try:
+        # Check if secrets are available
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            credentials = service_account.Credentials.from_service_account_info(info)
+            return bigquery.Client(credentials=credentials, project=info["project_id"])
+        
+        # If no secrets, this is likely what is causing your TransportError
+        # because it tries to find default environment credentials.
+        else:
+            st.error("GCP service account secrets not found in Streamlit secrets.")
+            return None
+            
+    except Exception as e:
+        st.error(f"❌ BigQuery Authentication Failed: {e}")
+        return None
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, is_summary_page=False):
