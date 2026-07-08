@@ -1,10 +1,3 @@
-# 1. CONFIGURATION & STYLING
-st.set_page_config(
-    page_title="SoilFreeze Data Lab", 
-    page_icon="❄️", 
-    layout="wide"
-)
-
 # app/utils/config.py
 DATASET_ID = "Temperature" 
 PROJECT_ID = "sensorpush-export"
