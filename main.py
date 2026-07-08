@@ -8,6 +8,7 @@ from app.utils import config
 import pandas as pd # Needed for pd.Timestamp
 from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
 from app.components.charts import build_high_speed_graph
+import pandas as pd
 
 # 1. UI SETUP
 st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
