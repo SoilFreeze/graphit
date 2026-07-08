@@ -241,19 +241,5 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
     y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
     return x_times, y_temps
 
-def run_office_auto_assignment():
-    client = get_bq_client()
-    sql = f"""
-        MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
-        USING (
-            SELECT DISTINCT r.NodeNum, TIMESTAMP_TRUNC(r.timestamp, HOUR) as ts
-            FROM (SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` UNION ALL SELECT NodeNum, timestamp FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`) AS r
-            INNER JOIN `{PROJECT_ID}.{DATASET_ID}.node_registry` AS n ON r.NodeNum = n.NodeNum
-            WHERE n.Project LIKE '%OFFICE%' 
-        ) S ON T.NodeNum = S.NodeNum AND T.timestamp = S.ts
-        WHEN MATCHED THEN UPDATE SET approve = 'OFFICE'
-        WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.ts, 'OFFICE')
-    """
-    try: client.query(sql).result(); st.success("✅ Success.")
-    except Exception as e: st.error(f"Failed: {e}")
+
 
