@@ -13,10 +13,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     """
     Engineering-grade Trend Graph.
     """
-    # STRIP THE PREFIX BEFORE CHECKING GRAPH TYPE
     clean_title_lower = str(title).lower().replace("thermal trends:", "").strip()
     
-    # --- FIX 1: KILL GHOST GRAPHS ---
     if any(x in clean_title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
         return None
         
@@ -36,8 +34,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig = go.Figure()
     final_end_view, final_start_view = end_view, start_view
 
-    # --- FIX 2: CURVE SHIELD ---
-    # Now it checks the actual location name (e.g., "t1" instead of "thermal trends: t1")
     is_temp_pipe = any(x in clean_title_lower for x in ['pipe', 'tp', 'depth']) or clean_title_lower.startswith('t')
     
     if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and st.session_state.get('global_show_ref', True):
@@ -51,7 +47,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             
             target_q = f"""
                 SELECT CurveID, Day, Temp 
-                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                FROM `{config.PROJECT_ID}.{config.DATASET_ID}.reference_curves` 
                 WHERE CurveID LIKE '%{proj_num}%' 
                 AND REGEXP_CONTAINS(CurveID, r'[T|TP]0?{loc_digit}([^0-9]|$)')
                 AND NOT REGEXP_CONTAINS(CurveID, r'(?i)brine')
@@ -144,7 +140,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             start_str = pd.to_datetime(start_view).strftime('%Y-%m-%d %H:%M:%S')
             amb_q = f"""
                 SELECT NodeNum, timestamp, temperature 
-                FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` 
+                FROM `{config.PROJECT_ID}.{config.DATASET_ID}.master_data_view_v2` 
                 WHERE Project LIKE '{job_num}%' 
                   AND UPPER(Location) = 'AMBIENT'
                   AND timestamp >= '{start_str}'
