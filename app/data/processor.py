@@ -12,16 +12,23 @@ def get_bq_client():
         "https://www.googleapis.com/auth/spreadsheets"
     ]
     
-    if "gcp_service_account" in st.secrets:
-        info = st.secrets["gcp_service_account"]
-        # Ensure 'with_scopes' is used to apply the necessary permissions
-        credentials = service_account.Credentials.from_service_account_info(
-            info
-        ).with_scopes(SCOPES)
+    # 1. Start the try block BEFORE the code that might fail
+    try:
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            # Ensure 'with_scopes' is used to apply the necessary permissions
+            credentials = service_account.Credentials.from_service_account_info(
+                info
+            ).with_scopes(SCOPES)
+            
+            return bigquery.Client(credentials=credentials, project=info["project_id"])
         
-        return bigquery.Client(credentials=credentials, project=info["project_id"])
+        return None
     
-    return None
+    # 2. The except block now correctly follows the try block
+    except Exception as e:
+        st.error(f"❌ BigQuery Authentication Failed: {e}")
+        return None
             
     except Exception as e:
         st.error(f"❌ BigQuery Authentication Failed: {e}")
