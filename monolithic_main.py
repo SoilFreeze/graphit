@@ -10,6 +10,9 @@ import re
 import numpy as np
 import zipfile
 import io
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+import plotly.express as px
 
 # 1. CONFIGURATION & STYLING
 st.set_page_config(
@@ -2977,7 +2980,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
 
     # Load down node inventory definitions for filter mappings
     try:
-        reg_df = client.query(f"SELECT NodeNum, Project, Location, Depth, Bank FROM `{NODE_REGISTRY_TABLE}` WHERE End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = ''").to_dataframe()
+        # Change this in your app.py:
+        reg_df = client.query("SELECT * FROM `sensorpush-export.Temperature.node_registry_synced`").to_dataframe()
     except Exception as e:
         st.error(f"Failed to fetch active registry for dropdown paths: {e}")
         return
@@ -2995,8 +2999,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
     with tab_lookup:
         st.subheader("🔍 Individual Node Telemetry Inspection")
         
+        # 1. Tie Project Scope to the Sidebar Context
         scope_label = "Global Fleet" if selected_project == "All Projects" else selected_project
-        st.info(f"🎯 **Search Scope:** {scope_label}")
+        st.info(f"🎯 **Search Scope:** {scope_label} (Change in sidebar)")
         
         c1, c2 = st.columns([1, 1])
         with c1:
@@ -3004,7 +3009,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             
         target_node = None
         
-        # Filter registry
+        # Filter registry based on the sidebar selection
         if selected_project == "All Projects":
             proj_filtered = reg_df 
         else:
@@ -3015,35 +3020,39 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             with c2:
                 avail_locs = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
                 f_loc = st.selectbox("Physical Location Context", avail_locs, key="diag_f_loc")
-                matching_nodes = sorted(proj_filtered[proj_filtered['Location'] == f_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
-                if matching_nodes:
-                    target_node = st.selectbox("Select Target Node to Inspect", matching_nodes, key="diag_node_select_dropdown")
-                else:
-                    st.warning("No nodes match this configuration.")
+                
+            matching_nodes = sorted(proj_filtered[proj_filtered['Location'] == f_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+            if matching_nodes:
+                target_node = st.selectbox("Select Target Node to Inspect", matching_nodes, key="diag_node_select_dropdown")
+            else:
+                st.warning("No nodes match this configuration.")
+                
         else:
             with c2:
                 all_active_nodes = sorted(proj_filtered['NodeNum'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
-                selected_search_node = st.selectbox("Type Node ID to Search:", [""] + all_active_nodes, index=0, key="diag_direct_node_search")
+                selected_search_node = st.selectbox(
+                    "Type Node ID to Search:", 
+                    options=[""] + all_active_nodes,
+                    index=0,
+                    key="diag_direct_node_search"
+                )
                 if selected_search_node != "":
                     target_node = selected_search_node
 
         if target_node:
             st.divider()
             
-            # Header and Control Row
-            c_header, c_time, c_opt = st.columns([2, 1, 1])
+            c_header, c_time = st.columns([3, 1])
             with c_header:
                 st.markdown(f"##### 📈 Telemetry History for Node: `{target_node}`")
             with c_time:
+                # Add dynamic timeline amounts
                 time_opt = st.selectbox("Historical Window:", ["30 Days", "60 Days", "90 Days", "1 Year", "All Time"], index=0)
-            with c_opt:
-                st.write("###") # Alignment spacer
-                show_ambient = st.checkbox("Show Office Ambient", value=False)
-            
+                
             days_map = {"30 Days": 30, "60 Days": 60, "90 Days": 90, "1 Year": 365, "All Time": 5000}
             lookback_days = days_map[time_opt]
             
-            # Data Fetching
+            # Master read query pulling localized node history down
             node_q = f"""
                 SELECT timestamp, temperature, Location, Bank, Depth, Project, SensorStatus
                 FROM `{MASTER_VIEW}`
@@ -3064,12 +3073,12 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             if node_history.empty:
                 st.warning(f"No telemetry data found for Node `{target_node}` in the past {time_opt}.")
             else:
-                # Time conversion
+                # Localize and convert time for entire dataframe first so aggregation works cleanly
                 if node_history['timestamp'].dt.tz is None:
                     node_history['timestamp'] = node_history['timestamp'].dt.tz_localize('UTC')
                 node_history['timestamp'] = node_history['timestamp'].dt.tz_convert(display_tz)
 
-                # Meta stats
+                # Meta overview statistics boxes
                 meta_row = node_history.iloc[0]
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
@@ -3077,52 +3086,103 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 m3.metric("Latest Project", str(meta_row['Project']))
                 m4.metric("Scanned Records", f"{len(node_history):,}")
 
-                # Historical Placements
+                # Compile the Historical Placements Table
                 st.markdown("#### 🗺️ Historical Placements")
+                
+                # Copy and fill NA to ensure GroupBy works without dropping records
                 hist_df = node_history.copy()
                 hist_df[['Project', 'Location', 'Bank', 'Depth']] = hist_df[['Project', 'Location', 'Bank', 'Depth']].fillna('')
+                
                 placements = hist_df.groupby(['Project', 'Location', 'Bank', 'Depth']).agg(
-                    First_Seen=('timestamp', 'min'), Last_Seen=('timestamp', 'max'), Records=('timestamp', 'count')
+                    First_Seen=('timestamp', 'min'),
+                    Last_Seen=('timestamp', 'max'),
+                    Records=('timestamp', 'count')
                 ).reset_index().sort_values('Last_Seen', ascending=False)
                 
+                # Format coordinates and timestamps for display
                 def format_pos(r):
                     if r['Depth']: return f"{r['Depth']}ft"
                     if r['Bank']: return f"Bank {r['Bank']}"
                     return "-"
+                    
                 placements['Position'] = placements.apply(format_pos, axis=1)
-                disp_placements = placements[['Project', 'Location', 'Position', 'First_Seen', 'Last_Seen', 'Records']]
-                st.dataframe(disp_placements, use_container_width=True, hide_index=True)
+                placements['First Seen'] = placements['First_Seen'].dt.strftime('%m/%d/%Y %H:%M')
+                placements['Last Seen'] = placements['Last_Seen'].dt.strftime('%m/%d/%Y %H:%M')
                 
-                # Temperature Trend
+                # Reorder and display the clean matrix
+                disp_placements = placements[['Project', 'Location', 'Position', 'First Seen', 'Last Seen', 'Records']]
+                st.dataframe(disp_placements, use_container_width=True, hide_index=True)
+
+                # ==========================================
+                # TEMPERATURE TREND & AMBIENT TOGGLE
+                # ==========================================
                 st.markdown("#### 📉 Temperature Trend")
+                
+                # The checkbox is placed directly above the graph
+                show_ambient = st.checkbox("Show Ambient Office Temperature", value=False, key="toggle_ambient_temp")
+                
+                # Calculate exact bounds for the chart's X-axis to force the view window
                 now_ts = pd.Timestamp.now(tz=display_tz)
                 start_ts = now_ts - pd.Timedelta(days=lookback_days)
                 
-                import plotly.graph_objects as go
-                fig = go.Figure()
+                fig = px.line(
+                    node_history, x='timestamp', y='temperature',
+                    labels={'timestamp': 'Time', 'temperature': f'Temperature ({unit_label})'},
+                    color_discrete_sequence=['#1f77b4']
+                )
 
-                # Add Node Data
-                fig.add_trace(go.Scatter(x=node_history['timestamp'], y=node_history['temperature'], 
-                                         name=f"Node {target_node}", line=dict(color='#1f77b4', width=2)))
-
-                # Add Ambient Data (Optional)
+                # Fetch and Append the Ambient data to the figure if checked
                 if show_ambient:
-                    ambient_df = get_ambient_data(start_ts, now_ts) # Ensure this helper is defined
-                    fig.add_trace(go.Scatter(x=ambient_df['timestamp'], y=ambient_df['temperature'], 
-                                             name="Office Ambient", line=dict(color='orange', width=2, dash='dot')))
+                    ambient_q = f"""
+                        SELECT timestamp, temperature
+                        FROM `{MASTER_VIEW}`
+                        WHERE Project = 'Office' 
+                          AND Location = 'Ambient'
+                          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+                        ORDER BY timestamp DESC
+                    """
+                    amb_job_config = bigquery.QueryJobConfig(
+                        query_parameters=[
+                            bigquery.ScalarQueryParameter("lookback_days", "INTEGER", int(lookback_days))
+                        ]
+                    )
+                    
+                    with st.spinner("Fetching ambient office data..."):
+                        ambient_df = client.query(ambient_q, job_config=amb_job_config).to_dataframe()
+                    
+                    if not ambient_df.empty:
+                        # Localize timezone to match the node_history so the graph aligns perfectly
+                        if ambient_df['timestamp'].dt.tz is None:
+                            ambient_df['timestamp'] = ambient_df['timestamp'].dt.tz_localize('UTC')
+                        ambient_df['timestamp'] = ambient_df['timestamp'].dt.tz_convert(display_tz)
+                        
+                        # Add the trace to the Plotly figure
+                        fig.add_scatter(
+                            x=ambient_df['timestamp'], 
+                            y=ambient_df['temperature'],
+                            mode='lines', 
+                            name="Ambient Office",
+                            line=dict(color='orange', dash='dot')
+                        )
+                    else:
+                        st.toast("No ambient data found for 'Office/Ambient' in this timeframe.", icon="⚠️")
                 
-                # Freeze line
+                fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
+                
+                # Force the x-axis range to strictly match the selected time window
+                fig.update_xaxes(
+                    range=[start_ts, now_ts],
+                    showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True
+                )
+                
+                fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
+                
+                # Overlay standard freezing marker reference point bounds
                 freeze_pt = 0 if st.session_state.get("unit_mode") == "Celsius" else 32
                 fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue")
                 
-                fig.update_layout(plot_bgcolor='white', hovermode='x unified', height=400, margin=dict(l=0, r=0, t=20, b=0))
-                fig.update_xaxes(range=[start_ts, now_ts], showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
-                fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True)
-                
                 st.plotly_chart(fig, use_container_width=True)
-    # =========================================================================
-    # TAB 2: THERMAL PERFORMANCE METRICS
-    # =========================================================================
+
     # =========================================================================
     # TAB 2: THERMAL PERFORMANCE METRICS (UPDATED)
     # =========================================================================
@@ -3133,170 +3193,296 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             st.info("💡 Please select a specific project in the sidebar.")
         else:
             job_num = str(selected_project).split('-')[0].strip()
+
+            st.markdown("### 🎛️ Dashboard Filters")
             
-            # This query pulls the rolling performance history for the last 7 days
+            # --- 1. TIME WINDOW FILTERS ---
+            st.markdown("##### ⏳ Timeline & Baselines")
+            
+            t1, t2 = st.columns(2)
+            with t1:
+                history_weeks = st.slider(
+                    "Select History Window (Weeks)", 
+                    min_value=1, max_value=12, value=2
+                )
+            with t2:
+                baseline_days = st.slider(
+                    "Cluster Baseline Window (Days)", 
+                    min_value=1, max_value=14, value=1,
+                    help="How many days back should the baseline comparison look?"
+                )
+            
+            lookback_days = history_weeks * 7
+            baseline_seconds = baseline_days * 86400
+            time_opt = f"{history_weeks} Week{'s' if history_weeks > 1 else ''}"
+            
+            # We must pull extra historical data so the window function has data 
+            # to calculate the baseline for the very first day of your visual graph.
+            total_fetch_days = lookback_days + baseline_days
+
+            # --- 2. DYNAMIC BIGQUERY FETCH ---
             perf_q = f"""
-                WITH RollingStats AS (
+                WITH BaseData AS (
                     SELECT 
-                        NodeNum, Location, temperature, timestamp,
-                        CASE WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' ELSE 'Brine' END as PipeType,
-                        AVG(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as mu,
-                        STDDEV(temperature) OVER (PARTITION BY NodeNum ORDER BY timestamp ROWS BETWEEN 168 PRECEDING AND CURRENT ROW) as sigma
+                        NodeNum, Location, Depth, temperature AS current_temp, timestamp,
+                        CASE 
+                            WHEN Depth IS NOT NULL AND TRIM(CAST(Depth AS STRING)) != '' AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%' THEN 'TempPipe' 
+                            ELSE 'Brine' 
+                        END as PipeType
                     FROM `{MASTER_VIEW}`
                     WHERE Project LIKE CONCAT(@job_num, '%')
-                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-                      AND temperature BETWEEN -30 AND 120
+                      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @total_fetch_days DAY)
+                ),
+                InstantDivergence AS (
+                    SELECT 
+                        *,
+                        -- 1. Find the instantaneous median of the pipe at this exact second
+                        PERCENTILE_CONT(current_temp, 0.5) OVER(PARTITION BY Location, PipeType, timestamp) AS peer_median
+                    FROM BaseData
+                ),
+                RollingMetrics AS (
+                    SELECT 
+                        *,
+                        -- 2. Calculate this node's raw distance from the median
+                        current_temp - peer_median AS raw_divergence,
+                        
+                        -- 3. Calculate the average of that distance over the past X days
+                        AVG(current_temp - peer_median) OVER(
+                            PARTITION BY NodeNum 
+                            ORDER BY UNIX_SECONDS(timestamp) 
+                            RANGE BETWEEN @baseline_seconds PRECEDING AND CURRENT ROW
+                        ) AS baseline_divergence_avg,
+                        
+                        -- 4. Keep the 24-hour thermal velocity for sudden spikes
+                        AVG(current_temp) OVER(
+                            PARTITION BY NodeNum 
+                            ORDER BY UNIX_SECONDS(timestamp) 
+                            RANGE BETWEEN 86400 PRECEDING AND 3600 PRECEDING
+                        ) AS past_24h_avg
+                    FROM InstantDivergence
                 )
-                SELECT *, 
-                    (temperature - mu) / NULLIF(sigma, 0) as z_score,
-                    ABS(temperature - mu) as absolute_drift
-                FROM RollingStats
+                SELECT 
+                    *,
+                    -- 5. Subtract the baseline average from the current divergence to flatten the line
+                    raw_divergence - baseline_divergence_avg AS cluster_divergence,
+                    
+                    -- Velocity remains the same
+                    current_temp - past_24h_avg AS thermal_velocity
+                FROM RollingMetrics
+                -- 6. Filter the final output so the graph matches the timeline slider exactly
+                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+                ORDER BY timestamp DESC
             """
             
-            perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
-                query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
-            )).to_dataframe()
-
-            # --- GRAPHICAL SECTION: THERMODYNAMIC TRENDS ---
-            st.markdown("### 📉 Thermodynamic Stability & Drift Trends")
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("job_num", "STRING", job_num),
+                    bigquery.ScalarQueryParameter("total_fetch_days", "INTEGER", total_fetch_days),
+                    bigquery.ScalarQueryParameter("lookback_days", "INTEGER", lookback_days),
+                    bigquery.ScalarQueryParameter("baseline_seconds", "INTEGER", baseline_seconds)
+                ]
+            )
             
-            # Select specific nodes to compare drift
-            all_nodes = sorted(perf_df['NodeNum'].unique().tolist())
-            selected_nodes = st.multiselect("Compare Stability Trends for Nodes:", all_nodes, default=all_nodes[:3])
-            
-            if selected_nodes:
-                trend_df = perf_df[perf_df['NodeNum'].isin(selected_nodes)].copy()
-                
-                # Plot 1: Absolute Drift (Stability)
-                fig_drift = px.line(trend_df, x="timestamp", y="absolute_drift", color="NodeNum",
-                                   title="Thermal Drift (Abs Dev from 7d Mean)")
-                fig_drift.add_hline(y=2.0, line_dash="dash", line_color="red", annotation_text="Drift Limit")
-                st.plotly_chart(fig_drift, use_container_width=True)
-                
-                # Plot 2: Z-Score (Divergence from Cluster behavior)
-                fig_z = px.line(trend_df, x="timestamp", y="z_score", color="NodeNum",
-                                title="Z-Score (Statistical Divergence)")
-                fig_z.add_hline(y=2.0, line_dash="dot", line_color="orange")
-                fig_z.add_hline(y=-2.0, line_dash="dot", line_color="orange")
-                st.plotly_chart(fig_z, use_container_width=True)
-
-            # [Keep your existing Data Grid code here...]
-            with st.spinner("Processing thermodynamic array calculus equations..."):
+            with st.spinner(f"Fetching {time_opt} of thermodynamic arrays..."):
                 try:
-                    perf_df = client.query(perf_q, job_config=bigquery.QueryJobConfig(
-                        query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
-                    )).to_dataframe()
+                    perf_df = client.query(perf_q, job_config=job_config).to_dataframe()
                     
                     if perf_df.empty:
-                        st.warning("Telemetry samples window dataset pool limits populated empty for this context scope window.")
+                        st.warning(f"No telemetry samples found for this project in the past {time_opt}.")
                     else:
-                        unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+                        if perf_df['timestamp'].dt.tz is None:
+                            perf_df['timestamp'] = perf_df['timestamp'].dt.tz_localize('UTC')
+                        perf_df['timestamp'] = perf_df['timestamp'].dt.tz_convert(display_tz)
                         
-                        def convert_t(v):
-                            if pd.isnull(v): return np.nan
-                            return (v - 32) * 5/9 if unit_mode == "Celsius" else v
-                            
-                        perf_df['Current Temp'] = perf_df['current_temp'].apply(convert_t)
-                        perf_df['7d Mean (μ)'] = perf_df['rolling_avg_7d'].apply(convert_t)
-                        perf_df['3h Slope (dT/dt)'] = perf_df['cooling_velocity_3h'] if unit_mode == "Fahrenheit" else perf_df['cooling_velocity_3h'] * 5/9
-                        perf_df['7d StdDev (σ)'] = perf_df['rolling_std_7d'] if unit_mode == "Fahrenheit" else perf_df['rolling_std_7d'] * 5/9
-                        perf_df['Cluster Deviation'] = perf_df['cluster_divergence_delta'] if unit_mode == "Fahrenheit" else perf_df['cluster_divergence_delta'] * 5/9
+                        perf_df['DisplayLabel'] = perf_df.apply(
+                            lambda r: f"{r['NodeNum']} ({r['Depth']}ft)" if pd.notnull(r['Depth']) and str(r['Depth']).strip() else r['NodeNum'], 
+                            axis=1
+                        )
+
+                        latest_df = perf_df.drop_duplicates(subset=['NodeNum'], keep='first').copy()
                         
-                        # 4. Refined Urgent Metrics Classification
                         def classify_performance_status(row):
-                            if row['3h Slope (dT/dt)'] >= 1.5: return "🔥 Rapid Warming (Urgent)"
-                            if abs(row['Cluster Deviation']) >= 4.0: return "🚨 Cluster Divergence"
-                            if pd.notnull(row['7d StdDev (σ)']) and pd.notnull(row['7d Mean (μ)']):
-                                upper_bound = row['rolling_avg_7d'] + (2 * row['rolling_std_7d'])
-                                if row['current_temp'] > upper_bound: return "⚠️ Thermal Drift"
-                            if row['3h Slope (dT/dt)'] <= -0.5: return "❄️ Freezing Active"
+                            if row['thermal_velocity'] >= 2.0: return "🔥 Rapid Warming (Urgent)"
+                            if abs(row['cluster_divergence']) >= 4.0: return "⚠️ Thermal Drift"
+                            if row['thermal_velocity'] <= -1.5: return "❄️ Freezing Active"
                             return "🟢 Stable Maintenance"
                             
-                        perf_df['Operational Assessment'] = perf_df.apply(classify_performance_status, axis=1)
+                        latest_df['Operational Assessment'] = latest_df.apply(classify_performance_status, axis=1)
+
+                        # --- 3. COMPONENT & LOCATION FILTERS ---
+                        c_loc, c_node, c_pipe = st.columns([2, 3, 2])
                         
-                        # 2. Hardcoded Color Palette Mapping
-                        status_color_map = {
-                            "🔥 Rapid Warming (Urgent)": "#8b0000", # Dark Red
-                            "🚨 Cluster Divergence": "#d62728",     # Bright Red
-                            "⚠️ Thermal Drift": "#ff7f0e",          # Orange
-                            "❄️ Freezing Active": "#1f77b4",        # Blue
-                            "🟢 Stable Maintenance": "#2ca02c"      # Green
-                        }
+                        with c_loc:
+                            unique_locations = sorted(perf_df['Location'].dropna().unique().tolist())
+                            selected_location = st.selectbox("2. Select Location:", ["All Locations"] + unique_locations)
+                        
+                        if selected_location != "All Locations":
+                            perf_filtered = perf_df[perf_df['Location'] == selected_location]
+                            latest_filtered = latest_df[latest_df['Location'] == selected_location]
+                        else:
+                            perf_filtered = perf_df
+                            latest_filtered = latest_df
 
-                        # --- UI: DATA BREAKDOWN FILTERS ---
-                        c_filt, _ = st.columns([1, 2])
-                        with c_filt:
-                            pipe_filter = st.radio("Component Filter:", ["Temp Pipes", "Brine Banks", "All Components"], horizontal=True)
+                        with c_node:
+                            available_nodes = sorted(latest_filtered['NodeNum'].unique().tolist())
+                            default_nodes = available_nodes if selected_location != "All Locations" and available_nodes else []
                             
-                        if pipe_filter == "Temp Pipes":
-                            disp_df = perf_df[perf_df['PipeType'] == 'TempPipe']
-                        elif pipe_filter == "Brine Banks":
-                            disp_df = perf_df[perf_df['PipeType'] == 'Brine']
-                        else:
-                            disp_df = perf_df
+                            selected_nodes = st.multiselect(
+                                "3. Select Specific Sensors:", 
+                                options=available_nodes,
+                                default=default_nodes,
+                                placeholder="Select nodes to view drift charts..."
+                            )
 
-                        if disp_df.empty:
-                            st.info(f"No {pipe_filter} found for this project phase.")
+                        with c_pipe:
+                            st.write("###") 
+                            pipe_filter = st.radio("4. Component Type:", ["All", "Temp Pipes", "Brine Banks"], horizontal=True)
+
+                        if selected_nodes:
+                            perf_filtered = perf_filtered[perf_filtered['NodeNum'].isin(selected_nodes)]
+                            latest_filtered = latest_filtered[latest_filtered['NodeNum'].isin(selected_nodes)]
+
+                        if pipe_filter == "Temp Pipes":
+                            latest_filtered = latest_filtered[latest_filtered['PipeType'] == 'TempPipe']
+                        elif pipe_filter == "Brine Banks":
+                            latest_filtered = latest_filtered[latest_filtered['PipeType'] == 'Brine']
+
+                        st.divider()
+
+                        # ==========================================
+                        # GRAPHICAL SECTION: UNIFIED MASTER DASHBOARD
+                        # ==========================================
+                        if selected_nodes:
+                            st.markdown(f"### 🌡️ {time_opt} Thermodynamic Master View")
+                            
+                            fig = make_subplots(
+                                rows=3, cols=1, 
+                                shared_xaxes=True,
+                                vertical_spacing=0.08,
+                                subplot_titles=(
+                                    "1. Raw Temperature Telemetry", 
+                                    "2. Data Spread (Distance from Pipe Baseline)", 
+                                    "3. Thermal Velocity (24-Hour Rate of Change)"
+                                )
+                            )
+                            
+                            colors = px.colors.qualitative.Plotly
+                            
+                            for i, node in enumerate(selected_nodes):
+                                node_data = perf_filtered[perf_filtered['NodeNum'] == node]
+                                if node_data.empty: continue
+                                    
+                                label = node_data['DisplayLabel'].iloc[0]
+                                line_color = colors[i % len(colors)]
+                                
+                                fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['current_temp'],
+                                                         name=label, legendgroup=label, mode='lines',
+                                                         line=dict(color=line_color, width=2)),
+                                              row=1, col=1)
+                                
+                                fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['cluster_divergence'],
+                                                         name=label, legendgroup=label, mode='lines', showlegend=False,
+                                                         line=dict(color=line_color, width=2)),
+                                              row=2, col=1)
+                                              
+                                fig.add_trace(go.Scatter(x=node_data['timestamp'], y=node_data['thermal_velocity'],
+                                                         name=label, legendgroup=label, mode='lines', showlegend=False,
+                                                         line=dict(color=line_color, width=2)),
+                                              row=3, col=1)
+
+                            freeze_pt = 0 if st.session_state.get("unit_mode") == "Celsius" else 32
+                            fig.add_hline(y=freeze_pt, line_dash="dash", line_color="RoyalBlue", row=1, col=1)
+                            
+                            fig.add_hline(y=0, line_width=2, line_color="black", row=2, col=1)
+                            fig.add_hline(y=4.0, line_dash="dot", line_color="orange", row=2, col=1)
+                            fig.add_hline(y=-4.0, line_dash="dot", line_color="blue", row=2, col=1)
+                            
+                            fig.add_hline(y=0, line_width=2, line_color="black", row=3, col=1)
+                            fig.add_hline(y=2.0, line_dash="dash", line_color="red", row=3, col=1)
+                            fig.add_hline(y=-2.0, line_dash="dash", line_color="cyan", row=3, col=1)
+
+                            fig.update_layout(
+                                height=900, 
+                                hovermode='x unified',
+                                plot_bgcolor='white',
+                                legend_title_text="Node (Depth)",
+                                margin=dict(t=40, b=0, l=0, r=0)
+                            )
+                            fig.update_xaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black')
+                            fig.update_yaxes(showgrid=True, gridcolor='Gainsboro', showline=True, linecolor='black')
+                            
+                            fig.update_xaxes(rangeslider_visible=True, row=3, col=1)
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+
                         else:
-                            # 3. OVERALL SCORES: Location Performance Summary
-                            st.markdown(f"### 📍 Location Array Summary ({pipe_filter})")
+                            st.info("👆 Please select at least one sensor from the filters above to view the thermodynamics.")
+                            
+                        # ==========================================
+                        # SNAPSHOT SECTION: CURRENT FLEET STATUS
+                        # ==========================================
+                        if latest_filtered.empty:
+                            st.warning("No sensors match your specific filter criteria.")
+                        else:
+                            st.markdown("### 📍 Array Summary (Latest Readings)")
+                            
+                            status_color_map = {
+                                "🔥 Rapid Warming (Urgent)": "#8b0000",
+                                "🚨 Cluster Divergence": "#d62728",
+                                "⚠️ Thermal Drift": "#ff7f0e",
+                                "❄️ Freezing Active": "#1f77b4",
+                                "🟢 Stable Maintenance": "#2ca02c"
+                            }
                             
                             summary_rows = []
-                            for loc, loc_group in disp_df.groupby('Location'):
-                                total = len(loc_group)
-                                urgent = len(loc_group[loc_group['Operational Assessment'] == "🔥 Rapid Warming (Urgent)"])
-                                div_drift = len(loc_group[loc_group['Operational Assessment'].isin(["🚨 Cluster Divergence", "⚠️ Thermal Drift"])])
-                                freezing = len(loc_group[loc_group['Operational Assessment'] == "❄️ Freezing Active"])
-                                stable = len(loc_group[loc_group['Operational Assessment'] == "🟢 Stable Maintenance"])
-                                
+                            for loc, loc_group in latest_filtered.groupby('Location'):
                                 summary_rows.append({
                                     "Location": str(loc),
-                                    "Total Nodes": total,
-                                    "🟢 Stable": stable,
-                                    "❄️ Freezing": freezing,
-                                    "⚠️ Drift/Divergence": div_drift,
-                                    "🔥 Urgent Action": urgent
+                                    "Total Nodes": len(loc_group),
+                                    "🟢 Stable": len(loc_group[loc_group['Operational Assessment'] == "🟢 Stable Maintenance"]),
+                                    "❄️ Freezing": len(loc_group[loc_group['Operational Assessment'] == "❄️ Freezing Active"]),
+                                    "⚠️ Drift": len(loc_group[loc_group['Operational Assessment'].isin(["🚨 Cluster Divergence", "⚠️ Thermal Drift"])]),
+                                    "🔥 Urgent": len(loc_group[loc_group['Operational Assessment'] == "🔥 Rapid Warming (Urgent)"])
                                 })
-                            
                             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-                            # --- UI: GRAPHICAL ANALYSIS ---
                             st.markdown("### 📈 Visual Thermodynamics")
                             g1, g2 = st.columns(2)
                             
                             with g1:
                                 fig_scatter = px.scatter(
-                                    disp_df, x="Current Temp", y="3h Slope (dT/dt)", 
+                                    latest_filtered, x="cluster_divergence", y="thermal_velocity", 
                                     color="Operational Assessment",
                                     color_discrete_map=status_color_map,
-                                    hover_data=["NodeNum", "Location", "position_label"],
-                                    title=f"Cooling Velocity vs Current Temp"
+                                    hover_data=["DisplayLabel", "Location", "current_temp"],
+                                    title="Velocity vs Data Spread",
+                                    labels={"cluster_divergence": "Data Spread", "thermal_velocity": "24h Velocity"}
                                 )
                                 fig_scatter.add_hline(y=0, line_dash="dot", line_width=1, line_color="black")
+                                fig_scatter.add_vline(x=0, line_dash="dot", line_width=1, line_color="black")
                                 fig_scatter.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
                                 st.plotly_chart(fig_scatter, use_container_width=True)
                                 
                             with g2:
                                 fig_bar = px.histogram(
-                                    disp_df, x="Location", color="Operational Assessment",
+                                    latest_filtered, x="Location", color="Operational Assessment",
                                     color_discrete_map=status_color_map,
-                                    title=f"Node Health Distribution by Location",
+                                    title="Node Health Distribution by Location",
                                     barmode="stack"
                                 )
                                 fig_bar.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
                                 st.plotly_chart(fig_bar, use_container_width=True)
 
-                            # --- UI: DATA GRID ---
                             st.markdown("### 🗄️ Raw Mathematical Evaluation")
-                            output_cols = ["NodeNum", "Location", "position_label", "PipeType", "Current Temp", "3h Slope (dT/dt)", "7d Mean (μ)", "7d StdDev (σ)", "Cluster Deviation", "Operational Assessment"]
                             
+                            output_cols = ["DisplayLabel", "Location", "PipeType", "current_temp", "cluster_divergence", "thermal_velocity", "Operational Assessment"]
+                            
+                            unit_label = "°C" if st.session_state.get("unit_mode") == "Celsius" else "°F"
                             st.dataframe(
-                                disp_df[output_cols].style.format({
-                                    "Current Temp": f"{{:.1f}}{unit_label}",
-                                    "3h Slope (dT/dt)": f"{{:+.2f}}{unit_label}/3h",
-                                    "7d Mean (μ)": f"{{:.1f}}{unit_label}",
-                                    "7d StdDev (σ)": "{:.2f}",
-                                    "Cluster Deviation": f"{{:+.1f}}{unit_label}"
+                                latest_filtered[output_cols].style.format({
+                                    "current_temp": f"{{:.1f}}{unit_label}",
+                                    "cluster_divergence": f"{{:+.2f}}{unit_label}",
+                                    "thermal_velocity": f"{{:+.2f}}{unit_label}/day"
                                 }),
                                 use_container_width=True, hide_index=True
                             )
