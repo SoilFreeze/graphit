@@ -1,22 +1,13 @@
 import streamlit as st
-import pandas as pd
-import time
-import plotly.express as px
-import plotly.graph_objects as go
-from google.cloud import bigquery
-from google.oauth2 import service_account
-from datetime import datetime, timedelta
-import re
-import numpy as np
-import zipfile
-import io
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
-import plotly.express as px
-    
+from app.utils import config
+import pandas as pd # Needed for pd.Timestamp
+from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
+from app.components.charts import build_high_speed_graph
 
-# - SIDEBAR NAVIGATION -  #
+# 1. UI SETUP
+st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
 
+# 2. SIDEBAR NAVIGATION
 st.sidebar.title("❄️ SoilFreeze Lab")
 
 # 1. PAGE NAVIGATION
@@ -292,3 +283,36 @@ unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
 unit_label = st.session_state.get("unit_label", "°F")
 display_tz = st.session_state.get("display_tz", "UTC")
 active_refs = st.session_state.get("active_refs", [])
+
+# ... (all your existing sidebar code ends here) ...
+
+# 3. APP LOGIC (Add this at the very bottom)
+if selected_project and selected_project != "All Projects":
+    
+    # Calculate dates based on the lookback slider
+    lookback_days = st.session_state.get("global_lookback_days", 35)
+    end_date = pd.Timestamp.now()
+    start_date = end_date - pd.Timedelta(days=lookback_days)
+    
+    # Fetch and process
+    raw_data = get_universal_portal_data(selected_project)
+    clean_data = apply_sanity_filter(raw_data)
+    
+    # 4. RENDER CHARTS
+    if page == "Time vs Temp":
+        # Pass your session state variables into the graph builder
+        fig = build_high_speed_graph(
+            df=clean_data, 
+            title=selected_project, 
+            start_view=start_date, 
+            end_view=end_date, 
+            active_refs=st.session_state.get("active_refs"),
+            unit_mode=st.session_state.get("unit_mode"),
+            unit_label=st.session_state.get("unit_label"),
+            display_tz=st.session_state.get("display_tz"),
+            f_start_date=start_date,
+            curve_id=selected_project
+        )
+        
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
