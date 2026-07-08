@@ -6,18 +6,22 @@ from app.utils import config
 
 @st.cache_resource
 def get_bq_client():
-    try:
-        # Check if secrets are available
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(info)
-            return bigquery.Client(credentials=credentials, project=info["project_id"])
+    SCOPES = [
+        "https://www.googleapis.com/auth/bigquery",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/spreadsheets"
+    ]
+    
+    if "gcp_service_account" in st.secrets:
+        info = st.secrets["gcp_service_account"]
+        # Ensure 'with_scopes' is used to apply the necessary permissions
+        credentials = service_account.Credentials.from_service_account_info(
+            info
+        ).with_scopes(SCOPES)
         
-        # If no secrets, this is likely what is causing your TransportError
-        # because it tries to find default environment credentials.
-        else:
-            st.error("GCP service account secrets not found in Streamlit secrets.")
-            return None
+        return bigquery.Client(credentials=credentials, project=info["project_id"])
+    
+    return None
             
     except Exception as e:
         st.error(f"❌ BigQuery Authentication Failed: {e}")
