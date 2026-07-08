@@ -13,6 +13,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     """
     Engineering-grade Trend Graph.
     """
+
+    st.write(f"Config attributes: {dir(config)}")
+                               
     clean_title_lower = str(title).lower().replace("thermal trends:", "").strip()
     
     if any(x in clean_title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
