@@ -1,42 +1,21 @@
-# app/data/processor.py
 import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from app.utils import config 
 
 @st.cache_resource
 def get_bq_client():
-    """
-    Initializes and caches the BigQuery connection.
-    Includes mandatory Google Drive scopes for federated Google Sheet tables.
-    """
-    try:
-        SCOPES = [
-            "https://www.googleapis.com/auth/bigquery", 
-            "https://www.googleapis.com/auth/drive" 
-        ]
-        
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            credentials = service_account.Credentials.from_service_account_info(
-                info, 
-                scopes=SCOPES
-            )
-            return bigquery.Client(credentials=credentials, project=info["project_id"])
-        
-        return bigquery.Client(project=PROJECT_ID)
-
-    except Exception as e:
-        st.error(f"❌ BigQuery Authentication Failed: {e}")
-        return None
+    return bigquery.Client(project=config.PROJECT_ID)
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, is_summary_page=False):
-    client = get_bq_client()
+    client = get_bq_client() # You needed to define 'client' here!
     if client is None: return pd.DataFrame()
     
     root_job_id = str(project_id).split('-')[0].strip()
 
+    # Fix: Use config.MASTER_VIEW
     query = f"""
         SELECT 
             Project as Raw_Project_Name,
@@ -49,7 +28,7 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             Phase,
             System,
             Hardware
-        FROM `{MASTER_VIEW}`
+        FROM `{config.MASTER_VIEW}`
         WHERE temperature >= -30.0 AND temperature <= 120.0
           AND Project LIKE CONCAT(@root_job_id, '%')
         ORDER BY timestamp ASC
@@ -75,12 +54,6 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     return df
 
 def apply_sanity_filter(df):
-    """
-    Automated filter for rogue data points.
-    - Removes entries with null sensor names to ensure integrity.
-    - Flags anything outside physical limits [-30°F, 120°F] as BADDATA.
-    - Masks dynamic outliers +/- 20°F from the sensor line's average.
-    """
     if df.empty: return df
 
     if 'NodeNum' in df.columns:
