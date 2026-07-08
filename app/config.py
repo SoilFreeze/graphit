@@ -1,15 +1,18 @@
-import streamlit as st
-import pandas as pd
-import time
-import plotly.express as px
-import plotly.graph_objects as go
-from google.cloud import bigquery
-from google.oauth2 import service_account
-from datetime import datetime, timedelta
-import re
-import numpy as np
-import zipfile
-import io
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
-import plotly.express as px
+# 1. CONFIGURATION & STYLING
+st.set_page_config(
+    page_title="SoilFreeze Data Lab", 
+    page_icon="❄️", 
+    layout="wide"
+)
+
+# Global Database Constants - Linked to Read-Only Infrastructure
+DATASET_ID = "Temperature" 
+PROJECT_ID = "sensorpush-export"
+
+# Schema-Aligned Table References
+PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
+NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry"
+
+# THE UPGRADE: Pointing to the new flattened Phase/System view
+MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" 
+REF_CURVE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.reference_curves"
