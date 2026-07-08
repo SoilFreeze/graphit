@@ -1,8 +1,3 @@
-import sys
-import os
-st.write(f"Current working directory: {os.getcwd()}")
-st.write(f"Files in root: {os.listdir('.')}")
-
 import streamlit as st
 from app.utils import config
 import pandas as pd # Needed for pd.Timestamp
