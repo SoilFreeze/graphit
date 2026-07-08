@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import time
 import os
+
+print("Current Working Directory:", os.getcwd())
+
 from app.utils import config
 from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
 from app.components.charts import build_high_speed_graph
