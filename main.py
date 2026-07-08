@@ -2,9 +2,6 @@ import streamlit as st
 import pandas as pd
 import time
 import os
-
-print("Current Working Directory:", os.getcwd())
-
 from app.utils import config
 from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
 from app.components.charts import build_high_speed_graph
@@ -49,7 +46,7 @@ if sidebar_client is not None:
                 Timezone, 
                 ProjectStatus, 
                 Date_Freezedown
-            FROM `{PROJECT_REGISTRY_TABLE}` 
+            FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
               {status_filter}
@@ -91,7 +88,7 @@ if sidebar_client is not None:
         if selected_project == "All Projects":
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
-                FROM `{MASTER_VIEW}`
+                FROM `{config.MASTER_VIEW}`
             """
             scope_label = "Last Data"
         else:
@@ -108,7 +105,7 @@ if sidebar_client is not None:
             # Search by job number and phase integer, ignoring the messy project strings
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
-                FROM `{MASTER_VIEW}`
+                FROM `{config.MASTER_VIEW}`
                 WHERE Project LIKE '{job_num}%' {phase_sql}
             """
             scope_label = f"Job {job_num} Age"
