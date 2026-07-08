@@ -4,11 +4,6 @@ import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-# Constants from your main file
-DATASET_ID = "Temperature" 
-PROJECT_ID = "sensorpush-export"
-MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" 
-
 @st.cache_resource
 def get_bq_client():
     """
@@ -16,7 +11,6 @@ def get_bq_client():
     Includes mandatory Google Drive scopes for federated Google Sheet tables.
     """
     try:
-        # THE FIX: Both BigQuery and Drive scopes are required for external tables
         SCOPES = [
             "https://www.googleapis.com/auth/bigquery", 
             "https://www.googleapis.com/auth/drive" 
@@ -35,19 +29,14 @@ def get_bq_client():
     except Exception as e:
         st.error(f"❌ BigQuery Authentication Failed: {e}")
         return None
-        
-############################
-# - 2. READ-ONLY DATA ENGINE - #
-############################
+
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, is_summary_page=False):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    # Extract the root job number (e.g., "2541" from "2541-Blackjack Phase 2")
     root_job_id = str(project_id).split('-')[0].strip()
 
-    # THE UPGRADE: A clean, flat query against the v2 view. No JOINs required.
     query = f"""
         SELECT 
             Project as Raw_Project_Name,
@@ -74,13 +63,10 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     
     # Filter by the specific Project/Phase Name requested 
     if not is_summary_page:
-        # Extract the root job number (e.g., '2541')
         job_num = str(project_id).split('-')[0].strip() 
         
-        # 1. Strip away everything else, just keep rows matching '2541'
         df = df[df['Raw_Project_Name'].astype(str).str.startswith(job_num, na=False)]
         
-        # 2. Filter by the raw integer phase stored in the database
         if "Phase 1" in str(project_id):
             df = df[df['Phase'].astype(str).str.strip() == '1']
         elif "Phase 2" in str(project_id) or "Phase2" in str(project_id):
