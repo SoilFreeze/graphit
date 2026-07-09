@@ -129,26 +129,36 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         pos = node_cfg['position']
         display_name = node_cfg['display_name']
         
-        # Isolate the data for this specific position to draw the single line
+        # Isolate the data for this specific position
         s_df = plot_df[plot_df['Logical_Position'] == pos].sort_values('timestamp')
         
-        # Resample to 1-hour intervals to smooth the graph. 
-        # '.first()' ensures we retain the correct NodeNum string for that specific hour.
+        # Resample to 1-hour intervals to smooth the graph.
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
         
-        # Drop any hours where the temperature was missing after resampling
-        s_df = s_df.dropna(subset=['temperature'])
+        # Drop the 1-hour NaNs so small gaps (under 6 hours) stay connected
+        s_df = s_df.dropna(subset=['temperature']).copy()
+        
+        # --- NEW: EXPLICITLY BREAK THE LINE ON > 6 HOUR GAPS ---
+        s_df['time_diff'] = s_df['timestamp'].diff()
+        gap_mask = s_df['time_diff'] > pd.Timedelta(hours=6)
+        
+        if gap_mask.any():
+            gap_rows = s_df[gap_mask].copy()
+            # Set a dummy timestamp inside the gap and assign NaN to temperature
+            gap_rows['timestamp'] = gap_rows['timestamp'] - pd.Timedelta(seconds=1)
+            gap_rows['temperature'] = float('nan')
+            # Concat the dummy NaN rows and re-sort
+            s_df = pd.concat([s_df, gap_rows]).sort_values('timestamp')
+        # -------------------------------------------------------
         
         fig.add_trace(go.Scatter(
             x=s_df['timestamp'], 
             y=s_df['temperature'],
             name=display_name, 
             mode='lines',
-            connectgaps=False, 
-            # Inject the active hardware ID into the custom data array for the tooltip
+            connectgaps=False, # This will now trigger on our injected NaNs
             customdata=s_df[['NodeNum']], 
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            # Update the hover template to extract that custom hardware ID
             hovertemplate=(
                 "<b>%{fullData.name}</b><br>"
                 "Time: %{x|%b %d, %H:%M}<br>"
@@ -156,7 +166,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 "Sensor: %{customdata[0]}<extra></extra>"
             )
         ))
-
+        
     # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
     is_brine_graph = not is_temp_pipe
     
