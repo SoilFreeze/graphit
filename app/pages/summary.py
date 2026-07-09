@@ -21,12 +21,17 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     # --- 1. THE CONTROL LIST: Active Projects Only ---
     proj_q = f"""
-        SELECT CAST(Project AS STRING) as Project, ProjectName, Date_Freezedown 
+        SELECT 
+            CAST(Project AS STRING) as Project, 
+            ProjectName, 
+            Date_Freezedown, 
+            Date_Maintenance 
         FROM `{PROJECT_REGISTRY_TABLE}`
         WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
           AND UPPER(Project) NOT LIKE '%OFFICE%'
         ORDER BY Project
     """
+    
     try: active_projs = client.query(proj_q).to_dataframe()
     except Exception as e: return st.error(f"Project Registry failed: {e}")
 
@@ -134,11 +139,49 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             if sys: title_ext.append(f"System {sys}")
             title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
 
-            day_text, f_date_display = "", "Not Set"
-            if pd.notnull(f_date):
-                f_date_display = pd.to_datetime(f_date).strftime('%b %d, %Y')
-                days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
-                day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
+            # --- DATE CALCULATION LOGIC ---
+            f_date = row['Date_Freezedown']
+            m_date = row.get('Date_Maintenance') # .get() is safe in case the column is totally missing
+
+            header_html = "<div style='text-align: right;'><small>Start: Not Set</small></div>"
+
+            if pd.notnull(f_date) and str(f_date).strip() != '':
+                f_date_dt = pd.to_datetime(f_date).date()
+                f_date_display = f_date_dt.strftime('%b %d, %Y')
+                
+                # Check if Maintenance date exists
+                if pd.notnull(m_date) and str(m_date).strip() != '' and str(m_date).strip().lower() != 'nan':
+                    m_date_dt = pd.to_datetime(m_date).date()
+                    m_date_display = m_date_dt.strftime('%b %d, %Y')
+                    
+                    # Calculate days between Freezedown and Maintenance
+                    freeze_days = (m_date_dt - f_date_dt).days
+                    day_text = f"✅ **Full Freezedown Provided: {max(0, freeze_days)} Days**"
+                    
+                    header_html = f"""
+                        <div style='text-align: right; line-height: 1.3;'>
+                            {day_text}<br>
+                            <small style='color: #666;'>
+                                Start Freezedown: {f_date_display}<br>
+                                Start Maintenance: {m_date_display}
+                            </small>
+                        </div>
+                    """
+                else:
+                    # Active freezedown (no maintenance yet)
+                    days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
+                    day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
+                    header_html = f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>"
+
+            # --- RENDER THE CONTAINER HEADER ---
+            with st.container(border=True):
+                h1, h2 = st.columns([2, 1])
+                h1.subheader(f"🏗️ {p_name}{title_suffix}")
+                
+                # Inject the dynamic HTML we built above
+                h2.markdown(header_html, unsafe_allow_html=True)
+                
+                st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
 
             with st.container(border=True):
                 h1, h2 = st.columns([2, 1])
