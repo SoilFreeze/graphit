@@ -14,6 +14,7 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     Renders Global Active Project Summary.
     Driven by the Project Registry to ensure active projects show up even if offline.
     """
+    st.error(f"DEBUG: Function started! Selected Project is: {selected_project}")
     st.header("🌐 Global Active Project Summary")
     
     client = get_bq_client()
