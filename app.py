@@ -10,33 +10,23 @@ from datetime import datetime, timedelta
 # ===============================================================
 # 1. DYNAMIC TARGET CONFIGURATION
 # ===============================================================
-# Check the URL for a 'job' parameter (e.g., ?job=2527)
-query_job = st.query_params.get("job", None)
 
+# 1. Fetch from secrets or URL FIRST (No visual Streamlit commands yet!)
+TARGET_JOB_NUMBER = None
 if "JOB_NUMBER" in st.secrets:
-    TARGET_JOB_NUMBER = st.secrets["JOB_NUMBER"]
-# If no secret, fall back to URL parameters (e.g., ?job=2527) or show the login box
+    TARGET_JOB_NUMBER = str(st.secrets["JOB_NUMBER"])
+elif "job_number" in st.secrets:
+    TARGET_JOB_NUMBER = str(st.secrets["job_number"])
 else:
     TARGET_JOB_NUMBER = st.query_params.get("job", None)
 
-if not TARGET_JOB_NUMBER:
-    st.title("🌐 SoilFreeze Client Portal")
-    manual_job = st.text_input("Enter Job Number:")
-    if not manual_job:
-        st.stop()
-    TARGET_JOB_NUMBER = manual_job
-    st.query_params["job"] = TARGET_JOB_NUMBER
-
-# Page config uses the dynamic number
-st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
-
-# Page config must be the very first Streamlit command
-page_title = f"SoilFreeze Portal #{query_job}" if query_job else "SoilFreeze Client Portal"
+# 2. PAGE CONFIG MUST BE THE VERY FIRST STREAMLIT COMMAND
+page_title = f"SoilFreeze Portal #{TARGET_JOB_NUMBER}" if TARGET_JOB_NUMBER else "SoilFreeze Client Portal"
 st.set_page_config(page_title=page_title, layout="wide")
 st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
 
-# Handle the routing: If no URL parameter is provided, show a login/entry screen
-if not query_job:
+# 3. If STILL no job number is found, show the manual entry screen
+if not TARGET_JOB_NUMBER:
     st.title("🌐 SoilFreeze Client Portal")
     st.info("Please enter your assigned Job Number to view project telemetry.")
     
@@ -45,14 +35,11 @@ if not query_job:
     if not manual_job:
         st.stop()  # 🛑 Halts script execution here until a number is entered
         
-    TARGET_JOB_NUMBER = manual_job
-    # Optional: Update the URL so if they refresh, they stay on their job
-    st.query_params["job"] = TARGET_JOB_NUMBER 
-else:
-    TARGET_JOB_NUMBER = query_job
+    # Once they hit enter, update the URL and rerun the script from the top
+    st.query_params["job"] = str(manual_job)
+    st.rerun()
 
 # ===============================================================
-
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
 
