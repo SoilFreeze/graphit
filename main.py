@@ -318,3 +318,49 @@ if selected_project and selected_project != "All Projects":
         
         if fig:
             st.plotly_chart(fig, use_container_width=True)
+
+# =============================================================================
+# 12. MASTER LAYOUT FRAMEWORK PAGE ROUTER
+# =============================================================================
+display_tz = st.session_state.get("display_tz", "UTC")
+unit_label = st.session_state.get("unit_label", "°F")
+unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
+active_refs = st.session_state.get("active_refs", [])
+
+client = get_bq_client() 
+
+if page == "Summary":
+    render_summary_dashboard(unit_label, unit_mode, display_tz)
+
+elif page == "Time vs Temp":
+    render_global_overview(selected_project, st.session_state.get('project_metadata'), display_tz) 
+
+elif page == "Depth Charts":
+    render_depth_charts(selected_project, unit_label, display_tz)
+
+elif page == "Sensor Status":
+    render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+
+elif page == "Node Diagnostics":
+    # Ensure this function exists in your code or is removed if deprecated
+    render_node_diagnostics(selected_project, display_tz, unit_label)
+
+elif page in ["Data Processing", "Admin Tools"]:
+    if st.session_state.get('authenticated', False):
+        if page == "Data Processing":
+            render_data_processing_page(selected_project)
+        elif page == "Admin Tools":
+            render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+    else:
+        st.divider()
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            st.subheader("🔐 Restricted Admin Access")
+            pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
+            if st.button("Unlock Dashboard", use_container_width=True):
+                if pwd == st.secrets.get("admin_password", "Freeze123!!"):
+                    st.session_state['authenticated'] = True
+                    st.rerun()
+                else:
+                    st.error("Invalid Password. Access Denied.")
+
