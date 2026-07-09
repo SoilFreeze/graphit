@@ -29,6 +29,7 @@ if not TARGET_JOB_NUMBER:
 
 # Page config uses the dynamic number
 st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
+
 # Page config must be the very first Streamlit command
 page_title = f"SoilFreeze Portal #{query_job}" if query_job else "SoilFreeze Client Portal"
 st.set_page_config(page_title=page_title, layout="wide")
@@ -112,20 +113,22 @@ def get_universal_portal_data(project_id):
             JOIN `{PROJECT_REGISTRY_TABLE}` p 
               ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
             WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
-              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+            
+              -- 🛡️ SAFE_CAST prevents crashes if Date_Freezedown is blank in the registry
+              AND m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
               
-              -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
+              -- 📍 STRICT LOCATION REASSIGNMENT FILTER (SAFE_CAST prevents DATE vs STRING mismatches)
               AND EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
               AND (
                   n.End_Date IS NULL 
-                  OR TRIM(n.End_Date) = ''
+                  OR TRIM(n.End_Date) = '' 
                   OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
               )
               
               -- 🔒 EXCLUSION FILTER: Drop masked, bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
               
-              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES (Checks both master view and node registry schemas)
+              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
               AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
