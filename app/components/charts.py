@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import re
-from app.utils import config
+from app.utils.config import config
 from app.data.processor import get_bq_client # Import the shared connection
 
 def natural_sort_key(text):
