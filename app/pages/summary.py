@@ -136,17 +136,25 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
 
             # --- DATE CALCULATION LOGIC ---
-            f_date = row['Date_Freezedown']
-            m_date = row.get('Date_Maintenance') # .get() is safe in case the column is totally missing
+            # --- SEAMLESS DATE LOGIC ---
+            f_date = row.get('Date_Freezedown')
+            m_date = row.get('Date_Maintenance') 
+
+            # Helper function to catch all Pandas "empty" variations (NaT, NaN, None, etc.)
+            def is_valid_date(val):
+                if pd.isnull(val): return False
+                val_str = str(val).strip().lower()
+                if val_str in ['', 'nan', 'nat', 'none', '<na>']: return False
+                return True
 
             header_html = "<div style='text-align: right;'><small>Start: Not Set</small></div>"
 
-            if pd.notnull(f_date) and str(f_date).strip() != '':
+            if is_valid_date(f_date):
                 f_date_dt = pd.to_datetime(f_date).date()
                 f_date_display = f_date_dt.strftime('%b %d, %Y')
                 
-                # Check if Maintenance date exists
-                if pd.notnull(m_date) and str(m_date).strip() != '' and str(m_date).strip().lower() != 'nan':
+                # Check if Maintenance date exists using the robust helper
+                if is_valid_date(m_date):
                     m_date_dt = pd.to_datetime(m_date).date()
                     m_date_display = m_date_dt.strftime('%b %d, %Y')
                     
@@ -178,7 +186,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 h2.markdown(header_html, unsafe_allow_html=True)
                 
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
-
             with st.container(border=True):
                 h1, h2 = st.columns([2, 1])
                 h1.subheader(f"🏗️ {p_name}{title_suffix}")
