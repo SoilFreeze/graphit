@@ -16,6 +16,12 @@ from app.utils.config import (
 )
 from app.data.processor import get_bq_client, natural_sort_key
 
+def natural_sort_key(s):
+    """Sorts strings containing numbers logically (e.g., T1, T2, T10 instead of T1, T10, T2)"""
+    if pd.isnull(s):
+        return []
+    return [int(text) if text.isdigit() else str(text).lower() for text in re.split(r'(\d+)', str(s))]
+
 ######################
 # Page: Admin Tool Helpers   #
 ######################
