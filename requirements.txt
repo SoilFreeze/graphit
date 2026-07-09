@@ -13,3 +13,6 @@ openpyxl
 xlrd
 pyarrow
 streamlit-plotly-events
+google-cloud-bigquery-storage
+pyarrow
+db-dtypes
