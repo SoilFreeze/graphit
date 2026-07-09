@@ -8,11 +8,11 @@ from app.utils.config import PROJECT_REGISTRY_TABLE, NODE_REGISTRY_TABLE, MASTER
 ##############################
 # Page 1 - Dashboard Summary #
 ##############################
-def render_summary_dashboard(unit_label, unit_mode, display_tz):
+# Make sure your function signature at the top accepts selected_project!
+def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz):
     """
     Renders Global Active Project Summary.
     Driven by the Project Registry to ensure active projects show up even if offline.
-    Properly counts 'Ambient' nodes in the 'Total Assigned' pool.
     """
     st.header("🌐 Global Active Project Summary")
     
@@ -20,16 +20,27 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
     if client is None: return
 
     # --- 1. THE CONTROL LIST: Active Projects Only ---
+    # Dynamically inject the project filter ONLY if a specific site is selected
+    project_filter_sql = ""
+    if selected_project != "All Projects":
+        project_filter_sql = f"AND Project = '{selected_project}'"
+
     proj_q = f"""
-        SELECT CAST(Project AS STRING) as Project, ProjectName, Date_Freezedown, Date_Maintenance
+        SELECT 
+            CAST(Project AS STRING) as Project, 
+            ProjectName, 
+            Date_Freezedown, 
+            Date_Maintenance 
         FROM `{PROJECT_REGISTRY_TABLE}`
         WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
           AND UPPER(Project) NOT LIKE '%OFFICE%'
+          {project_filter_sql}
         ORDER BY Project
     """
-    
-    try: active_projs = client.query(proj_q).to_dataframe()
-    except Exception as e: return st.error(f"Project Registry failed: {e}")
+    try: 
+        active_projs = client.query(proj_q).to_dataframe()
+    except Exception as e: 
+        return st.error(f"Project Registry failed: {e}")
 
     if active_projs.empty:
         return st.info("No active projects found in registry.")
