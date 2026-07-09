@@ -334,7 +334,7 @@ if selected_project and selected_project != "All Projects":
     # -------------------------
     elif page == "Summary":
         # Ensure render_summary_dashboard is imported at the top of main.py
-        render_summary_dashboard(unit_label, unit_mode, display_tz)
+        render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz)
 
     # -------------------------
     # ROUTE: DEPTH CHARTS
