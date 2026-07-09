@@ -115,8 +115,12 @@ def get_universal_portal_data(project_id):
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
               
               -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
-              AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
-              AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
+              AND EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+              AND (
+                  n.End_Date IS NULL 
+                  OR TRIM(n.End_Date) = ''
+                  OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
+              )
               
               -- 🔒 EXCLUSION FILTER: Drop masked, bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
