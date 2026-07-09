@@ -206,7 +206,13 @@ def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
             nodes_meeting_target = g_df[g_df['latest_temp'] <= target_temp]['NodeNum'].nunique()
             pct = (nodes_meeting_target / total_valid_nodes) * 100
             color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
-            st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {target_temp}°F</p>", unsafe_allow_html=True)
+            
+            # --- NEW: Convert target limit for display if in Celsius ---
+            display_target = target_temp
+            if unit_mode == "Celsius":
+                display_target = (target_temp - 32) * 5/9
+                
+            st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {display_target:.1f}{unit_label}</p>", unsafe_allow_html=True)
 
     range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'><b>Normal Ranges:</b><br>"
     if c_min is not None and c_max is not None:
