@@ -107,7 +107,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
         node_metadata.append({'node_num': sn, 'display_name': display_name, 'priority': priority, 'sort_key': sort_val})
 
-    sorted_node_cfgs = sorted(node_metadata, key=lambda x: (x['priority'], x['sort_key']))
+    sorted_node_configs = sorted(node_metadata, key=lambda x: (x['priority'], x['sort_key']))
 
     # To this:
     for i, node_cfg in enumerate(sorted_node_configs):
