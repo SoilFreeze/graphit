@@ -84,45 +84,80 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     skip_keywords = ['AMBIENT', 'OFFICE', 'X-TRA', 'XTRA']
     empty_vals = ['nan', 'none', '', '—', '-']
 
-    for sn in plot_df['NodeNum'].unique():
-        node_df = plot_df[plot_df['NodeNum'] == sn]
-        bank_val = str(node_df['Bank'].iloc[0]).strip()
-        depth_val = str(node_df['Depth'].iloc[0]).strip()
-        loc_val = str(node_df['Location'].iloc[0]).strip().upper()
+    # --- SEAMLESS TRANSITION FIX ---
+    # Define the grouping axis: Depth for pipes, Bank for brine
+    if is_temp_pipe:
+        plot_df['Logical_Position'] = plot_df['Depth'].astype(str).str.strip()
+    else:
+        plot_df['Logical_Position'] = plot_df['Bank'].astype(str).str.strip()
 
-        if any(x in loc_val for x in skip_keywords) or any(x in bank_val.upper() for x in skip_keywords):
+    # Filter out known bad values early
+    plot_df = plot_df[~plot_df['Logical_Position'].str.lower().isin(empty_vals)]
+
+    # Loop through unique POSITIONS instead of hardware nodes
+    for pos in plot_df['Logical_Position'].unique():
+        if any(x in pos.upper() for x in skip_keywords):
             continue
 
-        if bank_val and bank_val.lower() not in empty_vals:
-            display_name = f"{bank_val} ({sn})"
-            priority = 0
-            sort_val = natural_sort_key(bank_val)
-        elif depth_val and depth_val.lower() not in empty_vals: 
-            display_name = f"{depth_val} ft ({sn})"
-            priority = 1
-            try: sort_val = [float(depth_val)]
-            except: sort_val = natural_sort_key(depth_val)
-        else: 
-            continue 
+        # Isolate all data for this specific depth/bank and sort chronologically
+        pos_df = plot_df[plot_df['Logical_Position'] == pos].sort_values('timestamp')
+        
+        if pos_df.empty:
+            continue
+            
+        # Grab the MOST RECENT sensor ID for the static legend display
+        latest_sensor = str(pos_df.iloc[-1]['NodeNum']).strip()
 
-        node_metadata.append({'node_num': sn, 'display_name': display_name, 'priority': priority, 'sort_key': sort_val})
+        # Format display names
+        if is_temp_pipe:
+            display_name = f"{pos} ft ({latest_sensor})"
+            priority = 1
+            try: sort_val = [float(pos)]
+            except: sort_val = natural_sort_key(pos)
+        else:
+            display_name = f"{pos} ({latest_sensor})"
+            priority = 0
+            sort_val = natural_sort_key(pos)
+
+        node_metadata.append({
+            'position': pos, 
+            'display_name': display_name, 
+            'priority': priority, 
+            'sort_key': sort_val
+        })
 
     sorted_node_configs = sorted(node_metadata, key=lambda x: (x['priority'], x['sort_key']))
 
-    # To this:
     for i, node_cfg in enumerate(sorted_node_configs):
-        sn = node_cfg['node_num']
+        pos = node_cfg['position']
         display_name = node_cfg['display_name']
         
-        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
+        # Isolate the data for this specific position to draw the single line
+        s_df = plot_df[plot_df['Logical_Position'] == pos].sort_values('timestamp')
+        
+        # Resample to 1-hour intervals to smooth the graph. 
+        # '.first()' ensures we retain the correct NodeNum string for that specific hour.
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
         
+        # Drop any hours where the temperature was missing after resampling
+        s_df = s_df.dropna(subset=['temperature'])
+        
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'],
-            name=display_name, mode='lines',
+            x=s_df['timestamp'], 
+            y=s_df['temperature'],
+            name=display_name, 
+            mode='lines',
             connectgaps=False, 
+            # Inject the active hardware ID into the custom data array for the tooltip
+            customdata=s_df[['NodeNum']], 
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            hovertemplate="<b>%{fullData.name}</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+            # Update the hover template to extract that custom hardware ID
+            hovertemplate=(
+                "<b>%{fullData.name}</b><br>"
+                "Time: %{x|%b %d, %H:%M}<br>"
+                "Temp: %{y:.1f}" + unit_label + "<br>"
+                "Sensor: %{customdata[0]}<extra></extra>"
+            )
         ))
 
     # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
