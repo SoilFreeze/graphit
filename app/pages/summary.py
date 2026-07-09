@@ -140,7 +140,6 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
             f_date = row.get('Date_Freezedown')
             m_date = row.get('Date_Maintenance') 
 
-            # Helper function to catch all Pandas "empty" variations (NaT, NaN, None, etc.)
             def is_valid_date(val):
                 if pd.isnull(val): return False
                 val_str = str(val).strip().lower()
@@ -153,18 +152,17 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 f_date_dt = pd.to_datetime(f_date).date()
                 f_date_display = f_date_dt.strftime('%b %d, %Y')
                 
-                # Check if Maintenance date exists using the robust helper
                 if is_valid_date(m_date):
                     m_date_dt = pd.to_datetime(m_date).date()
                     m_date_display = m_date_dt.strftime('%b %d, %Y')
                     
-                    # Calculate days between Freezedown and Maintenance
+                    # Duration of the Freezedown Phase
                     freeze_days = (m_date_dt - f_date_dt).days
-                    day_text = f"✅ **Full Freezedown Provided: {max(0, freeze_days)} Days**"
                     
                     header_html = f"""
                         <div style='text-align: right; line-height: 1.3;'>
-                            {day_text}<br>
+                            <span style='color: #28a745;'>✅ <b>Full Freezedown Provided</b></span><br>
+                            <b>Freezedown: {max(0, freeze_days)} Days</b><br>
                             <small style='color: #666;'>
                                 Start Freezedown: {f_date_display}<br>
                                 Start Maintenance: {m_date_display}
@@ -174,22 +172,23 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 else:
                     # Active freezedown (no maintenance yet)
                     days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
-                    day_text = f"🗓️ **Day {max(0, days_elapsed)}**"
-                    header_html = f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>"
+                    header_html = f"""
+                        <div style='text-align: right; line-height: 1.3;'>
+                            🗓️ <b>Freezedown: {max(0, days_elapsed)} Days</b><br>
+                            <small style='color: #666;'>Start: {f_date_display}</small>
+                        </div>
+                    """
 
-            # --- RENDER THE CONTAINER HEADER ---
+            # ====================================================================
+            # RENDER THE CONTAINER 
+            # (Ensure this is the ONLY "with st.container" block in the loop!)
+            # ====================================================================
             with st.container(border=True):
                 h1, h2 = st.columns([2, 1])
                 h1.subheader(f"🏗️ {p_name}{title_suffix}")
                 
                 # Inject the dynamic HTML we built above
                 h2.markdown(header_html, unsafe_allow_html=True)
-                
-                st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
-            with st.container(border=True):
-                h1, h2 = st.columns([2, 1])
-                h1.subheader(f"🏗️ {p_name}{title_suffix}")
-                h2.markdown(f"<div style='text-align: right;'>{day_text}<br><small>Start: {f_date_display}</small></div>", unsafe_allow_html=True)
                 
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
                 
