@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import re
-from app.utils.config import config
+import app.utils.cfg as cfg
 from app.data.processor import get_bq_client # Import the shared connection
 
 def natural_sort_key(text):
@@ -14,7 +14,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     Engineering-grade Trend Graph.
     """
 
-    st.write(f"Config attributes: {dir(config)}")
+    st.write(f"cfg attributes: {dir(cfg)}")
                                
     clean_title_lower = str(title).lower().replace("thermal trends:", "").strip()
     
@@ -50,7 +50,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             
             target_q = f"""
                 SELECT CurveID, Day, Temp 
-                FROM `{config.PROJECT_ID}.{config.DATASET_ID}.reference_curves` 
+                FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.reference_curves` 
                 WHERE CurveID LIKE '%{proj_num}%' 
                 AND REGEXP_CONTAINS(CurveID, r'[T|TP]0?{loc_digit}([^0-9]|$)')
                 AND NOT REGEXP_CONTAINS(CurveID, r'(?i)brine')
@@ -107,11 +107,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
         node_metadata.append({'node_num': sn, 'display_name': display_name, 'priority': priority, 'sort_key': sort_val})
 
-    sorted_node_configs = sorted(node_metadata, key=lambda x: (x['priority'], x['sort_key']))
+    sorted_node_cfgs = sorted(node_metadata, key=lambda x: (x['priority'], x['sort_key']))
 
-    for i, config in enumerate(sorted_node_configs):
-        sn = config['node_num']
-        display_name = config['display_name']
+    for i, cfg in enumerate(sorted_node_cfgs):
+        sn = cfg['node_num']
+        display_name = cfg['display_name']
         
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
@@ -143,7 +143,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             start_str = pd.to_datetime(start_view).strftime('%Y-%m-%d %H:%M:%S')
             amb_q = f"""
                 SELECT NodeNum, timestamp, temperature 
-                FROM `{config.PROJECT_ID}.{config.DATASET_ID}.master_data_view_v2` 
+                FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.master_data_view_v2` 
                 WHERE Project LIKE '{job_num}%' 
                   AND UPPER(Location) = 'AMBIENT'
                   AND timestamp >= '{start_str}'
