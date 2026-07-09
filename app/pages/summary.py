@@ -195,18 +195,41 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
                 
+                # --- HARDWARE & DATA AGE LOGIC ---
                 if not sys_tel.empty:
                     active_1h = sys_tel[sys_tel['checkins_1h'] > 0]['NodeNum'].nunique()
                     active_6h = sys_tel[sys_tel['checkins_6h'] > 0]['NodeNum'].nunique()
                     active_24h = sys_tel[sys_tel['checkins_24h'] > 0]['NodeNum'].nunique()
+                    
+                    # Calculate Data Age
+                    latest_ts = sys_tel['latest_ts'].max()
+                    if pd.notnull(latest_ts):
+                        now_utc = pd.Timestamp.now(tz='UTC')
+                        elapsed_mins = int((now_utc - latest_ts).total_seconds() / 60)
+                        
+                        if elapsed_mins <= 60:
+                            pulse = f"🟢 **Live** ({elapsed_mins}m ago)"
+                        elif elapsed_mins <= 180:
+                            pulse = f"🟠 **Delayed** ({elapsed_mins}m ago)"
+                        else:
+                            pulse = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
+                            
+                        data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {latest_ts.strftime('%b %d, %H:%M UTC')})*"
+                    else:
+                        data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
                 else:
                     active_1h = active_6h = active_24h = 0
+                    data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
                 
                 status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🔴" if active_24h == 0 else "🟠"
+                
+                # Print the merged metrics block
                 st.markdown(
                     f"{status_color} **Hardware Status:** `{active_1h}` (1h) | "
                     f"`{active_6h}` (6h) | `{active_24h}` (24h) | "
-                    f"Assigned Pool: `{total_assigned}`"
+                    f"Assigned Pool: `{total_assigned}`<br>"
+                    f"{data_age_str}",
+                    unsafe_allow_html=True
                 )
                 st.divider() 
 
