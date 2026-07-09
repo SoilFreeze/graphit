@@ -21,11 +21,7 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
 
     # --- 1. THE CONTROL LIST: Active Projects Only ---
     proj_q = f"""
-        SELECT 
-            CAST(Project AS STRING) as Project, 
-            ProjectName, 
-            Date_Freezedown, 
-            Date_Maintenance 
+        SELECT CAST(Project AS STRING) as Project, ProjectName, Date_Freezedown, Date_Maintenance
         FROM `{PROJECT_REGISTRY_TABLE}`
         WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
           AND UPPER(Project) NOT LIKE '%OFFICE%'
