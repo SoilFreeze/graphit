@@ -14,7 +14,7 @@ from app.utils.config import (
     PROJECT_REGISTRY_TABLE, 
     NODE_REGISTRY_TABLE
 )
-from app.data.processor import get_bq_client, natural_sort_key
+from app.data.processor import get_bq_client
 
 def natural_sort_key(s):
     """Sorts strings containing numbers logically (e.g., T1, T2, T10 instead of T1, T10, T2)"""
