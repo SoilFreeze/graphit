@@ -152,36 +152,39 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
                 f_date_dt = pd.to_datetime(f_date).date()
                 f_date_display = f_date_dt.strftime('%b %d, %Y')
                 
+                # ALWAYS calculate the total time since the project started freezing
+                total_freezedown_days = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
+                
                 if is_valid_date(m_date):
                     m_date_dt = pd.to_datetime(m_date).date()
                     m_date_display = m_date_dt.strftime('%b %d, %Y')
                     
-                    # Duration of the Freezedown Phase
-                    freeze_days = (m_date_dt - f_date_dt).days
+                    # Calculate durations for the specific phases
+                    time_to_freeze = (m_date_dt - f_date_dt).days
+                    maintenance_days = (pd.Timestamp.now(tz=display_tz).date() - m_date_dt).days
                     
                     header_html = f"""
                         <div style='text-align: right; line-height: 1.3;'>
-                            <span style='color: #28a745;'>✅ <b>Full Freezedown Provided</b></span><br>
-                            <b>Freezedown: {max(0, freeze_days)} Days</b><br>
+                            🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
+                            <small style='color: #666;'>Start Freezedown: {f_date_display}</small><br>
+                            <span style='color: #28a745; display: inline-block; margin-top: 4px;'>✅ <b>Full Freezedown Provided</b></span><br>
                             <small style='color: #666;'>
-                                Start Freezedown: {f_date_display}<br>
-                                Start Maintenance: {m_date_display}
+                                Start Maintenance: {m_date_display}<br>
+                                Time to Freeze: {max(0, time_to_freeze)} Days | In Maintenance: {max(0, maintenance_days)} Days
                             </small>
                         </div>
                     """
                 else:
                     # Active freezedown (no maintenance yet)
-                    days_elapsed = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
                     header_html = f"""
                         <div style='text-align: right; line-height: 1.3;'>
-                            🗓️ <b>Freezedown: {max(0, days_elapsed)} Days</b><br>
-                            <small style='color: #666;'>Start: {f_date_display}</small>
+                            🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
+                            <small style='color: #666;'>Start Freezedown: {f_date_display}</small>
                         </div>
                     """
 
             # ====================================================================
             # RENDER THE CONTAINER 
-            # (Ensure this is the ONLY "with st.container" block in the loop!)
             # ====================================================================
             with st.container(border=True):
                 h1, h2 = st.columns([2, 1])
