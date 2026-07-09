@@ -333,7 +333,6 @@ if selected_project and selected_project != "All Projects":
     # ROUTE: SUMMARY
     # -------------------------
     elif page == "Summary":
-        # Ensure render_summary_dashboard is imported at the top of main.py
         render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz)
 
     # -------------------------
