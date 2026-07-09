@@ -13,6 +13,22 @@ from datetime import datetime, timedelta
 # Check the URL for a 'job' parameter (e.g., ?job=2527)
 query_job = st.query_params.get("job", None)
 
+if "JOB_NUMBER" in st.secrets:
+    TARGET_JOB_NUMBER = st.secrets["JOB_NUMBER"]
+# If no secret, fall back to URL parameters (e.g., ?job=2527) or show the login box
+else:
+    TARGET_JOB_NUMBER = st.query_params.get("job", None)
+
+if not TARGET_JOB_NUMBER:
+    st.title("🌐 SoilFreeze Client Portal")
+    manual_job = st.text_input("Enter Job Number:")
+    if not manual_job:
+        st.stop()
+    TARGET_JOB_NUMBER = manual_job
+    st.query_params["job"] = TARGET_JOB_NUMBER
+
+# Page config uses the dynamic number
+st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
 # Page config must be the very first Streamlit command
 page_title = f"SoilFreeze Portal #{query_job}" if query_job else "SoilFreeze Client Portal"
 st.set_page_config(page_title=page_title, layout="wide")
