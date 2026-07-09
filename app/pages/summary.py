@@ -28,11 +28,12 @@ def render_summary_dashboard(unit_label, unit_mode, display_tz):
         return st.info("No active projects found in registry.")
 
     # --- 2. INVENTORY POOL: Total assigned hardware ---
-    # THE UPGRADE: Included 'Location' so we can explicitly capture Ambient assignments
     pool_q = f"""
         SELECT CAST(Project AS STRING) as Project, Phase, System, UPPER(CAST(Location AS STRING)) as Location, COUNT(DISTINCT NodeNum) as total_assigned
         FROM `{NODE_REGISTRY_TABLE}`
         WHERE UPPER(Project) NOT LIKE '%OFFICE%'
+          -- Ensure we only count the currently active hardware in the hole
+          AND (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
         GROUP BY 1, 2, 3, 4
     """
     pool_df = client.query(pool_q).to_dataframe()
