@@ -1,3 +1,470 @@
+######################
+# Page: Admin Tool Helpers   #
+######################
+# =============================================================================
+# SUB-TAB WORKSPACE HELPERS: ADVANCED MAINTENANCE & BULK APPROVAL WORKSPACE
+# =============================================================================
+
+def render_bulk_approval_controls():
+    """Renders the top-level scope selection, filter parameters, and target flag status inputs."""
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        target_scope = st.radio(
+            "Target Scope", 
+            ["Project Wide", "Specific Location", "Specific Node"], 
+            horizontal=True, 
+            key="blk_mgmt_target_scope"
+        )
+    with c2:
+        current_status_filter = st.selectbox(
+            "Filter Current Designation Status:",
+            options=["all", "all but null", "true", "null (streaming / unreviewed)", "masked", "office", "baddata"],
+            key="blk_mgmt_current_status_filter",
+            help="Limits modifications only to data points that currently match this selected classification."
+        )
+    with c3:
+        new_status = st.selectbox(
+            "Set Approval Status To:", 
+            ["true", "masked", "office", "baddata"], 
+            key="blk_mgmt_new_status"
+        )
+    return target_scope, current_status_filter, new_status
+
+
+def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, current_status_filter, f):
+    """Constructs analytical logical statements parsing historical coordinates."""
+    where_clauses = []
+
+    if selected_project != "All Projects":
+        if target_scope == "Specific Node":
+            where_clauses.append(f"NodeNum = '{f['scope_val']}'")
+        elif target_scope == "Specific Location":
+            loc_nodes = reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == f['scope_val'])]['NodeNum'].dropna().unique().tolist()
+            nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
+            where_clauses.append(f"NodeNum IN ({nodes_str})")
+        else:
+            proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].dropna().unique().tolist()
+            if proj_nodes:
+                nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
+                where_clauses.append(f"NodeNum IN ({nodes_str})")
+            else:
+                where_clauses.append("NodeNum = 'NONE'")
+        where_clauses.append(f"Project = '{selected_project}'")
+    else:
+        where_clauses.append("Project IS NOT NULL")
+
+    start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
+
+    if f["temporal_dir"] == "Between Range":
+        end_ts_str = f"{f['e_date'].strftime('%Y-%m-%d')} {f['e_time'].strftime('%H:%M:%S')}"
+        where_clauses.append(f"timestamp BETWEEN '{start_ts_str}' AND '{end_ts_str}'")
+    elif f["temporal_dir"] in ["Older Than", "Newer Than"]:
+        op = "<" if f["temporal_dir"] == "Older Than" else ">"
+        where_clauses.append(f"timestamp {op} '{start_ts_str}'")
+    
+    if f["val_filter"] == "Above Threshold":
+        where_clauses.append(f"temperature > {f['threshold']}")
+    elif f["val_filter"] == "Below Threshold":
+        where_clauses.append(f"temperature < {f['threshold']}")
+
+    if current_status_filter != "all":
+        if current_status_filter == "all but null":
+            where_clauses.append("r.approve IS NOT NULL")
+        elif current_status_filter == "null (streaming / unreviewed)":
+            where_clauses.append("r.approve IS NULL")
+        elif current_status_filter == "true":
+            where_clauses.append("r.approve IS NULL")
+        else:
+            where_clauses.append(f"LOWER(CAST(r.approve AS STRING)) = '{str(current_status_filter).lower()}'")
+
+    return " AND ".join(where_clauses)
+
+
+def render_bulk_approval_filters(reg_df, selected_project, target_scope):
+    """Renders temporal filter vectors alongside numeric sensor value threshold blocks."""
+    col_f1, col_f2, col_f3 = st.columns(3)
+    
+    with col_f1:
+        temporal_dir = st.selectbox("Temporal Direction", ["Between Range", "Older Than", "Newer Than"], key="blk_mgmt_temp_dir")
+        
+        if temporal_dir == "Between Range":
+            c_start, c_end = st.columns(2)
+            with c_start:
+                s_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=7), key="blk_mgmt_s_date")
+                s_time = st.time_input("Start Time (Exact)", value=datetime.min.time(), key="blk_mgmt_s_time")
+            with c_end:
+                e_date = st.date_input("End Date", value=datetime.now().date(), key="blk_mgmt_e_date")
+                e_time = st.time_input("End Time (Exact)", value=datetime.max.time(), key="blk_mgmt_e_time")
+        else:
+            s_date = st.date_input("Target Date", value=datetime.now().date() - timedelta(days=7), key="blk_mgmt_single_date")
+            s_time = st.time_input("Target Time (Exact)", value=datetime.min.time(), key="blk_mgmt_single_time")
+            e_date, e_time = None, None
+
+    with col_f2:
+        val_filter = st.selectbox("Value Filter", ["No Threshold", "Above Threshold", "Below Threshold"], key="blk_mgmt_val_filter")
+        threshold = st.number_input("Threshold Value (°F)", value=100.0, key="blk_mgmt_threshold")
+
+    with col_f3:
+        scope_val = None
+        if selected_project == "All Projects":
+            st.info("Targeting **Global Registry Scope** (All Active Projects)")
+            scope_val = "ALL_PROJECTS"
+        else:
+            if target_scope == "Project Wide":
+                st.info(f"Targeting all nodes in **{selected_project}**")
+                scope_val = selected_project
+            elif target_scope == "Specific Location":
+                u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist())
+                scope_val = st.selectbox("Select Location", u_locs, key="blk_mgmt_loc_select")
+            elif target_scope == "Specific Node":
+                u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist())
+                selected_loc = st.selectbox("First, Select Location", u_locs, key="blk_mgmt_loc_node_select")
+                u_nodes = sorted(
+                    reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == selected_loc)]['NodeNum'].dropna().unique().tolist()
+                )
+                scope_val = st.selectbox("Then, Select Node", u_nodes, key="blk_mgmt_node_select")
+            
+    return {
+        "temporal_dir": temporal_dir, 
+        "s_date": s_date, "s_time": s_time,
+        "e_date": e_date, "e_time": e_time,
+        "val_filter": val_filter, "threshold": threshold, "scope_val": scope_val
+    }
+
+
+def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
+    """
+    Main administrative execution module managing bulk data approval modification routines,
+    hourly table consolidation aggregates, and manual rejection string standardization.
+    
+    Parameters:
+    -----------
+    client : bigquery.Client
+        Authenticated Google Cloud BigQuery client instance.
+    full_reg_df : pandas.DataFrame
+        The full sensor node registry dataset mapping nodes to active hardware configurations.
+    selected_project : str
+        The current active project context token filtered out of the sidebar app menu.
+    tab_logistics : streamlit.tabs
+        Bubble handle routing to pass downstream context states across layouts.
+    """
+    # Establish explicit table paths mapped directly out of your data view catalog
+    target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
+    telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" 
+
+    st.title("⚡ Bulk Approval and Database Maintenance")
+    st.divider()
+
+    # Initialize application state memory footprints to prevent unintended app re-runs during data scans
+    if "blk_mgmt_profile_df" not in st.session_state: 
+        st.session_state.blk_mgmt_profile_df = None
+    if "blk_mgmt_total_points" not in st.session_state: 
+        st.session_state.blk_mgmt_total_points = 0
+
+    # =========================================================================
+    # UTILITY A: GLOBAL DATABASE CLEANUP ENGINE
+    # =========================================================================
+    st.header("🧹 Global Database Cleanup")
+    st.write(
+        "Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency "
+        "and duplicate records system-wide. "
+        "**Note:** Running this cleanup automatically drops any rogue data points outside the physical bounds of -30°F and 120°F."
+    )
+    
+    # Split utilities into clean side-by-side management columns
+    clean_col1, clean_col2, clean_col3 = st.columns(3)
+    
+    with clean_col1:
+        st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
+        st.caption("Truncates raw timestamps to the hour, filters bad logs, and collapses records to an average value.")
+        run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Hourly Consolidation", use_container_width=True)
+        
+    with clean_col2:
+        st.write("##### 🧼 Approval String Casing Standardization")
+        st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
+        run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
+
+    with clean_col3:
+        st.write("##### 🧠 Smart TempPipe Spike Filter")
+        st.caption("Auto-masks TempPipe readings that jump >5°F from adjacent records.")
+        run_smart_filter = st.button("🤖 Run TempPipe Smart Masking", use_container_width=True)
+
+    
+
+    # --- PATHWAY A: COMPREHENSIVE HOURLY HOOD CONSOLIDATION ENGINE ---
+    if run_telemetry_cleanup:
+        status_box = st.empty()
+        try:
+            # 1. Audit active data rows before applying modifications to map the exact purge count
+            status_box.markdown("⏳ **[1/4] Calculating initial database row baselines...**")
+            count_sp_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
+            count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
+            
+            # 2. Upgraded SensorPush: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
+            status_box.markdown("🧹 **[2/4] Consolidating and averaging SensorPush timelines to the hour...**")
+            sp_cleanup_sql = f"""
+                CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
+                SELECT 
+                    TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                    NodeNum, 
+                    ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature,
+                    MAX(rssi) as rssi
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                WHERE temperature >= -30.0 AND temperature <= 120.0
+                GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), NodeNum;
+
+                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
+                SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature, rssi FROM tmp_clean_sensorpush;
+            """
+            client.query(sp_cleanup_sql).result()
+            
+            # 3. Upgraded Lord: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
+            status_box.markdown("🛰️ **[3/4] Consolidating and averaging Lord Wireless timelines to the hour...**")
+            lord_cleanup_sql = f"""
+                CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
+                SELECT 
+                    TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                    NodeNum, 
+                    ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature
+                FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
+                GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), NodeNum;
+
+                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
+                SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature FROM tmp_clean_lord;
+            """
+            client.query(lord_cleanup_sql).result()
+            st.cache_data.clear()
+
+            # 4. Pull database row summaries to document the data cleanup audit trail
+            status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling consolidated tallies...**")
+            count_sp_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
+            count_lord_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
+
+            sp_removed = count_sp_before - count_sp_after
+            lord_removed = count_lord_before - count_lord_after
+            total_removed = sp_removed + lord_removed
+            
+            status_box.empty()
+            st.success("🎉 Global Database Consolidation successfully completed!")
+            
+            # Print comparative ledger results matrix
+            report_data = [
+                {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged High-Freq Points": f"{sp_removed:,}"},
+                {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged High-Freq Points": f"{lord_removed:,}"},
+                {"Data Table": "Combined Total Pool", "Before Count": f"{count_sp_before + count_lord_before:,}", "After Count": f"{count_sp_after + count_lord_after:,}", "Purged High-Freq Points": f"{total_removed:,}"}
+            ]
+            st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
+            
+        except Exception as e:
+            status_box.empty()
+            st.error(f"Global Database Consolidation Failed: {e}")
+
+    # --- PATHWAY B: REJECTIONS ENGINE STRING CASING CLEANUP ---
+    if run_string_cleanup:
+        status_box_str = st.empty()
+        try:
+            status_box_str.markdown("🧼 **Standardizing mixed-case manual override parameters...**")
+            
+            # Targets the data override source table directly (`manual_rejections`)
+            # Converts lower or mixed-case string variants safely into standard uppercase 'TRUE' or 'FALSE'
+            str_cleanup_sql = f"""
+                UPDATE `{target_table}`
+                SET approve = UPPER(TRIM(approve))
+                WHERE LOWER(approve) IN ('true', 'false')
+            """
+            job = client.query(str_cleanup_sql)
+            job.result()
+            
+            status_box_str.empty()
+            st.success(f"🎉 Text standardization complete! Successfully cleaned {job.num_dml_affected_rows:,} records inside the rejections ledger.")
+            st.cache_data.clear()
+            time.sleep(0.5)
+            st.rerun()
+        except Exception as e:
+            status_box_str.empty()
+            st.error(f"Text String Cleanup Operation Failed: {e}")
+
+    # --- PATHWAY C: SMART FILTER ANOMALY MASKING ---
+    if run_smart_filter:
+        status_box_smart = st.empty()
+        try:
+            status_box_smart.markdown("🧠 **Scanning TempPipes for >5°F anomalies...**")
+            
+            # Uses LAG (previous) and LEAD (next) to compare chronological neighbors
+            spike_sql = f"""
+                MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
+                USING (
+                    WITH OrderedData AS (
+                        SELECT 
+                            NodeNum, 
+                            timestamp, 
+                            temperature,
+                            LAG(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp) as prev_temp,
+                            LEAD(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp) as next_temp
+                        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+                        -- Isolate TempPipes: Has depth, not ambient, not a bank
+                        WHERE Depth IS NOT NULL 
+                          AND TRIM(CAST(Depth AS STRING)) != '' 
+                          AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%'
+                    )
+                    SELECT DISTINCT NodeNum, timestamp
+                    FROM OrderedData
+                    WHERE (prev_temp IS NOT NULL AND ABS(temperature - prev_temp) > 5.0)
+                       OR (next_temp IS NOT NULL AND ABS(temperature - next_temp) > 5.0)
+                ) S
+                ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                WHEN MATCHED THEN UPDATE SET approve = 'MASKED'
+                WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, 'MASKED')
+            """
+            
+            job = client.query(spike_sql)
+            job.result()
+            
+            status_box_smart.empty()
+            st.success(f"🎉 Smart Filter applied! Successfully masked {job.num_dml_affected_rows:,} anomalous TempPipe records.")
+            st.cache_data.clear()
+            time.sleep(0.5)
+            st.rerun()
+            
+        except Exception as e:
+            status_box_smart.empty()
+            st.error(f"Smart Filter Operation Failed: {e}")
+    
+    st.divider()
+
+    # =========================================================================
+    # UTILITY B: BULK APPROVAL AND DATA STATUS CHANGE SYSTEM CONTROLS
+    # =========================================================================
+    st.header("⚡ Bulk Approval and Data Status Change")
+    st.info("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides.")
+    
+    # Render user selection widgets to grab Target Scope (Project/All), Filtering Criteria, and New Status Value
+    target_scope, current_status_filter, new_status = render_bulk_approval_controls()
+    st.divider()
+
+    # Build active project logic constraints by pulling down matching query string blocks
+    filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
+    where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
+    
+    # Map raw field strings to match the proper table aliases used inside the Master analytical query view
+    aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
+                              .replace("timestamp", "t.timestamp")
+                              .replace("temperature", "t.temperature")
+                              .replace("r.approve", "t.approval_status"))
+    
+    # Internal function to map and verify exactly how many data rows will be changed before saving
+    def run_profile_audit():
+        status_q = f"""
+            SELECT  
+                COALESCE(t.approval_status, 'NULL (Streaming / Unreviewed)') as Current_Designation_Status,
+                COUNT(*) as Total_Captured_Points,
+                FORMAT_TIMESTAMP('%m/%d/%Y', MIN(t.timestamp)) as Oldest_Log_Entry,
+                FORMAT_TIMESTAMP('%m/%d/%Y', MAX(t.timestamp)) as Newest_Log_Entry
+            FROM `{telemetry_table}` t
+            WHERE {aliased_where}
+            GROUP BY Current_Designation_Status
+            ORDER BY Total_Captured_Points DESC
+        """
+        with st.spinner("Auditing active database designation profiles..."):
+            res = client.query(status_q).to_dataframe()
+            if not res.empty:
+                st.session_state.blk_mgmt_profile_df = res
+                st.session_state.blk_mgmt_total_points = res['Total_Captured_Points'].sum()
+            else:
+                st.session_state.blk_mgmt_profile_df = pd.DataFrame()
+                st.session_state.blk_mgmt_total_points = 0
+
+    # Step 1 Button: Verification Routine
+    if st.button("🔍 Step 1: Verify Match Count & Current Status Profiles", key="blk_mgmt_verify_btn", use_container_width=True):
+        try:
+            run_profile_audit()
+        except Exception as e:
+            st.error(f"Verification Matrix Compilation Failed: {e}")
+
+    # Render results grid if data profile calculations are actively held in app cache states
+    if st.session_state.blk_mgmt_profile_df is not None:
+        if not st.session_state.blk_mgmt_profile_df.empty:
+            st.subheader("📊 Current Node Status")
+            st.dataframe(st.session_state.blk_mgmt_profile_df, use_container_width=True, hide_index=True)
+            st.metric("Total Consolidated Points in Selection Scope", f"{st.session_state.blk_mgmt_total_points:,}")
+        else:
+            st.warning("No telemetry data points found matching this configuration window.")
+
+    st.divider()
+    st.info(f"Target Designation Status for selected coordinates: **{new_status}**")
+    
+    # Step 2: Form Checkbox and Execution Engine Block
+    if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
+        if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
+            
+            # PATH A: If target override is TRUE, drop tracking tokens entirely out of the rejections table so they re-approve
+            if new_status == "TRUE":
+                sql = f"""
+                    DELETE FROM `{target_table}`
+                    WHERE STRUCT(NodeNum, timestamp) IN (
+                        SELECT AS STRUCT t.NodeNum, t.timestamp 
+                        FROM `{telemetry_table}` t
+                        WHERE {aliased_where}
+                    )
+                """
+            # PATH B: If target override is a custom flag (FALSE, BADDATA, MASK), merge row coordinates into manual_rejections
+            else:
+                sql = f"""
+                    MERGE `{target_table}` T
+                    USING (
+                        SELECT DISTINCT t.NodeNum, t.timestamp 
+                        FROM `{telemetry_table}` t 
+                        WHERE {aliased_where}
+                    ) S
+                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                    WHEN MATCHED THEN
+                        UPDATE SET approve = '{new_status}'
+                    WHEN NOT MATCHED THEN
+                        INSERT (NodeNum, timestamp, approve) 
+                        VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                """
+            try:
+                with st.spinner("Processing database status reclassifications..."):
+                    job = client.query(sql)
+                    job.result()
+                
+                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records inside the registry ledger.")
+                st.cache_data.clear()
+                run_profile_audit() # Refresh data metrics locally
+                st.balloons()
+                time.sleep(1.0)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
+                st.code(sql, language="sql")
+
+def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
+    """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
+    client = get_bq_client()
+    if client is None: return False
+        
+    if isinstance(timestamp, pd.Timestamp):
+        ts_str = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')
+    else:
+        ts_str = str(timestamp)
+
+    write_q = f"""
+        MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
+        USING (SELECT '{node_num}' as NodeNum, TIMESTAMP('{ts_str}') as timestamp) S
+        ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+        WHEN MATCHED THEN
+          UPDATE SET approve = '{new_status}'
+        WHEN NOT MATCHED THEN
+          INSERT (NodeNum, timestamp, approve) 
+          VALUES (S.NodeNum, S.timestamp, '{new_status}')
+    """
+    try:
+        client.query(write_q).result()
+        return True
+    except Exception as e:
+        st.error(f"⚠️ Cloud DB Commit Failed: {e}")
+        return False
 
 # =============================================================================
 # DATA RECOVERY REQUISITE ENGINE HELPERS
