@@ -580,31 +580,39 @@ def render_client_portal():
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
        
     with tabs[4]:
-        asbuilt_filename = primary_meta.get('AsBuiltFile')
-        if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
-            possible_paths = [
-                os.path.join("assets", "asbuilts", asbuilt_filename), 
-                asbuilt_filename, 
-                os.path.join("assets", asbuilt_filename)
-            ]
-            img_found = False
-            for path in possible_paths:
-                if os.path.exists(path):
-                    try:
-                        with open(path, "rb") as img_file:
-                            img_bytes = img_file.read()
-                        
-                        st.image(img_bytes, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
-                        img_found = True
-                        break
-                    except Exception as img_err:
-                        st.error(f"⚠️ Failed to decode image file stream: {img_err}")
-                        img_found = True 
-                        break
-            if not img_found:
-                st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
+        asbuilt_raw = primary_meta.get('AsBuiltFile')
+        if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
+            # Split the string by commas or semicolons, and remove any extra spaces
+            asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
+            
+            if not asbuilt_filenames:
+                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
+            else:
+                for filename in asbuilt_filenames:
+                    possible_paths = [
+                        os.path.join("assets", "asbuilts", filename), 
+                        filename, 
+                        os.path.join("assets", filename)
+                    ]
+                    img_found = False
+                    for path in possible_paths:
+                        if os.path.exists(path):
+                            try:
+                                with open(path, "rb") as img_file:
+                                    img_bytes = img_file.read()
+                                
+                                st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
+                                st.markdown("<br>", unsafe_allow_html=True) # Adds a little spacing between images
+                                img_found = True
+                                break
+                            except Exception as img_err:
+                                st.error(f"⚠️ Failed to decode image file stream for {filename}: {img_err}")
+                                img_found = True 
+                                break
+                    
+                    if not img_found:
+                        st.error(f"❌ Drawing Not Found: '{filename}'")
         else:
             st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-
 # --- EXECUTION ---
 render_client_portal()
