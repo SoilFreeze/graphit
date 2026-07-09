@@ -2,9 +2,22 @@ import streamlit as st
 import pandas as pd
 import time
 import os
+import re
 from app.utils import config
 from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
 from app.components.charts import build_high_speed_graph
+
+# =============================================================================
+# IMPORTANT: Import your other page functions here based on your file structure
+# Example paths provided below, adjust as needed!
+# =============================================================================
+# from app.pages.summary import render_summary_dashboard
+# from app.pages.depth import render_depth_charts
+# from app.pages.sensors import render_sensor_status
+# from app.pages.diagnostics import render_node_diagnostics
+# from app.pages.data_processing import render_data_processing_page
+# from app.pages.admin import render_admin_page
+
 
 # 1. UI SETUP
 st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
@@ -12,7 +25,7 @@ st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout=
 # 2. SIDEBAR NAVIGATION
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# 1. PAGE NAVIGATION
+# PAGE NAVIGATION
 page = st.sidebar.selectbox(
     "Navigation", 
     [
@@ -27,7 +40,7 @@ page = st.sidebar.selectbox(
     key="nav_page"
 )
 
-# 2. PROJECT SELECTION
+# PROJECT SELECTION
 selected_project = "All Projects"
 project_metadata = None  
 
@@ -35,8 +48,7 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # Determine the filter based on the new toggle
-        # Assumes your boolean column is named 'ShowActive'
+        # Determine the filter based on the toggle
         status_filter = "" if st.session_state.get('global_show_archived', False) else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
 
         proj_q = f"""
@@ -92,17 +104,14 @@ if sidebar_client is not None:
             """
             scope_label = "Last Data"
         else:
-            # Extract just the '2541'
             job_num = selected_project.split('-')[0].strip()
             
-            # Map the dropdown selection to the raw database integer
             phase_sql = ""
             if "Phase 1" in selected_project:
                 phase_sql = " AND Phase = '1' "
             elif "Phase 2" in selected_project or "Phase2" in selected_project:
                 phase_sql = " AND Phase = '2' "
 
-            # Search by job number and phase integer, ignoring the messy project strings
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
                 FROM `{config.MASTER_VIEW}`
@@ -112,7 +121,6 @@ if sidebar_client is not None:
 
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
         
-        # Guard: Check if the result is valid and not null
         if not pulse_df.empty and pulse_df['last_sync'].iloc[0] is not None and pd.notna(pulse_df['last_sync'].iloc[0]):
             last_sync_str = str(pulse_df['last_sync'].iloc[0])
             
@@ -154,7 +162,6 @@ show_archived = st.sidebar.toggle(
     help="Display all historic projects in the project selection menu."
 )
 
-# NEW: The Ambient Toggle
 st.sidebar.toggle(
     "Show Ambient Temp", 
     value=True, 
@@ -193,38 +200,23 @@ selected_weeks = st.sidebar.slider(
 lookback_days = selected_weeks * 7
 st.session_state["global_lookback_days"] = lookback_days
 
+# CSS customizations
 st.sidebar.markdown(
     """
     <style>
-        /* Target the slider track line */
         div[data-baseweb="slider"] > div > div {
             background: linear-gradient(to right, rgb(214, 39, 40) 0%, rgb(214, 39, 40) var(--slider-progress, 100%), rgb(230, 230, 230) var(--slider-progress, 100%)) !important;
         }
-        /* Target the interactive thumb dot handle */
         div[role="slider"] {
             background-color: rgb(214, 39, 40) !important;
             border: 2px solid rgb(214, 39, 40) !important;
             box-shadow: 0px 0px 4px rgba(214, 39, 40, 0.5) !important;
         }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-# --- CSS TO FORCE DATA TABLE PROGRESS COLUMNS RED ---
-st.sidebar.markdown(
-    """
-    <style>
-        /* Target the progress bar fill indicators inside Streamlit data grids */
         div[data-testid="stDataFrame"] div[role="progressbar"] > div {
             background-color: rgb(214, 39, 40) !important;
         }
-        /* Target alternative HTML5 fallback elements if utilized by the matrix view */
-        progress::-webkit-progress-value {
-            background: rgb(214, 39, 40) !important;
-        }
-        progress::-moz-progress-bar {
-            background: rgb(214, 39, 40) !important;
-        }
+        progress::-webkit-progress-value { background: rgb(214, 39, 40) !important; }
+        progress::-moz-progress-bar { background: rgb(214, 39, 40) !important; }
     </style>
     """,
     unsafe_allow_html=True
@@ -281,14 +273,17 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False, key="ref_type_a"):
 
 st.session_state["active_refs"] = tuple(active_refs)
 
-unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
-unit_label = st.session_state.get("unit_label", "°F")
 display_tz = st.session_state.get("display_tz", "UTC")
-active_refs = st.session_state.get("active_refs", [])
 
-# ... (all your existing sidebar code ends here) ...
+# =============================================================================
+# MASTER LAYOUT FRAMEWORK PAGE ROUTER
+# =============================================================================
 
-# 3. APP LOGIC (Add this at the very bottom)
+# Define a sorting helper to ensure proper numerical sequencing (T1, T2, T3... instead of T1, T10, T2)
+def natural_sort_key(text):
+    return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
+
+# Only fetch heavy data if a project is selected
 if selected_project and selected_project != "All Projects":
     
     # Calculate dates based on the lookback slider
@@ -296,71 +291,90 @@ if selected_project and selected_project != "All Projects":
     end_date = pd.Timestamp.now()
     start_date = end_date - pd.Timedelta(days=lookback_days)
     
-    # Fetch and process
+    # Fetch and process the data for the selected project
     raw_data = get_universal_portal_data(selected_project)
     clean_data = apply_sanity_filter(raw_data)
     
-    # 4. RENDER CHARTS
+    # -------------------------
+    # ROUTE: TIME VS TEMP
+    # -------------------------
     if page == "Time vs Temp":
-        # Pass your session state variables into the graph builder
-        fig = build_high_speed_graph(
-            df=clean_data, 
-            title=selected_project, 
-            start_view=start_date, 
-            end_view=end_date, 
-            active_refs=st.session_state.get("active_refs"),
-            unit_mode=st.session_state.get("unit_mode"),
-            unit_label=st.session_state.get("unit_label"),
-            display_tz=st.session_state.get("display_tz"),
-            f_start_date=start_date,
-            curve_id=selected_project
-        )
-        
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
+        unique_locations = clean_data['Location'].dropna().unique()
+        sorted_locations = sorted(unique_locations, key=natural_sort_key)
 
-# =============================================================================
-# 12. MASTER LAYOUT FRAMEWORK PAGE ROUTER
-# =============================================================================
-display_tz = st.session_state.get("display_tz", "UTC")
-unit_label = st.session_state.get("unit_label", "°F")
-unit_mode = st.session_state.get("unit_mode", "Fahrenheit")
-active_refs = st.session_state.get("active_refs", [])
+        # Loop through each location and build its own graph
+        for loc in sorted_locations:
+            if str(loc).strip().upper() == 'UNASSIGNED':
+                continue
+                
+            loc_data = clean_data[clean_data['Location'] == loc]
+            
+            if loc_data.empty:
+                continue
 
-client = get_bq_client() 
+            fig = build_high_speed_graph(
+                df=loc_data, 
+                title=f"Thermal Trends: {loc}",
+                start_view=start_date, 
+                end_view=end_date, 
+                active_refs=active_refs,
+                unit_mode=unit_mode,
+                unit_label=unit_label,
+                display_tz=display_tz,
+                f_start_date=start_date,
+                curve_id=selected_project
+            )
+            
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+                st.markdown("---") 
 
-if page == "Summary":
-    render_summary_dashboard(unit_label, unit_mode, display_tz)
+    # -------------------------
+    # ROUTE: SUMMARY
+    # -------------------------
+    elif page == "Summary":
+        # Ensure render_summary_dashboard is imported at the top of main.py
+        render_summary_dashboard(unit_label, unit_mode, display_tz)
 
-elif page == "Time vs Temp":
-    render_global_overview(selected_project, st.session_state.get('project_metadata'), display_tz) 
+    # -------------------------
+    # ROUTE: DEPTH CHARTS
+    # -------------------------
+    elif page == "Depth Charts":
+        # Ensure render_depth_charts is imported
+        render_depth_charts(selected_project, unit_label, display_tz)
 
-elif page == "Depth Charts":
-    render_depth_charts(selected_project, unit_label, display_tz)
+    # -------------------------
+    # ROUTE: SENSOR STATUS
+    # -------------------------
+    elif page == "Sensor Status":
+        # Ensure render_sensor_status is imported
+        render_sensor_status(sidebar_client, selected_project, unit_label, unit_mode, display_tz)
 
-elif page == "Sensor Status":
-    render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz)
+    # -------------------------
+    # ROUTE: NODE DIAGNOSTICS
+    # -------------------------
+    elif page == "Node Diagnostics":
+        # Ensure render_node_diagnostics is imported
+        render_node_diagnostics(selected_project, display_tz, unit_label)
 
-elif page == "Node Diagnostics":
-    # Ensure this function exists in your code or is removed if deprecated
-    render_node_diagnostics(selected_project, display_tz, unit_label)
-
-elif page in ["Data Processing", "Admin Tools"]:
-    if st.session_state.get('authenticated', False):
-        if page == "Data Processing":
-            render_data_processing_page(selected_project)
-        elif page == "Admin Tools":
-            render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
-    else:
-        st.divider()
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c2:
-            st.subheader("🔐 Restricted Admin Access")
-            pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
-            if st.button("Unlock Dashboard", use_container_width=True):
-                if pwd == st.secrets.get("admin_password", "Freeze123!!"):
-                    st.session_state['authenticated'] = True
-                    st.rerun()
-                else:
-                    st.error("Invalid Password. Access Denied.")
-
+    # -------------------------
+    # ROUTE: ADMIN & PROCESSING
+    # -------------------------
+    elif page in ["Data Processing", "Admin Tools"]:
+        if st.session_state.get('authenticated', False):
+            if page == "Data Processing":
+                render_data_processing_page(selected_project)
+            elif page == "Admin Tools":
+                render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
+        else:
+            st.divider()
+            c1, c2, c3 = st.columns([1, 2, 1])
+            with c2:
+                st.subheader("🔐 Restricted Admin Access")
+                pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
+                if st.button("Unlock Dashboard", use_container_width=True):
+                    if pwd == st.secrets.get("admin_password", "Freeze123!!"):
+                        st.session_state['authenticated'] = True
+                        st.rerun()
+                    else:
+                        st.error("Invalid Password. Access Denied.")
