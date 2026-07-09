@@ -109,9 +109,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
     sorted_node_cfgs = sorted(node_metadata, key=lambda x: (x['priority'], x['sort_key']))
 
-    for i, config in enumerate(sorted_node_configs):
-        sn = config['node_num']
-        display_name = config['display_name']
+    # To this:
+    for i, node_cfg in enumerate(sorted_node_configs):
+        sn = node_cfg['node_num']
+        display_name = node_cfg['display_name']
         
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
