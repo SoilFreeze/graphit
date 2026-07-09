@@ -622,8 +622,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         # 5. TRIGGER EXECUTION PIPELINE BUTTON
         if st.button("🚀 Execute Cloud Backfill Ingestion Pipeline Run", use_container_width=True, key="btn_trigger_recovery_run"):
-            import requests
-            import numpy as np
             
             all_rows = []
             hardware_map = {}
@@ -813,7 +811,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             if grand_total_tally > 0:
                 st.balloons()
 
-# -------------------------------------------------------------------------
+        # -------------------------------------------------------------------------
         # SUB-SECTION: HARDWARE AUDIT & STATUS LOOKUP
         # -------------------------------------------------------------------------
         st.divider()
@@ -821,8 +819,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.write("Scan all connected SensorPush cloud accounts to generate a comprehensive list of mapped hardware, physical IDs, and the last time they successfully logged data.")
 
         if st.button("📊 Run Fleet Account Audit", use_container_width=True, key="btn_run_account_audit"):
-            import requests
-            import pandas as pd
 
             audit_records = []
             hardware_map = {}
