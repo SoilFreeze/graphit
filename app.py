@@ -112,7 +112,7 @@ def get_universal_portal_data(project_id):
             JOIN `{PROJECT_REGISTRY_TABLE}` p 
               ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
             WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
-              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+              AND m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
               
               -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
               AND EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
