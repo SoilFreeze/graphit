@@ -19,12 +19,7 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     client = get_bq_client()
     if client is None: return
 
-    # --- 1. THE CONTROL LIST: Active Projects Only ---
-    # Dynamically inject the project filter ONLY if a specific site is selected
-    project_filter_sql = ""
-    if selected_project != "All Projects":
-        project_filter_sql = f"AND Project = '{selected_project}'"
-
+    # --- 1. THE CONTROL LIST: Active Projects Only (ALWAYS GLOBAL) ---
     proj_q = f"""
         SELECT 
             CAST(Project AS STRING) as Project, 
@@ -34,7 +29,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
         FROM `{PROJECT_REGISTRY_TABLE}`
         WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
           AND UPPER(Project) NOT LIKE '%OFFICE%'
-          {project_filter_sql}
         ORDER BY Project
     """
     try: 
