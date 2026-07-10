@@ -97,18 +97,30 @@ def get_universal_portal_data(project_id):
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
             JOIN `{NODE_REGISTRY_TABLE}` n 
               ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
-            JOIN `{PROJECT_REGISTRY_TABLE}` p 
-              ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
-            WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
-            
-              -- 🛡️ SAFE_CAST prevents crashes if Date_Freezedown is blank in the registry
-              AND m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
               
-              -- 📍 STRICT LOCATION REASSIGNMENT FILTER (SAFE_CAST prevents DATE vs STRING mismatches)
-              AND EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+            -- 🛡️ SPLIT MATCH: Handles hyphenated project names perfectly
+            JOIN `{PROJECT_REGISTRY_TABLE}` p 
+              ON SPLIT(CAST(m.Project AS STRING), '-')[OFFSET(0)] = SPLIT(CAST(p.Project AS STRING), '-')[OFFSET(0)]
+              
+            -- 🎯 TARGET LOCK: Binds the query strictly to the current phase being mapped
+            WHERE SPLIT(CAST(m.Project AS STRING), '-')[OFFSET(0)] = SPLIT(CAST(@project_id AS STRING), '-')[OFFSET(0)]
+            
+              -- 🛡️ DATE FAILSAFES: Ignores null/false text strings from Google Sheets
+              AND (
+                  p.Date_Freezedown IS NULL 
+                  OR LOWER(TRIM(CAST(p.Date_Freezedown AS STRING))) IN ('', 'null', 'nan', 'false')
+                  OR m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
+              )
+              
+              AND (
+                  n.Start_Date IS NULL
+                  OR LOWER(TRIM(CAST(n.Start_Date AS STRING))) IN ('', 'null', 'nan', 'false')
+                  OR EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+              )
+              
               AND (
                   n.End_Date IS NULL 
-                  OR TRIM(n.End_Date) = '' 
+                  OR LOWER(TRIM(CAST(n.End_Date AS STRING))) IN ('', 'null', 'nan', 'false')
                   OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
               )
               
@@ -124,7 +136,8 @@ def get_universal_portal_data(project_id):
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%TEST%'
               
-              AND n.SensorStatus IN ('On Project', 'Available')
+              -- 🛠️ ALLOWS "MISSING" SENSORS
+              AND UPPER(TRIM(CAST(n.SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
         ),
         gap_evaluation AS (
