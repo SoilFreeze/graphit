@@ -78,71 +78,67 @@ def get_universal_portal_data(target_job_number):
     
     root_job_id = str(target_job_number).split('-')[0].strip()
     
+    # 1. Fetch the raw, approved telemetry directly from the master view
     query = f"""
-        WITH filtered_base AS (
-            SELECT 
-                n.Project, 
-                m.NodeNum, 
-                n.Bank, 
-                n.Location, 
-                n.Depth, 
-                m.temperature, 
-                m.timestamp, 
-                m.approval_status
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
-            
-            -- 🔗 STRICT REGISTRY JOIN: Connects raw telemetry to your exact Sheet configurations
-            JOIN `{NODE_REGISTRY_TABLE}` n 
-              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
-            
-            -- 🎯 STRICT PROJECT LOCK
-            WHERE SPLIT(CAST(n.Project AS STRING), '-')[OFFSET(0)] = @root_job_id
-            
-              -- ⏱️ BULLETPROOF DATE PARSER: Casts safely to TIMESTAMP to handle Google Sheets' exact output
-              AND (
-                  n.Start_Date IS NULL
-                  OR LOWER(TRIM(CAST(n.Start_Date AS STRING))) IN ('', 'null', 'nan', 'false')
-                  OR m.timestamp >= SAFE_CAST(n.Start_Date AS TIMESTAMP)
-              )
-              AND (
-                  n.End_Date IS NULL 
-                  OR LOWER(TRIM(CAST(n.End_Date AS STRING))) IN ('', 'null', 'nan', 'false')
-                  OR m.timestamp <= SAFE_CAST(n.End_Date AS TIMESTAMP)
-              )
-              
-              -- 🔒 THE IRONCLAD ALLOWLIST: Accepts 'TRUE', 'true', 'True'. 
-              AND UPPER(TRIM(CAST(m.approval_status AS STRING))) = 'TRUE'
-              
-              -- 🎛️ RETIREMENT FILTER: Honors your Google Sheet labels
-              AND UPPER(TRIM(CAST(n.SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
-              
-              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
-              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
-              
-              AND m.temperature >= -30.0 AND m.temperature <= 120.0
-        ),
-        gap_evaluation AS (
-            SELECT 
-                *,
-                LAG(timestamp) OVER (PARTITION BY NodeNum, Location, Depth, Bank ORDER BY timestamp ASC) as prev_timestamp
-            FROM filtered_base
-        )
         SELECT 
-            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
-        FROM gap_evaluation
-        WHERE prev_timestamp IS NULL 
-           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
-        ORDER BY timestamp ASC
+            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status, SensorStatus
+        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+        WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
+          
+          -- 🔒 STRICT ALLOWLIST
+          AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
+          
+          -- 🎛️ RETIREMENT FILTER
+          AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
+          
+          -- 🚫 EXCLUSION RULES
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
+          AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
+          
+          AND temperature >= -30.0 AND temperature <= 120.0
     """
-    
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
     )
-    return client.query(query, job_config=job_config).to_dataframe()
+    df = client.query(query, job_config=job_config).to_dataframe()
     
+    if df.empty: return pd.DataFrame()
+    
+    # 2. Pull the Registry Dates
+    reg_q = f"""
+        SELECT Project, NodeNum, Location, Start_Date, End_Date 
+        FROM `{NODE_REGISTRY_TABLE}` 
+        WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
+    """
+    reg_df = client.query(reg_q, job_config=job_config).to_dataframe()
+    
+    # 3. Process Time Boundaries safely using Pandas
+    if not reg_df.empty:
+        # Pandas effortlessly absorbs ANY date format coming from Google Sheets
+        reg_df['Start_Date'] = pd.to_datetime(reg_df['Start_Date'], errors='coerce', utc=True)
+        reg_df['End_Date'] = pd.to_datetime(reg_df['End_Date'], errors='coerce', utc=True)
+        
+        # Merge exactly on Project, Node, AND Location to prevent Cartesian cloning (e.g., TP-0142 at T8 vs T17)
+        df = df.merge(reg_df[['Project', 'NodeNum', 'Location', 'Start_Date', 'End_Date']], 
+                      on=['Project', 'NodeNum', 'Location'], 
+                      how='left')
+        
+        # Apply historical boundary filters
+        df = df[df['Start_Date'].isna() | (df['timestamp'] >= df['Start_Date'])]
+        df = df[df['End_Date'].isna() | (df['timestamp'] <= df['End_Date'])]
+    
+    # 4. Generate the 24-hour gap evaluation
+    # Keeps data clean by explicitly terminating the line if a sensor goes offline for >24 hours
+    df = df.sort_values(by=['NodeNum', 'Location', 'Depth', 'Bank', 'timestamp'])
+    df['prev_timestamp'] = df.groupby(['NodeNum', 'Location', 'Depth', 'Bank'])['timestamp'].shift(1)
+    
+    df = df[df['prev_timestamp'].isna() | ((df['timestamp'] - df['prev_timestamp']).dt.total_seconds() / 3600 <= 24)]
+    
+    return df.sort_values('timestamp')
+
+
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
