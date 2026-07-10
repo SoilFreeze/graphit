@@ -76,6 +76,7 @@ def get_universal_portal_data(target_job_number):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
+    # 1. Extract the root job number (e.g., '2541') to grab the whole project umbrella
     root_job_id = str(target_job_number).split('-')[0].strip()
     
     query = f"""
@@ -83,13 +84,18 @@ def get_universal_portal_data(target_job_number):
             SELECT 
                 Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+            
+            -- 🎯 ALL PHASES IN ONE PULL: Grabs everything for this Job Number
             WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
             
               -- 🔒 THE IRONCLAD ALLOWLIST: Strips spaces and forces uppercase. 
               -- Accepts 'true', 'True', and 'TRUE'. Blocks absolutely everything else.
               AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
               
+              -- 🎛️ RETIREMENT FILTER: Honors your Google Sheet labels to hide Archived/Dead data
               AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
+              
+              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
@@ -119,7 +125,7 @@ def get_universal_portal_data(target_job_number):
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
-                           display_tz="UTC", f_start_date=None, curve_id=None):
+                           display_tz="UTC", f_start_date=None, curve_id=None, ambient_df=None):
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
@@ -127,7 +133,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     fig = go.Figure()
 
     plot_df['timestamp'] = ensure_tz_convert(plot_df['timestamp'], display_tz)
-
+    
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
@@ -138,11 +144,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-
+            
             # 🛡️ Extract just the numbers from the location (e.g., "T1" -> "1")
             digits = re.findall(r'\d+', loc_part)
             loc_digit = digits[0] if digits else loc_part
-
+            
             target_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -154,23 +160,23 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
-
+            
             if not target_df.empty:
                 for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     soil_label = str(cid).split('-')[-1].strip()
-
+                    
                     fig.add_trace(go.Scatter(
                         x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
                         line=dict(color='rgba(80, 80, 80, 0.9)', width=4, dash=dash_styles[idx % len(dash_styles)], shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
         except: pass
-
+            
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
-
+    
     def get_position_string(row):
         depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
@@ -182,7 +188,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
-    # Secondary cleaning filter step to make sure no loose office/desk items survive in telemetry subsets
+    # Secondary cleaning filter step to make sure no loose office/desk items survive
     plot_df = plot_df[
         (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
         (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
@@ -191,14 +197,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
-
-    # Identify the latest node context checking in for each position to deduplicate legend display
-    latest_nodes_by_pos = {}
-    for pos in unique_positions:
-        pos_df = plot_df[plot_df['PositionLabel'] == pos]
-        if not pos_df.empty:
-            latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
-            latest_nodes_by_pos[pos] = latest_node
 
     def get_legend_sort_key(pos_str, df):
         sub_df = df[df['PositionLabel'] == pos_str]
@@ -215,44 +213,61 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     for pos in sorted_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
         if pos_df.empty: continue
-        active_node = latest_nodes_by_pos.get(pos, "Unknown")
+        
+        # 🛡️ SPLIT BY SENSOR: Draw a separate line for every unique sensor that lived at this position
+        for node_id in pos_df['NodeNum'].unique():
+            node_pos_df = pos_df[pos_df['NodeNum'] == node_id].copy()
+            
+            # ⏱️ 24-HOUR CHART GAP BUILDER
+            node_pos_df = node_pos_df.sort_values('timestamp').reset_index(drop=True)
+            time_deltas = node_pos_df['timestamp'].diff()
+            gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
+            
+            if not gap_indices.empty:
+                inserted_gaps = []
+                for idx in gap_indices:
+                    gap_row = node_pos_df.loc[idx].copy()
+                    prev_ts = node_pos_df.loc[idx - 1]['timestamp']
+                    gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
+                    gap_row['temperature'] = None  # None kills the connecting segment trace
+                    inserted_gaps.append(gap_row)
+                
+                node_pos_df = pd.concat([node_pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
+            
+            display_name = f"{pos} ({node_id})"
+            
+            fig.add_trace(go.Scatter(
+                x=node_pos_df['timestamp'], y=node_pos_df['temperature'], 
+                name=display_name, 
+                mode='lines',
+                connectgaps=False,  # Enforces physical segment termination at None rows
+                line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
+                showlegend=True,
+                hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
+                text=node_pos_df['NodeNum']
+            ))
 
-        display_name = f"{pos} ({active_node})"
-
-        # ⏱️ 24-HOUR CHART GAP BUILDER
-        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
-        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
-        pos_df = pos_df.sort_values('timestamp').reset_index(drop=True)
-        time_deltas = pos_df['timestamp'].diff()
-        gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
-
-        if not gap_indices.empty:
-            inserted_gaps = []
-            for idx in gap_indices:
-                gap_row = pos_df.loc[idx].copy()
-                # Place the gap timestamp exactly 1 second after the previous valid timestamp
-                prev_ts = pos_df.loc[idx - 1]['timestamp']
-                gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  # None kills the connecting segment trace
-                inserted_gaps.append(gap_row)
-
-            pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
-
-        fig.add_trace(go.Scatter(
-            x=pos_df['timestamp'], y=pos_df['temperature'], 
-            name=display_name, 
-            mode='lines',
-            connectgaps=False,  # Enforces physical segment termination at None rows
-            line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
-            showlegend=True,
-            hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
-            text=pos_df['NodeNum']
-        ))
-
+    # --- INJECT AMBIENT DATA ONTO BRINE GRAPHS ---
+    clean_title_lower = str(title).lower()
+    is_brine_graph = any(x in clean_title_lower for x in ['s', 'r', 'supply', 'return', 'brine', 'bank'])
+    
+    if is_brine_graph and ambient_df is not None and not ambient_df.empty:
+        for sn in ambient_df['NodeNum'].unique():
+            a_df = ambient_df[ambient_df['NodeNum'] == sn].sort_values('timestamp')
+            
+            fig.add_trace(go.Scatter(
+                x=a_df['timestamp'], y=a_df['temperature'],
+                name=f"Ambient Air ({sn})", mode='lines',
+                connectgaps=False,
+                line=dict(width=2.5, dash='dot', color='orange'),
+                hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                legendrank=99 
+            ))
+            
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
-
+    
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
@@ -457,7 +472,7 @@ def render_client_portal():
     primary_meta = proj_registry.iloc[0].to_dict()
     display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
-
+    
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
     f_start_date = None
     day_count_text = ""
@@ -465,7 +480,7 @@ def render_client_portal():
         f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
         days_since = (now_local - f_start_date).days
         day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
-        
+
     with st.spinner("Synchronizing official records..."):
         # Fetch ALL phases in a single, clean database pull to prevent overlap
         full_p_df = get_universal_portal_data(TARGET_JOB_NUMBER)
@@ -483,10 +498,18 @@ def render_client_portal():
         (~full_p_df['Location'].str.upper().str.contains('TEST'))
     ]
 
-    st.title(f"📊 {display_name}")
+    # ☁️ ISOLATE AMBIENT DATA
+    ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+    ambient_df = full_p_df[ambient_mask].copy()
+    
+    # Remove Ambient from the main dataframe so it doesn't get its own graph/summary
+    full_p_df = full_p_df[~ambient_mask].copy()
 
+    st.title(f"📊 {display_name}")
+    
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
-    st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
+    if pd.notnull(last_approved_local):
+        st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
     head_c1, head_c2 = st.columns(2)
     with head_c1:
@@ -495,38 +518,37 @@ def render_client_portal():
         if f_start_date: st.write(f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}")
 
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
-
+    
     with tabs[0]:
         render_summary_tab(full_p_df, "°F", local_tz)
 
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
-
+        
         locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
-
+                
                 matched_project_id = loc_data['Project'].iloc[0]
                 phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
-
+                
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 loc_f_start_date = f_start_date
-
+                
                 if not phase_row.empty:
                     raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
                     if pd.notnull(raw_phase_fd):
                         loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
                         loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
-
+                        
                         if weeks_view:
                             loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
-
-                # --- EXCLUSION PROTOCOL: BLOCK THEORETICAL CURVES ON BRINE MANIFOLDS ---
-                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
+                
+                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN', 'BRINE', 'BANK'])
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
-
+                
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
                     f"{loc} History", 
@@ -536,28 +558,30 @@ def render_client_portal():
                     "°F", 
                     local_tz, 
                     loc_f_start_date, 
-                    graph_curve_id
+                    graph_curve_id,
+                    ambient_df  # <--- PASS IT HERE
                 ), use_container_width=True)
 
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz)
-
+    
     with tabs[3]:
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
-        latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
-
-        latest['sort_idx'] = latest['Location'].apply(natural_sort_key)
-        latest = latest.sort_values(by='sort_idx').drop(columns=['sort_idx'])
-
-        st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
-
+        if not latest.empty:
+            latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
+            latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
+            
+            latest['sort_idx'] = latest['Location'].apply(natural_sort_key)
+            latest = latest.sort_values(by='sort_idx').drop(columns=['sort_idx'])
+            
+            st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
+       
     with tabs[4]:
         asbuilt_raw = primary_meta.get('AsBuiltFile')
         if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
             # Split the string by commas or semicolons, and remove any extra spaces
             asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
-
+            
             if not asbuilt_filenames:
                  st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
             else:
@@ -573,7 +597,7 @@ def render_client_portal():
                             try:
                                 with open(path, "rb") as img_file:
                                     img_bytes = img_file.read()
-
+                                
                                 st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
                                 st.markdown("<br>", unsafe_allow_html=True) # Adds a little spacing between images
                                 img_found = True
@@ -582,10 +606,10 @@ def render_client_portal():
                                 st.error(f"⚠️ Failed to decode image file stream for {filename}: {img_err}")
                                 img_found = True 
                                 break
-
+                    
                     if not img_found:
                         st.error(f"❌ Drawing Not Found: '{filename}'")
         else:
             st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-# --- EXECUTION ---
+            # --- EXECUTION ---
 render_client_portal()
