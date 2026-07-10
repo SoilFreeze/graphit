@@ -74,71 +74,42 @@ def natural_sort_key(s):
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Fetches approved client telemetry, surgically bound between the deployment's 
-    Start_Date and End_Date as defined in the node registry. Cleans out masked data,
-    bad data, and ignores everything assigned to 'Office' loops or unassigned inventory.
+    Fetches approved client telemetry directly from the unified v2 master view.
+    Cleans out masked data, bad data, and ignores 'Office' inventory.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
+    # Extract the root job number (e.g., '2541' from '2541-Blackjack')
+    root_job_id = str(project_id).split('-')[0].strip()
+    
     query = f"""
         WITH filtered_base AS (
             SELECT 
-                m.Project, 
-                m.NodeNum, 
-                n.Bank, 
-                n.Location, 
-                n.Depth, 
-                m.temperature, 
-                m.timestamp, 
-                m.approval_status,
-                n.Start_Date,
-                n.End_Date
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
-            JOIN `{NODE_REGISTRY_TABLE}` n 
-              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
-              
-            -- 🛡️ SPLIT MATCH: Handles hyphenated project names perfectly
-            JOIN `{PROJECT_REGISTRY_TABLE}` p 
-              ON SPLIT(CAST(m.Project AS STRING), '-')[OFFSET(0)] = SPLIT(CAST(p.Project AS STRING), '-')[OFFSET(0)]
-              
-            -- 🎯 TARGET LOCK: Binds the query strictly to the current phase being mapped
-            WHERE SPLIT(CAST(m.Project AS STRING), '-')[OFFSET(0)] = SPLIT(CAST(@project_id AS STRING), '-')[OFFSET(0)]
+                Project, 
+                NodeNum, 
+                Bank, 
+                Location, 
+                Depth, 
+                temperature, 
+                timestamp, 
+                approval_status
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+            WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
             
-              -- 🛡️ DATE FAILSAFES: Ignores null/false text strings from Google Sheets
-              AND (
-                  p.Date_Freezedown IS NULL 
-                  OR LOWER(TRIM(CAST(p.Date_Freezedown AS STRING))) IN ('', 'null', 'nan', 'false')
-                  OR m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
-              )
-              
-              AND (
-                  n.Start_Date IS NULL
-                  OR LOWER(TRIM(CAST(n.Start_Date AS STRING))) IN ('', 'null', 'nan', 'false')
-                  OR EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
-              )
-              
-              AND (
-                  n.End_Date IS NULL 
-                  OR LOWER(TRIM(CAST(n.End_Date AS STRING))) IN ('', 'null', 'nan', 'false')
-                  OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
-              )
-              
               -- 🔒 EXCLUSION FILTER: Drop masked, bad data
-              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+              AND UPPER(COALESCE(CAST(approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
               
               -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
-              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
-              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
-              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%TEST%'
+              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
+              AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
               
-              -- 🛠️ ALLOWS "MISSING" SENSORS
-              AND UPPER(TRIM(CAST(n.SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
-              AND m.temperature >= -30.0 AND m.temperature <= 120.0
+              -- 🛠️ ALLOW "MISSING" SENSORS
+              AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
+              
+              AND temperature >= -30.0 AND temperature <= 120.0
         ),
         gap_evaluation AS (
             SELECT 
@@ -153,7 +124,10 @@ def get_universal_portal_data(project_id):
            OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
         ORDER BY timestamp ASC
     """
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
+    )
     return client.query(query, job_config=job_config).to_dataframe()
 
 # --- THE ENGINEERING GRAPHING ENGINE ---
