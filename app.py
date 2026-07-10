@@ -602,8 +602,18 @@ def render_client_portal():
                         if weeks_view:
                             loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
-                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN', 'BRINE', 'BANK'])
+                # 🛡️ STRICT BRINE CHECK: Must explicitly start with S/R or contain specific keywords
+                loc_upper = str(loc).upper().strip()
+                is_brine_pipe = (
+                    loc_upper.startswith('S') or 
+                    loc_upper.startswith('R') or 
+                    any(x in loc_upper for x in ['SUPPLY', 'RETURN', 'BRINE', 'BANK'])
+                )
+                
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
+                
+                # 🎯 TARGETED INJECTION: Only pass the ambient data if the pipe passed the strict Brine check
+                target_ambient = ambient_df if is_brine_pipe else None
                 
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
@@ -615,7 +625,7 @@ def render_client_portal():
                     local_tz, 
                     loc_f_start_date, 
                     graph_curve_id,
-                    ambient_df  # <--- INJECT AMBIENT DATA ONLY ON BRINE GRAPHS
+                    target_ambient  # <--- PASS THE CONDITIONALLY FILTERED VARIABLE HERE
                 ), use_container_width=True)
 
     with tabs[2]:
