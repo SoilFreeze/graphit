@@ -72,9 +72,12 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
+def get_universal_portal_data(target_job_number):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
+    
+    # Extract the root job number (e.g., '2541') to grab the whole project umbrella
+    root_job_id = str(target_job_number).split('-')[0].strip()
     
     query = f"""
         WITH filtered_base AS (
@@ -82,16 +85,16 @@ def get_universal_portal_data(project_id):
                 Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
             
-            -- 🎯 STRICT PHASE LOCK: Binds exactly to the specific Phase being queried
-            WHERE UPPER(TRIM(CAST(Project AS STRING))) = UPPER(TRIM(CAST(@project_id AS STRING)))
+            -- 🎯 ALL PHASES IN ONE PULL: Grabs everything for this Job Number
+            WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
             
-              -- 🔒 STRICT ALLOWLIST: Only show explicitly approved 'TRUE' data to clients
+              -- 🔒 STRICT ALLOWLIST: Only show explicitly approved 'TRUE' data
               AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
               
-              -- 🎛️ RETIREMENT FILTER: Honors your Google Sheet labels to hide Archived/Dead data
+              -- 🎛️ RETIREMENT FILTER: Hides Archived/Dead/Inventory data
               AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
               
-              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
+              -- 🚫 OFFICE EXCLUSION
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
@@ -114,7 +117,7 @@ def get_universal_portal_data(project_id):
     """
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
+        query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
     )
     return client.query(query, job_config=job_config).to_dataframe()
 
@@ -468,8 +471,8 @@ def render_client_portal():
         day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
 
     with st.spinner("Synchronizing official records..."):
-        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
-        full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
+        # Fetch ALL phases in a single, clean database pull to prevent overlap
+        full_p_df = get_universal_portal_data(TARGET_JOB_NUMBER)
 
     if full_p_df.empty:
         st.warning("⚠️ No approved data records available yet.")
