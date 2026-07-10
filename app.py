@@ -248,10 +248,8 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             ))
 
     # --- INJECT AMBIENT DATA ONTO BRINE GRAPHS ---
-    clean_title_lower = str(title).lower()
-    is_brine_graph = any(x in clean_title_lower for x in ['s', 'r', 'supply', 'return', 'brine', 'bank'])
-    
-    if is_brine_graph and ambient_df is not None and not ambient_df.empty:
+    # (The determination of whether this is a Brine graph is now handled strictly by the parent function)
+    if ambient_df is not None and not ambient_df.empty:
         for sn in ambient_df['NodeNum'].unique():
             a_df = ambient_df[ambient_df['NodeNum'] == sn].sort_values('timestamp')
             
