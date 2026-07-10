@@ -5,7 +5,7 @@ import re
 
 # You will need your custom functions from your internal modules
 from app.data.processor import get_universal_portal_data
-from app.utils.config import natural_sort_key
+from app.pages.admin import natural_sort_key
 
 
 #########################
