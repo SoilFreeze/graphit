@@ -347,7 +347,7 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_pipe_summary_table(full_p_df, unit_label, local_tz):
-    """Renders a granular 24-hour Thermal Summary for each individual pipe/location."""
+    """Renders a granular Current vs 24-hour Extremes Summary for each individual pipe/location."""
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
@@ -370,23 +370,39 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
         
         if loc_24h.empty: continue
         
-        # Calculate Current Avg from the absolute latest reading of each node
-        latest_temp = loc_df.sort_values('timestamp').groupby('NodeNum').last()['temperature'].mean()
+        # 1. Calculate Current Extremes from the absolute latest reading of each active node
+        latest_nodes = loc_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         
-        # Find 24h Extremes
+        if not latest_nodes.empty:
+            c_max_idx = latest_nodes['temperature'].idxmax()
+            c_min_idx = latest_nodes['temperature'].idxmin()
+            
+            c_high_temp = latest_nodes.loc[c_max_idx, 'temperature']
+            c_high_node = latest_nodes.loc[c_max_idx, 'NodeNum']
+            
+            c_low_temp = latest_nodes.loc[c_min_idx, 'temperature']
+            c_low_node = latest_nodes.loc[c_min_idx, 'NodeNum']
+        else:
+            c_high_temp, c_high_node, c_low_temp, c_low_node = None, "N/A", None, "N/A"
+        
+        # 2. Find 24h Extremes across the entire trailing window
         max_row = loc_24h.loc[loc_24h['temperature'].idxmax()]
         min_row = loc_24h.loc[loc_24h['temperature'].idxmin()]
         
-        high_temp, high_node = max_row['temperature'], max_row['NodeNum']
-        low_temp, low_node = min_row['temperature'], min_row['NodeNum']
-        temp_range = high_temp - low_temp
+        h24_temp, h24_node = max_row['temperature'], max_row['NodeNum']
+        l24_temp, l24_node = min_row['temperature'], min_row['NodeNum']
+        
+        # Helper to neatly format the temperature and node ID
+        def fmt_temp_node(t, n):
+            if pd.isnull(t): return "N/A"
+            return f"{t:.1f}{unit_label} ({n})"
         
         summary_data.append({
             "Pipe / Location": loc,
-            "Current Avg": f"{latest_temp:.1f}{unit_label}",
-            "24h High": f"{high_temp:.1f}{unit_label} (Node: {high_node})",
-            "24h Low": f"{low_temp:.1f}{unit_label} (Node: {low_node})",
-            "24h Range": f"{temp_range:.1f}{unit_label}"
+            "Current High": fmt_temp_node(c_high_temp, c_high_node),
+            "Current Low": fmt_temp_node(c_low_temp, c_low_node),
+            "24h High": fmt_temp_node(h24_temp, h24_node),
+            "24h Low": fmt_temp_node(l24_temp, l24_node)
         })
         
     st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
