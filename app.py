@@ -294,23 +294,23 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 def render_summary_tab(full_p_df, unit_label, local_tz):
     """Renders the 24 hour Thermal Summary split across 4 structural groups."""
     st.subheader("🌐 24 hour Thermal Summary")
-
+    
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
-
+    
     def classify_pipe(row):
         loc = str(row.get('Location', '')).upper()
         bank = str(row.get('Bank', '')).upper()
-
+        
         if any(x in loc or x in bank for x in ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE', 'WEATHER']): 
             return 'Ambient'
-
+            
         if 'S' in bank or 'SUPPLY' in loc: return 'Supply (S)'
         if 'R' in bank or 'RETURN' in loc: return 'Return (R)'
         return 'Temp Pipes (TP)'
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
-
+    
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
     latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
@@ -321,16 +321,16 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
     for i, p_type in enumerate(categories):
         with cols[i]:
             st.markdown(f"### {p_type}")
-
+            
             snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
             hist_type_df = df_24h_window[df_24h_window['PipeType'] == p_type]
-
+            
             if snap_type_df.empty:
                 st.caption("No data available.")
                 continue
 
             avg_val = snap_type_df['temperature'].mean()
-
+            
             if not hist_type_df.empty:
                 high_val = hist_type_df['temperature'].max()
                 low_val = hist_type_df['temperature'].min()
@@ -346,6 +346,50 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
             st.divider()
 
+def render_pipe_summary_table(full_p_df, unit_label, local_tz):
+    """Renders a granular 24-hour Thermal Summary for each individual pipe/location."""
+    df_local = full_p_df.copy()
+    df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
+    
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
+    df_24h = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
+    
+    if df_24h.empty:
+        st.info("No approved data available in the last 24 hours.")
+        return
+        
+    summary_data = []
+    locations = sorted(df_local['Location'].unique(), key=natural_sort_key)
+    
+    for loc in locations:
+        # Skip Ambient for the granular pipe summary 
+        if 'AMBIENT' in str(loc).upper(): continue
+        
+        loc_df = df_local[df_local['Location'] == loc]
+        loc_24h = df_24h[df_24h['Location'] == loc]
+        
+        if loc_24h.empty: continue
+        
+        # Calculate Current Avg from the absolute latest reading of each node
+        latest_temp = loc_df.sort_values('timestamp').groupby('NodeNum').last()['temperature'].mean()
+        
+        # Find 24h Extremes
+        max_row = loc_24h.loc[loc_24h['temperature'].idxmax()]
+        min_row = loc_24h.loc[loc_24h['temperature'].idxmin()]
+        
+        high_temp, high_node = max_row['temperature'], max_row['NodeNum']
+        low_temp, low_node = min_row['temperature'], min_row['NodeNum']
+        temp_range = high_temp - low_temp
+        
+        summary_data.append({
+            "Pipe / Location": loc,
+            "Current Avg": f"{latest_temp:.1f}{unit_label}",
+            "24h High": f"{high_temp:.1f}{unit_label} (Node: {high_node})",
+            "24h Low": f"{low_temp:.1f}{unit_label} (Node: {low_node})",
+            "24h Range": f"{temp_range:.1f}{unit_label}"
+        })
+        
+    st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
@@ -498,13 +542,6 @@ def render_client_portal():
         (~full_p_df['Location'].str.upper().str.contains('TEST'))
     ]
 
-    # ☁️ ISOLATE AMBIENT DATA
-    ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-    ambient_df = full_p_df[ambient_mask].copy()
-    
-    # Remove Ambient from the main dataframe so it doesn't get its own graph/summary
-    full_p_df = full_p_df[~ambient_mask].copy()
-
     st.title(f"📊 {display_name}")
     
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
@@ -525,7 +562,14 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
+        # ☁️ ISOLATE AMBIENT DATA TO PASS TO GRAPHS
+        ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+        ambient_df = full_p_df[ambient_mask].copy()
+        
+        # Filter locations to remove ambient from creating its own expander
+        raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
+        locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
+        
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
@@ -559,27 +603,19 @@ def render_client_portal():
                     local_tz, 
                     loc_f_start_date, 
                     graph_curve_id,
-                    ambient_df  # <--- PASS IT HERE
+                    ambient_df  # <--- INJECT AMBIENT DATA ONLY ON BRINE GRAPHS
                 ), use_container_width=True)
 
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz)
     
     with tabs[3]:
-        latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        if not latest.empty:
-            latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
-            latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
-            
-            latest['sort_idx'] = latest['Location'].apply(natural_sort_key)
-            latest = latest.sort_values(by='sort_idx').drop(columns=['sort_idx'])
-            
-            st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
+        st.subheader("📋 24-Hour Pipe Summary Table")
+        render_pipe_summary_table(full_p_df, "°F", local_tz)
        
     with tabs[4]:
         asbuilt_raw = primary_meta.get('AsBuiltFile')
         if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
-            # Split the string by commas or semicolons, and remove any extra spaces
             asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
             
             if not asbuilt_filenames:
@@ -599,7 +635,7 @@ def render_client_portal():
                                     img_bytes = img_file.read()
                                 
                                 st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
-                                st.markdown("<br>", unsafe_allow_html=True) # Adds a little spacing between images
+                                st.markdown("<br>", unsafe_allow_html=True) 
                                 img_found = True
                                 break
                             except Exception as img_err:
