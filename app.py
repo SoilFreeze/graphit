@@ -81,38 +81,36 @@ def get_universal_portal_data(target_job_number):
     query = f"""
         WITH filtered_base AS (
             SELECT 
-                m.Project, 
+                n.Project, 
                 m.NodeNum, 
                 n.Bank, 
                 n.Location, 
                 n.Depth, 
                 m.temperature, 
                 m.timestamp, 
-                m.approval_status,
-                n.Start_Date,
-                n.End_Date
+                m.approval_status
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
             
-            -- 🔗 REGISTRY JOIN: This is REQUIRED to enforce your Google Sheet Date Cutoffs
+            -- 🔗 STRICT REGISTRY JOIN: Connects raw telemetry to your exact Sheet configurations
             JOIN `{NODE_REGISTRY_TABLE}` n 
               ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
             
             -- 🎯 STRICT PROJECT LOCK
             WHERE SPLIT(CAST(n.Project AS STRING), '-')[OFFSET(0)] = @root_job_id
             
-              -- 🛡️ HISTORICAL TIMELINE BOUNDARIES: Forces retired sensors to stop showing data
+              -- ⏱️ BULLETPROOF DATE PARSER: Casts safely to TIMESTAMP to handle Google Sheets' exact output
               AND (
                   n.Start_Date IS NULL
                   OR LOWER(TRIM(CAST(n.Start_Date AS STRING))) IN ('', 'null', 'nan', 'false')
-                  OR EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+                  OR m.timestamp >= SAFE_CAST(n.Start_Date AS TIMESTAMP)
               )
               AND (
                   n.End_Date IS NULL 
                   OR LOWER(TRIM(CAST(n.End_Date AS STRING))) IN ('', 'null', 'nan', 'false')
-                  OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
+                  OR m.timestamp <= SAFE_CAST(n.End_Date AS TIMESTAMP)
               )
               
-              -- 🔒 THE IRONCLAD ALLOWLIST: Accepts 'TRUE', 'true', 'True'. Rejects Masked/Baddata/Null.
+              -- 🔒 THE IRONCLAD ALLOWLIST: Accepts 'TRUE', 'true', 'True'. 
               AND UPPER(TRIM(CAST(m.approval_status AS STRING))) = 'TRUE'
               
               -- 🎛️ RETIREMENT FILTER: Honors your Google Sheet labels
@@ -144,6 +142,7 @@ def get_universal_portal_data(target_job_number):
         query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
     )
     return client.query(query, job_config=job_config).to_dataframe()
+    
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
