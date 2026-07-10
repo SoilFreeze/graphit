@@ -11,7 +11,8 @@ from app.data.processor import get_bq_client
 from app.utils.config import (
     PROJECT_ID, 
     DATASET_ID, 
-    PROJECT_REGISTRY_TABLE
+    PROJECT_REGISTRY_TABLE,
+    MASTER_VIEW
 )
 from app.pages.admin import natural_sort_key
 from app.components.charts import build_high_speed_graph
