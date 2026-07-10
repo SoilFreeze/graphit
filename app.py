@@ -152,10 +152,19 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
+            
+            # 🛡️ Extract just the numbers from the location (e.g., "T1" -> "1")
+            digits = re.findall(r'\d+', loc_part)
+            loc_digit = digits[0] if digits else loc_part
+            
             target_q = f"""
-                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                SELECT CurveID, Day, Temp 
+                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                 WHERE UPPER(CurveID) LIKE UPPER('%{TARGET_JOB_NUMBER}%') 
-                AND UPPER(CurveID) LIKE UPPER('%{loc_part}%')
+                -- 🎯 EXACT MATCH: Forces a non-numeric boundary after the number so T1 doesn't match T11
+                AND REGEXP_CONTAINS(UPPER(CurveID), r'(?i)T[P]?0?{loc_digit}([^0-9]|$)')
+                -- 🚫 BRINE EXCLUSION: Database-level block to keep curves off Brine charts
+                AND NOT REGEXP_CONTAINS(UPPER(CurveID), r'(?i)BRINE')
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
