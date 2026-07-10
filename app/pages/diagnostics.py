@@ -9,11 +9,11 @@ from google.cloud import bigquery
 # Import your custom app modules
 from app.data.processor import get_bq_client
 from app.utils.config import (
-    MASTER_VIEW, 
-    PROJECT_REGISTRY_TABLE, 
-    NODE_REGISTRY_TABLE, 
-    natural_sort_key
+    PROJECT_ID, 
+    DATASET_ID, 
+    PROJECT_REGISTRY_TABLE
 )
+from app.pages.admin import natural_sort_key
 from app.components.charts import fmt_temp, assign_row_color
 
 # =============================================================================
