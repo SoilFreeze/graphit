@@ -73,35 +73,23 @@ def natural_sort_key(s):
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
-    """
-    Fetches strictly approved client telemetry directly from the time-bound v2 master view.
-    Zero JOINs are used here to prevent Cartesian timeline duplication.
-    """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
-    
-    # Extract the root job number (e.g., '2541' from '2541-Blackjack')
-    root_job_id = str(project_id).split('-')[0].strip()
     
     query = f"""
         WITH filtered_base AS (
             SELECT 
-                Project, 
-                NodeNum, 
-                Bank, 
-                Location, 
-                Depth, 
-                temperature, 
-                timestamp, 
-                approval_status
+                Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
             
-            -- 🎯 STRICT PROJECT ISOLATION: The Master View already time-bounds the data. 
-            -- We just grab the rows currently attached to this project's name.
-            WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
+            -- 🎯 STRICT PHASE LOCK: Binds exactly to the specific Phase being queried
+            WHERE UPPER(TRIM(CAST(Project AS STRING))) = UPPER(TRIM(CAST(@project_id AS STRING)))
             
               -- 🔒 STRICT ALLOWLIST: Only show explicitly approved 'TRUE' data to clients
               AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
+              
+              -- 🎛️ RETIREMENT FILTER: Honors your Google Sheet labels to hide Archived/Dead data
+              AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
               
               -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
@@ -126,7 +114,7 @@ def get_universal_portal_data(project_id):
     """
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
+        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
     )
     return client.query(query, job_config=job_config).to_dataframe()
 
