@@ -97,8 +97,8 @@ def get_universal_portal_data(project_id):
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
             WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
             
-              -- 🔒 EXCLUSION FILTER: Drop masked, bad data
-              AND UPPER(COALESCE(CAST(approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+              -- 🔒 STRICT ALLOWLIST: Only show explicitly approved 'TRUE' data to clients
+              AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
               
               -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
