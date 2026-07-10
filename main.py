@@ -15,7 +15,7 @@ from app.pages.summary import render_summary_dashboard
 from app.pages.depth import render_depth_charts
 # from app.pages.sensors import render_sensor_status
 from app.pages.diagnostics import render_node_diagnostics
-# from app.pages.data_processing import render_data_processing_page
+from app.pages.data_processing import render_data_processing_page
 from app.pages.admin import render_admin_page
 
 
