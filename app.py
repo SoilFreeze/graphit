@@ -76,32 +76,55 @@ def get_universal_portal_data(target_job_number):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    # 1. Extract the root job number (e.g., '2541') to grab the whole project umbrella
     root_job_id = str(target_job_number).split('-')[0].strip()
     
     query = f"""
         WITH filtered_base AS (
             SELECT 
-                Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+                m.Project, 
+                m.NodeNum, 
+                n.Bank, 
+                n.Location, 
+                n.Depth, 
+                m.temperature, 
+                m.timestamp, 
+                m.approval_status,
+                n.Start_Date,
+                n.End_Date
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
             
-            -- 🎯 ALL PHASES IN ONE PULL: Grabs everything for this Job Number
-            WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
+            -- 🔗 REGISTRY JOIN: This is REQUIRED to enforce your Google Sheet Date Cutoffs
+            JOIN `{NODE_REGISTRY_TABLE}` n 
+              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
             
-              -- 🔒 THE IRONCLAD ALLOWLIST: Strips spaces and forces uppercase. 
-              -- Accepts 'true', 'True', and 'TRUE'. Blocks absolutely everything else.
-              AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
+            -- 🎯 STRICT PROJECT LOCK
+            WHERE SPLIT(CAST(n.Project AS STRING), '-')[OFFSET(0)] = @root_job_id
+            
+              -- 🛡️ HISTORICAL TIMELINE BOUNDARIES: Forces retired sensors to stop showing data
+              AND (
+                  n.Start_Date IS NULL
+                  OR LOWER(TRIM(CAST(n.Start_Date AS STRING))) IN ('', 'null', 'nan', 'false')
+                  OR EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+              )
+              AND (
+                  n.End_Date IS NULL 
+                  OR LOWER(TRIM(CAST(n.End_Date AS STRING))) IN ('', 'null', 'nan', 'false')
+                  OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
+              )
               
-              -- 🎛️ RETIREMENT FILTER: Honors your Google Sheet labels to hide Archived/Dead data
-              AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
+              -- 🔒 THE IRONCLAD ALLOWLIST: Accepts 'TRUE', 'true', 'True'. Rejects Masked/Baddata/Null.
+              AND UPPER(TRIM(CAST(m.approval_status AS STRING))) = 'TRUE'
+              
+              -- 🎛️ RETIREMENT FILTER: Honors your Google Sheet labels
+              AND UPPER(TRIM(CAST(n.SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
               
               -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
-              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
-              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
-              AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
+              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
               
-              AND temperature >= -30.0 AND temperature <= 120.0
+              AND m.temperature >= -30.0 AND m.temperature <= 120.0
         ),
         gap_evaluation AS (
             SELECT 
@@ -121,7 +144,6 @@ def get_universal_portal_data(target_job_number):
         query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
     )
     return client.query(query, job_config=job_config).to_dataframe()
-
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
@@ -248,19 +270,27 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             ))
 
     # --- INJECT AMBIENT DATA ONTO BRINE GRAPHS ---
-    # (The determination of whether this is a Brine graph is now handled strictly by the parent function)
     if ambient_df is not None and not ambient_df.empty:
-        for sn in ambient_df['NodeNum'].unique():
-            a_df = ambient_df[ambient_df['NodeNum'] == sn].sort_values('timestamp')
+        amb_plot_df = ambient_df.copy()
+        
+        # ⏱️ TIMEZONE FIX: Aligns ambient data with the local time of the current graph
+        amb_plot_df['timestamp'] = ensure_tz_convert(amb_plot_df['timestamp'], display_tz)
+        
+        for sn in amb_plot_df['NodeNum'].unique():
+            a_df = amb_plot_df[amb_plot_df['NodeNum'] == sn].sort_values('timestamp')
             
-            fig.add_trace(go.Scatter(
-                x=a_df['timestamp'], y=a_df['temperature'],
-                name=f"Ambient Air ({sn})", mode='lines',
-                connectgaps=False,
-                line=dict(width=2.5, dash='dot', color='orange'),
-                hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
-                legendrank=99 
-            ))
+            # 🛡️ VISUAL FIX: Limit ambient trace to the exact view window of the current graph
+            a_df = a_df[(a_df['timestamp'] >= final_start_view) & (a_df['timestamp'] <= final_end_view)]
+            
+            if not a_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=a_df['timestamp'], y=a_df['temperature'],
+                    name=f"Ambient Air ({sn})", mode='lines',
+                    connectgaps=False,
+                    line=dict(width=2.5, dash='dot', color='orange'),
+                    hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                    legendrank=99 
+                ))
             
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     now_ts = pd.Timestamp.now(tz=display_tz)
@@ -574,13 +604,20 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        # ☁️ ISOLATE AMBIENT DATA TO PASS TO GRAPHS
-        ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-        ambient_df = full_p_df[ambient_mask].copy()
+        # ☁️ EXPLICITLY FETCH AMBIENT DATA
+        # Pulls ambient data directly from the DB so it is guaranteed to show up regardless of its project assignment
+        ambient_q = f"""
+            SELECT NodeNum, timestamp, temperature 
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+            WHERE UPPER(TRIM(CAST(Location AS STRING))) = 'AMBIENT'
+              AND temperature >= -30.0 AND temperature <= 120.0
+        """
+        try:
+            ambient_df = client.query(ambient_q).to_dataframe()
+        except Exception:
+            ambient_df = None
         
-        # Filter locations to remove ambient from creating its own expander
-        raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
-        locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
+        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
         
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
@@ -602,7 +639,7 @@ def render_client_portal():
                         if weeks_view:
                             loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
-                # 🛡️ STRICT BRINE CHECK: Must explicitly start with S/R or contain specific keywords
+                # 🛡️ STRICT BRINE CHECK
                 loc_upper = str(loc).upper().strip()
                 is_brine_pipe = (
                     loc_upper.startswith('S') or 
@@ -612,7 +649,7 @@ def render_client_portal():
                 
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
-                # 🎯 TARGETED INJECTION: Only pass the ambient data if the pipe passed the strict Brine check
+                # 🎯 TARGETED INJECTION: Pass ambient_df to Brine graphs, ignore for Temp Pipes
                 target_ambient = ambient_df if is_brine_pipe else None
                 
                 st.plotly_chart(build_high_speed_graph(
@@ -625,7 +662,7 @@ def render_client_portal():
                     local_tz, 
                     loc_f_start_date, 
                     graph_curve_id,
-                    target_ambient  # <--- PASS THE CONDITIONALLY FILTERED VARIABLE HERE
+                    target_ambient
                 ), use_container_width=True)
 
     with tabs[2]:
