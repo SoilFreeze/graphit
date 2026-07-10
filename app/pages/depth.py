@@ -34,7 +34,6 @@ def render_depth_charts(selected_project, unit_label, display_tz):
         return
 
     # --- AUTO-FILTER BY PHASE FROM PROJECT TITLE ---
-    import re
     phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
     
     if phase_match:
