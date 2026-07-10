@@ -132,24 +132,19 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     final_end_view, final_start_view = end_view, start_view
-    proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
+    # 1. INJECT THEORETICAL REFERENCE CURVES
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-            
-            # 🛡️ Extract just the numbers from the location (e.g., "T1" -> "1")
             digits = re.findall(r'\d+', loc_part)
             loc_digit = digits[0] if digits else loc_part
             
             target_q = f"""
-                SELECT CurveID, Day, Temp 
-                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                 WHERE UPPER(CurveID) LIKE UPPER('%{TARGET_JOB_NUMBER}%') 
-                -- 🎯 EXACT MATCH: Forces a non-numeric boundary after the number so T1 doesn't match T11
                 AND REGEXP_CONTAINS(UPPER(CurveID), r'(?i)T[P]?0?{loc_digit}([^0-9]|$)')
-                -- 🚫 BRINE EXCLUSION: Database-level block to keep curves off Brine charts
                 AND NOT REGEXP_CONTAINS(UPPER(CurveID), r'(?i)BRINE')
                 ORDER BY Day
             """
@@ -160,10 +155,8 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                    soil_label = str(cid).split('-')[-1].strip()
-                    
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {str(cid).split('-')[-1].strip()}</b>", mode='lines',
                         line=dict(color='rgba(80, 80, 80, 0.9)', width=4, dash=dash_styles[idx % len(dash_styles)], shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
@@ -171,128 +164,68 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
+    # 2. POSITION LABELING
     def get_position_string(row):
         depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
-        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
-            return str(bank_val)
-        elif pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0: 
-            return f"{depth_val}ft"
-        else: 
-            return str(loc_val)
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']): return str(bank_val)
+        elif pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0: return f"{depth_val}ft"
+        else: return str(loc_val)
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
-
-    # Secondary cleaning filter step to make sure no loose office/desk items survive in telemetry subsets
-    full_p_df = full_p_df[
-        (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
-        (~full_p_df['Location'].str.upper().str.contains('DESK')) &
-        (~full_p_df['Location'].str.upper().str.contains('TEST'))
-    ]
-
-    # ☁️ ISOLATE AMBIENT DATA
-    ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-    ambient_df = full_p_df[ambient_mask].copy()
-    
-    # Remove Ambient from the main dataframe so it doesn't get its own graph/summary
-    full_p_df = full_p_df[~ambient_mask].copy()
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
-    # Identify the latest node context checking in for each position to deduplicate legend display
-    latest_nodes_by_pos = {}
+    # 3. DRAW PRIMARY SENSOR LINES
     for pos in unique_positions:
-        pos_df = plot_df[plot_df['PositionLabel'] == pos]
-        if not pos_df.empty:
-            latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
-            latest_nodes_by_pos[pos] = latest_node
-
-    def get_legend_sort_key(pos_str, df):
-        sub_df = df[df['PositionLabel'] == pos_str]
-        if sub_df.empty: return (3, 0, pos_str)
-        row = sub_df.iloc[0]
-        bank = str(row['Bank']).upper() if pd.notnull(row['Bank']) else ""
-        depth = pd.to_numeric(row['Depth'], errors='coerce') if pd.notnull(row['Depth']) else 999
-        if 'R' in bank: return (0, bank, pos_str) 
-        if 'S' in bank: return (1, bank, pos_str)
-        return (2, depth, pos_str)
-
-    sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
-
-    for pos in sorted_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
-        if pos_df.empty: continue
-        active_node = latest_nodes_by_pos.get(pos, "Unknown")
         
-        display_name = f"{pos} ({active_node})"
-        
-        # ⏱️ 24-HOUR CHART GAP BUILDER
-        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
-        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
-        pos_df = pos_df.sort_values('timestamp').reset_index(drop=True)
-        time_deltas = pos_df['timestamp'].diff()
-        gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
-        
-        if not gap_indices.empty:
-            inserted_gaps = []
-            for idx in gap_indices:
-                gap_row = pos_df.loc[idx].copy()
-                # Place the gap timestamp exactly 1 second after the previous valid timestamp
-                prev_ts = pos_df.loc[idx - 1]['timestamp']
-                gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  # None kills the connecting segment trace
-                inserted_gaps.append(gap_row)
+        # Loop by unique NodeNum to prevent "Scribble of Doom" line overlaps
+        for node_id in pos_df['NodeNum'].unique():
+            node_pos_df = pos_df[pos_df['NodeNum'] == node_id].sort_values('timestamp').reset_index(drop=True)
             
-            pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
-        
-        fig.add_trace(go.Scatter(
-            x=pos_df['timestamp'], y=pos_df['temperature'], 
-            name=display_name, 
-            mode='lines',
-            connectgaps=False,  # Enforces physical segment termination at None rows
-            line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
-            showlegend=True,
-            hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
-            text=pos_df['NodeNum']
-        ))
+            # Gap Builder
+            time_deltas = node_pos_df['timestamp'].diff()
+            gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
+            if not gap_indices.empty:
+                inserted_gaps = []
+                for idx in gap_indices:
+                    gap_row = node_pos_df.loc[idx].copy()
+                    gap_row['timestamp'] = node_pos_df.loc[idx - 1]['timestamp'] + timedelta(seconds=1)
+                    gap_row['temperature'] = None
+                    inserted_gaps.append(gap_row)
+                node_pos_df = pd.concat([node_pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
+            
+            fig.add_trace(go.Scatter(
+                x=node_pos_df['timestamp'], y=node_pos_df['temperature'], 
+                name=f"{pos} ({node_id})", mode='lines', connectgaps=False,
+                line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
+                hovertemplate=f"<b>{pos}</b> (Node: {node_id})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>"
+            ))
 
-    # --- INJECT AMBIENT DATA ONTO BRINE GRAPHS ---
+    # 4. INJECT AMBIENT DATA (Only on Brine/Supply/Return charts)
     clean_title_lower = str(title).lower()
     is_brine_graph = any(x in clean_title_lower for x in ['s', 'r', 'supply', 'return', 'brine', 'bank'])
     
     if is_brine_graph and ambient_df is not None and not ambient_df.empty:
         for sn in ambient_df['NodeNum'].unique():
             a_df = ambient_df[ambient_df['NodeNum'] == sn].sort_values('timestamp')
-            
             fig.add_trace(go.Scatter(
-                x=a_df['timestamp'], y=a_df['temperature'],
-                name=f"Ambient Air ({sn})", mode='lines',
-                connectgaps=False,
-                line=dict(width=2.5, dash='dot', color='orange'),
-                hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                x=a_df['timestamp'], y=a_df['temperature'], name=f"Ambient ({sn})",
+                mode='lines', line=dict(width=2.5, dash='dot', color='orange'),
+                hovertemplate="<b>Ambient Air</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
                 legendrank=99 
             ))
-                               
+                                
+    # 5. LAYOUT & ANNOTATIONS
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
     
-    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
-    for m_dt in m_range:
-        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
-
     fig.update_layout(
         title=dict(text=f"<b>{title}</b>", x=0.02, y=0.98, font=dict(size=18)),
         plot_bgcolor='white', hovermode="x unified", height=650,
-        xaxis=dict(
-            range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
-            showline=True, mirror=True, linecolor='black', linewidth=2,
-            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'), tickformat='%b %d'
-        ),
-        yaxis=dict(
-            title=f"Temperature ({unit_label})", range=y_range, dtick=10,
-            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-            showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
-        ),
+        xaxis=dict(range=[start_view, end_view], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, tickformat='%b %d'),
+        yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
