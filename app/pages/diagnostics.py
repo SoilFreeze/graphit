@@ -14,7 +14,7 @@ from app.utils.config import (
     PROJECT_REGISTRY_TABLE
 )
 from app.pages.admin import natural_sort_key
-from app.components.charts import fmt_temp, assign_row_color
+from app.components.charts import build_high_speed_graph
 
 # =============================================================================
 # PAGE MODULE: 🛠️ NODE MANAGER
