@@ -1,3 +1,10 @@
+import streamlit as st
+import pandas as pd
+from google.cloud import bigquery
+
+# Import your custom app modules
+from app.utils.config import MASTER_VIEW, PROJECT_ID, DATASET_ID
+from app.components.charts import build_high_speed_graph
 
 # =============================================================================
 # WORKSPACE PAGE 4: SENSOR STATUS COMPONENT LIST
