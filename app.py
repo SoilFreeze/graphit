@@ -74,8 +74,8 @@ def natural_sort_key(s):
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Fetches approved client telemetry directly from the unified v2 master view.
-    Cleans out masked data, bad data, and ignores 'Office' inventory.
+    Fetches strictly approved client telemetry directly from the time-bound v2 master view.
+    Zero JOINs are used here to prevent Cartesian timeline duplication.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
@@ -95,6 +95,9 @@ def get_universal_portal_data(project_id):
                 timestamp, 
                 approval_status
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+            
+            -- 🎯 STRICT PROJECT ISOLATION: The Master View already time-bounds the data. 
+            -- We just grab the rows currently attached to this project's name.
             WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
             
               -- 🔒 STRICT ALLOWLIST: Only show explicitly approved 'TRUE' data to clients
@@ -105,9 +108,6 @@ def get_universal_portal_data(project_id):
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
               AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
-              
-              -- 🛠️ ALLOW "MISSING" SENSORS
-              AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
               
               AND temperature >= -30.0 AND temperature <= 120.0
         ),
