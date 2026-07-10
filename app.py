@@ -76,7 +76,6 @@ def get_universal_portal_data(target_job_number):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    # Extract the root job number (e.g., '2541') to grab the whole project umbrella
     root_job_id = str(target_job_number).split('-')[0].strip()
     
     query = f"""
@@ -84,17 +83,13 @@ def get_universal_portal_data(target_job_number):
             SELECT 
                 Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
-            
-            -- 🎯 ALL PHASES IN ONE PULL: Grabs everything for this Job Number
             WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
             
-              -- 🔒 STRICT ALLOWLIST: Only show explicitly approved 'TRUE' data
+              -- 🔒 THE IRONCLAD ALLOWLIST: Strips spaces and forces uppercase. 
+              -- Accepts 'true', 'True', and 'TRUE'. Blocks absolutely everything else.
               AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
               
-              -- 🎛️ RETIREMENT FILTER: Hides Archived/Dead/Inventory data
               AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
-              
-              -- 🚫 OFFICE EXCLUSION
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
               AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
@@ -124,7 +119,7 @@ def get_universal_portal_data(target_job_number):
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
-                           display_tz="UTC", f_start_date=None, curve_id=None):
+                           display_tz="UTC", f_start_date=None, curve_id=None, ambient_df=None):
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
@@ -188,12 +183,18 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
     # Secondary cleaning filter step to make sure no loose office/desk items survive in telemetry subsets
-    plot_df = plot_df[
-        (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
-        (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
-        (~plot_df['PositionLabel'].str.upper().str.contains('TEST'))
+    full_p_df = full_p_df[
+        (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
+        (~full_p_df['Location'].str.upper().str.contains('DESK')) &
+        (~full_p_df['Location'].str.upper().str.contains('TEST'))
     ]
 
+    # ☁️ ISOLATE AMBIENT DATA
+    ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+    ambient_df = full_p_df[ambient_mask].copy()
+    
+    # Remove Ambient from the main dataframe so it doesn't get its own graph/summary
+    full_p_df = full_p_df[~ambient_mask].copy()
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
@@ -253,7 +254,24 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
             text=pos_df['NodeNum']
         ))
-        
+
+    # --- INJECT AMBIENT DATA ONTO BRINE GRAPHS ---
+    clean_title_lower = str(title).lower()
+    is_brine_graph = any(x in clean_title_lower for x in ['s', 'r', 'supply', 'return', 'brine', 'bank'])
+    
+    if is_brine_graph and ambient_df is not None and not ambient_df.empty:
+        for sn in ambient_df['NodeNum'].unique():
+            a_df = ambient_df[ambient_df['NodeNum'] == sn].sort_values('timestamp')
+            
+            fig.add_trace(go.Scatter(
+                x=a_df['timestamp'], y=a_df['temperature'],
+                name=f"Ambient Air ({sn})", mode='lines',
+                connectgaps=False,
+                line=dict(width=2.5, dash='dot', color='orange'),
+                hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                legendrank=99 
+            ))
+                               
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
@@ -282,59 +300,48 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
-    """Renders the 24 hour Thermal Summary split across 4 structural groups."""
-    st.subheader("🌐 24 hour Thermal Summary")
+    """Renders a granular 24-hour Thermal Summary for each individual pipe/location."""
+    st.subheader("🌐 24-Hour Pipe Summary")
     
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
-    def classify_pipe(row):
-        loc = str(row.get('Location', '')).upper()
-        bank = str(row.get('Bank', '')).upper()
-        
-        if any(x in loc or x in bank for x in ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE', 'WEATHER']): 
-            return 'Ambient'
-            
-        if 'S' in bank or 'SUPPLY' in loc: return 'Supply (S)'
-        if 'R' in bank or 'RETURN' in loc: return 'Return (R)'
-        return 'Temp Pipes (TP)'
-
-    df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
-    
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
-    df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
-    latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-
-    cols = st.columns(4)
-    categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)', 'Ambient']
-
-    for i, p_type in enumerate(categories):
-        with cols[i]:
-            st.markdown(f"### {p_type}")
-            
-            snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
-            hist_type_df = df_24h_window[df_24h_window['PipeType'] == p_type]
-            
-            if snap_type_df.empty:
-                st.caption("No data available.")
-                continue
-
-            avg_val = snap_type_df['temperature'].mean()
-            
-            if not hist_type_df.empty:
-                high_val = hist_type_df['temperature'].max()
-                low_val = hist_type_df['temperature'].min()
-            else:
-                high_val = snap_type_df['temperature'].max()
-                low_val = snap_type_df['temperature'].min()
-
-            st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
-            st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
-
-            sub1, sub2 = st.columns(2)
-            sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
-            sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
-            st.divider()
+    df_24h = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
+    
+    if df_24h.empty:
+        st.info("No approved data available in the last 24 hours.")
+        return
+        
+    summary_data = []
+    locations = sorted(df_local['Location'].unique(), key=natural_sort_key)
+    
+    for loc in locations:
+        loc_df = df_local[df_local['Location'] == loc]
+        loc_24h = df_24h[df_24h['Location'] == loc]
+        
+        if loc_24h.empty: continue
+        
+        # Calculate Current Avg from the absolute latest reading of each node
+        latest_temp = loc_df.sort_values('timestamp').groupby('NodeNum').last()['temperature'].mean()
+        
+        # Find 24h Extremes
+        max_row = loc_24h.loc[loc_24h['temperature'].idxmax()]
+        min_row = loc_24h.loc[loc_24h['temperature'].idxmin()]
+        
+        high_temp, high_node = max_row['temperature'], max_row['NodeNum']
+        low_temp, low_node = min_row['temperature'], min_row['NodeNum']
+        temp_range = high_temp - low_temp
+        
+        summary_data.append({
+            "Pipe / Location": loc,
+            "Current Avg": f"{latest_temp:.1f}{unit_label}",
+            "24h High": f"{high_temp:.1f}{unit_label} (Node: {high_node})",
+            "24h Low": f"{low_temp:.1f}{unit_label} (Node: {low_node})",
+            "24h Range": f"{temp_range:.1f}{unit_label}"
+        })
+        
+    st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
@@ -528,9 +535,10 @@ def render_client_portal():
                             loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
                 # --- EXCLUSION PROTOCOL: BLOCK THEORETICAL CURVES ON BRINE MANIFOLDS ---
-                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
+                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN', 'BRINE', 'BANK'])
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
+                # Update the graph call to include ambient_df at the very end
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
                     f"{loc} History", 
@@ -540,7 +548,8 @@ def render_client_portal():
                     "°F", 
                     local_tz, 
                     loc_f_start_date, 
-                    graph_curve_id
+                    graph_curve_id,
+                    ambient_df  # <--- PASS IT HERE
                 ), use_container_width=True)
 
     with tabs[2]:
