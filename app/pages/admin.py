@@ -523,6 +523,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     try:
         proj_q = f"SELECT CAST(Project AS STRING) as Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown FROM `{PROJECT_REGISTRY_TABLE}` WHERE ShowActive IS TRUE"
         full_reg_df = client.query(f"SELECT * FROM `{NODE_REGISTRY_TABLE}` WHERE End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = ''").to_dataframe()
+        full_reg_df['Project'] = full_reg_df['Project'].astype(str).str.split('.').str[0].str.strip()
         available_projects_list = sorted(client.query(proj_q).to_dataframe()['Project'].dropna().unique().tolist())
     except Exception as e: st.error(f"Registry Link Offline: {e}"); return
 
