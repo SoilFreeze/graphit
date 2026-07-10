@@ -401,8 +401,6 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
             "Pipe / Location": loc,
             "Current High": fmt_temp_node(c_high_temp, c_high_node),
             "Current Low": fmt_temp_node(c_low_temp, c_low_node),
-            "24h High": fmt_temp_node(h24_temp, h24_node),
-            "24h Low": fmt_temp_node(l24_temp, l24_node)
         })
         
     st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
