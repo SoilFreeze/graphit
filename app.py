@@ -599,20 +599,15 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        # ☁️ EXPLICITLY FETCH AMBIENT DATA
-        # Pulls ambient data directly from the DB so it is guaranteed to show up regardless of its project assignment
-        ambient_q = f"""
-            SELECT NodeNum, timestamp, temperature 
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
-            WHERE UPPER(TRIM(CAST(Location AS STRING))) = 'AMBIENT'
-              AND temperature >= -30.0 AND temperature <= 120.0
-        """
-        try:
-            ambient_df = client.query(ambient_q).to_dataframe()
-        except Exception:
-            ambient_df = None
+        # ☁️ ISOLATE AMBIENT DATA LOCALLY
+        # Since the ambient sensor is assigned to the current project, it is already in full_p_df.
+        # We slice it out here so we can pass it exclusively to the brine graphs.
+        ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+        ambient_df = full_p_df[ambient_mask].copy()
         
-        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
+        # Filter locations to remove ambient from creating its own expander tab
+        raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
+        locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
         
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
