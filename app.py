@@ -227,7 +227,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         # ⏱️ 24-HOUR CHART GAP BUILDER
         # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
         # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
-        pos_df = pos_df.sort_values('timestamp')
+        pos_df = pos_df.sort_values('timestamp').reset_index(drop=True)
         time_deltas = pos_df['timestamp'].diff()
         gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
         
@@ -236,7 +236,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             for idx in gap_indices:
                 gap_row = pos_df.loc[idx].copy()
                 # Place the gap timestamp exactly 1 second after the previous valid timestamp
-                prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
+                prev_ts = pos_df.loc[idx - 1]['timestamp']
                 gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
                 gap_row['temperature'] = None  # None kills the connecting segment trace
                 inserted_gaps.append(gap_row)
