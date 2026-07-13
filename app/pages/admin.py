@@ -980,4 +980,27 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- SUB-TAB 4: PROJECT LIFECYCLE HISTORY DIRECTORY ---
     with tab_proj_master:
         st.subheader("🗄️ Complete Master Project Lifecycle Directory")
-        st.dataframe(client.query(f"SELECT Project as `Project ID`, ProjectName as `Friendly Name`, ProjectStatus as `Operational Phase`, Date_Freezedown as `Freezedown Date`, City, Timezone FROM `{PROJECT_REGISTRY_TABLE}` ORDER BY Project ASC").to_dataframe(), use_container_width=True, hide_index=True)
+        
+        # Expanded query to include Maintenance and End Freeze dates
+        directory_q = f"""
+            SELECT 
+                Project as `Project ID`, 
+                ProjectName as `Friendly Name`, 
+                ProjectStatus as `Operational Phase`, 
+                Date_Freezedown as `Freezedown Date`, 
+                Date_Maintenance as `Maintenance Date`,
+                Date_EndFreeze as `End Freeze Date`,
+                City, 
+                Timezone 
+            FROM `{PROJECT_REGISTRY_TABLE}` 
+            ORDER BY Project ASC
+        """
+        
+        try:
+            st.dataframe(
+                client.query(directory_q).to_dataframe(), 
+                use_container_width=True, 
+                hide_index=True
+            )
+        except Exception as e:
+            st.error(f"Failed to load directory: {e}")
