@@ -36,43 +36,55 @@ def get_bq_client():
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, is_summary_page=False):
-    client = get_bq_client() 
+    client = get_bq_client()
     if client is None: return pd.DataFrame()
     
     root_job_id = str(project_id).split('-')[0].strip()
 
-    # THE FIX: INNER JOIN with the Active Registry. 
-    # This acts as an iron-clad filter so only nodes without an End_Date are pulled,
-    # and their Location/Depth is forced to match their CURRENT assignment.
+    # Build dynamic phase matching for the SQL query
+    phase_sql = ""
+    if not is_summary_page:
+        import re
+        phase_match = re.search(r'(?i)Phase\s*(\d+)', str(project_id))
+        if phase_match:
+            target_phase = phase_match.group(1)
+            phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
+
+    # THE UPGRADE: INNER JOIN with the Node Registry. 
+    # This STRICTLY enforces that only currently assigned nodes (for the exact phase) are pulled,
+    # and safely bridges the case-sensitive gap for Lord sensors using UPPER(TRIM()).
     query = f"""
-        WITH ActiveRegistry AS (
+        WITH ValidNodes AS (
             SELECT 
                 NodeNum, 
-                CAST(Location AS STRING) as Active_Loc, 
-                CAST(Bank AS STRING) as Active_Bank, 
-                CAST(Depth AS STRING) as Active_Depth, 
-                CAST(Phase AS STRING) as Active_Phase, 
-                CAST(System AS STRING) as Active_System
+                TRIM(CAST(Location AS STRING)) as Reg_Location, 
+                TRIM(CAST(Bank AS STRING)) as Reg_Bank, 
+                Depth as Reg_Depth, 
+                Phase as Reg_Phase, 
+                System as Reg_System
             FROM `{config.NODE_REGISTRY_TABLE}`
-            WHERE (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
-              AND Project LIKE CONCAT(@root_job_id, '%')
+            WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
+              AND (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
+              {phase_sql}
         )
         SELECT 
-            t.Project as Raw_Project_Name,
-            t.NodeNum,
-            t.temperature,
-            t.timestamp,
-            COALESCE(r.Active_Loc, t.Location, 'Unassigned') as Location,
-            COALESCE(r.Active_Bank, t.Bank, '—') as Bank,
-            COALESCE(r.Active_Depth, t.Depth) as Depth,
-            COALESCE(r.Active_Phase, t.Phase) as Phase,
-            COALESCE(r.Active_System, t.System) as System,
-            t.Hardware
-        FROM `{config.MASTER_VIEW}` t
-        INNER JOIN ActiveRegistry r ON t.NodeNum = r.NodeNum
-        WHERE t.temperature >= -30.0 AND t.temperature <= 120.0
-          AND t.Project LIKE CONCAT(@root_job_id, '%')
-        ORDER BY t.timestamp ASC
+            m.Project as Raw_Project_Name,
+            m.NodeNum,
+            m.temperature,
+            m.timestamp,
+            COALESCE(NULLIF(v.Reg_Location, ''), m.Location, 'Unassigned') as Location,
+            COALESCE(NULLIF(v.Reg_Bank, ''), m.Bank, '—') as Bank,
+            COALESCE(v.Reg_Depth, m.Depth) as Depth,
+            COALESCE(NULLIF(CAST(v.Reg_Phase AS STRING), ''), m.Phase) as Phase,
+            COALESCE(NULLIF(v.Reg_System, ''), m.System) as System,
+            m.Hardware
+        FROM `{config.MASTER_VIEW}` m
+        INNER JOIN ValidNodes v 
+          ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(v.NodeNum AS STRING)))
+        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+          -- Ensure we only pull data recorded while mapped to this project
+          AND m.Project LIKE CONCAT(@root_job_id, '%')
+        ORDER BY m.timestamp ASC
     """
     
     job_config = bigquery.QueryJobConfig(
@@ -80,19 +92,8 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     )
     
     df = client.query(query, job_config=job_config).to_dataframe()
-    
-    # Filter by the specific Project/Phase Name requested 
-    if not is_summary_page:
-        job_num = str(project_id).split('-')[0].strip() 
-        
-        df = df[df['Raw_Project_Name'].astype(str).str.startswith(job_num, na=False)]
-        
-        if "Phase 1" in str(project_id):
-            df = df[df['Phase'].astype(str).str.strip() == '1']
-        elif "Phase 2" in str(project_id) or "Phase2" in str(project_id):
-            df = df[df['Phase'].astype(str).str.strip() == '2']
-            
     return df
+    
 def apply_sanity_filter(df):
     if df.empty: return df
 
