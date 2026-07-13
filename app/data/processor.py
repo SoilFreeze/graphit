@@ -50,9 +50,7 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             target_phase = phase_match.group(1)
             phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
 
-    # THE UPGRADE: INNER JOIN with the Node Registry. 
-    # This STRICTLY enforces that only currently assigned nodes (for the exact phase) are pulled,
-    # and safely bridges the case-sensitive gap for Lord sensors using UPPER(TRIM()).
+    # THE UPGRADE: Explicitly block office data and manual rejections at the database level
     query = f"""
         WITH ValidNodes AS (
             SELECT 
@@ -77,13 +75,23 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             COALESCE(v.Reg_Depth, m.Depth) as Depth,
             COALESCE(NULLIF(CAST(v.Reg_Phase AS STRING), ''), m.Phase) as Phase,
             COALESCE(NULLIF(v.Reg_System, ''), m.System) as System,
-            m.Hardware
+            m.Hardware,
+            m.approval_status
         FROM `{config.MASTER_VIEW}` m
         INNER JOIN ValidNodes v 
           ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(v.NodeNum AS STRING)))
         WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-          -- Ensure we only pull data recorded while mapped to this project
+          
+          -- 1. Ensure we only pull data recorded while strictly mapped to this exact project
           AND m.Project LIKE CONCAT(@root_job_id, '%')
+          
+          -- 2. Explicitly ban any historical records tagged as Office
+          AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%'
+          AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'
+          
+          -- 3. Explicitly drop database-level manual rejections
+          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ('FALSE', 'BADDATA', 'MASKED')
+          
         ORDER BY m.timestamp ASC
     """
     
@@ -93,8 +101,10 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     
     df = client.query(query, job_config=job_config).to_dataframe()
     return df
-    
+
+
 def apply_sanity_filter(df):
+    """Dynamically identifies severe thermal anomalies and drops them from the visual rendering."""
     if df.empty: return df
 
     if 'NodeNum' in df.columns:
@@ -102,8 +112,10 @@ def apply_sanity_filter(df):
 
     if df.empty: return df
 
+    # Flag anything impossible outside standard planetary/equipment bounds
     bad_condition = (df['temperature'] > 120) | (df['temperature'] < -30)
     
+    # Calculate a running median/mean per node to identify sudden impossible jumps
     if 'NodeNum' in df.columns:
         node_means = df.groupby('NodeNum')['temperature'].transform('mean')
         outlier_condition = (df['temperature'] > node_means + 20) | (df['temperature'] < node_means - 20)
@@ -111,10 +123,8 @@ def apply_sanity_filter(df):
         avg_temp = df['temperature'].mean()
         outlier_condition = (df['temperature'] > avg_temp + 20) | (df['temperature'] < avg_temp - 20)
 
-    mask_col = 'approve' if 'approve' in df.columns else 'approval_status' if 'approval_status' in df.columns else None
-    
-    if mask_col:
-        df.loc[outlier_condition, mask_col] = 'MASKED'
-        df.loc[bad_condition, mask_col] = 'BADDATA'
+    # THE FIX: Physically drop the bad data rows using a negated boolean mask (~), 
+    # instead of just assigning them a text label.
+    df = df[~bad_condition & ~outlier_condition].copy()
 
     return df
