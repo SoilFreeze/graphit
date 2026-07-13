@@ -588,7 +588,44 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider(); st.markdown("### 🏗️ Active Deployment Overview Matrix")
         try:
-            sum_q = f"SELECT p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown, COUNT(DISTINCT n.NodeNum) as Mapped_Sensors, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_6h, COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h FROM `{PROJECT_REGISTRY_TABLE}` p LEFT JOIN `{NODE_REGISTRY_TABLE}` n ON p.Project = n.Project LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m ON n.NodeNum = m.NodeNum WHERE (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '') AND p.ShowActive IS TRUE AND UPPER(p.Project) NOT LIKE '%OFFICE%' GROUP BY 1,2,3,4 ORDER BY p.Project ASC"
+            # THE FIX: Split the project ID to extract the base job number and dynamically extract the phase number
+            sum_q = f"""
+                WITH ProjectBase AS (
+                  SELECT 
+                    Project,
+                    ProjectName,
+                    ProjectStatus,
+                    Date_Freezedown,
+                    TRIM(SPLIT(Project, '-')[OFFSET(0)]) as RootJob,
+                    REGEXP_EXTRACT(Project, r'(?i)Phase\\s*(\\d+)') as ProjectPhase
+                  FROM `{PROJECT_REGISTRY_TABLE}`
+                  WHERE ShowActive IS TRUE 
+                    AND UPPER(Project) NOT LIKE '%OFFICE%'
+                ),
+                ActiveNodes AS (
+                  SELECT NodeNum, Project, Phase
+                  FROM `{NODE_REGISTRY_TABLE}`
+                  WHERE (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
+                )
+                SELECT 
+                    p.Project, 
+                    p.ProjectName, 
+                    p.ProjectStatus, 
+                    p.Date_Freezedown, 
+                    COUNT(DISTINCT n.NodeNum) as Mapped_Sensors, 
+                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_6h, 
+                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h 
+                FROM ProjectBase p
+                LEFT JOIN ActiveNodes n 
+                  ON n.Project = p.RootJob
+                  AND (p.ProjectPhase IS NULL OR TRIM(CAST(n.Phase AS STRING)) = p.ProjectPhase)
+                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
+                  ON n.NodeNum = m.NodeNum
+                  AND m.Project LIKE CONCAT(p.RootJob, '%')
+                  AND (p.ProjectPhase IS NULL OR TRIM(CAST(m.Phase AS STRING)) = p.ProjectPhase)
+                GROUP BY 1,2,3,4 
+                ORDER BY p.Project ASC
+            """
             rows = []
             for _, r in client.query(sum_q).to_dataframe().iterrows():
                 elapsed = max(0, (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(r['Date_Freezedown']).date()).days) if pd.notnull(r['Date_Freezedown']) else 0
