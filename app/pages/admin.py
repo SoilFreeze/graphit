@@ -22,6 +22,21 @@ def natural_sort_key(s):
         return []
     return [int(text) if text.isdigit() else str(text).lower() for text in re.split(r'(\d+)', str(s))]
 
+def get_project_mask(df, selected_project):
+    """Helper to match projects that have multi-phase suffixes."""
+    if selected_project == "All Projects":
+        return pd.Series([True] * len(df), index=df.index)
+        
+    job_num = str(selected_project).split('-')[0].strip()
+    is_job = df['Project'].astype(str).str.startswith(job_num)
+    
+    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+    if phase_match and 'Phase' in df.columns:
+        target_phase = phase_match.group(1)
+        return is_job & (df['Phase'].astype(str).str.strip() == target_phase)
+        
+    return is_job
+
 ######################
 # Page: Admin Tool Helpers   #
 ######################
@@ -60,22 +75,36 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     where_clauses = []
 
     if selected_project != "All Projects":
+        proj_mask = get_project_mask(reg_df, selected_project)
+        proj_filtered = reg_df[proj_mask]
+        
+        # 1. Handle Node ID targeting
         if target_scope == "Specific Node":
-            where_clauses.append(f"NodeNum = '{f['scope_val']}'")
+            where_clauses.append(f"t.NodeNum = '{f['scope_val']}'")
         elif target_scope == "Specific Location":
-            loc_nodes = reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == f['scope_val'])]['NodeNum'].dropna().unique().tolist()
+            loc_nodes = proj_filtered[proj_filtered['Location'] == f['scope_val']]['NodeNum'].dropna().unique().tolist()
             nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
-            where_clauses.append(f"NodeNum IN ({nodes_str})")
+            where_clauses.append(f"t.NodeNum IN ({nodes_str})" if nodes_str else "t.NodeNum = 'NONE'")
         else:
-            proj_nodes = reg_df[reg_df['Project'] == selected_project]['NodeNum'].dropna().unique().tolist()
+            proj_nodes = proj_filtered['NodeNum'].dropna().unique().tolist()
             if proj_nodes:
                 nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
-                where_clauses.append(f"NodeNum IN ({nodes_str})")
+                where_clauses.append(f"t.NodeNum IN ({nodes_str})")
             else:
-                where_clauses.append("NodeNum = 'NONE'")
-        where_clauses.append(f"Project = '{selected_project}'")
+                where_clauses.append("t.NodeNum = 'NONE'")
+        
+        # 2. Handle Job and Phase targeting for the SQL view
+        job_num = str(selected_project).split('-')[0].strip()
+        where_clauses.append(f"t.Project LIKE '{job_num}%'")
+        
+        phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+        if phase_match:
+            target_phase = phase_match.group(1)
+            where_clauses.append(f"TRIM(CAST(t.Phase AS STRING)) = '{target_phase}'")
     else:
-        where_clauses.append("Project IS NOT NULL")
+        where_clauses.append("t.Project IS NOT NULL")
+
+    # ... keep your existing timestamp and threshold logic below here
 
     start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
 
@@ -134,19 +163,24 @@ def render_bulk_approval_filters(reg_df, selected_project, target_scope):
             st.info("Targeting **Global Registry Scope** (All Active Projects)")
             scope_val = "ALL_PROJECTS"
         else:
+            # Apply our new smart mask
+            proj_mask = get_project_mask(reg_df, selected_project)
+            proj_filtered = reg_df[proj_mask]
+            
             if target_scope == "Project Wide":
                 st.info(f"Targeting all nodes in **{selected_project}**")
                 scope_val = selected_project
             elif target_scope == "Specific Location":
-                u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist())
-                scope_val = st.selectbox("Select Location", u_locs, key="blk_mgmt_loc_select")
+                u_locs = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
+                scope_val = st.selectbox("Select Location", u_locs if u_locs else ["No Locations Found"], key="blk_mgmt_loc_select")
             elif target_scope == "Specific Node":
-                u_locs = sorted(reg_df[reg_df['Project'] == selected_project]['Location'].dropna().unique().tolist())
-                selected_loc = st.selectbox("First, Select Location", u_locs, key="blk_mgmt_loc_node_select")
+                u_locs = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
+                selected_loc = st.selectbox("First, Select Location", u_locs if u_locs else ["No Locations Found"], key="blk_mgmt_loc_node_select")
+                
                 u_nodes = sorted(
-                    reg_df[(reg_df['Project'] == selected_project) & (reg_df['Location'] == selected_loc)]['NodeNum'].dropna().unique().tolist()
+                    proj_filtered[proj_filtered['Location'] == selected_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key
                 )
-                scope_val = st.selectbox("Then, Select Node", u_nodes, key="blk_mgmt_node_select")
+                scope_val = st.selectbox("Then, Select Node", u_nodes if u_nodes else ["No Nodes Found"], key="blk_mgmt_node_select")
             
     return {
         "temporal_dir": temporal_dir, 
