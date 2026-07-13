@@ -119,27 +119,38 @@ def get_universal_portal_data(project_id, is_summary_page=False):
 
 
 def apply_sanity_filter(df):
-    """Dynamically identifies severe thermal anomalies and drops them from the visual rendering."""
-    if df.empty: return df
+    """
+    Filters out noise 'blips' while preserving valid thermal spikes.
+    A data point is masked only if it is an outlier compared to its 
+    immediate neighbors AND returns to normal levels immediately after.
+    """
+    if df.empty or 'temperature' not in df.columns: 
+        return df
 
-    if 'NodeNum' in df.columns:
-        df = df.dropna(subset=['NodeNum']).copy()
+    df = df.copy()
 
-    if df.empty: return df
+    # 1. Flag absolute physical impossibilities (Equipment errors)
+    is_absolute_outlier = (df['temperature'] > 120) | (df['temperature'] < -30)
 
-    # Flag anything impossible outside standard planetary/equipment bounds
-    bad_condition = (df['temperature'] > 120) | (df['temperature'] < -30)
+    # 2. Identify noise blips:
+    # A point is a 'noise blip' if it deviates significantly from the 
+    # average of the point before AND the point after it.
+    df['prev_temp'] = df.groupby('NodeNum')['temperature'].shift(1)
+    df['next_temp'] = df.groupby('NodeNum')['temperature'].shift(-1)
     
-    # Calculate a running median/mean per node to identify sudden impossible jumps
-    if 'NodeNum' in df.columns:
-        node_means = df.groupby('NodeNum')['temperature'].transform('mean')
-        outlier_condition = (df['temperature'] > node_means + 20) | (df['temperature'] < node_means - 20)
-    else:
-        avg_temp = df['temperature'].mean()
-        outlier_condition = (df['temperature'] > avg_temp + 20) | (df['temperature'] < avg_temp - 20)
+    # Calculate the average of the neighbors
+    df['neighbor_avg'] = (df['prev_temp'] + df['next_temp']) / 2
+    
+    # Define noise as:
+    # - A deviation > 5.0 degrees from the neighbor average
+    # - AND the neighbor average is NOT a deviation from the previous point
+    # (This ensures we don't mask the start of a legitimate rapid thermal event)
+    is_noise_blip = (abs(df['temperature'] - df['neighbor_avg']) > 5.0) & \
+                    (abs(df['neighbor_avg'] - df['prev_temp']) < 2.0)
 
-    # THE FIX: Physically drop the bad data rows using a negated boolean mask (~), 
-    # instead of just assigning them a text label.
-    df = df[~bad_condition & ~outlier_condition].copy()
+    # 3. Apply the filter: 
+    # Drop rows that are absolute outliers OR identified noise blips
+    df = df[~is_absolute_outlier & ~is_noise_blip].copy()
 
-    return df
+    # Cleanup temporary helper columns
+    return df.drop(columns=['prev_temp', 'next_temp', 'neighbor_avg'])
