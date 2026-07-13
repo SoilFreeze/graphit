@@ -50,19 +50,36 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             target_phase = phase_match.group(1)
             phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
 
-    # THE UPGRADE: Explicitly block office data and manual rejections at the database level
+    # THE UPGRADE: Bind telemetry to the registry's timeline windows to seamlessly stitch sensor replacements together!
     query = f"""
-        WITH ValidNodes AS (
+        WITH ProjectAssignments AS (
             SELECT 
                 NodeNum, 
                 TRIM(CAST(Location AS STRING)) as Reg_Location, 
                 TRIM(CAST(Bank AS STRING)) as Reg_Bank, 
                 Depth as Reg_Depth, 
                 Phase as Reg_Phase, 
-                System as Reg_System
+                System as Reg_System,
+                
+                -- Resilient timestamp parsing to safely establish historical lifecycle bounds
+                COALESCE(
+                    SAFE_CAST(Start_Date AS TIMESTAMP),
+                    SAFE.PARSE_TIMESTAMP('%m/%d/%Y %H:%M:%S', CAST(Start_Date AS STRING)),
+                    SAFE.PARSE_TIMESTAMP('%m/%d/%Y', CAST(Start_Date AS STRING)),
+                    SAFE.PARSE_TIMESTAMP('%Y-%m-%d', CAST(Start_Date AS STRING)),
+                    TIMESTAMP('2000-01-01')
+                ) as active_start,
+                
+                COALESCE(
+                    SAFE_CAST(End_Date AS TIMESTAMP),
+                    SAFE.PARSE_TIMESTAMP('%m/%d/%Y %H:%M:%S', CAST(End_Date AS STRING)),
+                    SAFE.PARSE_TIMESTAMP('%m/%d/%Y', CAST(End_Date AS STRING)),
+                    SAFE.PARSE_TIMESTAMP('%Y-%m-%d', CAST(End_Date AS STRING)),
+                    TIMESTAMP('2099-12-31')
+                ) as active_end
+                
             FROM `{config.NODE_REGISTRY_TABLE}`
             WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
-              AND (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
               {phase_sql}
         )
         SELECT 
@@ -78,20 +95,18 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             m.Hardware,
             m.approval_status
         FROM `{config.MASTER_VIEW}` m
-        INNER JOIN ValidNodes v 
+        INNER JOIN ProjectAssignments v 
           ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(v.NodeNum AS STRING)))
+          
+          -- THE SEAMLESS SPLICE: Only pull data recorded while mapped to this specific position!
+          AND m.timestamp >= v.active_start
+          AND m.timestamp <= v.active_end
+          
         WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
-          
-          -- 1. Ensure we only pull data recorded while strictly mapped to this exact project
           AND m.Project LIKE CONCAT(@root_job_id, '%')
-          
-          -- 2. Explicitly ban any historical records tagged as Office
           AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%'
           AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'
-          
-          -- 3. Explicitly drop database-level manual rejections
           AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ('FALSE', 'BADDATA', 'MASKED')
-          
         ORDER BY m.timestamp ASC
     """
     
