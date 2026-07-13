@@ -981,7 +981,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     with tab_proj_master:
         st.subheader("🗄️ Complete Master Project Lifecycle Directory")
         
-        # Expanded query to include Maintenance and End Freeze dates
+        # Expanded query with Maintenance/EndFreeze AND a filter to drop empty spreadsheet rows
         directory_q = f"""
             SELECT 
                 Project as `Project ID`, 
@@ -993,6 +993,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 City, 
                 Timezone 
             FROM `{PROJECT_REGISTRY_TABLE}` 
+            WHERE Project IS NOT NULL 
+              AND TRIM(CAST(Project AS STRING)) != ''
             ORDER BY Project ASC
         """
         
