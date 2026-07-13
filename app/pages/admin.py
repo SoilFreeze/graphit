@@ -588,7 +588,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider(); st.markdown("### 🏗️ Active Deployment Overview Matrix")
         try:
-            # THE FIX: Split the project ID to extract the base job number and dynamically extract the phase number
             sum_q = f"""
                 WITH ProjectBase AS (
                   SELECT 
@@ -596,14 +595,17 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     ProjectName,
                     ProjectStatus,
                     Date_Freezedown,
-                    TRIM(SPLIT(Project, '-')[OFFSET(0)]) as RootJob,
-                    REGEXP_EXTRACT(Project, r'(?i)Phase\\s*(\\d+)') as ProjectPhase
+                    TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob,
+                    REGEXP_EXTRACT(CAST(Project AS STRING), r'(?i)Phase\\s*(\\d+)') as ProjectPhase
                   FROM `{PROJECT_REGISTRY_TABLE}`
                   WHERE ShowActive IS TRUE 
-                    AND UPPER(Project) NOT LIKE '%OFFICE%'
+                    AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
                 ),
                 ActiveNodes AS (
-                  SELECT NodeNum, Project, Phase
+                  SELECT 
+                    NodeNum, 
+                    CAST(Phase AS STRING) as Phase,
+                    TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as NodeRootJob
                   FROM `{NODE_REGISTRY_TABLE}`
                   WHERE (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
                 )
@@ -617,11 +619,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h 
                 FROM ProjectBase p
                 LEFT JOIN ActiveNodes n 
-                  ON n.Project = p.RootJob
-                  AND (p.ProjectPhase IS NULL OR TRIM(CAST(n.Phase AS STRING)) = p.ProjectPhase)
+                  ON n.NodeRootJob = p.RootJob
+                  AND (p.ProjectPhase IS NULL OR TRIM(n.Phase) = p.ProjectPhase)
                 LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
                   ON n.NodeNum = m.NodeNum
-                  AND m.Project LIKE CONCAT(p.RootJob, '%')
+                  AND CAST(m.Project AS STRING) LIKE CONCAT(p.RootJob, '%')
                   AND (p.ProjectPhase IS NULL OR TRIM(CAST(m.Phase AS STRING)) = p.ProjectPhase)
                 GROUP BY 1,2,3,4 
                 ORDER BY p.Project ASC
