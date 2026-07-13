@@ -283,31 +283,16 @@ display_tz = st.session_state.get("display_tz", "UTC")
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
 
-# Only fetch heavy data if a project is selected
-if selected_project and selected_project != "All Projects":
-    
-    # Calculate dates based on the lookback slider
-    lookback_days = st.session_state.get("global_lookback_days", 35)
-    end_date = pd.Timestamp.now()
-    start_date = end_date - pd.Timedelta(days=lookback_days)
-    
-    # Fetch and process the data for the selected project
-    raw_data = get_universal_portal_data(selected_project)
-    clean_data = apply_sanity_filter(raw_data)
-    
-    # =====================================================================
-    # GLOBAL PAGES (These load no matter what project is selected)
-    # =====================================================================
-    
-    # -------------------------
-    # ROUTE: SUMMARY
-    # -------------------------
-    if page == "Summary":
-        render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz)
+# 1. DEFINE GLOBAL PAGES
+GLOBAL_PAGES = ["Summary", "Data Processing", "Admin Tools"]
 
-    # -------------------------
-    # ROUTE: ADMIN & PROCESSING
-    # -------------------------
+# 2. RENDER GLOBAL PAGES (Load regardless of project selection)
+if page in GLOBAL_PAGES:
+    if page == "Summary":
+        # Pass None as selected_project if it's "All Projects"
+        project_arg = None if selected_project == "All Projects" else selected_project
+        render_summary_dashboard(project_arg, unit_label, unit_mode, display_tz)
+        
     elif page in ["Data Processing", "Admin Tools"]:
         if st.session_state.get('authenticated', False):
             if page == "Data Processing":
@@ -327,68 +312,57 @@ if selected_project and selected_project != "All Projects":
                     else:
                         st.error("Invalid Password. Access Denied.")
 
-    # =====================================================================
-    # PROJECT-SPECIFIC PAGES (These require a specific project to be picked)
-    # =====================================================================
-    elif selected_project != "All Projects":
+# 3. RENDER PROJECT-SPECIFIC PAGES (Only load if a project is selected)
+elif selected_project != "All Projects":
+    # Calculate dates once for project pages
+    lookback_days = st.session_state.get("global_lookback_days", 35)
+    end_date = pd.Timestamp.now()
+    start_date = end_date - pd.Timedelta(days=lookback_days)
+    
+    # Fetch and process the data for the selected project
+    raw_data = get_universal_portal_data(selected_project)
+    clean_data = apply_sanity_filter(raw_data)
 
-        # -------------------------
-        # ROUTE: TIME VS TEMP
-        # -------------------------
-        if page == "Time vs Temp":
-            unique_locations = clean_data['Location'].dropna().unique()
-            sorted_locations = sorted(unique_locations, key=natural_sort_key)
+    if page == "Time vs Temp":
+        unique_locations = clean_data['Location'].dropna().unique()
+        sorted_locations = sorted(unique_locations, key=natural_sort_key)
 
-            # Loop through each location and build its own graph
-            for loc in sorted_locations:
-                if str(loc).strip().upper() == 'UNASSIGNED':
-                    continue
-                    
-                loc_data = clean_data[clean_data['Location'] == loc]
+        # Loop through each location and build its own graph
+        for loc in sorted_locations:
+            if str(loc).strip().upper() == 'UNASSIGNED':
+                continue
                 
-                if loc_data.empty:
-                    continue
+            loc_data = clean_data[clean_data['Location'] == loc]
+            
+            if loc_data.empty:
+                continue
 
-                fig = build_high_speed_graph(
-                    df=loc_data, 
-                    title=f"Thermal Trends: {loc}",
-                    start_view=start_date, 
-                    end_view=end_date, 
-                    active_refs=active_refs,
-                    unit_mode=unit_mode,
-                    unit_label=unit_label,
-                    display_tz=display_tz,
-                    f_start_date=start_date,
-                    curve_id=selected_project
-                )
-                
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.markdown("---") 
+            fig = build_high_speed_graph(
+                df=loc_data, 
+                title=f"Thermal Trends: {loc}",
+                start_view=start_date, 
+                end_view=end_date, 
+                active_refs=active_refs,
+                unit_mode=unit_mode,
+                unit_label=unit_label,
+                display_tz=display_tz,
+                f_start_date=start_date,
+                curve_id=selected_project
+            )
+            
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+                st.markdown("---") 
 
-        # -------------------------
-        # ROUTE: DEPTH CHARTS
-        # -------------------------
-        elif page == "Depth Charts":
-            # Ensure render_depth_charts is imported
-            render_depth_charts(selected_project, unit_label, display_tz)
+    elif page == "Depth Charts":
+        render_depth_charts(selected_project, unit_label, display_tz)
 
-        # -------------------------
-        # ROUTE: SENSOR STATUS
-        # -------------------------
-        elif page == "Sensor Status":
-            # Ensure render_sensor_status is imported
-            render_sensor_status(sidebar_client, selected_project, unit_label, unit_mode, display_tz)
+    elif page == "Sensor Status":
+        render_sensor_status(sidebar_client, selected_project, unit_label, unit_mode, display_tz)
 
-        # -------------------------
-        # ROUTE: NODE DIAGNOSTICS
-        # -------------------------
-        elif page == "Node Diagnostics":
-            # Ensure render_node_diagnostics is imported
-            render_node_diagnostics(selected_project, display_tz, unit_label)
+    elif page == "Node Diagnostics":
+        render_node_diagnostics(selected_project, display_tz, unit_label)
 
-    # =====================================================================
-    # THE FALLBACK (If they are on a specific page but haven't picked a project)
-    # =====================================================================
-    else:
-        st.info(f"👈 Please select a specific project from the sidebar to view the **{page}** dashboard.")
+# 4. FALLBACK
+else:
+    st.info(f"👈 Please select a specific project from the sidebar to view the **{page}** dashboard.")
