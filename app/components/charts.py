@@ -65,6 +65,18 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     
+                    # --- NEW: EXTEND X-AXIS TO ACCOMMODATE THE FULL CURVE ---
+                    curve_max_ts = c_df['timestamp'].max()
+                    
+                    # Safely strip the timezone to match the naive final_end_view
+                    if curve_max_ts.tzinfo is not None:
+                        curve_max_ts = curve_max_ts.tz_localize(None)
+                        
+                    # Push the right-side boundary out if the curve extends into the future
+                    if curve_max_ts > final_end_view:
+                        final_end_view = curve_max_ts
+                    # --------------------------------------------------------
+                    
                     fig.add_trace(go.Scatter(
                         x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {cid}</b>", 
                         mode='lines',
