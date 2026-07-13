@@ -621,10 +621,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 LEFT JOIN ActiveNodes n 
                   ON n.NodeRootJob = p.RootJob
                   AND (p.ProjectPhase IS NULL OR TRIM(n.Phase) = p.ProjectPhase)
+                
+                -- THE FIX: Only join on NodeNum and limit the scan to 24 hours for performance.
+                -- We trust the ActiveNodes table to tell us which project the node belongs to.
                 LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
-                  ON n.NodeNum = m.NodeNum
-                  AND CAST(m.Project AS STRING) LIKE CONCAT(p.RootJob, '%')
-                  AND (p.ProjectPhase IS NULL OR TRIM(CAST(m.Phase AS STRING)) = p.ProjectPhase)
+                  ON n.NodeNum = m.NodeNum 
+                  AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+                  
                 GROUP BY 1,2,3,4 
                 ORDER BY p.Project ASC
             """
