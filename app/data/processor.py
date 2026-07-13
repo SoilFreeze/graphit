@@ -36,28 +36,43 @@ def get_bq_client():
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, is_summary_page=False):
-    client = get_bq_client() # You needed to define 'client' here!
+    client = get_bq_client() 
     if client is None: return pd.DataFrame()
     
     root_job_id = str(project_id).split('-')[0].strip()
 
-    # Fix: Use config.MASTER_VIEW
+    # THE FIX: INNER JOIN with the Active Registry. 
+    # This acts as an iron-clad filter so only nodes without an End_Date are pulled,
+    # and their Location/Depth is forced to match their CURRENT assignment.
     query = f"""
+        WITH ActiveRegistry AS (
+            SELECT 
+                NodeNum, 
+                CAST(Location AS STRING) as Active_Loc, 
+                CAST(Bank AS STRING) as Active_Bank, 
+                CAST(Depth AS STRING) as Active_Depth, 
+                CAST(Phase AS STRING) as Active_Phase, 
+                CAST(System AS STRING) as Active_System
+            FROM `{config.NODE_REGISTRY_TABLE}`
+            WHERE (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
+              AND Project LIKE CONCAT(@root_job_id, '%')
+        )
         SELECT 
-            Project as Raw_Project_Name,
-            NodeNum,
-            temperature,
-            timestamp,
-            COALESCE(Location, 'Unassigned') as Location,
-            COALESCE(Bank, '—') as Bank,
-            Depth,
-            Phase,
-            System,
-            Hardware
-        FROM `{config.MASTER_VIEW}`
-        WHERE temperature >= -30.0 AND temperature <= 120.0
-          AND Project LIKE CONCAT(@root_job_id, '%')
-        ORDER BY timestamp ASC
+            t.Project as Raw_Project_Name,
+            t.NodeNum,
+            t.temperature,
+            t.timestamp,
+            COALESCE(r.Active_Loc, t.Location, 'Unassigned') as Location,
+            COALESCE(r.Active_Bank, t.Bank, '—') as Bank,
+            COALESCE(r.Active_Depth, t.Depth) as Depth,
+            COALESCE(r.Active_Phase, t.Phase) as Phase,
+            COALESCE(r.Active_System, t.System) as System,
+            t.Hardware
+        FROM `{config.MASTER_VIEW}` t
+        INNER JOIN ActiveRegistry r ON t.NodeNum = r.NodeNum
+        WHERE t.temperature >= -30.0 AND t.temperature <= 120.0
+          AND t.Project LIKE CONCAT(@root_job_id, '%')
+        ORDER BY t.timestamp ASC
     """
     
     job_config = bigquery.QueryJobConfig(
@@ -78,7 +93,6 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             df = df[df['Phase'].astype(str).str.strip() == '2']
             
     return df
-
 def apply_sanity_filter(df):
     if df.empty: return df
 
