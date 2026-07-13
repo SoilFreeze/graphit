@@ -622,10 +622,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                   ON n.NodeRootJob = p.RootJob
                   AND (p.ProjectPhase IS NULL OR TRIM(n.Phase) = p.ProjectPhase)
                 
-                -- THE FIX: Only join on NodeNum and limit the scan to 24 hours for performance.
-                -- We trust the ActiveNodes table to tell us which project the node belongs to.
+                -- THE FIX: Force case-insensitive, whitespace-trimmed joins for Lord hex IDs
                 LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
-                  ON n.NodeNum = m.NodeNum 
+                  ON UPPER(TRIM(CAST(n.NodeNum AS STRING))) = UPPER(TRIM(CAST(m.NodeNum AS STRING)))
                   AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
                   
                 GROUP BY 1,2,3,4 
