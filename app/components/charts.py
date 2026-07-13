@@ -40,9 +40,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         try:
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip() if len(parts) > 0 else ""
-            loc_raw = parts[1].strip() if len(parts) > 1 else ""
             
-            digits = re.findall(r'\d+', loc_raw)
+            # THE FIX: Extract the pipe number from the graph's clean title, NOT the project name!
+            digits = re.findall(r'\d+', clean_title_lower)
             loc_digit = digits[0] if digits else ""
             
             target_q = f"""
@@ -65,17 +65,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     
-                    # --- NEW: EXTEND X-AXIS TO ACCOMMODATE THE FULL CURVE ---
+                    # --- EXTEND X-AXIS TO ACCOMMODATE THE FULL CURVE ---
                     curve_max_ts = c_df['timestamp'].max()
                     
-                    # Safely strip the timezone to match the naive final_end_view
                     if curve_max_ts.tzinfo is not None:
                         curve_max_ts = curve_max_ts.tz_localize(None)
                         
-                    # Push the right-side boundary out if the curve extends into the future
                     if curve_max_ts > final_end_view:
                         final_end_view = curve_max_ts
-                    # --------------------------------------------------------
                     
                     fig.add_trace(go.Scatter(
                         x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {cid}</b>", 
