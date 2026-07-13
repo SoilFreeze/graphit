@@ -316,40 +316,22 @@ if page in GLOBAL_PAGES:
 elif selected_project != "All Projects":
     # Calculate dates once for project pages
     lookback_days = st.session_state.get("global_lookback_days", 35)
-    end_date = pd.Timestamp.now()
+    end_date = pd.Timestamp.now()  # Kept timezone-naive
     start_date = end_date - pd.Timedelta(days=lookback_days)
     
-    # Fetch and process the data for the selected project
-    raw_data = get_universal_portal_data(selected_project)
-    clean_data = apply_sanity_filter(raw_data)
-
-    if page == "Time vs Temp":
-        unique_locations = clean_data['Location'].dropna().unique()
-        sorted_locations = sorted(unique_locations, key=natural_sort_key)
-
-        # Loop through each location and build its own graph
-        # 3. RENDER PROJECT-SPECIFIC PAGES (Only load if a project is selected)
-elif selected_project != "All Projects":
-    # Calculate dates once for project pages
-    lookback_days = st.session_state.get("global_lookback_days", 35)
-    end_date = pd.Timestamp.now(tz=display_tz)
-    start_date = end_date - pd.Timedelta(days=lookback_days)
-    
-    # --- NEW: Extract the True Freezedown Date for Theoretical Curves ---
+    # --- FIX: Safely parse Date_Freezedown to match timezone-naive format ---
+    freeze_start_ts = start_date 
     p_meta = st.session_state.get('project_metadata') or {}
     real_f_date = p_meta.get('Date_Freezedown')
     
-    if pd.notnull(real_f_date) and str(real_f_date).strip():
-        # Make sure the Freezedown Date is timezone-aware to match the telemetry
-        freeze_start_ts = pd.to_datetime(real_f_date)
-        if freeze_start_ts.tzinfo is None:
-            freeze_start_ts = freeze_start_ts.tz_localize(display_tz)
+    parsed_date = pd.to_datetime(real_f_date, errors='coerce')
+    if pd.notnull(parsed_date):
+        # If the database returns it with a timezone, strip it so it matches start_date/end_date
+        if parsed_date.tzinfo is not None:
+            freeze_start_ts = parsed_date.tz_localize(None)
         else:
-            freeze_start_ts = freeze_start_ts.tz_convert(display_tz)
-    else:
-        # Fallback if no freezedown date is logged yet
-        freeze_start_ts = start_date 
-        
+            freeze_start_ts = parsed_date
+            
     # Fetch and process the data for the selected project
     raw_data = get_universal_portal_data(selected_project)
     clean_data = apply_sanity_filter(raw_data)
@@ -377,7 +359,7 @@ elif selected_project != "All Projects":
                 unit_mode=unit_mode,
                 unit_label=unit_label,
                 display_tz=display_tz,
-                f_start_date=freeze_start_ts,  # <-- Passed the true freeze date here
+                f_start_date=freeze_start_ts,  # <-- Safely passed the true freeze date
                 curve_id=selected_project
             )
             
