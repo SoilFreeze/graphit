@@ -228,14 +228,11 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     # =========================================================================
     # UTILITY A: GLOBAL DATABASE CLEANUP ENGINE
     # =========================================================================
-    # =========================================================================
-    # UTILITY A: GLOBAL DATABASE CLEANUP ENGINE
-    # =========================================================================
     st.header("🧹 Global Database Cleanup")
     st.write(
         "Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency "
         "and duplicate records system-wide. "
-        "**Note:** Running this cleanup automatically drops any rogue data points outside the physical bounds of -30°F and 120°F."
+        "**Note:** Running this automatically marks any rogue data points outside the physical bounds of -30°F and 120°F as BADDATA."
     )
     
     # Split utilities into clean side-by-side management columns
@@ -244,14 +241,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     with clean_col1:
         st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
         st.caption("Truncates raw timestamps to the hour, filters bad logs, and collapses records to an average value.")
-        run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Hourly Consolidation", use_container_width=True)
-        
-    with clean_col2:
-        st.write("##### 🧼 Approval String Casing Standardization")
-        st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
-        run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
-
-    
+        run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Hourly Consolidation", use_container_width=True)  
 
     # --- PATHWAY A: COMPREHENSIVE HOURLY HOOD CONSOLIDATION ENGINE ---
     if run_telemetry_cleanup:
