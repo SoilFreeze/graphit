@@ -152,35 +152,40 @@ if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
         time.sleep(0.5)
         st.rerun()
 
-# 3. GLOBAL VIEW TOGGLES & INTERACTIVE LOOKBACK
-st.sidebar.subheader("👁️ Visibility Controls")
+st.sidebar.header("👁️ Visibility Controls")
 
-show_archived = st.sidebar.toggle(
+# 1. Archived Projects Toggle
+st.session_state['global_show_archived'] = st.sidebar.checkbox(
     "Show Archived Projects", 
-    value=False, 
-    key="global_show_archived",
-    help="Display all historic projects in the project selection menu."
+    value=st.session_state.get('global_show_archived', False)
 )
 
-st.sidebar.toggle(
+# 2. Ambient Temp Toggle
+st.session_state['global_show_ambient'] = st.sidebar.checkbox(
     "Show Ambient Temp", 
-    value=True, 
-    key="global_show_ambient",
-    help="Overlay ambient air temperature on the charts."
+    value=st.session_state.get('global_show_ambient', True)
 )
 
-st.sidebar.toggle(
+# 3. Theoretical Curve (Auto-toggles based on Project Status!)
+p_meta = st.session_state.get('project_metadata', {})
+p_status = str(p_meta.get('ProjectStatus', '')).lower()
+# Default to False if in maintenance, True otherwise (Freezedown)
+default_curve = False if 'maintenance' in p_status else True 
+
+st.session_state['global_show_ref'] = st.sidebar.checkbox(
     "Show Theoretical Curves", 
-    value=True, 
-    key="global_show_ref",
-    help="Superimpose goal curves on Time vs Temp charts."
+    value=st.session_state.get('global_show_ref', default_curve)
 )
 
-st.sidebar.toggle(
+# 4 & 5. Independent Data Auditing Controls
+st.session_state['global_show_masked'] = st.sidebar.checkbox(
     "Show Masked Data", 
-    value=False, 
-    key="global_show_masked",
-    help="Display data points manually hidden by admins."
+    value=st.session_state.get('global_show_masked', False)
+)
+
+st.session_state['global_show_baddata'] = st.sidebar.checkbox(
+    "Show Bad Data", 
+    value=st.session_state.get('global_show_baddata', False)
 )
 
 st.sidebar.divider()
