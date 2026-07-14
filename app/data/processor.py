@@ -53,6 +53,13 @@ def get_universal_portal_data(project_id, is_summary_page=False):
     # THE UPGRADE: Build dynamic exclusion list based on sidebar checkboxes
     import streamlit as st
     exclusions = ["'FALSE'"] # Always drop permanently rejected data
+    
+    # NEW: Lift the temperature bounds if we are hunting for bad data anomalies!
+    if st.session_state.get('global_show_baddata', False):
+        temp_bounds_sql = "(1=1)" # Allows all wild spikes through
+    else:
+        temp_bounds_sql = "(m.temperature >= -30.0 AND m.temperature <= 120.0)"
+
     if not st.session_state.get('global_show_masked', False):
         exclusions.append("'MASKED'")
     if not st.session_state.get('global_show_baddata', False):
@@ -112,10 +119,12 @@ def get_universal_portal_data(project_id, is_summary_page=False):
           AND m.timestamp >= v.active_start
           AND m.timestamp <= v.active_end
           
-        WHERE m.temperature >= -30.0 AND m.temperature <= 120.0
+        WHERE {temp_bounds_sql}
           AND m.Project LIKE CONCAT(@root_job_id, '%')
           AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%'
           AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'
+          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
+        ORDER BY m.timestamp ASC
           
           -- NEW: Dynamically filter based on sidebar checkboxes!
           AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
