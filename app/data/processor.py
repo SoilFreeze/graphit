@@ -50,7 +50,17 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             target_phase = phase_match.group(1)
             phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
 
-    # THE UPGRADE: Bind telemetry to the registry's timeline windows to seamlessly stitch sensor replacements together!
+    # THE UPGRADE: Build dynamic exclusion list based on sidebar checkboxes
+    import streamlit as st
+    exclusions = ["'FALSE'"] # Always drop permanently rejected data
+    if not st.session_state.get('global_show_masked', False):
+        exclusions.append("'MASKED'")
+    if not st.session_state.get('global_show_baddata', False):
+        exclusions.append("'BADDATA'")
+    
+    exclusion_str = ", ".join(exclusions)
+
+    # Bind telemetry to the registry's timeline windows to seamlessly stitch sensor replacements together!
     query = f"""
         WITH ProjectAssignments AS (
             SELECT 
@@ -106,7 +116,9 @@ def get_universal_portal_data(project_id, is_summary_page=False):
           AND m.Project LIKE CONCAT(@root_job_id, '%')
           AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%'
           AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'
-          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ('FALSE', 'BADDATA', 'MASKED')
+          
+          -- NEW: Dynamically filter based on sidebar checkboxes!
+          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
         ORDER BY m.timestamp ASC
     """
     
