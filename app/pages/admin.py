@@ -409,11 +409,12 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
     where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
     
-    # Map raw field strings to match the proper table aliases used inside the Master analytical query view
-    aliased_where = (where_str.replace("NodeNum", "t.NodeNum")
-                              .replace("timestamp", "t.timestamp")
-                              .replace("temperature", "t.temperature")
-                              .replace("r.approve", "t.approval_status"))
+    # Build active project logic constraints by pulling down matching query string blocks
+    filters = render_bulk_approval_filters(full_reg_df, selected_project, target_scope)
+    where_str = build_bulk_approval_where_clause(full_reg_df, selected_project, target_scope, current_status_filter, filters)
+    
+    # THE FIX: Assign the where clause directly. DO NOT use .replace() here anymore!
+    aliased_where = where_str
     
     # Internal function to map and verify exactly how many data rows will be changed before saving
     def run_profile_audit():
