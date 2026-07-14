@@ -207,18 +207,17 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         amb_df['timestamp'] = amb_df['timestamp'].dt.tz_localize('UTC')
                     amb_df['timestamp'] = amb_df['timestamp'].dt.tz_convert(display_tz)
                     
-                    for sn in amb_df['NodeNum'].unique():
-                        a_df = amb_df[amb_df['NodeNum'] == sn].sort_values('timestamp')
-                        a_df = a_df.set_index('timestamp').resample('1h').first().reset_index()
-                        
-                        fig.add_trace(go.Scatter(
-                            x=a_df['timestamp'], y=a_df['temperature'],
-                            name=f"Ambient Air ({sn})", mode='lines',
-                            connectgaps=False,
-                            line=dict(width=2.5, dash='dot', color='orange'),
-                            hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
-                            legendrank=99 
-                        ))
+                    # THE FIX: Average all ambient sensors across the entire site (all phases) into one clean metric
+                    amb_df = amb_df.set_index('timestamp').resample('1h')['temperature'].mean().dropna().reset_index()
+                    
+                    fig.add_trace(go.Scatter(
+                        x=amb_df['timestamp'], y=amb_df['temperature'],
+                        name="Ambient Air (Site Avg)", mode='lines',
+                        connectgaps=False,
+                        line=dict(width=2.5, dash='dot', color='orange'),
+                        hovertemplate="<b>Site Ambient Avg</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                        legendrank=99 
+                    ))
             except Exception:
                 pass
 
