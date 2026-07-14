@@ -172,24 +172,35 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
         ))
         
-        # --- NEW: VISUAL OVERLAYS FOR AUDITING ---
+        # --- VISUAL OVERLAYS FOR AUDITING ---
         if 'approval_status' in s_df.columns:
-            # Normalize the status text safely
-            s_status = s_df['approval_status'].fillna('TRUE').astype(str).str.upper().str.strip()
+            # Safely strip spaces so 'BAD DATA' and 'BADDATA' both map correctly
+            s_status = s_df['approval_status'].fillna('TRUE').astype(str).str.replace(' ', '').str.upper().str.strip()
             
-            # 1. MASKED DATA: Overlay as Orange Hollow Rings
+            # 2. MASKED DATA
             if st.session_state.get('global_show_masked', False):
                 masked_df = s_df[s_status == 'MASKED']
                 if not masked_df.empty:
                     fig.add_trace(go.Scatter(
-                        x=masked_df['timestamp'], 
-                        y=masked_df['temperature'],
-                        name=display_name + " [MASKED]", 
-                        mode='markers',
+                        x=masked_df['timestamp'], y=masked_df['temperature'],
+                        name=display_name + " [MASKED]", mode='markers',
                         customdata=masked_df[['NodeNum']],
                         marker=dict(symbol='circle-open', size=9, color='orange', line=dict(width=2.5)),
-                        hovertemplate="<b>⚠️ MASKED</b> | %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>",
-                        showlegend=False  # Keeps the legend clean
+                        hovertemplate="<b>⚠️ MASKED</b> <i>(%{customdata[0]})</i><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                        showlegend=False
+                    ))
+            
+            # 3. BADDATA
+            if st.session_state.get('global_show_baddata', False):
+                bad_df = s_df[s_status == 'BADDATA']
+                if not bad_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=bad_df['timestamp'], y=bad_df['temperature'],
+                        name=display_name + " [BAD]", mode='markers',
+                        customdata=bad_df[['NodeNum']],
+                        marker=dict(symbol='x', size=9, color='gray', line=dict(width=2.5)), # Now colored Gray!
+                        hovertemplate="<b>❌ BAD DATA</b> <i>(%{customdata[0]})</i><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                        showlegend=False
                     ))
             
             # 2. BADDATA: Overlay as Red X's
