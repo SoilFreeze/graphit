@@ -349,8 +349,17 @@ elif selected_project != "All Projects":
             freeze_start_ts = parsed_date
             
     # Fetch and process the data for the selected project
-    raw_data = get_universal_portal_data(selected_project)
-    clean_data = apply_sanity_filter(raw_data)
+    # Pass the checkbox states dynamically so the Cache correctly refreshes!
+    raw_data = get_universal_portal_data(
+        selected_project, 
+        is_summary_page=False,
+        show_masked=st.session_state.get('global_show_masked', False),
+        show_baddata=st.session_state.get('global_show_baddata', False)
+    )
+    if st.session_state.get('global_show_baddata', False):
+        clean_data = raw_data
+    else:
+        clean_data = apply_sanity_filter(raw_data)
 
     if page == "Time vs Temp":
         unique_locations = clean_data['Location'].dropna().unique()
