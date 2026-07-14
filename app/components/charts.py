@@ -304,8 +304,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top"),
         # Force the unified hover header to display full Date and Time (e.g., Jul 14, 2026 09:30 AM)
-        fig.update_xaxes(hoverformat="%b %d, %Y %I:%M %p")
     )
+    fig.update_xaxes(hoverformat="%b %d, %Y %I:%M %p")                           
     return fig
                                
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
