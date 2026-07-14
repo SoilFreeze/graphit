@@ -35,7 +35,7 @@ def get_bq_client():
         return None
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, is_summary_page=False):
+def get_universal_portal_data(project_id, is_summary_page=False, show_masked=False, show_baddata=False):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
@@ -50,22 +50,20 @@ def get_universal_portal_data(project_id, is_summary_page=False):
             target_phase = phase_match.group(1)
             phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
 
-    # THE UPGRADE: Build dynamic exclusion list based on sidebar checkboxes
-    import streamlit as st
+    # 1. THE FIX: Safely map exclusions without triggering syntax errors
     exclusions = ["'FALSE'"] # Always drop permanently rejected data
-    
-    # NEW: Lift the temperature bounds if we are hunting for bad data anomalies!
-    if st.session_state.get('global_show_baddata', False):
-        temp_bounds_sql = "(1=1)" # Allows all wild spikes through
-    else:
-        temp_bounds_sql = "(m.temperature >= -30.0 AND m.temperature <= 120.0)"
-
-    if not st.session_state.get('global_show_masked', False):
+    if not show_masked:
         exclusions.append("'MASKED'")
-    if not st.session_state.get('global_show_baddata', False):
+    if not show_baddata:
         exclusions.append("'BADDATA'")
     
     exclusion_str = ", ".join(exclusions)
+
+    # 2. THE FIX: Lift the temperature bounds cleanly if hunting anomalies
+    if show_baddata:
+        temp_bounds_sql = "(1=1)" 
+    else:
+        temp_bounds_sql = "(m.temperature >= -30.0 AND m.temperature <= 120.0)"
 
     # Bind telemetry to the registry's timeline windows to seamlessly stitch sensor replacements together!
     query = f"""
@@ -78,7 +76,6 @@ def get_universal_portal_data(project_id, is_summary_page=False):
                 Phase as Reg_Phase, 
                 System as Reg_System,
                 
-                -- Resilient timestamp parsing to safely establish historical lifecycle bounds
                 COALESCE(
                     SAFE_CAST(Start_Date AS TIMESTAMP),
                     SAFE.PARSE_TIMESTAMP('%m/%d/%Y %H:%M:%S', CAST(Start_Date AS STRING)),
@@ -114,8 +111,6 @@ def get_universal_portal_data(project_id, is_summary_page=False):
         FROM `{config.MASTER_VIEW}` m
         INNER JOIN ProjectAssignments v 
           ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(v.NodeNum AS STRING)))
-          
-          -- THE SEAMLESS SPLICE: Only pull data recorded while mapped to this specific position!
           AND m.timestamp >= v.active_start
           AND m.timestamp <= v.active_end
           
@@ -123,10 +118,6 @@ def get_universal_portal_data(project_id, is_summary_page=False):
           AND m.Project LIKE CONCAT(@root_job_id, '%')
           AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%'
           AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'
-          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
-        ORDER BY m.timestamp ASC
-          
-          -- NEW: Dynamically filter based on sidebar checkboxes!
           AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
         ORDER BY m.timestamp ASC
     """
