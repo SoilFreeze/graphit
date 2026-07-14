@@ -311,31 +311,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
         except Exception as e:
             status_box.empty()
             st.error(f"Global Database Consolidation Failed: {e}")
-
-    # --- PATHWAY B: REJECTIONS ENGINE STRING CASING CLEANUP ---
-    if run_string_cleanup:
-        status_box_str = st.empty()
-        try:
-            status_box_str.markdown("🧼 **Standardizing mixed-case manual override parameters...**")
-            
-            # Targets the data override source table directly (`manual_rejections`)
-            # Converts lower or mixed-case string variants safely into standard uppercase 'TRUE' or 'FALSE'
-            str_cleanup_sql = f"""
-                UPDATE `{target_table}`
-                SET approve = UPPER(TRIM(approve))
-                WHERE LOWER(approve) IN ('true', 'false')
-            """
-            job = client.query(str_cleanup_sql)
-            job.result()
-            
-            status_box_str.empty()
-            st.success(f"🎉 Text standardization complete! Successfully cleaned {job.num_dml_affected_rows:,} records inside the rejections ledger.")
-            st.cache_data.clear()
-            time.sleep(0.5)
-            st.rerun()
-        except Exception as e:
-            status_box_str.empty()
-            st.error(f"Text String Cleanup Operation Failed: {e}")
    
     st.divider()
 
