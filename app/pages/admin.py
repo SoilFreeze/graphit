@@ -544,6 +544,56 @@ def render_recovery_filters(sp_reg):
     loc_filtered = proj_filtered if rec_loc == "All" else proj_filtered[proj_filtered['Location'] == rec_loc]
     return c3.multiselect("Select Target Node Numbers", sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key), default=None, key="rec_nodes_multiselect_isolated")
 
+@st.cache_data(ttl=600)
+def get_cached_registry():
+    client = get_bq_client()
+    if client is None: return pd.DataFrame(), []
+    
+    full_reg_df = client.query(f"SELECT * FROM `{NODE_REGISTRY_TABLE}` WHERE End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = ''").to_dataframe()
+    full_reg_df['Project'] = full_reg_df['Project'].astype(str).str.split('.').str[0].str.strip()
+    
+    proj_q = f"SELECT CAST(Project AS STRING) as Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown FROM `{PROJECT_REGISTRY_TABLE}` WHERE ShowActive IS TRUE"
+    available_projects_list = sorted(client.query(proj_q).to_dataframe()['Project'].dropna().unique().tolist())
+    
+    return full_reg_df, available_projects_list
+
+@st.cache_data(ttl=600)
+def get_cached_fleet_matrix():
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
+    
+    sum_q = f"""
+        WITH ProjectBase AS (
+          SELECT 
+            Project, ProjectName, ProjectStatus, Date_Freezedown,
+            TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob,
+            REGEXP_EXTRACT(CAST(Project AS STRING), r'(?i)Phase\\s*(\\d+)') as ProjectPhase
+          FROM `{PROJECT_REGISTRY_TABLE}`
+          WHERE ShowActive IS TRUE AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
+        ),
+        ActiveNodes AS (
+          SELECT 
+            NodeNum, CAST(Phase AS STRING) as Phase,
+            TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as NodeRootJob
+          FROM `{NODE_REGISTRY_TABLE}`
+          WHERE (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
+        )
+        SELECT 
+            p.Project, p.ProjectName, p.ProjectStatus, p.Date_Freezedown, 
+            COUNT(DISTINCT n.NodeNum) as Mapped_Sensors, 
+            COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_6h, 
+            COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h 
+        FROM ProjectBase p
+        LEFT JOIN ActiveNodes n 
+          ON n.NodeRootJob = p.RootJob AND (p.ProjectPhase IS NULL OR TRIM(n.Phase) = p.ProjectPhase)
+        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
+          ON UPPER(TRIM(CAST(n.NodeNum AS STRING))) = UPPER(TRIM(CAST(m.NodeNum AS STRING)))
+          AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+        GROUP BY 1,2,3,4 
+        ORDER BY p.Project ASC
+    """
+    return client.query(sum_q).to_dataframe()
+    
 # =============================================================================
 # Page: Admin Tools 
 # =============================================================================
@@ -554,13 +604,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     client = get_bq_client()
     if client is None: st.error("Database connection unavailable."); return
 
-    # Core Read-Only Matrix Data Pull
+    # Core Read-Only Matrix Data Pull (Now Cached!)
     try:
-        proj_q = f"SELECT CAST(Project AS STRING) as Project, ProjectName, Timezone, ProjectStatus, Date_Freezedown FROM `{PROJECT_REGISTRY_TABLE}` WHERE ShowActive IS TRUE"
-        full_reg_df = client.query(f"SELECT * FROM `{NODE_REGISTRY_TABLE}` WHERE End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = ''").to_dataframe()
-        full_reg_df['Project'] = full_reg_df['Project'].astype(str).str.split('.').str[0].str.strip()
-        available_projects_list = sorted(client.query(proj_q).to_dataframe()['Project'].dropna().unique().tolist())
-    except Exception as e: st.error(f"Registry Link Offline: {e}"); return
+        full_reg_df, available_projects_list = get_cached_registry()
+    except Exception as e: 
+        st.error(f"Registry Link Offline: {e}"); return
 
     # Standardized Navigation Tabs Layout Schema Paths (Registry & Chiller Tabs Removed)
     tab_admin_sum, tab_bulk_app, tab_recovery, tab_proj_master = st.tabs([
@@ -589,54 +637,21 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         st.divider(); st.markdown("### 🏗️ Active Deployment Overview Matrix")
         try:
-            sum_q = f"""
-                WITH ProjectBase AS (
-                  SELECT 
-                    Project,
-                    ProjectName,
-                    ProjectStatus,
-                    Date_Freezedown,
-                    TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob,
-                    REGEXP_EXTRACT(CAST(Project AS STRING), r'(?i)Phase\\s*(\\d+)') as ProjectPhase
-                  FROM `{PROJECT_REGISTRY_TABLE}`
-                  WHERE ShowActive IS TRUE 
-                    AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
-                ),
-                ActiveNodes AS (
-                  SELECT 
-                    NodeNum, 
-                    CAST(Phase AS STRING) as Phase,
-                    TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as NodeRootJob
-                  FROM `{NODE_REGISTRY_TABLE}`
-                  WHERE (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
-                )
-                SELECT 
-                    p.Project, 
-                    p.ProjectName, 
-                    p.ProjectStatus, 
-                    p.Date_Freezedown, 
-                    COUNT(DISTINCT n.NodeNum) as Mapped_Sensors, 
-                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN n.NodeNum END) as Active_6h, 
-                    COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN n.NodeNum END) as Active_24h 
-                FROM ProjectBase p
-                LEFT JOIN ActiveNodes n 
-                  ON n.NodeRootJob = p.RootJob
-                  AND (p.ProjectPhase IS NULL OR TRIM(n.Phase) = p.ProjectPhase)
-                
-                -- THE FIX: Force case-insensitive, whitespace-trimmed joins for Lord hex IDs
-                LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
-                  ON UPPER(TRIM(CAST(n.NodeNum AS STRING))) = UPPER(TRIM(CAST(m.NodeNum AS STRING)))
-                  AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-                  
-                GROUP BY 1,2,3,4 
-                ORDER BY p.Project ASC
-            """
+            matrix_df = get_cached_fleet_matrix()
             rows = []
-            for _, r in client.query(sum_q).to_dataframe().iterrows():
+            for _, r in matrix_df.iterrows():
                 elapsed = max(0, (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(r['Date_Freezedown']).date()).days) if pd.notnull(r['Date_Freezedown']) else 0
-                rows.append({"Project ID": r['Project'], "Project Name": r['ProjectName'] or r['Project'], "Mapped Sensors": int(r['Mapped_Sensors']), "Active (6h)": int(r['Active_6h']), "Active (24h)": int(r['Active_24h']), "Project Status Timeline": f"Day {elapsed} of {str(r['ProjectStatus']).title()}" if pd.notnull(r['Date_Freezedown']) else "Not Freezing"})
+                rows.append({
+                    "Project ID": r['Project'], 
+                    "Project Name": r['ProjectName'] or r['Project'], 
+                    "Mapped Sensors": int(r['Mapped_Sensors']), 
+                    "Active (6h)": int(r['Active_6h']), 
+                    "Active (24h)": int(r['Active_24h']), 
+                    "Project Status Timeline": f"Day {elapsed} of {str(r['ProjectStatus']).title()}" if pd.notnull(r['Date_Freezedown']) else "Not Freezing"
+                })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        except Exception as e: st.error(f"Overview compilation fault: {e}")
+        except Exception as e: 
+            st.error(f"Overview compilation fault: {e}")
 
     # --- SUB-TAB 2: BULK APPROVAL SYSTEM RUNROOM ---
     with tab_bulk_app:
