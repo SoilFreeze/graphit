@@ -167,8 +167,19 @@ st.session_state['global_show_ambient'] = st.sidebar.checkbox(
 )
 
 # 3. Theoretical Curve (Auto-toggles based on Project Status!)
-p_meta = st.session_state.get('project_metadata', {})
-p_status = str(p_meta.get('ProjectStatus', '')).lower()
+p_meta = st.session_state.get('project_metadata')
+p_status = ""
+
+# Safely extract the status whether p_meta is a dict, Pandas Series, or None
+try:
+    if p_meta is not None:
+        if hasattr(p_meta, 'get'):
+            p_status = str(p_meta.get('ProjectStatus', '')).lower()
+        else:
+            p_status = str(p_meta['ProjectStatus']).lower()
+except Exception:
+    p_status = ""
+
 # Default to False if in maintenance, True otherwise (Freezedown)
 default_curve = False if 'maintenance' in p_status else True 
 
