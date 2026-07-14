@@ -356,10 +356,7 @@ elif selected_project != "All Projects":
         show_masked=st.session_state.get('global_show_masked', False),
         show_baddata=st.session_state.get('global_show_baddata', False)
     )
-    if st.session_state.get('global_show_baddata', False):
-        clean_data = raw_data
-    else:
-        clean_data = apply_sanity_filter(raw_data)
+    clean_data = apply_sanity_filter(raw_data)
 
     if page == "Time vs Temp":
         unique_locations = clean_data['Location'].dropna().unique()
