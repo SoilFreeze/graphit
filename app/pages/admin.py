@@ -344,53 +344,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
         except Exception as e:
             status_box_str.empty()
             st.error(f"Text String Cleanup Operation Failed: {e}")
-
-    # --- PATHWAY C: SMART FILTER ANOMALY MASKING ---
-    if run_smart_filter:
-        status_box_smart = st.empty()
-        try:
-            status_box_smart.markdown("🧠 **Scanning TempPipes for >5°F anomalies...**")
-            
-            # Uses LAG (previous) and LEAD (next) to compare chronological neighbors
-            spike_sql = f"""
-                MERGE `{PROJECT_ID}.{DATASET_ID}.manual_rejections` T
-                USING (
-                    WITH OrderedData AS (
-                        SELECT 
-                            NodeNum, 
-                            timestamp, 
-                            temperature,
-                            LAG(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp) as prev_temp,
-                            LEAD(temperature) OVER(PARTITION BY NodeNum ORDER BY timestamp) as next_temp
-                        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
-                        -- Isolate TempPipes: Has depth, not ambient, not a bank
-                        WHERE Depth IS NOT NULL 
-                          AND TRIM(CAST(Depth AS STRING)) != '' 
-                          AND UPPER(CAST(Location AS STRING)) NOT LIKE '%AMB%'
-                    )
-                    SELECT DISTINCT NodeNum, timestamp
-                    FROM OrderedData
-                    WHERE (prev_temp IS NOT NULL AND ABS(temperature - prev_temp) > 5.0)
-                       OR (next_temp IS NOT NULL AND ABS(temperature - next_temp) > 5.0)
-                ) S
-                ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
-                WHEN MATCHED THEN UPDATE SET approve = 'MASKED'
-                WHEN NOT MATCHED THEN INSERT (NodeNum, timestamp, approve) VALUES (S.NodeNum, S.timestamp, 'MASKED')
-            """
-            
-            job = client.query(spike_sql)
-            job.result()
-            
-            status_box_smart.empty()
-            st.success(f"🎉 Smart Filter applied! Successfully masked {job.num_dml_affected_rows:,} anomalous TempPipe records.")
-            st.cache_data.clear()
-            time.sleep(0.5)
-            st.rerun()
-            
-        except Exception as e:
-            status_box_smart.empty()
-            st.error(f"Smart Filter Operation Failed: {e}")
-    
+   
     st.divider()
 
     # =========================================================================
