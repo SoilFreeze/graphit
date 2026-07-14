@@ -226,6 +226,9 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     # =========================================================================
     # UTILITY A: GLOBAL DATABASE CLEANUP ENGINE
     # =========================================================================
+    # =========================================================================
+    # UTILITY A: GLOBAL DATABASE CLEANUP ENGINE
+    # =========================================================================
     st.header("🧹 Global Database Cleanup")
     st.write(
         "Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency "
@@ -234,7 +237,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     )
     
     # Split utilities into clean side-by-side management columns
-    clean_col1, clean_col2, clean_col3 = st.columns(3)
+    clean_col1, clean_col2 = st.columns(2)
     
     with clean_col1:
         st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
@@ -245,11 +248,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
         st.write("##### 🧼 Approval String Casing Standardization")
         st.caption("Scans the rejections table to convert any lowercase 'true/false' strings to standard 'TRUE/FALSE'.")
         run_string_cleanup = st.button("🧹 Clean Approval Text 'true' to 'TRUE'", use_container_width=True)
-
-    with clean_col3:
-        st.write("##### 🧠 Smart TempPipe Spike Filter")
-        st.caption("Auto-masks TempPipe readings that jump >5°F from adjacent records.")
-        run_smart_filter = st.button("🤖 Run TempPipe Smart Masking", use_container_width=True)
 
     
 
