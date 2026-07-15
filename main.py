@@ -201,20 +201,30 @@ st.session_state['global_show_baddata'] = st.sidebar.checkbox(
 
 st.sidebar.divider()
 
-st.sidebar.subheader("⏳ Timeline Navigation")
+# Add this right above your timeline slider
+show_full_dataset = st.checkbox("🌍 See Full Data Set (Ignore Timeline)", value=False)
 
-selected_weeks = st.sidebar.slider(
-    "Select History Window (Weeks)",
-    min_value=1,
-    max_value=12,
-    value=5,  
-    step=1,
-    key="global_lookback_weeks_slider",
-    help="Slide the point to change how many weeks of history pull into your charts."
-)
+if show_full_dataset:
+    # Bypass the date filter completely and use all available data
+    filtered_df = clean_data 
+else:
+    # Your existing date filtering logic goes here
+    # filtered_df = clean_data[(clean_data['timestamp'] >= start_date) & ...]
+    
+    st.sidebar.subheader("⏳ Timeline Navigation")
+    
+    selected_weeks = st.sidebar.slider(
+        "Select History Window (Weeks)",
+        min_value=1,
+        max_value=12,
+        value=5,  
+        step=1,
+        key="global_lookback_weeks_slider",
+        help="Slide the point to change how many weeks of history pull into your charts."
+    )
 
-lookback_days = selected_weeks * 7
-st.session_state["global_lookback_days"] = lookback_days
+    lookback_days = selected_weeks * 7
+    st.session_state["global_lookback_days"] = lookback_days
 
 # CSS customizations
 st.sidebar.markdown(
