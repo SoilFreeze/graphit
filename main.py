@@ -209,7 +209,6 @@ if show_full_dataset:
     # 2. Hide the slider and force a massive lookback period
     st.sidebar.caption("Showing all available historical data.")
     st.session_state["global_lookback_days"] = 9999 
-    filtered_df = clean_data  # Pass the entire dataset
 else:
     # 3. Show the slider only if they are not viewing the full dataset
     selected_weeks = st.sidebar.slider(
@@ -221,16 +220,7 @@ else:
         key="global_lookback_weeks_slider",
         help="Slide the point to change how many weeks of history pull into your charts."
     )
-    lookback_days = selected_weeks * 7
-    st.session_state["global_lookback_days"] = lookback_days
-    
-    # Apply the standard date filter
-    if not clean_data.empty and 'timestamp' in clean_data.columns:
-        # Calculate cutoff based on the most recent data point
-        cutoff_date = clean_data['timestamp'].max() - pd.Timedelta(days=lookback_days)
-        filtered_df = clean_data[clean_data['timestamp'] >= cutoff_date]
-    else:
-        filtered_df = clean_data
+    st.session_state["global_lookback_days"] = selected_weeks * 7
 
 # CSS customizations
 st.sidebar.markdown(
