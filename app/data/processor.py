@@ -50,7 +50,7 @@ def get_universal_portal_data(project_id, is_summary_page=False, show_masked=Fal
             target_phase = phase_match.group(1)
             phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
 
-    # 1. THE FIX: Safely map exclusions without triggering syntax errors
+    # 1. Safely map exclusions without triggering syntax errors
     exclusions = ["'FALSE'"] # Always drop permanently rejected data
     if not show_masked:
         exclusions.append("'MASKED'")
@@ -59,13 +59,19 @@ def get_universal_portal_data(project_id, is_summary_page=False, show_masked=Fal
     
     exclusion_str = ", ".join(exclusions)
 
-    # 2. THE FIX: Lift the temperature bounds cleanly if hunting anomalies
+    # 2. Lift the temperature bounds cleanly if hunting anomalies
     if show_baddata:
         temp_bounds_sql = "(1=1)" 
     else:
         temp_bounds_sql = "(m.temperature >= -30.0 AND m.temperature <= 120.0)"
 
-    # Bind telemetry to the registry's timeline windows to seamlessly stitch sensor replacements together!
+    # 3. Smart Office Filter (Must be strictly aligned to the left edge of the function!)
+    if 'OFFICE' in str(root_job_id).upper():
+        office_filter_sql = ""
+    else:
+        office_filter_sql = "AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%' AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'"
+
+    # Bind telemetry to the registry's timeline windows to seamlessly stitch sensor replacements together
     query = f"""
         WITH ProjectAssignments AS (
             SELECT 
@@ -118,15 +124,9 @@ def get_universal_portal_data(project_id, is_summary_page=False, show_masked=Fal
           AND m.Project LIKE CONCAT(@root_job_id, '%')
           {office_filter_sql}
           AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
-        ORDER BY m.timestamp ASCC
+        ORDER BY m.timestamp ASC
     """
     
-    # 3. THE FIX: Only block office data if we are NOT looking at the Office project
-    if 'OFFICE' in str(root_job_id).upper():
-        office_filter_sql = ""  # Let the office data through!
-    else:
-        office_filter_sql = "AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%' AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'"
-        
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
     )
