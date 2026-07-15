@@ -139,6 +139,15 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
     )
     
     df = client.query(query, job_config=job_config).to_dataframe()
+    
+    # THE FIX: If we are viewing the massive "Full Data" set, downsample to 1-hour averages
+    # to keep the browser from crashing.
+    if lookback_days >= 9999 and not df.empty:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.set_index('timestamp').groupby(
+            ['Project', 'NodeNum', 'Location', pd.Grouper(freq='1h')]
+        )['temperature'].mean().reset_index()
+        
     return df
 
 
