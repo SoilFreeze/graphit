@@ -118,7 +118,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
                     fig.add_trace(go.Scattergl(
                         x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {cid}</b>", 
                         mode='lines',
-                        line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3),
+                        line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)]),
                         legendrank=1 
                     ))
         except:
@@ -193,7 +193,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             mode='lines',
             connectgaps=False, 
             customdata=s_df[['NodeNum']], 
-            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
+            line=dict(width=2, color=sf_15_palette[i % 15]),
             hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
         ))
         
