@@ -144,9 +144,11 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
     # to keep the browser from crashing.
     if lookback_days >= 9999 and not df.empty:
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.set_index('timestamp').groupby(
-            ['Project', 'NodeNum', 'Location', pd.Grouper(freq='1h')]
-        )['temperature'].mean().reset_index()
+        
+        # We group by the columns that actually exist in the dataframe returned by your query
+        group_cols = ['Raw_Project_Name', 'NodeNum', 'Location', pd.Grouper(key='timestamp', freq='1h')]
+        
+        df = df.groupby(group_cols)['temperature'].mean().reset_index()
         
     return df
 
