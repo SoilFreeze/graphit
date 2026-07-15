@@ -7,7 +7,46 @@ from app.data.processor import get_bq_client # Import the shared connection
 
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_cached_reference_curve(curve_id, loc_digit):
+    """Fetches reference curves once and caches them for all charts."""
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
     
+    parts = str(curve_id).split('-')
+    proj_num = parts[0].strip() if len(parts) > 0 else ""
+    target_q = f"""
+        SELECT CurveID, Day, Temp 
+        FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.reference_curves` 
+        WHERE CurveID LIKE '%{proj_num}%' 
+        AND REGEXP_CONTAINS(CurveID, r'[T|TP]0?{loc_digit}([^0-9]|$)')
+        AND NOT REGEXP_CONTAINS(CurveID, r'(?i)brine')
+        ORDER BY Day
+    """
+    try:
+        return client.query(target_q).to_dataframe()
+    except:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_cached_ambient_data(job_num, start_str):
+    """Fetches ambient data once and caches it for all charts."""
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
+    
+    amb_q = f"""
+        SELECT NodeNum, timestamp, temperature 
+        FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.master_data_view_v2` 
+        WHERE Project LIKE '{job_num}%' 
+          AND UPPER(Location) = 'AMBIENT'
+          AND timestamp >= '{start_str}'
+    """
+    try:
+        return client.query(amb_q).to_dataframe()
+    except:
+        return pd.DataFrame()
+
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
@@ -53,7 +92,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 AND NOT REGEXP_CONTAINS(CurveID, r'(?i)brine')
                 ORDER BY Day
             """
-            target_df = client.query(target_q).to_dataframe()
+            target_df = get_cached_reference_curve(curve_id, loc_digit)
             
             if not target_df.empty:
                 dash_styles = ['dashdot', 'dash', 'dot']
@@ -209,7 +248,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                   AND timestamp >= '{start_str}'
             """
             try:
-                amb_df = client.query(amb_q).to_dataframe()
+                amb_df = get_cached_ambient_data(job_num, start_str)
                 if not amb_df.empty:
                     if amb_df['timestamp'].dt.tz is None:
                         amb_df['timestamp'] = amb_df['timestamp'].dt.tz_localize('UTC')
