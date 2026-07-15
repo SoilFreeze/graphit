@@ -366,33 +366,43 @@ elif selected_project != "All Projects":
     clean_data = apply_sanity_filter(raw_data)
 
     if page == "Time vs Temp":
-        # 1. Clean the list of unique locations first
-        unique_locations = clean_data['Location'].dropna().unique()
+        st.write("### 📈 Time vs Temperature Tracking")
+        
+        # --- RESTORED PHASE & SYSTEM FILTERS ---
+        # 1. Safely extract available Phases and Systems from the data
+        available_phases = sorted([str(p) for p in clean_data['Phase'].dropna().unique() if str(p).strip().upper() not in ['NAN', 'NONE', '']])
+        available_systems = sorted([str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
+        
+        # 2. Put the selectors side-by-side
+        col1, col2 = st.columns(2)
+        with col1:
+            selected_phases = st.multiselect("🔍 Filter by Phase (Leave blank for all):", options=available_phases)
+        with col2:
+            selected_systems = st.multiselect("⚙️ Filter by System (Leave blank for all):", options=available_systems)
+            
+        # 3. Slice the data based on what you selected
+        display_data = clean_data.copy()
+        if selected_phases:
+            display_data = display_data[display_data['Phase'].astype(str).isin(selected_phases)]
+        if selected_systems:
+            display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
+            
+        st.divider()
+
+        # 4. Grab only the locations that belong to the filtered Phases/Systems
+        unique_locations = display_data['Location'].dropna().unique()
         valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
         sorted_locations = sorted(valid_locations, key=natural_sort_key)
 
-        # 2. THE FIX: Add a UI selector so we don't render 50 charts at once!
-        st.write("### 📈 Time vs Temperature Tracking")
-        default_selections = sorted_locations[:3] if len(sorted_locations) > 0 else []
-        
-        selected_locs = st.multiselect(
-            "📍 Select Locations to Graph (Displaying too many at once may slow down your browser):",
-            options=sorted_locations,
-            default=default_selections,
-            key="time_temp_loc_picker"
-        )
-        
-        st.divider()
-
-        # 3. Only loop through the ones the user actually selected
-        for loc in selected_locs:
-            loc_data = clean_data[clean_data['Location'] == loc]
+        # 5. Automatically loop through those specific locations
+        for loc in sorted_locations:
+            loc_data = display_data[display_data['Location'] == loc]
             
             if loc_data.empty:
                 continue
 
             fig = build_high_speed_graph(
-                client=sidebar_client,  # <--- THE FIX: Pass the existing connection here!
+                client=sidebar_client,  
                 df=loc_data, 
                 title=f"Thermal Trends: {loc}",
                 start_view=start_date, 
@@ -406,7 +416,7 @@ elif selected_project != "All Projects":
             )
             
             if fig:
-                # THE FIX: Revert this back to use_container_width for charts only!
+                # Keep use_container_width=True for Plotly charts!
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
                 st.markdown("---")
 
