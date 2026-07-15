@@ -357,6 +357,7 @@ elif selected_project != "All Projects":
     # Pass the checkbox states dynamically so the Cache correctly refreshes!
     raw_data = get_universal_portal_data(
         selected_project, 
+        lookback_days=lookback_days,  # <--- THE FIX: Passing the days to BigQuery!
         is_summary_page=False,
         show_masked=st.session_state.get('global_show_masked', False),
         show_baddata=st.session_state.get('global_show_baddata', False)
