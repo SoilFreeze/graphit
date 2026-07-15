@@ -47,7 +47,8 @@ def get_cached_ambient_data(job_num, start_str):
     except:
         return pd.DataFrame()
 
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
+# THE FIX: Added 'client' as the first argument
+def build_high_speed_graph(client, df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
     Engineering-grade Trend Graph.
@@ -59,7 +60,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         
     if df.empty: return go.Figure().update_layout(title="No data available")
 
-    client = get_bq_client()
+    # THE FIX: Removed the get_bq_client() call here! We use the 'client' passed into the function.
     plot_df = df.copy() 
 
     # 1. TIMEZONE & UNITS
