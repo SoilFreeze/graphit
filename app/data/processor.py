@@ -65,13 +65,13 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
     else:
         temp_bounds_sql = "(m.temperature >= -30.0 AND m.temperature <= 120.0)"
 
-    # 3. Smart Office Filter
+    # 3. Smart Office Filter (Make sure this 'if' is pulled all the way to the left!)
     if 'OFFICE' in str(root_job_id).upper():
         office_filter_sql = ""
     else:
         office_filter_sql = "AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%' AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'"
 
-    # 4. NEW: Push the timeline filter directly into BigQuery!
+    # 4. Push the timeline filter directly into BigQuery
     if lookback_days >= 9999:
         time_filter_sql = "" # Let everything through for the 'Full Data Set' view
     else:
