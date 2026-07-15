@@ -365,14 +365,26 @@ elif selected_project != "All Projects":
     clean_data = apply_sanity_filter(raw_data)
 
     if page == "Time vs Temp":
+        # 1. Clean the list of unique locations first
         unique_locations = clean_data['Location'].dropna().unique()
-        sorted_locations = sorted(unique_locations, key=natural_sort_key)
+        valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
+        sorted_locations = sorted(valid_locations, key=natural_sort_key)
 
-        # Loop through each location and build its own graph
-        for loc in sorted_locations:
-            if str(loc).strip().upper() == 'UNASSIGNED':
-                continue
-                
+        # 2. THE FIX: Add a UI selector so we don't render 50 charts at once!
+        st.write("### 📈 Time vs Temperature Tracking")
+        default_selections = sorted_locations[:3] if len(sorted_locations) > 0 else []
+        
+        selected_locs = st.multiselect(
+            "📍 Select Locations to Graph (Displaying too many at once may slow down your browser):",
+            options=sorted_locations,
+            default=default_selections,
+            key="time_temp_loc_picker"
+        )
+        
+        st.divider()
+
+        # 3. Only loop through the ones the user actually selected
+        for loc in selected_locs:
             loc_data = clean_data[clean_data['Location'] == loc]
             
             if loc_data.empty:
@@ -387,12 +399,13 @@ elif selected_project != "All Projects":
                 unit_mode=unit_mode,
                 unit_label=unit_label,
                 display_tz=display_tz,
-                f_start_date=freeze_start_ts,  # <-- Safely passed the true freeze date
+                f_start_date=freeze_start_ts, 
                 curve_id=selected_project
             )
             
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                # config={"displayModeBar": False} also removes the bulky plotly hover menu to speed up rendering
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
                 st.markdown("---")
 
     elif page == "Depth Charts":
