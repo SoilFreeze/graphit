@@ -156,3 +156,43 @@ def apply_sanity_filter(df):
     df.loc[extreme_mask, 'approval_status'] = 'BADDATA'
     
     return df
+
+@st.cache_data(ttl=600)
+def get_sensor_performance_data(project_id="All Projects"):
+    """
+    Calculates the health score and failure rate for sensors.
+    Can be scoped to a single project or run globally across the fleet.
+    """
+    client = get_bq_client()
+    if client is None: 
+        return pd.DataFrame()
+    
+    # 1. Scope the query based on the active view
+    project_filter = ""
+    if project_id != "All Projects":
+        root_job_id = str(project_id).split('-')[0].strip()
+        project_filter = f"WHERE Project LIKE '{root_job_id}%'"
+        
+    # 2. Let BigQuery calculate the exact ratios of good vs. bad data
+    query = f"""
+        SELECT 
+            NodeNum,
+            MAX(Project) as Project,
+            MAX(Location) as Location,
+            COUNT(*) as Total_Readings,
+            COUNTIF(UPPER(approval_status) = 'BADDATA') as Bad_Readings,
+            COUNTIF(UPPER(approval_status) = 'MASKED') as Masked_Readings,
+            ROUND((COUNTIF(UPPER(approval_status) = 'BADDATA') / COUNT(*)) * 100, 2) as Failure_Rate_Pct
+        FROM `{config.MASTER_VIEW}`
+        {project_filter}
+        GROUP BY NodeNum
+        HAVING Total_Readings > 10  -- Ignore brand new sensors with barely any data
+        ORDER BY Failure_Rate_Pct DESC, Bad_Readings DESC
+    """
+    
+    try:
+        df = client.query(query).to_dataframe()
+        return df
+    except Exception as e:
+        st.error(f"Failed to fetch performance data: {e}")
+        return pd.DataFrame()
