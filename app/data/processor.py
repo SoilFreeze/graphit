@@ -35,7 +35,7 @@ def get_bq_client():
         return None
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, is_summary_page=False, show_masked=False, show_baddata=False):
+def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=False, show_masked=False, show_baddata=False):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
@@ -51,7 +51,7 @@ def get_universal_portal_data(project_id, is_summary_page=False, show_masked=Fal
             phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
 
     # 1. Safely map exclusions without triggering syntax errors
-    exclusions = ["'FALSE'"] # Always drop permanently rejected data
+    exclusions = ["'FALSE'"] 
     if not show_masked:
         exclusions.append("'MASKED'")
     if not show_baddata:
@@ -65,13 +65,19 @@ def get_universal_portal_data(project_id, is_summary_page=False, show_masked=Fal
     else:
         temp_bounds_sql = "(m.temperature >= -30.0 AND m.temperature <= 120.0)"
 
-    # 3. Smart Office Filter (Must be strictly aligned to the left edge of the function!)
+    # 3. Smart Office Filter
     if 'OFFICE' in str(root_job_id).upper():
         office_filter_sql = ""
     else:
         office_filter_sql = "AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%' AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'"
 
-    # Bind telemetry to the registry's timeline windows to seamlessly stitch sensor replacements together
+    # 4. NEW: Push the timeline filter directly into BigQuery!
+    if lookback_days >= 9999:
+        time_filter_sql = "" # Let everything through for the 'Full Data Set' view
+    else:
+        # Ask BigQuery to only give us data from the last X days
+        time_filter_sql = f"AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY)"
+
     query = f"""
         WITH ProjectAssignments AS (
             SELECT 
@@ -123,6 +129,7 @@ def get_universal_portal_data(project_id, is_summary_page=False, show_masked=Fal
         WHERE {temp_bounds_sql}
           AND m.Project LIKE CONCAT(@root_job_id, '%')
           {office_filter_sql}
+          {time_filter_sql}
           AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
         ORDER BY m.timestamp ASC
     """
