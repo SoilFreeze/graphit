@@ -116,12 +116,17 @@ def get_universal_portal_data(project_id, is_summary_page=False, show_masked=Fal
           
         WHERE {temp_bounds_sql}
           AND m.Project LIKE CONCAT(@root_job_id, '%')
-          AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%'
-          AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'
+          {office_filter_sql}
           AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
-        ORDER BY m.timestamp ASC
+        ORDER BY m.timestamp ASCC
     """
     
+    # 3. THE FIX: Only block office data if we are NOT looking at the Office project
+    if 'OFFICE' in str(root_job_id).upper():
+        office_filter_sql = ""  # Let the office data through!
+    else:
+        office_filter_sql = "AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%' AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'"
+        
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
     )
