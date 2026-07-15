@@ -406,8 +406,8 @@ elif selected_project != "All Projects":
             )
             
             if fig:
-                # THE FIX: Changed use_container_width to width="stretch" to clear terminal warnings
-                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+                # THE FIX: Revert this back to use_container_width for charts only!
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
                 st.markdown("---")
 
     elif page == "Depth Charts":
