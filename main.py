@@ -145,7 +145,7 @@ if sidebar_client is not None:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
 
 # INTERACTIVE REFRESH TRIGGER
-if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
+if st.sidebar.button("🔄 Refresh Data", width="stretch"):
     with st.sidebar.spinner("Purging cache maps..."):
         st.cache_data.clear()
         st.toast("System cache completely cleared!", icon="🔄")
@@ -326,8 +326,8 @@ if page in GLOBAL_PAGES:
             with c2:
                 st.subheader("🔐 Restricted Admin Access")
                 pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
-                if st.button("Unlock Dashboard", use_container_width=True):
-                    if pwd == st.secrets.get("admin_password", "Freeze123!!"):
+                if st.button("Unlock Dashboard", width="stretch"):
+                    if pwd == st.secrets.get("admin_password", "freeze123"):
                         st.session_state['authenticated'] = True
                         st.rerun()
                     else:
