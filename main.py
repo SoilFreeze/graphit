@@ -327,6 +327,7 @@ if page in GLOBAL_PAGES:
                 st.subheader("🔐 Restricted Admin Access")
                 pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
                 if st.button("Unlock Dashboard", width="stretch"):
+                    # THE FIX: Updated the fallback password to exactly "freeze123"
                     if pwd == st.secrets.get("admin_password", "freeze123"):
                         st.session_state['authenticated'] = True
                         st.rerun()
@@ -391,6 +392,7 @@ elif selected_project != "All Projects":
                 continue
 
             fig = build_high_speed_graph(
+                client=sidebar_client,  # <--- THE FIX: Pass the existing connection here!
                 df=loc_data, 
                 title=f"Thermal Trends: {loc}",
                 start_view=start_date, 
@@ -404,8 +406,8 @@ elif selected_project != "All Projects":
             )
             
             if fig:
-                # config={"displayModeBar": False} also removes the bulky plotly hover menu to speed up rendering
-                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+                # THE FIX: Changed use_container_width to width="stretch" to clear terminal warnings
+                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
                 st.markdown("---")
 
     elif page == "Depth Charts":
