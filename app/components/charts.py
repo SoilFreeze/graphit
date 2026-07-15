@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import re
 import app.utils.config as cfg
-from app.data.processor import get_bq_client # Import the shared connection
+from app.data.processor import get_bq_client 
 
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
@@ -47,7 +47,6 @@ def get_cached_ambient_data(job_num, start_str):
     except:
         return pd.DataFrame()
 
-# THE FIX: Added 'client' as the first argument
 def build_high_speed_graph(client, df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
     """
@@ -60,7 +59,6 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         
     if df.empty: return go.Figure().update_layout(title="No data available")
 
-    # THE FIX: Removed the get_bq_client() call here! We use the 'client' passed into the function.
     plot_df = df.copy() 
 
     # 1. TIMEZONE & UNITS
@@ -85,14 +83,6 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             digits = re.findall(r'\d+', clean_title_lower)
             loc_digit = digits[0] if digits else ""
             
-            target_q = f"""
-                SELECT CurveID, Day, Temp 
-                FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.reference_curves` 
-                WHERE CurveID LIKE '%{proj_num}%' 
-                AND REGEXP_CONTAINS(CurveID, r'[T|TP]0?{loc_digit}([^0-9]|$)')
-                AND NOT REGEXP_CONTAINS(CurveID, r'(?i)brine')
-                ORDER BY Day
-            """
             target_df = get_cached_reference_curve(curve_id, loc_digit)
             
             if not target_df.empty:
@@ -114,17 +104,12 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
                     if curve_max_ts > final_end_view:
                         final_end_view = curve_max_ts
                     
-                    # FASTER RENDERING: Changed to Scattergl
+                    # FASTER RENDERING: Changed to Scattergl & Removed Spline
                     fig.add_trace(go.Scattergl(
-                        x=s_df['timestamp'], 
-                        y=s_df['temperature'],
-                        name=display_name, 
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {cid}</b>", 
                         mode='lines',
-                        connectgaps=False, 
-                        customdata=s_df[['NodeNum']], 
-                        # THE FIX: Removed shape='spline' and smoothing=1.3
-                        line=dict(width=2, color=sf_15_palette[i % 15]),
-                        hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
+                        line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)]),
+                        legendrank=1 
                     ))
         except:
             pass # Fail silently
@@ -190,7 +175,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             gap_rows['temperature'] = float('nan')
             s_df = pd.concat([s_df, gap_rows]).sort_values('timestamp')
         
-        # FASTER RENDERING: Changed to Scattergl
+        # FASTER RENDERING: Changed to Scattergl & Removed Spline
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], 
             y=s_df['temperature'],
@@ -208,7 +193,6 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             if st.session_state.get('global_show_masked', False):
                 masked_df = s_df[s_status == 'MASKED']
                 if not masked_df.empty:
-                    # FASTER RENDERING: Changed to Scattergl
                     fig.add_trace(go.Scattergl(
                         x=masked_df['timestamp'], y=masked_df['temperature'],
                         name=display_name + " [MASKED]", mode='markers',
@@ -221,7 +205,6 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             if st.session_state.get('global_show_baddata', False):
                 bad_df = s_df[s_status == 'BADDATA']
                 if not bad_df.empty:
-                    # FASTER RENDERING: Changed to Scattergl
                     fig.add_trace(go.Scattergl(
                         x=bad_df['timestamp'], y=bad_df['temperature'],
                         name=display_name + " [BAD]", mode='markers',
@@ -246,13 +229,6 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         
         if job_num:
             start_str = pd.to_datetime(start_view).strftime('%Y-%m-%d %H:%M:%S')
-            amb_q = f"""
-                SELECT NodeNum, timestamp, temperature 
-                FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.master_data_view_v2` 
-                WHERE Project LIKE '{job_num}%' 
-                  AND UPPER(Location) = 'AMBIENT'
-                  AND timestamp >= '{start_str}'
-            """
             try:
                 amb_df = get_cached_ambient_data(job_num, start_str)
                 if not amb_df.empty:
@@ -262,7 +238,6 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
                     
                     amb_df = amb_df.set_index('timestamp').resample('1h')['temperature'].mean().dropna().reset_index()
                     
-                    # FASTER RENDERING: Changed to Scattergl
                     fig.add_trace(go.Scattergl(
                         x=amb_df['timestamp'], y=amb_df['temperature'],
                         name="Ambient Air (Site Avg)", mode='lines',
@@ -341,6 +316,3 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
     x_times = [pd.Timestamp(start_date) + pd.Timedelta(days=d) for d, t in curve]
     y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
     return x_times, y_temps
-
-
-
