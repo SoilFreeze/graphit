@@ -200,19 +200,18 @@ st.session_state['global_show_baddata'] = st.sidebar.checkbox(
 )
 
 st.sidebar.divider()
+st.sidebar.subheader("⏳ Timeline Navigation")
 
-# Add this right above your timeline slider
-show_full_dataset = st.checkbox("🌍 See Full Data Set (Ignore Timeline)", value=False)
+# 1. Put the checkbox in the sidebar
+show_full_dataset = st.sidebar.checkbox("🌍 See Full Data Set (Ignore Timeline)", value=False, key="full_data_toggle")
 
 if show_full_dataset:
-    # Bypass the date filter completely and use all available data
-    filtered_df = clean_data 
+    # 2. Hide the slider and force a massive lookback period
+    st.sidebar.caption("Showing all available historical data.")
+    st.session_state["global_lookback_days"] = 9999 
+    filtered_df = clean_data  # Pass the entire dataset
 else:
-    # Your existing date filtering logic goes here
-    # filtered_df = clean_data[(clean_data['timestamp'] >= start_date) & ...]
-    
-    st.sidebar.subheader("⏳ Timeline Navigation")
-    
+    # 3. Show the slider only if they are not viewing the full dataset
     selected_weeks = st.sidebar.slider(
         "Select History Window (Weeks)",
         min_value=1,
@@ -222,9 +221,16 @@ else:
         key="global_lookback_weeks_slider",
         help="Slide the point to change how many weeks of history pull into your charts."
     )
-
     lookback_days = selected_weeks * 7
     st.session_state["global_lookback_days"] = lookback_days
+    
+    # Apply the standard date filter
+    if not clean_data.empty and 'timestamp' in clean_data.columns:
+        # Calculate cutoff based on the most recent data point
+        cutoff_date = clean_data['timestamp'].max() - pd.Timedelta(days=lookback_days)
+        filtered_df = clean_data[clean_data['timestamp'] >= cutoff_date]
+    else:
+        filtered_df = clean_data
 
 # CSS customizations
 st.sidebar.markdown(
@@ -247,7 +253,6 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True
 )
-
 # 4. MEASUREMENT & UNITS
 st.sidebar.subheader("🌡️ Units")
 unit_mode = st.sidebar.radio(
