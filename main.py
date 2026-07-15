@@ -368,52 +368,35 @@ elif selected_project != "All Projects":
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
         
-        # --- SMART CASCADING FILTERS ---
-        # 1. Safely extract available Phases
-        available_phases = sorted([str(p) for p in clean_data['Phase'].dropna().unique() if str(p).strip().upper() not in ['NAN', 'NONE', '']])
+        # 1. Extract available Systems (Phase is already handled by the sidebar active project)
+        available_systems = sorted(
+            [str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
+            key=natural_sort_key
+        )
         
-        # Auto-fill the first phase by default (or the only phase if it's already broken out)
-        default_phase = [available_phases[0]] if available_phases else []
-
-        col1, col2 = st.columns(2)
-        with col1:
-            selected_phases = st.multiselect(
-                "🔍 Filter by Phase:", 
-                options=available_phases, 
-                default=default_phase
-            )
-            
-        # 2. Filter the data down to the selected phase BEFORE checking for systems
-        phase_filtered_data = clean_data.copy()
-        if selected_phases:
-            phase_filtered_data = phase_filtered_data[phase_filtered_data['Phase'].astype(str).isin(selected_phases)]
-
-        # 3. Extract available Systems based *only* on the active Phase
-        available_systems = sorted([str(s) for s in phase_filtered_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
+        selected_systems = []
         
-        # Auto-fill the first system by default
-        default_system = [available_systems[0]] if available_systems else []
-
-        with col2:
+        # 2. THE FIX: Only show the filter if there are actually multiple systems to choose from!
+        if len(available_systems) > 1:
             selected_systems = st.multiselect(
-                "⚙️ Filter by System:", 
+                "⚙️ Filter by System (Leave blank to show all systems):", 
                 options=available_systems, 
-                default=default_system
+                default=[]  # Defaulting to blank safely passes all data through
             )
             
-        # 4. Final slice based on the System selection
-        display_data = phase_filtered_data.copy()
+        # 3. Slice the data ONLY if the user explicitly picked a system
+        display_data = clean_data.copy()
         if selected_systems:
             display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
             
         st.divider()
 
-        # 5. Grab only the locations that belong to the auto-filled Phases/Systems
+        # 4. Grab only the valid locations
         unique_locations = display_data['Location'].dropna().unique()
         valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
         sorted_locations = sorted(valid_locations, key=natural_sort_key)
 
-        # 6. Automatically loop through those specific locations
+        # 5. Automatically loop through those specific locations
         for loc in sorted_locations:
             loc_data = display_data[display_data['Location'] == loc]
             
