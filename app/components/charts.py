@@ -41,7 +41,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip() if len(parts) > 0 else ""
             
-            # THE FIX: Extract the pipe number from the graph's clean title, NOT the project name!
+            # Extract the pipe number from the graph's clean title
             digits = re.findall(r'\d+', clean_title_lower)
             loc_digit = digits[0] if digits else ""
             
@@ -74,7 +74,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                     if curve_max_ts > final_end_view:
                         final_end_view = curve_max_ts
                     
-                    fig.add_trace(go.Scatter(
+                    # FASTER RENDERING: Changed to Scattergl
+                    fig.add_trace(go.Scattergl(
                         x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {cid}</b>", 
                         mode='lines',
                         line=dict(color=gray_shades[c_idx % len(gray_shades)], width=3.5, dash=dash_styles[c_idx % len(dash_styles)], shape='spline', smoothing=1.3),
@@ -90,31 +91,24 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     skip_keywords = ['AMBIENT', 'OFFICE', 'X-TRA', 'XTRA']
     empty_vals = ['nan', 'none', '', '—', '-']
 
-    # --- SEAMLESS TRANSITION FIX ---
-    # Define the grouping axis: Depth for pipes, Bank for brine
     if is_temp_pipe:
         plot_df['Logical_Position'] = plot_df['Depth'].astype(str).str.strip()
     else:
         plot_df['Logical_Position'] = plot_df['Bank'].astype(str).str.strip()
 
-    # Filter out known bad values early
     plot_df = plot_df[~plot_df['Logical_Position'].str.lower().isin(empty_vals)]
 
-    # Loop through unique POSITIONS instead of hardware nodes
     for pos in plot_df['Logical_Position'].unique():
         if any(x in pos.upper() for x in skip_keywords):
             continue
 
-        # Isolate all data for this specific depth/bank and sort chronologically
         pos_df = plot_df[plot_df['Logical_Position'] == pos].sort_values('timestamp')
         
         if pos_df.empty:
             continue
             
-        # Grab the MOST RECENT sensor ID for the static legend display
         latest_sensor = str(pos_df.iloc[-1]['NodeNum']).strip()
 
-        # Format display names
         if is_temp_pipe:
             display_name = f"{pos} ft ({latest_sensor})"
             priority = 1
@@ -138,30 +132,21 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         pos = node_cfg['position']
         display_name = node_cfg['display_name']
         
-        # Isolate the data for this specific position
         s_df = plot_df[plot_df['Logical_Position'] == pos].sort_values('timestamp')
-        
-        # Resample to 1-hour intervals to smooth the graph.
         s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
-        
-        # Drop the 1-hour NaNs so small gaps (under 6 hours) stay connected
         s_df = s_df.dropna(subset=['temperature']).copy()
         
-        # --- NEW: EXPLICITLY BREAK THE LINE ON > 6 HOUR GAPS ---
         s_df['time_diff'] = s_df['timestamp'].diff()
         gap_mask = s_df['time_diff'] > pd.Timedelta(hours=6)
         
         if gap_mask.any():
             gap_rows = s_df[gap_mask].copy()
-            # Set a dummy timestamp inside the gap and assign NaN to temperature
             gap_rows['timestamp'] = gap_rows['timestamp'] - pd.Timedelta(seconds=1)
             gap_rows['temperature'] = float('nan')
-            # Concat the dummy NaN rows and re-sort
             s_df = pd.concat([s_df, gap_rows]).sort_values('timestamp')
-        # -------------------------------------------------------
         
-        # (Your existing main line trace goes here)
-        fig.add_trace(go.Scatter(
+        # FASTER RENDERING: Changed to Scattergl
+        fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], 
             y=s_df['temperature'],
             name=display_name, 
@@ -172,16 +157,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
         ))
         
-        # --- VISUAL OVERLAYS FOR AUDITING ---
         if 'approval_status' in s_df.columns:
-            # Safely strip spaces so 'BAD DATA' and 'BADDATA' both map correctly
             s_status = s_df['approval_status'].fillna('TRUE').astype(str).str.replace(' ', '').str.upper().str.strip()
             
-            # 2. MASKED DATA
             if st.session_state.get('global_show_masked', False):
                 masked_df = s_df[s_status == 'MASKED']
                 if not masked_df.empty:
-                    fig.add_trace(go.Scatter(
+                    # FASTER RENDERING: Changed to Scattergl
+                    fig.add_trace(go.Scattergl(
                         x=masked_df['timestamp'], y=masked_df['temperature'],
                         name=display_name + " [MASKED]", mode='markers',
                         customdata=masked_df[['NodeNum']],
@@ -190,39 +173,22 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         showlegend=False
                     ))
             
-            # 3. BADDATA
             if st.session_state.get('global_show_baddata', False):
                 bad_df = s_df[s_status == 'BADDATA']
                 if not bad_df.empty:
-                    fig.add_trace(go.Scatter(
+                    # FASTER RENDERING: Changed to Scattergl
+                    fig.add_trace(go.Scattergl(
                         x=bad_df['timestamp'], y=bad_df['temperature'],
                         name=display_name + " [BAD]", mode='markers',
                         customdata=bad_df[['NodeNum']],
-                        marker=dict(symbol='x', size=9, color='gray', line=dict(width=2.5)), # Now colored Gray!
-                        hovertemplate="<b>❌ BAD DATA</b> <i>(%{customdata[0]})</i><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
-                        showlegend=False
-                    ))
-            
-            # 2. BADDATA: Overlay as Red X's
-            if st.session_state.get('global_show_baddata', False):
-                bad_df = s_df[s_status == 'BADDATA']
-                if not bad_df.empty:
-                    fig.add_trace(go.Scatter(
-                        x=bad_df['timestamp'], 
-                        y=bad_df['temperature'],
-                        name=display_name + " [BAD]", 
-                        mode='markers',
-                        customdata=bad_df[['NodeNum']],
                         marker=dict(symbol='x', size=9, color='red', line=dict(width=2.5)),
                         hovertemplate="<b>❌ BAD DATA</b> | %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>",
-                        showlegend=False  # Keeps the legend clean
+                        showlegend=False
                     ))
         
-    # --- FIX 3: INJECT AMBIENT DATA GLOBALLY ---
     is_brine_graph = not is_temp_pipe
     
     if st.session_state.get('global_show_ambient', True) and is_brine_graph:
-        # THE FIX: Accurately grab the project name using the correct dataframe column
         p_name = ""
         if 'Project' in plot_df.columns and not plot_df.empty:
             p_name = str(plot_df['Project'].iloc[0])
@@ -249,10 +215,10 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                         amb_df['timestamp'] = amb_df['timestamp'].dt.tz_localize('UTC')
                     amb_df['timestamp'] = amb_df['timestamp'].dt.tz_convert(display_tz)
                     
-                    # THE FIX: Average all ambient sensors across the entire site (all phases) into one clean metric
                     amb_df = amb_df.set_index('timestamp').resample('1h')['temperature'].mean().dropna().reset_index()
                     
-                    fig.add_trace(go.Scatter(
+                    # FASTER RENDERING: Changed to Scattergl
+                    fig.add_trace(go.Scattergl(
                         x=amb_df['timestamp'], y=amb_df['temperature'],
                         name="Ambient Air (Site Avg)", mode='lines',
                         connectgaps=False,
@@ -263,7 +229,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             except Exception:
                 pass
 
-    # 4. REFERENCE LINES
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     
     now_ts = pd.Timestamp.now(tz=display_tz)
@@ -273,7 +238,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
-    # 5. LAYOUT & TITLING
     if 'Project' in plot_df.columns and not plot_df.empty:
         p_name = str(plot_df['Project'].iloc[0])
     elif 'Raw_Project_Name' in plot_df.columns and not plot_df.empty:
@@ -283,7 +247,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     
     clean_title = str(title).replace("Thermal Trends:", "").strip()
     
-    # --- THE FIX: Use the variable we already defined above ---
     if is_temp_pipe:
         header_text = f"Time vs Temperature - Temperatures for Temperature Pipe {clean_title}"
     else:
@@ -314,7 +277,6 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         xaxis=dict(range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, hoverformat='%A, %b %d, %Y', tickformat='%b %d', minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8')),
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top"),
-        # Force the unified hover header to display full Date and Time (e.g., Jul 14, 2026 09:30 AM)
     )
     fig.update_xaxes(hoverformat="%b %d, %Y %I:%M %p")                           
     return fig
