@@ -368,33 +368,52 @@ elif selected_project != "All Projects":
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
         
-        # --- RESTORED PHASE & SYSTEM FILTERS ---
-        # 1. Safely extract available Phases and Systems from the data
+        # --- SMART CASCADING FILTERS ---
+        # 1. Safely extract available Phases
         available_phases = sorted([str(p) for p in clean_data['Phase'].dropna().unique() if str(p).strip().upper() not in ['NAN', 'NONE', '']])
-        available_systems = sorted([str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
         
-        # 2. Put the selectors side-by-side
+        # Auto-fill the first phase by default (or the only phase if it's already broken out)
+        default_phase = [available_phases[0]] if available_phases else []
+
         col1, col2 = st.columns(2)
         with col1:
-            selected_phases = st.multiselect("🔍 Filter by Phase (Leave blank for all):", options=available_phases)
-        with col2:
-            selected_systems = st.multiselect("⚙️ Filter by System (Leave blank for all):", options=available_systems)
+            selected_phases = st.multiselect(
+                "🔍 Filter by Phase:", 
+                options=available_phases, 
+                default=default_phase
+            )
             
-        # 3. Slice the data based on what you selected
-        display_data = clean_data.copy()
+        # 2. Filter the data down to the selected phase BEFORE checking for systems
+        phase_filtered_data = clean_data.copy()
         if selected_phases:
-            display_data = display_data[display_data['Phase'].astype(str).isin(selected_phases)]
+            phase_filtered_data = phase_filtered_data[phase_filtered_data['Phase'].astype(str).isin(selected_phases)]
+
+        # 3. Extract available Systems based *only* on the active Phase
+        available_systems = sorted([str(s) for s in phase_filtered_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
+        
+        # Auto-fill the first system by default
+        default_system = [available_systems[0]] if available_systems else []
+
+        with col2:
+            selected_systems = st.multiselect(
+                "⚙️ Filter by System:", 
+                options=available_systems, 
+                default=default_system
+            )
+            
+        # 4. Final slice based on the System selection
+        display_data = phase_filtered_data.copy()
         if selected_systems:
             display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
             
         st.divider()
 
-        # 4. Grab only the locations that belong to the filtered Phases/Systems
+        # 5. Grab only the locations that belong to the auto-filled Phases/Systems
         unique_locations = display_data['Location'].dropna().unique()
         valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
         sorted_locations = sorted(valid_locations, key=natural_sort_key)
 
-        # 5. Automatically loop through those specific locations
+        # 6. Automatically loop through those specific locations
         for loc in sorted_locations:
             loc_data = display_data[display_data['Location'] == loc]
             
@@ -416,7 +435,6 @@ elif selected_project != "All Projects":
             )
             
             if fig:
-                # Keep use_container_width=True for Plotly charts!
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
                 st.markdown("---")
 
