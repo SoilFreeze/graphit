@@ -321,22 +321,41 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
                     """
                     client.query(sp_cleanup_sql).result()
                     
+                    status_box2.markdown("🧹 **[1/2] Consolidating SensorPush timelines...**")
+                    sp_cleanup_sql = f"""
+                        CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
+                        SELECT 
+                            TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                            -- Strip floating-point decimals from raw hardware IDs before grouping
+                            UPPER(TRIM(SPLIT(CAST(NodeNum AS STRING), '.')[OFFSET(0)])) as NodeNum, 
+                            ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature,
+                            MAX(rssi) as rssi
+                        FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                        WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
+                        GROUP BY 1, 2;
+
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
+                        SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature, rssi FROM tmp_clean_sensorpush;
+                    """
+                    client.query(sp_cleanup_sql).result()
+                    
                     status_box2.markdown("🛰️ **[2/2] Consolidating Lord Wireless timelines...**")
                     lord_cleanup_sql = f"""
                         CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
                         SELECT 
                             TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
-                            UPPER(TRIM(CAST(NodeNum AS STRING))) as NodeNum, 
+                            -- Strip floating-point decimals from raw hardware IDs before grouping
+                            UPPER(TRIM(SPLIT(CAST(NodeNum AS STRING), '.')[OFFSET(0)])) as NodeNum, 
                             ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature
                         FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
                         WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
-                        GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), UPPER(TRIM(CAST(NodeNum AS STRING)));
+                        GROUP BY 1, 2;
 
                         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
                         SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature FROM tmp_clean_lord;
                     """
                     client.query(lord_cleanup_sql).result()
-                    
+                                     
                     st.cache_data.clear()
                     status_box2.empty()
                     st.success("🎉 Global Database Consolidation successfully completed!")
