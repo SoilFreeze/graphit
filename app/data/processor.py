@@ -72,11 +72,7 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
         office_filter_sql = "AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%' AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'"
 
     # 4. Push the timeline filter directly into BigQuery
-    if lookback_days >= 9999:
-        time_filter_sql = "" # Let everything through for the 'Full Data Set' view
-    else:
-        # Ask BigQuery to only give us data from the last X days
-        time_filter_sql = f"AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY)"
+    time_filter_sql = f"AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY)"
 
     query = f"""
         WITH ProjectAssignments AS (
@@ -137,18 +133,8 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
     )
-    
+       
     df = client.query(query, job_config=job_config).to_dataframe()
-    
-    # THE FIX: If we are viewing the massive "Full Data" set, downsample to 1-hour averages
-    # to keep the browser from crashing.
-    if lookback_days >= 9999 and not df.empty:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # We group by the columns that actually exist in the dataframe returned by your query
-        group_cols = ['Raw_Project_Name', 'NodeNum', 'Location', pd.Grouper(key='timestamp', freq='1h')]
-        
-        df = df.groupby(group_cols)['temperature'].mean().reset_index()
         
     return df
 
