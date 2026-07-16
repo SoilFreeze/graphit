@@ -106,38 +106,38 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     else:
         where_clauses.append("t.Project IS NOT NULL")
 
-    # ... keep your existing timestamp and threshold logic below here
+    # ... (keep all the target_scope and Project targeting logic above here) ...
 
+    # 3. Handle Timestamps (safely cast to BigQuery TIMESTAMP format)
     start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
 
-    # Use t.timestamp
     if f["temporal_dir"] == "Between Range":
         end_ts_str = f"{f['e_date'].strftime('%Y-%m-%d')} {f['e_time'].strftime('%H:%M:%S')}"
-        where_clauses.append(f"t.timestamp BETWEEN '{start_ts_str}' AND '{end_ts_str}'")
+        where_clauses.append(f"t.timestamp BETWEEN TIMESTAMP('{start_ts_str}') AND TIMESTAMP('{end_ts_str}')")
     elif f["temporal_dir"] in ["Older Than", "Newer Than"]:
         op = "<" if f["temporal_dir"] == "Older Than" else ">"
-        where_clauses.append(f"t.timestamp {op} '{start_ts_str}'")
+        where_clauses.append(f"t.timestamp {op} TIMESTAMP('{start_ts_str}')")
     
-    # Use t.temperature
+    # 4. Handle Temperature Thresholds
     if f["val_filter"] == "Above Threshold":
         where_clauses.append(f"t.temperature > {f['threshold']}")
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"t.temperature < {f['threshold']}")
 
-    # Use t.approval_status instead of r.approve
-    if current_status_filter != "all":
-        if current_status_filter == "all but null":
+    # 5. THE FIX: Handle Status Filters by forcing it to lowercase first!
+    safe_status = str(current_status_filter).lower().strip()
+    
+    if safe_status != "all":
+        if safe_status == "all but null":
             where_clauses.append("t.approval_status IS NOT NULL")
-        elif current_status_filter == "null (streaming / unreviewed)":
+        elif safe_status == "null (streaming / unreviewed)":
             where_clauses.append("t.approval_status IS NULL")
-        elif current_status_filter == "true":
-            # Assuming 'true' implies data that hasn't been masked/rejected
+        elif safe_status == "true":
             where_clauses.append("t.approval_status IS NULL") 
         else:
-            where_clauses.append(f"LOWER(CAST(t.approval_status AS STRING)) = '{str(current_status_filter).lower()}'")
+            where_clauses.append(f"LOWER(CAST(t.approval_status AS STRING)) = '{safe_status}'")
 
     return " AND ".join(where_clauses)
-
 
 def render_bulk_approval_filters(reg_df, selected_project, target_scope):
     """Renders temporal filter vectors alongside numeric sensor value threshold blocks."""
