@@ -29,10 +29,6 @@ def get_bq_client():
     except Exception as e:
         st.error(f"❌ BigQuery Authentication Failed: {e}")
         return None
-            
-    except Exception as e:
-        st.error(f"❌ BigQuery Authentication Failed: {e}")
-        return None
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=False, show_masked=False, show_baddata=False):
