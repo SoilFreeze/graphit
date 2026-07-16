@@ -436,16 +436,21 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
             sql = f"""
                 MERGE `{target_table}` T
                 USING (
-                    SELECT DISTINCT t.NodeNum, t.timestamp 
+                    SELECT 
+                        UPPER(TRIM(CAST(t.NodeNum AS STRING))) as NodeNum, 
+                        TIMESTAMP_TRUNC(t.timestamp, HOUR) as match_hour,
+                        MAX(t.timestamp) as exact_timestamp
                     FROM `{telemetry_table}` t 
                     WHERE {aliased_where}
+                    GROUP BY 1, 2
                 ) S
-                ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                ON UPPER(TRIM(CAST(T.NodeNum AS STRING))) = S.NodeNum 
+                   AND TIMESTAMP_TRUNC(T.timestamp, HOUR) = S.match_hour
                 WHEN MATCHED THEN
                     UPDATE SET approve = '{new_status}'
                 WHEN NOT MATCHED THEN
                     INSERT (NodeNum, timestamp, approve) 
-                    VALUES (S.NodeNum, S.timestamp, '{new_status}')
+                    VALUES (S.NodeNum, S.exact_timestamp, '{new_status}')
             """
             
             try:
