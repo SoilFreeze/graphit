@@ -244,13 +244,22 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
         status_box.info("Auditing massive raw tables... (This may take a few seconds)")
         try:
             # Smart SQL that calculates duplicates and merges without altering the table
+            # Smart SQL that calculates duplicates and merges without altering the table
             def get_audit_query(table_name):
                 return f"""
                     WITH RawStats AS (
-                        SELECT 
-                            COUNT(*) as Total_Points,
-                            COUNT(*) - COUNT(DISTINCT STRUCT(timestamp, UPPER(TRIM(CAST(NodeNum AS STRING))), CAST(temperature AS STRING))) as Exact_Doubles
+                        SELECT COUNT(*) as Total_Points
                         FROM `{PROJECT_ID}.{DATASET_ID}.{table_name}`
+                    ),
+                    DistinctStats AS (
+                        SELECT COUNT(*) as Distinct_Points
+                        FROM (
+                            SELECT DISTINCT 
+                                timestamp, 
+                                UPPER(TRIM(CAST(NodeNum AS STRING))) as NodeNum, 
+                                CAST(temperature AS STRING) as temp
+                            FROM `{PROJECT_ID}.{DATASET_ID}.{table_name}`
+                        )
                     ),
                     HourlyStats AS (
                         SELECT COUNT(*) as Final_Points
@@ -262,11 +271,13 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
                         )
                     )
                     SELECT 
-                        Total_Points, 
-                        Exact_Doubles,
-                        (Total_Points - Final_Points - Exact_Doubles) as Merged_Points,
-                        Final_Points
-                    FROM RawStats CROSS JOIN HourlyStats
+                        r.Total_Points, 
+                        (r.Total_Points - d.Distinct_Points) as Exact_Doubles,
+                        (d.Distinct_Points - h.Final_Points) as Merged_Points,
+                        h.Final_Points
+                    FROM RawStats r 
+                    CROSS JOIN DistinctStats d 
+                    CROSS JOIN HourlyStats h
                 """
             
             sp_res = client.query(get_audit_query("raw_sensorpush")).to_dataframe().iloc[0]
