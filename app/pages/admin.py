@@ -433,6 +433,23 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
                 with st.spinner("Processing database status reclassifications..."):
                     job = client.query(sql)
                     job.result()
+
+                affected_rows = job.num_dml_affected_rows
+                st.warning(f"🚨 DEBUG: BigQuery physically modified {affected_rows} rows.")
+                
+                st.success(f"✅ Reclassification successful! Explicitly stamped '{new_status}' on {affected_rows:,} records.")
+                
+                st.cache_data.clear()
+                run_profile_audit() # Refresh data metrics locally
+                st.balloons()
+                
+                # 2. TEMPORARILY disable the rerun so you can actually read the screen
+                # time.sleep(1.0)
+                # st.rerun()
+                
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
+                st.code(sql, language="sql")
                 
                 st.success(f"✅ Reclassification successful! Explicitly stamped '{new_status}' on {job.num_dml_affected_rows:,} records.")
                 st.cache_data.clear()
