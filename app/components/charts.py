@@ -176,14 +176,15 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             s_df = pd.concat([s_df, gap_rows]).sort_values('timestamp')
         
         # FASTER RENDERING: Changed to Scattergl & Removed Spline
-        fig.add_trace(go.Scattergl(
-            x=s_df['timestamp'], 
-            y=s_df['temperature'],
+        # REVERTED TO go.Scatter
+        fig.add_trace(go.Scatter(
+            x=s_df['timestamp'], y=s_df['temperature'],
             name=display_name, 
-            mode='lines',
+            mode='lines+markers',     # THE FIX: Draw tiny dots so isolated pings don't vanish
+            marker=dict(size=3),      # Keeps the dots small so they don't clutter the line
             connectgaps=False, 
             customdata=s_df[['NodeNum']], 
-            line=dict(width=2, color=sf_15_palette[i % 15]),
+            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
             hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
         ))
         
