@@ -569,8 +569,8 @@ def get_cached_fleet_matrix():
         LEFT JOIN ActiveNodes n 
           ON n.NodeRootJob = p.RootJob AND (p.ProjectPhase IS NULL OR TRIM(n.Phase) = p.ProjectPhase)
         LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
-          ON UPPER(TRIM(CAST(n.NodeNum AS STRING))) = UPPER(TRIM(CAST(m.NodeNum AS STRING)))
-          AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+            ON UPPER(TRIM(CAST(target.NodeNum AS STRING))) = UPPER(TRIM(CAST(source.NodeNum AS STRING))) 
+            AND target.timestamp = source.timestamp
         GROUP BY 1,2,3,4 
         ORDER BY p.Project ASC
     """
