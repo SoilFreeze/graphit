@@ -80,29 +80,30 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
         proj_mask = get_project_mask(reg_df, selected_project)
         proj_filtered = reg_df[proj_mask]
         
-        # 1. Handle Node ID targeting (FIXED: Added TRIM() to safely match NodeNums with trailing spaces)
+        # 1. Handle Node ID targeting (FIXED: UPPER() for case-insensitive matching)
         if target_scope == "Specific Node":
-            where_clauses.append(f"TRIM(CAST(t.NodeNum AS STRING)) = '{str(f['scope_val']).strip()}'")
+            safe_node = str(f['scope_val']).strip().upper()
+            where_clauses.append(f"UPPER(TRIM(CAST(t.NodeNum AS STRING))) = '{safe_node}'")
         elif target_scope == "Specific Location":
             loc_nodes = proj_filtered[proj_filtered['Location'] == f['scope_val']]['NodeNum'].dropna().unique().tolist()
-            nodes_str = ", ".join([f"'{str(n).strip()}'" for n in loc_nodes])
-            where_clauses.append(f"TRIM(CAST(t.NodeNum AS STRING)) IN ({nodes_str})" if nodes_str else "t.NodeNum = 'NONE'")
-        else:
+            nodes_str = ", ".join([f"'{str(n).strip().upper()}'" for n in loc_nodes])
+            where_clauses.append(f"UPPER(TRIM(CAST(t.NodeNum AS STRING))) IN ({nodes_str})" if nodes_str else "t.NodeNum = 'NONE'")
+        elif target_scope == "Project Wide":
             proj_nodes = proj_filtered['NodeNum'].dropna().unique().tolist()
             if proj_nodes:
-                nodes_str = ", ".join([f"'{str(n).strip()}'" for n in proj_nodes])
-                where_clauses.append(f"TRIM(CAST(t.NodeNum AS STRING)) IN ({nodes_str})")
+                nodes_str = ", ".join([f"'{str(n).strip().upper()}'" for n in proj_nodes])
+                where_clauses.append(f"UPPER(TRIM(CAST(t.NodeNum AS STRING))) IN ({nodes_str})")
             else:
                 where_clauses.append("t.NodeNum = 'NONE'")
         
-        # 2. Handle Job and Phase targeting for the SQL view
-        job_num = str(selected_project).split('-')[0].strip()
-        where_clauses.append(f"t.Project LIKE '{job_num}%'")
+        # 2. Handle Job and Phase targeting for the SQL view (FIXED: UPPER() applied)
+        job_num = str(selected_project).split('-')[0].strip().upper()
+        where_clauses.append(f"UPPER(CAST(t.Project AS STRING)) LIKE '{job_num}%'")
         
         phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
         if phase_match:
-            target_phase = phase_match.group(1)
-            where_clauses.append(f"TRIM(CAST(t.Phase AS STRING)) = '{target_phase}'")
+            target_phase = phase_match.group(1).upper()
+            where_clauses.append(f"UPPER(TRIM(CAST(t.Phase AS STRING))) = '{target_phase}'")
     else:
         where_clauses.append("t.Project IS NOT NULL")
 
@@ -122,79 +123,20 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"t.temperature < {f['threshold']}")
 
-    # 5. Handle Status Filters (FIXED: Added TRIM to prevent whitespace mismatch and fixed TRUE logic)
-    safe_status = str(current_status_filter).lower().strip()
+    # 5. Handle Status Filters (FIXED: Explicitly mimic the processor.py logic by stripping inner spaces)
+    safe_status = str(current_status_filter).upper().replace(" ", "")
     
-    if safe_status != "all":
-        if safe_status == "all but null":
+    if safe_status != "ALL":
+        if safe_status == "ALLBUTNULL":
             where_clauses.append("t.approval_status IS NOT NULL")
-        elif safe_status == "null (streaming / unreviewed)":
+        elif safe_status == "NULL(STREAMING/UNREVIEWED)":
             where_clauses.append("t.approval_status IS NULL")
-        elif safe_status == "true":
-            # Fix: If users override Masked -> True, the DB explicitly writes "TRUE", meaning it is no longer NULL.
-            where_clauses.append("(t.approval_status IS NULL OR TRIM(LOWER(CAST(t.approval_status AS STRING))) = 'true')")
+        elif safe_status == "TRUE":
+            where_clauses.append("(t.approval_status IS NULL OR REPLACE(UPPER(TRIM(CAST(t.approval_status AS STRING))), ' ', '') = 'TRUE')")
         else:
-            # Fix: Added TRIM to prevent silent failures when the DB contains "MASKED "
-            where_clauses.append(f"TRIM(LOWER(CAST(t.approval_status AS STRING))) = '{safe_status}'")
+            where_clauses.append(f"REPLACE(UPPER(TRIM(CAST(t.approval_status AS STRING))), ' ', '') = '{safe_status}'")
 
     return " AND ".join(where_clauses)
-
-def render_bulk_approval_filters(reg_df, selected_project, target_scope):
-    """Renders temporal filter vectors alongside numeric sensor value threshold blocks."""
-    col_f1, col_f2, col_f3 = st.columns(3)
-    
-    with col_f1:
-        temporal_dir = st.selectbox("Temporal Direction", ["Between Range", "Older Than", "Newer Than"], key="blk_mgmt_temp_dir")
-        
-        if temporal_dir == "Between Range":
-            c_start, c_end = st.columns(2)
-            with c_start:
-                s_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=7), key="blk_mgmt_s_date")
-                s_time = st.time_input("Start Time (Exact)", value=datetime.min.time(), key="blk_mgmt_s_time")
-            with c_end:
-                e_date = st.date_input("End Date", value=datetime.now().date(), key="blk_mgmt_e_date")
-                e_time = st.time_input("End Time (Exact)", value=datetime.max.time(), key="blk_mgmt_e_time")
-        else:
-            s_date = st.date_input("Target Date", value=datetime.now().date() - timedelta(days=7), key="blk_mgmt_single_date")
-            s_time = st.time_input("Target Time (Exact)", value=datetime.min.time(), key="blk_mgmt_single_time")
-            e_date, e_time = None, None
-
-    with col_f2:
-        val_filter = st.selectbox("Value Filter", ["No Threshold", "Above Threshold", "Below Threshold"], key="blk_mgmt_val_filter")
-        threshold = st.number_input("Threshold Value (°F)", value=100.0, key="blk_mgmt_threshold")
-
-    with col_f3:
-        scope_val = None
-        if selected_project == "All Projects":
-            st.info("Targeting **Global Registry Scope** (All Active Projects)")
-            scope_val = "ALL_PROJECTS"
-        else:
-            # Apply our new smart mask
-            proj_mask = get_project_mask(reg_df, selected_project)
-            proj_filtered = reg_df[proj_mask]
-            
-            if target_scope == "Project Wide":
-                st.info(f"Targeting all nodes in **{selected_project}**")
-                scope_val = selected_project
-            elif target_scope == "Specific Location":
-                u_locs = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
-                scope_val = st.selectbox("Select Location", u_locs if u_locs else ["No Locations Found"], key="blk_mgmt_loc_select")
-            elif target_scope == "Specific Node":
-                u_locs = sorted(proj_filtered['Location'].dropna().unique().tolist(), key=natural_sort_key)
-                selected_loc = st.selectbox("First, Select Location", u_locs if u_locs else ["No Locations Found"], key="blk_mgmt_loc_node_select")
-                
-                u_nodes = sorted(
-                    proj_filtered[proj_filtered['Location'] == selected_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key
-                )
-                scope_val = st.selectbox("Then, Select Node", u_nodes if u_nodes else ["No Nodes Found"], key="blk_mgmt_node_select")
-            
-    return {
-        "temporal_dir": temporal_dir, 
-        "s_date": s_date, "s_time": s_time,
-        "e_date": e_date, "e_time": e_time,
-        "val_filter": val_filter, "threshold": threshold, "scope_val": scope_val
-    }
-
 
 def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     """
