@@ -200,26 +200,13 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     """
     Main administrative execution module managing bulk data approval modification routines,
     hourly table consolidation aggregates, and manual rejection string standardization.
-    
-    Parameters:
-    -----------
-    client : bigquery.Client
-        Authenticated Google Cloud BigQuery client instance.
-    full_reg_df : pandas.DataFrame
-        The full sensor node registry dataset mapping nodes to active hardware configurations.
-    selected_project : str
-        The current active project context token filtered out of the sidebar app menu.
-    tab_logistics : streamlit.tabs
-        Bubble handle routing to pass downstream context states across layouts.
     """
-    # Establish explicit table paths mapped directly out of your data view catalog
     target_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" 
     telemetry_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" 
 
     st.title("⚡ Bulk Approval and Database Maintenance")
     st.divider()
 
-    # Initialize application state memory footprints to prevent unintended app re-runs during data scans
     if "blk_mgmt_profile_df" not in st.session_state: 
         st.session_state.blk_mgmt_profile_df = None
     if "blk_mgmt_total_points" not in st.session_state: 
@@ -365,7 +352,7 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
                     st.error(f"Global Database Consolidation Failed: {e}")
                     
     st.divider()
-
+    
     # =========================================================================
     # UTILITY B: BULK APPROVAL AND DATA STATUS CHANGE SYSTEM CONTROLS
     # =========================================================================
