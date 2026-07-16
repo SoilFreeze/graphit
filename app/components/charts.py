@@ -175,26 +175,35 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             gap_rows['temperature'] = float('nan')
             s_df = pd.concat([s_df, gap_rows]).sort_values('timestamp')
         
-        # FASTER RENDERING: Changed to Scattergl & Removed Spline
-        # REVERTED TO go.Scatter
+        # --- THE FIX STARTS HERE ---
+        # 1. We create a copy of the temperatures for the main line
+        clean_y = s_df['temperature'].copy()
+        
+        # 2. We identify the bad data and nullify it in the 'clean' line so the line breaks
+        if 'approval_status' in s_df.columns:
+            s_status = s_df['approval_status'].fillna('TRUE').astype(str).str.replace(' ', '').str.upper().str.strip()
+            bad_data_mask = s_status.isin(['MASKED', 'BADDATA', 'OFFICE'])
+            clean_y.loc[bad_data_mask] = float('nan')
+        
+        # 3. Draw the main line using the 'clean_y' (which has holes where the masked data is)
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'],
+            x=s_df['timestamp'], 
+            y=clean_y, # <-- USING THE NULLIFIED DATA HERE
             name=display_name, 
-            mode='lines+markers',     # THE FIX: Draw tiny dots so isolated pings don't vanish
-            marker=dict(size=3),      # Keeps the dots small so they don't clutter the line
+            mode='lines+markers',
+            marker=dict(size=3),
             connectgaps=False, 
             customdata=s_df[['NodeNum']], 
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
             hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
         ))
         
+        # 4. Draw the isolated warning markers using the original un-nullified temperature
         if 'approval_status' in s_df.columns:
-            s_status = s_df['approval_status'].fillna('TRUE').astype(str).str.replace(' ', '').str.upper().str.strip()
-            
             if st.session_state.get('global_show_masked', False):
                 masked_df = s_df[s_status == 'MASKED']
                 if not masked_df.empty:
-                    fig.add_trace(go.Scattergl(
+                    fig.add_trace(go.Scatter(
                         x=masked_df['timestamp'], y=masked_df['temperature'],
                         name=display_name + " [MASKED]", mode='markers',
                         customdata=masked_df[['NodeNum']],
@@ -206,7 +215,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             if st.session_state.get('global_show_baddata', False):
                 bad_df = s_df[s_status == 'BADDATA']
                 if not bad_df.empty:
-                    fig.add_trace(go.Scattergl(
+                    fig.add_trace(go.Scatter(
                         x=bad_df['timestamp'], y=bad_df['temperature'],
                         name=display_name + " [BAD]", mode='markers',
                         customdata=bad_df[['NodeNum']],
@@ -214,6 +223,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
                         hovertemplate="<b>❌ BAD DATA</b> | %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>",
                         showlegend=False
                     ))
+    
         
     is_brine_graph = not is_temp_pipe
     
