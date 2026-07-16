@@ -129,7 +129,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
     plot_df = plot_df[~plot_df['Logical_Position'].str.lower().isin(empty_vals)]
 
     for pos in plot_df['Logical_Position'].unique():
-        if any(x in pos.upper() for x in skip_keywords):
+        if any(x in str(pos).upper() for x in skip_keywords):
             continue
 
         pos_df = plot_df[plot_df['Logical_Position'] == pos].sort_values('timestamp')
