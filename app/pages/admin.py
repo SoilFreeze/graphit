@@ -80,18 +80,18 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
         proj_mask = get_project_mask(reg_df, selected_project)
         proj_filtered = reg_df[proj_mask]
         
-        # 1. Handle Node ID targeting
+        # 1. Handle Node ID targeting (FIXED: Added TRIM() to safely match NodeNums with trailing spaces)
         if target_scope == "Specific Node":
-            where_clauses.append(f"t.NodeNum = '{f['scope_val']}'")
+            where_clauses.append(f"TRIM(CAST(t.NodeNum AS STRING)) = '{str(f['scope_val']).strip()}'")
         elif target_scope == "Specific Location":
             loc_nodes = proj_filtered[proj_filtered['Location'] == f['scope_val']]['NodeNum'].dropna().unique().tolist()
-            nodes_str = ", ".join([f"'{n}'" for n in loc_nodes])
-            where_clauses.append(f"t.NodeNum IN ({nodes_str})" if nodes_str else "t.NodeNum = 'NONE'")
+            nodes_str = ", ".join([f"'{str(n).strip()}'" for n in loc_nodes])
+            where_clauses.append(f"TRIM(CAST(t.NodeNum AS STRING)) IN ({nodes_str})" if nodes_str else "t.NodeNum = 'NONE'")
         else:
             proj_nodes = proj_filtered['NodeNum'].dropna().unique().tolist()
             if proj_nodes:
-                nodes_str = ", ".join([f"'{n}'" for n in proj_nodes])
-                where_clauses.append(f"t.NodeNum IN ({nodes_str})")
+                nodes_str = ", ".join([f"'{str(n).strip()}'" for n in proj_nodes])
+                where_clauses.append(f"TRIM(CAST(t.NodeNum AS STRING)) IN ({nodes_str})")
             else:
                 where_clauses.append("t.NodeNum = 'NONE'")
         
@@ -105,8 +105,6 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
             where_clauses.append(f"TRIM(CAST(t.Phase AS STRING)) = '{target_phase}'")
     else:
         where_clauses.append("t.Project IS NOT NULL")
-
-    # ... (keep all the target_scope and Project targeting logic above here) ...
 
     # 3. Handle Timestamps (safely cast to BigQuery TIMESTAMP format)
     start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
@@ -124,7 +122,7 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
     elif f["val_filter"] == "Below Threshold":
         where_clauses.append(f"t.temperature < {f['threshold']}")
 
-    # 5. THE FIX: Handle Status Filters by forcing it to lowercase first!
+    # 5. Handle Status Filters (FIXED: Added TRIM to prevent whitespace mismatch and fixed TRUE logic)
     safe_status = str(current_status_filter).lower().strip()
     
     if safe_status != "all":
@@ -133,9 +131,11 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
         elif safe_status == "null (streaming / unreviewed)":
             where_clauses.append("t.approval_status IS NULL")
         elif safe_status == "true":
-            where_clauses.append("t.approval_status IS NULL") 
+            # Fix: If users override Masked -> True, the DB explicitly writes "TRUE", meaning it is no longer NULL.
+            where_clauses.append("(t.approval_status IS NULL OR TRIM(LOWER(CAST(t.approval_status AS STRING))) = 'true')")
         else:
-            where_clauses.append(f"LOWER(CAST(t.approval_status AS STRING)) = '{safe_status}'")
+            # Fix: Added TRIM to prevent silent failures when the DB contains "MASKED "
+            where_clauses.append(f"TRIM(LOWER(CAST(t.approval_status AS STRING))) = '{safe_status}'")
 
     return " AND ".join(where_clauses)
 
