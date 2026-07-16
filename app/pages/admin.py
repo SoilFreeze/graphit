@@ -243,8 +243,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
         status_box = st.empty()
         status_box.info("Auditing massive raw tables... (This may take a few seconds)")
         try:
-            # Smart SQL that calculates duplicates and merges without altering the table
-            # Smart SQL that calculates duplicates and merges without altering the table
             def get_audit_query(table_name):
                 return f"""
                     WITH RawStats AS (
@@ -429,17 +427,8 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     # Step 2: Form Checkbox and Execution Engine Block
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
-            
-            # PATH A: If target override is TRUE, drop tracking tokens entirely out of the rejections table so they re-approve
-            if new_status == "TRUE":
-                sql = f"""
-                    DELETE FROM `{target_table}`
-                    WHERE STRUCT(NodeNum, timestamp) IN (
-                        SELECT AS STRUCT t.NodeNum, t.timestamp 
-                        FROM `{telemetry_table}` t
-                        WHERE {aliased_where}
-                    )
                 """
+
             # PATH B: If target override is a custom flag (FALSE, BADDATA, MASK), merge row coordinates into manual_rejections
             else:
                 sql = f"""
