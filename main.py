@@ -418,7 +418,7 @@ elif selected_project != "All Projects":
             )
             
             if fig:
-                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+                st.plotly_chart(fig, use_container_width=True)
                 st.markdown("---")
 
     elif page == "Depth Charts":
