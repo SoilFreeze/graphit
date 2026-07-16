@@ -203,14 +203,30 @@ st.sidebar.divider()
 st.sidebar.subheader("⏳ Timeline Navigation")
 
 # 1. Put the checkbox in the sidebar
-show_full_dataset = st.sidebar.checkbox("🌍 See Full Data Set (Ignore Timeline)", value=False, key="full_data_toggle")
+show_full_dataset = st.sidebar.checkbox("🌍 See Full Data (Since Freezedown)", value=False, key="full_data_toggle")
 
 if show_full_dataset:
-    # 2. Hide the slider and force a massive lookback period
-    st.sidebar.caption("Showing all available historical data.")
-    st.session_state["global_lookback_days"] = 9999 
+    # 2. Dynamically calculate days since Date_Freezedown
+    p_meta = st.session_state.get('project_metadata') or {}
+    real_f_date = p_meta.get('Date_Freezedown')
+    parsed_date = pd.to_datetime(real_f_date, errors='coerce')
+    
+    if pd.notnull(parsed_date):
+        # Strip timezone if present so we can compare to today
+        if parsed_date.tzinfo is not None:
+            parsed_date = parsed_date.tz_localize(None)
+            
+        days_since = (pd.Timestamp.now() - parsed_date).days
+        # Ensure we always pull at least 7 days, and add a 2-day buffer to cover today/tomorrow
+        lookback = max(7, days_since + 2) 
+        
+        st.sidebar.caption(f"Showing ~{lookback} days of data since freezedown.")
+        st.session_state["global_lookback_days"] = lookback
+    else:
+        st.sidebar.caption("No freezedown date set for this project. Defaulting to 90 days.")
+        st.session_state["global_lookback_days"] = 90
 else:
-    # 3. Show the slider only if they are not viewing the full dataset
+    # 3. Standard slider for custom windows
     selected_weeks = st.sidebar.slider(
         "Select History Window (Weeks)",
         min_value=1,
