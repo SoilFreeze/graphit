@@ -414,30 +414,29 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     # Step 2: Form Checkbox and Execution Engine Block
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
-                """
-
-            # PATH B: If target override is a custom flag (FALSE, BADDATA, MASK), merge row coordinates into manual_rejections
-            else:
-                sql = f"""
-                    MERGE `{target_table}` T
-                    USING (
-                        SELECT DISTINCT t.NodeNum, t.timestamp 
-                        FROM `{telemetry_table}` t 
-                        WHERE {aliased_where}
-                    ) S
-                    ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
-                    WHEN MATCHED THEN
-                        UPDATE SET approve = '{new_status}'
-                    WHEN NOT MATCHED THEN
-                        INSERT (NodeNum, timestamp, approve) 
-                        VALUES (S.NodeNum, S.timestamp, '{new_status}')
-                """
+            
+            # We explicitly write every status into the table so the system registers it
+            sql = f"""
+                MERGE `{target_table}` T
+                USING (
+                    SELECT DISTINCT t.NodeNum, t.timestamp 
+                    FROM `{telemetry_table}` t 
+                    WHERE {aliased_where}
+                ) S
+                ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+                WHEN MATCHED THEN
+                    UPDATE SET approve = '{new_status}'
+                WHEN NOT MATCHED THEN
+                    INSERT (NodeNum, timestamp, approve) 
+                    VALUES (S.NodeNum, S.timestamp, '{new_status}')
+            """
+            
             try:
                 with st.spinner("Processing database status reclassifications..."):
                     job = client.query(sql)
                     job.result()
                 
-                st.success(f"✅ Reclassification successful! Updated {job.num_dml_affected_rows:,} records inside the registry ledger.")
+                st.success(f"✅ Reclassification successful! Explicitly stamped '{new_status}' on {job.num_dml_affected_rows:,} records.")
                 st.cache_data.clear()
                 run_profile_audit() # Refresh data metrics locally
                 st.balloons()
