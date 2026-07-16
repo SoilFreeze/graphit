@@ -232,86 +232,129 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     st.write(
         "Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency "
         "and duplicate records system-wide. "
-        "**Note:** Running this automatically marks any rogue data points outside the physical bounds of -30°F and 120°F as BADDATA."
+        "**Note:** Running this automatically drops rogue data points outside the physical bounds of -30°F and 120°F."
     )
     
-    # Split utilities into clean side-by-side management columns
-    clean_col1, clean_col2 = st.columns(2)
-    
-    with clean_col1:
-        st.write("##### 📊 Telemetry Aggregation & Hourly Flattening")
-        st.caption("Truncates raw timestamps to the hour, filters bad logs, and collapses records to an average value.")
-        run_telemetry_cleanup = st.button("⚡ Run Global Database Cleanup & Hourly Consolidation", use_container_width=True)  
+    if "cleanup_audit_df" not in st.session_state:
+        st.session_state.cleanup_audit_df = None
 
-    # --- PATHWAY A: COMPREHENSIVE HOURLY HOOD CONSOLIDATION ENGINE ---
-    if run_telemetry_cleanup:
+    # --- STEP 1: AUDIT & PREVIEW ---
+    if st.button("🔍 Step 1: Audit Database & Calculate Cleanup Impact", use_container_width=True):
         status_box = st.empty()
+        status_box.info("Auditing massive raw tables... (This may take a few seconds)")
         try:
-            # 1. Audit active data rows before applying modifications to map the exact purge count
-            status_box.markdown("⏳ **[1/4] Calculating initial database row baselines...**")
-            count_sp_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
-            count_lord_before = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
+            # Smart SQL that calculates duplicates and merges without altering the table
+            def get_audit_query(table_name):
+                return f"""
+                    WITH RawStats AS (
+                        SELECT 
+                            COUNT(*) as Total_Points,
+                            COUNT(*) - COUNT(DISTINCT STRUCT(timestamp, UPPER(TRIM(CAST(NodeNum AS STRING))), CAST(temperature AS STRING))) as Exact_Doubles
+                        FROM `{PROJECT_ID}.{DATASET_ID}.{table_name}`
+                    ),
+                    HourlyStats AS (
+                        SELECT COUNT(*) as Final_Points
+                        FROM (
+                            SELECT 1 
+                            FROM `{PROJECT_ID}.{DATASET_ID}.{table_name}`
+                            WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
+                            GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), UPPER(TRIM(CAST(NodeNum AS STRING)))
+                        )
+                    )
+                    SELECT 
+                        Total_Points, 
+                        Exact_Doubles,
+                        (Total_Points - Final_Points - Exact_Doubles) as Merged_Points,
+                        Final_Points
+                    FROM RawStats CROSS JOIN HourlyStats
+                """
             
-            # 2. Upgraded SensorPush: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
-            status_box.markdown("🧹 **[2/4] Consolidating and averaging SensorPush timelines to the hour...**")
-            sp_cleanup_sql = f"""
-                CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
-                SELECT 
-                    TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
-                    NodeNum, 
-                    ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature,
-                    MAX(rssi) as rssi
-                FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-                WHERE temperature >= -30.0 AND temperature <= 120.0
-                GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), NodeNum;
-
-                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
-                SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature, rssi FROM tmp_clean_sensorpush;
-            """
-            client.query(sp_cleanup_sql).result()
+            sp_res = client.query(get_audit_query("raw_sensorpush")).to_dataframe().iloc[0]
+            lord_res = client.query(get_audit_query("raw_lord")).to_dataframe().iloc[0]
             
-            # 3. Upgraded Lord: Groups by Node & Truncated Hour, filtering outliers and calculating clean averages
-            status_box.markdown("🛰️ **[3/4] Consolidating and averaging Lord Wireless timelines to the hour...**")
-            lord_cleanup_sql = f"""
-                CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
-                SELECT 
-                    TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
-                    NodeNum, 
-                    ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature
-                FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-                WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
-                GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), NodeNum;
-
-                CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
-                SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature FROM tmp_clean_lord;
-            """
-            client.query(lord_cleanup_sql).result()
-            st.cache_data.clear()
-
-            # 4. Pull database row summaries to document the data cleanup audit trail
-            status_box.markdown("📊 **[4/4] Finalizing database overwrites and pulling consolidated tallies...**")
-            count_sp_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`").to_dataframe().iloc[0, 0]
-            count_lord_after = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`").to_dataframe().iloc[0, 0]
-
-            sp_removed = count_sp_before - count_sp_after
-            lord_removed = count_lord_before - count_lord_after
-            total_removed = sp_removed + lord_removed
-            
-            status_box.empty()
-            st.success("🎉 Global Database Consolidation successfully completed!")
-            
-            # Print comparative ledger results matrix
-            report_data = [
-                {"Data Table": "SensorPush (raw_sensorpush)", "Before Count": f"{count_sp_before:,}", "After Count": f"{count_sp_after:,}", "Purged High-Freq Points": f"{sp_removed:,}"},
-                {"Data Table": "Lord Wireless (raw_lord)", "Before Count": f"{count_lord_before:,}", "After Count": f"{count_lord_after:,}", "Purged High-Freq Points": f"{lord_removed:,}"},
-                {"Data Table": "Combined Total Pool", "Before Count": f"{count_sp_before + count_lord_before:,}", "After Count": f"{count_sp_after + count_lord_after:,}", "Purged High-Freq Points": f"{total_removed:,}"}
+            audit_data = [
+                {
+                    "Table": "SensorPush", 
+                    "Total Points": f"{sp_res['Total_Points']:,}", 
+                    "Doubles to Delete": f"{sp_res['Exact_Doubles']:,}", 
+                    "Points to Merge": f"{sp_res['Merged_Points']:,}", 
+                    "Final Points": f"{sp_res['Final_Points']:,}"
+                },
+                {
+                    "Table": "Lord Wireless", 
+                    "Total Points": f"{lord_res['Total_Points']:,}", 
+                    "Doubles to Delete": f"{lord_res['Exact_Doubles']:,}", 
+                    "Points to Merge": f"{lord_res['Merged_Points']:,}", 
+                    "Final Points": f"{lord_res['Final_Points']:,}"
+                },
+                {
+                    "Table": "Combined Total", 
+                    "Total Points": f"{(sp_res['Total_Points'] + lord_res['Total_Points']):,}", 
+                    "Doubles to Delete": f"{(sp_res['Exact_Doubles'] + lord_res['Exact_Doubles']):,}", 
+                    "Points to Merge": f"{(sp_res['Merged_Points'] + lord_res['Merged_Points']):,}", 
+                    "Final Points": f"{(sp_res['Final_Points'] + lord_res['Final_Points']):,}"
+                }
             ]
-            st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
-            
+            st.session_state.cleanup_audit_df = pd.DataFrame(audit_data)
+            status_box.empty()
         except Exception as e:
             status_box.empty()
-            st.error(f"Global Database Consolidation Failed: {e}")
-   
+            st.error(f"Audit compilation failed: {e}")
+
+    # --- STEP 2: REVIEW & EXECUTE ---
+    if st.session_state.cleanup_audit_df is not None:
+        st.write("### 📊 Cleanup Impact Matrix")
+        st.dataframe(st.session_state.cleanup_audit_df, use_container_width=True, hide_index=True)
+        
+        if st.checkbox("I authorize permanently merging and deleting these records.", key="confirm_global_cleanup"):
+            if st.button("🚀 Step 2: Execute Database Cleanup", use_container_width=True):
+                status_box2 = st.empty()
+                try:
+                    status_box2.markdown("🧹 **[1/2] Consolidating SensorPush timelines...**")
+                    sp_cleanup_sql = f"""
+                        CREATE OR REPLACE TEMP TABLE tmp_clean_sensorpush AS
+                        SELECT 
+                            TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                            UPPER(TRIM(CAST(NodeNum AS STRING))) as NodeNum, 
+                            ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature,
+                            MAX(rssi) as rssi
+                        FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                        WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
+                        GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), UPPER(TRIM(CAST(NodeNum AS STRING)));
+
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` AS
+                        SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature, rssi FROM tmp_clean_sensorpush;
+                    """
+                    client.query(sp_cleanup_sql).result()
+                    
+                    status_box2.markdown("🛰️ **[2/2] Consolidating Lord Wireless timelines...**")
+                    lord_cleanup_sql = f"""
+                        CREATE OR REPLACE TEMP TABLE tmp_clean_lord AS
+                        SELECT 
+                            TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp, 
+                            UPPER(TRIM(CAST(NodeNum AS STRING))) as NodeNum, 
+                            ROUND(AVG(CAST(temperature AS NUMERIC)), 1) as temperature
+                        FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                        WHERE CAST(temperature AS NUMERIC) >= -30.0 AND CAST(temperature AS NUMERIC) <= 120.0
+                        GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR), UPPER(TRIM(CAST(NodeNum AS STRING)));
+
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord` AS
+                        SELECT timestamp, NodeNum, CAST(temperature AS FLOAT64) as temperature FROM tmp_clean_lord;
+                    """
+                    client.query(lord_cleanup_sql).result()
+                    
+                    st.cache_data.clear()
+                    status_box2.empty()
+                    st.success("🎉 Global Database Consolidation successfully completed!")
+                    st.balloons()
+                    
+                    st.session_state.cleanup_audit_df = None
+                    time.sleep(1.5)
+                    st.rerun()
+                except Exception as e:
+                    status_box2.empty()
+                    st.error(f"Global Database Consolidation Failed: {e}")
+                    
     st.divider()
 
     # =========================================================================
