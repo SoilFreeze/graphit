@@ -220,11 +220,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         "🚨 Bad Actor & Reliability"
     ])
 
-    # =========================================================================
+# =========================================================================
     # TAB 1: DATA LOOKUP ENGINE
     # =========================================================================
     with tab_lookup:
-        st.subheader("🔍 Individual Node Telemetry Inspection")
+        st.subheader("🔍 Node Telemetry Inspection (Multi-Node)")
         
         # 1. Tie Project Scope to the Sidebar Context
         scope_label = "Global Fleet" if selected_project == "All Projects" else selected_project
@@ -234,7 +234,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
         with c1:
             search_mode = st.radio("Search Method", ["Filter Mappings", "Search by Node ID"], horizontal=True)
             
-        target_node = None
+        target_nodes = [] # Initialize as an empty list
         
         # Filter registry based on the sidebar selection
         if selected_project == "All Projects":
@@ -250,28 +250,28 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 
             matching_nodes = sorted(proj_filtered[proj_filtered['Location'] == f_loc]['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
             if matching_nodes:
-                target_node = st.selectbox("Select Target Node to Inspect", matching_nodes, key="diag_node_select_dropdown")
+                # CHANGED to multiselect
+                target_nodes = st.multiselect("Select Target Node(s) to Inspect", matching_nodes, default=[matching_nodes[0]], key="diag_node_select_dropdown")
             else:
                 st.warning("No nodes match this configuration.")
                 
         else:
             with c2:
                 all_active_nodes = sorted(proj_filtered['NodeNum'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
-                selected_search_node = st.selectbox(
-                    "Type Node ID to Search:", 
-                    options=[""] + all_active_nodes,
-                    index=0,
+                # CHANGED to multiselect
+                target_nodes = st.multiselect(
+                    "Search and Select Node ID(s):", 
+                    options=all_active_nodes,
+                    default=[],
                     key="diag_direct_node_search"
                 )
-                if selected_search_node != "":
-                    target_node = selected_search_node
 
-        if target_node:
+        if target_nodes:
             st.divider()
             
             c_header, c_time = st.columns([3, 1])
             with c_header:
-                st.markdown(f"##### 📈 Telemetry History for Node: `{target_node}`")
+                st.markdown(f"##### 📈 Telemetry History for Selected Nodes")
             with c_time:
                 # Add dynamic timeline amounts
                 time_opt = st.selectbox("Historical Window:", ["30 Days", "60 Days", "90 Days", "1 Year", "All Time"], index=0)
@@ -279,17 +279,17 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             days_map = {"30 Days": 30, "60 Days": 60, "90 Days": 90, "1 Year": 365, "All Time": 5000}
             lookback_days = days_map[time_opt]
             
-            # Master read query pulling localized node history down
+            # Master read query pulling localized node history down for ALL target nodes
             node_q = f"""
-                SELECT timestamp, temperature, rssi, Location, Bank, Depth, Project, SensorStatus
+                SELECT timestamp, temperature, rssi, Location, Bank, Depth, Project, SensorStatus, NodeNum
                 FROM `{MASTER_VIEW}`
-                WHERE NodeNum = @target_node
+                WHERE NodeNum IN UNNEST(@target_nodes)
                   AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
                 ORDER BY timestamp DESC
             """
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
-                    bigquery.ScalarQueryParameter("target_node", "STRING", target_node),
+                    bigquery.ArrayQueryParameter("target_nodes", "STRING", target_nodes),
                     bigquery.ScalarQueryParameter("lookback_days", "INTEGER", int(lookback_days))
                 ]
             )
@@ -298,36 +298,28 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 node_history = client.query(node_q, job_config=job_config).to_dataframe()
             
             if node_history.empty:
-                st.warning(f"No telemetry data found for Node `{target_node}` in the past {time_opt}.")
+                st.warning(f"No telemetry data found for the selected nodes in the past {time_opt}.")
             else:
                 # Localize and convert time for entire dataframe first so aggregation works cleanly
                 if node_history['timestamp'].dt.tz is None:
                     node_history['timestamp'] = node_history['timestamp'].dt.tz_localize('UTC')
                 node_history['timestamp'] = node_history['timestamp'].dt.tz_convert(display_tz)
 
-                # --- FIX: Safe Date Parsing, Field Reliability & RSSI (Pandas Engine) ---
-                target_reg = reg_df[reg_df['NodeNum'] == target_node].copy()
-                target_reg['Start_Date_DT'] = pd.to_datetime(target_reg['Start_Date'], errors='coerce')
-                target_reg['End_Date_DT'] = pd.to_datetime(target_reg['End_Date'], errors='coerce')
-                
-                # Sort newest assignments to the top
-                target_reg = target_reg.sort_values(by='Start_Date_DT', ascending=False)
-
-                # Fetch ONLY the distinct ping hours AND the average RSSI for that hour
-                # Using GROUP BY 1 ensures BigQuery doesn't trip on the timestamp truncation syntax
+                # Fetch ONLY the distinct ping hours AND the average RSSI for ALL selected nodes
                 ping_q = f"""
                     SELECT 
+                        NodeNum,
                         TIMESTAMP_TRUNC(timestamp, HOUR) as ping_hour,
                         AVG(rssi) as hourly_rssi
                     FROM `{MASTER_VIEW}`
-                    WHERE NodeNum = @target_node
-                    GROUP BY 1
+                    WHERE NodeNum IN UNNEST(@target_nodes)
+                    GROUP BY 1, 2
                 """
                 job_config_ping = bigquery.QueryJobConfig(
-                    query_parameters=[bigquery.ScalarQueryParameter("target_node", "STRING", target_node)]
+                    query_parameters=[bigquery.ArrayQueryParameter("target_nodes", "STRING", target_nodes)]
                 )
                 
-                with st.spinner("Calculating overall reliability and RSSI scores..."):
+                with st.spinner("Calculating reliability and RSSI scores..."):
                     try:
                         ping_df = client.query(ping_q, job_config=job_config_ping).to_dataframe()
                         if not ping_df.empty:
@@ -335,6 +327,23 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     except Exception as e:
                         st.error(f"Data Fetch Error: {e}")
                         ping_df = pd.DataFrame()
+
+                # ==========================================
+                # LOOP THROUGH EACH SELECTED NODE FOR METRICS
+                # ==========================================
+                for node in target_nodes:
+                    st.markdown(f"### 📡 Diagnostics: `{node}`")
+                    
+                    # Filter dataframes for just the current node in the loop
+                    node_specific_history = node_history[node_history['NodeNum'] == node]
+                    node_pings = ping_df[ping_df['NodeNum'] == node] if not ping_df.empty else pd.DataFrame()
+
+                    target_reg = reg_df[reg_df['NodeNum'] == node].copy()
+                    target_reg['Start_Date_DT'] = pd.to_datetime(target_reg['Start_Date'], errors='coerce')
+                    target_reg['End_Date_DT'] = pd.to_datetime(target_reg['End_Date'], errors='coerce')
+                    
+                    # Sort newest assignments to the top
+                    target_reg = target_reg.sort_values(by='Start_Date_DT', ascending=False)
 
                     overall_active_hrs = 0
                     overall_total_hrs = 0
@@ -364,8 +373,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         total_assignment_hours = max(1.0, (calc_end_ts - start_ts).total_seconds() / 3600.0)
 
                         # Count actual pings within the bounds and average the RSSI
-                        if not ping_df.empty:
-                            pings_in_window = ping_df[(ping_df['ping_hour'] >= start_ts) & (ping_df['ping_hour'] <= end_ts)]
+                        if not node_pings.empty:
+                            pings_in_window = node_pings[(node_pings['ping_hour'] >= start_ts) & (node_pings['ping_hour'] <= end_ts)]
                             active_hrs = len(pings_in_window)
                             avg_rssi = pd.to_numeric(pings_in_window['hourly_rssi'], errors='coerce').mean()
                         else:
@@ -391,34 +400,38 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     else:
                         overall_reliability = 0.0
 
-                # Meta overview statistics boxes (Reverted to 5 metrics)
-                meta_row = node_history.iloc[0]
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
-                m2.metric("Latest Location", str(meta_row['Location']))
-                m3.metric("Latest Project", str(meta_row['Project']))
-                m4.metric("Scanned Records", f"{len(node_history):,}")
-                m5.metric("Overall Field Reliability", f"{overall_reliability:.1f}%")
+                    if not node_specific_history.empty:
+                        # Meta overview statistics boxes
+                        meta_row = node_specific_history.iloc[0]
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
+                        m2.metric("Latest Location", str(meta_row['Location']))
+                        m3.metric("Latest Project", str(meta_row['Project']))
+                        m4.metric("Scanned Records", f"{len(node_specific_history):,}")
+                        m5.metric("Overall Field Reliability", f"{overall_reliability:.1f}%")
+                    else:
+                        st.info("No recent telemetry found for this node in the timeframe.")
 
-                # Compile the Historical Placements Table strictly from the Registry
-                st.markdown("#### 🗺️ Assignment History (Registry)")
-                
-                def format_pos(r):
-                    if pd.notnull(r.get('Depth')) and str(r.get('Depth')).strip(): return f"{r['Depth']}ft"
-                    if pd.notnull(r.get('Bank')) and str(r.get('Bank')).strip(): return f"Bank {r['Bank']}"
-                    return "-"
+                    # Compile the Historical Placements Table strictly from the Registry
+                    st.markdown(f"**Assignment History (Registry) - {node}**")
                     
-                target_reg['Position'] = target_reg.apply(format_pos, axis=1)
-                target_reg['Start Date'] = target_reg['Start_Date_DT'].dt.strftime('%m/%d/%Y %H:%M').fillna("Unknown")
-                target_reg['End Date'] = target_reg['End_Date_DT'].dt.strftime('%m/%d/%Y %H:%M').fillna("Active")
-                target_reg['Project Reliability'] = target_reg['Project Reliability'].fillna(0).apply(lambda x: f"{x:.1f}%")
-                
-                # Format the new RSSI column safely for the table ONLY
-                target_reg['Avg RSSI'] = target_reg['Avg RSSI'].apply(lambda x: f"{x:.0f} dBm" if pd.notnull(x) else "-")
-                
-                # Add Avg RSSI to the display columns
-                disp_placements = target_reg[['Project', 'Location', 'Position', 'Start Date', 'End Date', 'Project Reliability', 'Avg RSSI', 'SensorStatus']]
-                st.dataframe(disp_placements, use_container_width=True, hide_index=True)
+                    def format_pos(r):
+                        if pd.notnull(r.get('Depth')) and str(r.get('Depth')).strip(): return f"{r['Depth']}ft"
+                        if pd.notnull(r.get('Bank')) and str(r.get('Bank')).strip(): return f"Bank {r['Bank']}"
+                        return "-"
+                        
+                    target_reg['Position'] = target_reg.apply(format_pos, axis=1)
+                    target_reg['Start Date'] = target_reg['Start_Date_DT'].dt.strftime('%m/%d/%Y %H:%M').fillna("Unknown")
+                    target_reg['End Date'] = target_reg['End_Date_DT'].dt.strftime('%m/%d/%Y %H:%M').fillna("Active")
+                    target_reg['Project Reliability'] = target_reg['Project Reliability'].fillna(0).apply(lambda x: f"{x:.1f}%")
+                    
+                    # Format the new RSSI column safely for the table ONLY
+                    target_reg['Avg RSSI'] = target_reg['Avg RSSI'].apply(lambda x: f"{x:.0f} dBm" if pd.notnull(x) else "-")
+                    
+                    # Add Avg RSSI to the display columns
+                    disp_placements = target_reg[['Project', 'Location', 'Position', 'Start Date', 'End Date', 'Project Reliability', 'Avg RSSI', 'SensorStatus']]
+                    st.dataframe(disp_placements, use_container_width=True, hide_index=True)
+                    st.divider()
 
                 # ==========================================
                 # TEMPERATURE TREND & AMBIENT TOGGLE
@@ -433,10 +446,10 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 now_ts = pd.Timestamp.now(tz=display_tz)
                 start_ts = now_ts - pd.Timedelta(days=lookback_days)
                 
+                # Removed color_discrete_sequence so Plotly assigns different colors to different NodeNums
                 fig = px.line(
-                    node_history, x='timestamp', y='temperature',
-                    labels={'timestamp': 'Time', 'temperature': f'Temperature ({unit_label})'},
-                    color_discrete_sequence=['#1f77b4']
+                    node_history, x='timestamp', y='temperature', color='NodeNum',
+                    labels={'timestamp': 'Time', 'temperature': f'Temperature ({unit_label})'}
                 )
 
                 # Fetch and Append the Ambient data to the figure if checked
@@ -490,7 +503,6 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue")
                 
                 st.plotly_chart(fig, use_container_width=True)
-
     # =========================================================================
     # TAB 2: THERMAL PERFORMANCE METRICS (UPDATED)
     # =========================================================================
