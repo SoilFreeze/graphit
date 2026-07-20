@@ -305,7 +305,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     node_history['timestamp'] = node_history['timestamp'].dt.tz_localize('UTC')
                 node_history['timestamp'] = node_history['timestamp'].dt.tz_convert(display_tz)
 
-                # --- FIX: Safe Date Parsing for Reliability & History (Via Pandas) ---
+                # --- FIX: Safe Date Parsing & Multi-Project Reliability ---
                 target_reg = reg_df[reg_df['NodeNum'] == target_node].copy()
                 target_reg['Start_Date_DT'] = pd.to_datetime(target_reg['Start_Date'], errors='coerce')
                 target_reg['End_Date_DT'] = pd.to_datetime(target_reg['End_Date'], errors='coerce')
@@ -313,54 +313,62 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 # Sort newest assignments to the top
                 target_reg = target_reg.sort_values(by='Start_Date_DT', ascending=False)
 
-                # Calculate precise assignment bounds for the reliability score
-                if not target_reg.empty:
-                    latest_assign = target_reg.iloc[0]
-                    start_ts = latest_assign['Start_Date_DT']
-                    if pd.isnull(start_ts):
-                        start_ts = pd.Timestamp('2000-01-01', tz='UTC')
-                    elif start_ts.tzinfo is None:
-                        start_ts = start_ts.tz_localize('UTC')
-                        
-                    end_ts = latest_assign['End_Date_DT']
-                    if pd.isnull(end_ts):
-                        end_ts = pd.Timestamp.now(tz='UTC')
-                    elif end_ts.tzinfo is None:
-                        end_ts = end_ts.tz_localize('UTC')
-                else:
-                    start_ts = pd.Timestamp('2000-01-01', tz='UTC')
-                    end_ts = pd.Timestamp.now(tz='UTC')
-
-                # Get total hours on assignment (minimum of 1 to prevent division by zero errors)
-                total_assignment_hours = max(1, (end_ts - start_ts).total_seconds() / 3600.0)
-
-                # Fetch unique pings using the safe Pandas timestamps
-                rel_q = f"""
-                    SELECT COUNT(DISTINCT TIMESTAMP_TRUNC(timestamp, HOUR)) as unique_ping_hours
-                    FROM `{MASTER_VIEW}`
-                    WHERE NodeNum = @target_node
-                      AND timestamp >= @start_ts
-                      AND timestamp <= @end_ts
+                # Fetch unique pings per assignment for the history table
+                hist_rel_q = f"""
+                    WITH Assignments AS (
+                        SELECT 
+                            CAST(Project AS STRING) AS Project,
+                            CAST(Location AS STRING) AS Location,
+                            COALESCE(SAFE_CAST(Start_Date AS TIMESTAMP), TIMESTAMP '2000-01-01 00:00:00 UTC') AS start_ts,
+                            COALESCE(SAFE_CAST(End_Date AS TIMESTAMP), CURRENT_TIMESTAMP()) AS end_ts
+                        FROM `{NODE_REGISTRY_TABLE}`
+                        WHERE NodeNum = @target_node
+                    )
+                    SELECT 
+                        a.Project, 
+                        a.Location, 
+                        a.start_ts,
+                        COUNT(DISTINCT TIMESTAMP_TRUNC(m.timestamp, HOUR)) as unique_ping_hours,
+                        GREATEST(1, TIMESTAMP_DIFF(a.end_ts, a.start_ts, HOUR)) as total_assignment_hours
+                    FROM Assignments a
+                    LEFT JOIN `{MASTER_VIEW}` m
+                      ON m.NodeNum = @target_node
+                      AND m.timestamp >= a.start_ts
+                      AND m.timestamp <= a.end_ts
+                    GROUP BY a.Project, a.Location, a.start_ts
                 """
                 job_config_rel = bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("target_node", "STRING", target_node),
-                        bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", start_ts),
-                        bigquery.ScalarQueryParameter("end_ts", "TIMESTAMP", end_ts)
-                    ]
+                    query_parameters=[bigquery.ScalarQueryParameter("target_node", "STRING", target_node)]
                 )
                 
-                with st.spinner("Calculating assignment reliability..."):
+                with st.spinner("Calculating phase & project reliability scores..."):
                     try:
-                        rel_df = client.query(rel_q, job_config=job_config_rel).to_dataframe()
-                        if not rel_df.empty:
-                            active_hrs = int(rel_df['unique_ping_hours'].iloc[0])
-                            node_reliability = (active_hrs / total_assignment_hours) * 100
-                            node_reliability = min(100.0, node_reliability) # Cap at 100%
+                        hist_rel_df = client.query(hist_rel_q, job_config=job_config_rel).to_dataframe()
+                        
+                        if not hist_rel_df.empty:
+                            hist_rel_df['Project Reliability'] = (hist_rel_df['unique_ping_hours'] / hist_rel_df['total_assignment_hours']) * 100.0
+                            hist_rel_df['Project Reliability'] = hist_rel_df['Project Reliability'].clip(upper=100.0)
+                            
+                            # Align timezones and merge the scores back into the main registry dataframe
+                            target_reg['match_ts'] = pd.to_datetime(target_reg['Start_Date_DT'].fillna(pd.Timestamp('2000-01-01')), utc=True)
+                            hist_rel_df['start_ts'] = pd.to_datetime(hist_rel_df['start_ts'], utc=True)
+                            
+                            target_reg = pd.merge(
+                                target_reg, 
+                                hist_rel_df[['Project', 'Location', 'start_ts', 'Project Reliability']], 
+                                left_on=['Project', 'Location', 'match_ts'], 
+                                right_on=['Project', 'Location', 'start_ts'], 
+                                how='left'
+                            )
                         else:
-                            node_reliability = 0.0
+                            target_reg['Project Reliability'] = 0.0
+                            
+                        # Set the top stat box to the most recent assignment
+                        node_reliability = target_reg['Project Reliability'].iloc[0] if (not target_reg.empty and pd.notnull(target_reg['Project Reliability'].iloc[0])) else 0.0
+                        
                     except Exception:
                         node_reliability = 0.0
+                        target_reg['Project Reliability'] = 0.0
 
                 # Meta overview statistics boxes
                 meta_row = node_history.iloc[0]
@@ -369,7 +377,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 m2.metric("Latest Location", str(meta_row['Location']))
                 m3.metric("Latest Project", str(meta_row['Project']))
                 m4.metric("Scanned Records", f"{len(node_history):,}")
-                m5.metric("Reliability Score", f"{node_reliability:.1f}%")
+                m5.metric("Current Project Reliability", f"{node_reliability:.1f}%")
 
                 # Compile the Historical Placements Table strictly from the Registry
                 st.markdown("#### 🗺️ Assignment History (Registry)")
@@ -382,8 +390,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 target_reg['Position'] = target_reg.apply(format_pos, axis=1)
                 target_reg['Start Date'] = target_reg['Start_Date_DT'].dt.strftime('%m/%d/%Y %H:%M').fillna("Unknown")
                 target_reg['End Date'] = target_reg['End_Date_DT'].dt.strftime('%m/%d/%Y %H:%M').fillna("Active")
+                target_reg['Project Reliability'] = target_reg['Project Reliability'].fillna(0).apply(lambda x: f"{x:.1f}%")
                 
-                disp_placements = target_reg[['Project', 'Location', 'Position', 'Start Date', 'End Date', 'SensorStatus']]
+                disp_placements = target_reg[['Project', 'Location', 'Position', 'Start Date', 'End Date', 'Project Reliability', 'SensorStatus']]
                 st.dataframe(disp_placements, use_container_width=True, hide_index=True)
 
                 # ==========================================
