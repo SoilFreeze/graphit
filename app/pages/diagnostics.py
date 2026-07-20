@@ -314,13 +314,14 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 target_reg = target_reg.sort_values(by='Start_Date_DT', ascending=False)
 
                 # Fetch ONLY the distinct ping hours AND the average RSSI for that hour
+                # Using GROUP BY 1 ensures BigQuery doesn't trip on the timestamp truncation syntax
                 ping_q = f"""
                     SELECT 
                         TIMESTAMP_TRUNC(timestamp, HOUR) as ping_hour,
                         AVG(rssi) as hourly_rssi
                     FROM `{MASTER_VIEW}`
                     WHERE NodeNum = @target_node
-                    GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR)
+                    GROUP BY 1
                 """
                 job_config_ping = bigquery.QueryJobConfig(
                     query_parameters=[bigquery.ScalarQueryParameter("target_node", "STRING", target_node)]
@@ -331,7 +332,8 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         ping_df = client.query(ping_q, job_config=job_config_ping).to_dataframe()
                         if not ping_df.empty:
                             ping_df['ping_hour'] = pd.to_datetime(ping_df['ping_hour'], utc=True)
-                    except Exception:
+                    except Exception as e:
+                        st.error(f"Data Fetch Error: {e}")
                         ping_df = pd.DataFrame()
 
                     overall_active_hrs = 0
@@ -365,7 +367,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         if not ping_df.empty:
                             pings_in_window = ping_df[(ping_df['ping_hour'] >= start_ts) & (ping_df['ping_hour'] <= end_ts)]
                             active_hrs = len(pings_in_window)
-                            avg_rssi = pings_in_window['hourly_rssi'].mean()
+                            avg_rssi = pd.to_numeric(pings_in_window['hourly_rssi'], errors='coerce').mean()
                         else:
                             active_hrs = 0
                             avg_rssi = pd.NA
@@ -389,15 +391,13 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     else:
                         overall_reliability = 0.0
 
-                # Meta overview statistics boxes
+                # Meta overview statistics boxes (Reverted to 5 metrics)
                 meta_row = node_history.iloc[0]
                 m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
                 m2.metric("Latest Location", str(meta_row['Location']))
                 m3.metric("Latest Project", str(meta_row['Project']))
                 m4.metric("Scanned Records", f"{len(node_history):,}")
-                
-                # NEW OVERALL METRIC
                 m5.metric("Overall Field Reliability", f"{overall_reliability:.1f}%")
 
                 # Compile the Historical Placements Table strictly from the Registry
@@ -413,7 +413,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 target_reg['End Date'] = target_reg['End_Date_DT'].dt.strftime('%m/%d/%Y %H:%M').fillna("Active")
                 target_reg['Project Reliability'] = target_reg['Project Reliability'].fillna(0).apply(lambda x: f"{x:.1f}%")
                 
-                # Format the new RSSI column
+                # Format the new RSSI column safely for the table ONLY
                 target_reg['Avg RSSI'] = target_reg['Avg RSSI'].apply(lambda x: f"{x:.0f} dBm" if pd.notnull(x) else "-")
                 
                 # Add Avg RSSI to the display columns
