@@ -305,13 +305,50 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     node_history['timestamp'] = node_history['timestamp'].dt.tz_localize('UTC')
                 node_history['timestamp'] = node_history['timestamp'].dt.tz_convert(display_tz)
 
+                # --- NEW: Fetch Exact Assignment Reliability ---
+                rel_q = f"""
+                    WITH CurrentAssignment AS (
+                        SELECT 
+                            COALESCE(SAFE_CAST(Start_Date AS TIMESTAMP), TIMESTAMP '2000-01-01 00:00:00 UTC') AS start_ts,
+                            COALESCE(SAFE_CAST(End_Date AS TIMESTAMP), CURRENT_TIMESTAMP()) AS end_ts
+                        FROM `{NODE_REGISTRY_TABLE}`
+                        WHERE NodeNum = @target_node
+                        ORDER BY COALESCE(SAFE_CAST(Start_Date AS TIMESTAMP), TIMESTAMP '2000-01-01 00:00:00 UTC') DESC
+                        LIMIT 1
+                    )
+                    SELECT 
+                        COUNT(DISTINCT TIMESTAMP_TRUNC(m.timestamp, HOUR)) as unique_ping_hours,
+                        GREATEST(1, TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), c.start_ts, HOUR)) as total_assignment_hours
+                    FROM CurrentAssignment c
+                    LEFT JOIN `{MASTER_VIEW}` m
+                      ON m.NodeNum = @target_node
+                      AND m.timestamp >= c.start_ts
+                      AND m.timestamp <= c.end_ts
+                    GROUP BY c.start_ts
+                """
+                job_config_rel = bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("target_node", "STRING", target_node)]
+                )
+                with st.spinner("Calculating assignment reliability..."):
+                    try:
+                        rel_df = client.query(rel_q, job_config=job_config_rel).to_dataframe()
+                        if not rel_df.empty:
+                            active_hrs = int(rel_df['unique_ping_hours'].iloc[0])
+                            total_hrs = int(rel_df['total_assignment_hours'].iloc[0])
+                            node_reliability = (active_hrs / total_hrs) * 100
+                        else:
+                            node_reliability = 0.0
+                    except Exception:
+                        node_reliability = 0.0
+
                 # Meta overview statistics boxes
                 meta_row = node_history.iloc[0]
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Current Temp", f"{meta_row['temperature']:.1f}{unit_label}")
                 m2.metric("Latest Location", str(meta_row['Location']))
                 m3.metric("Latest Project", str(meta_row['Project']))
                 m4.metric("Scanned Records", f"{len(node_history):,}")
+                m5.metric("Reliability Score", f"{node_reliability:.1f}%")
 
                 # Compile the Historical Placements Table
                 st.markdown("#### 🗺️ Historical Placements")
@@ -835,16 +872,25 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             project_summary[proj_label]["Extreme"] += 1
                             if is_in_scope:
                                 extreme_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str, "Current Temp": f"{convert_t(r['latest_temp']):.1f}{unit_label}"})
-                            
+
                         spike_val, spike_count, hours_with_data = r['max_single_spike_24h'], int(r['spike_count_24h']), int(r['hours_with_data_24h'])
-                        if pd.notnull(spike_val) and spike_count > 0:
+                        
+                        # UPDATED: Node must have 3 or more spikes in 24 hours to trigger the alert
+                        if pd.notnull(spike_val) and spike_count >= 3:
                             node_has_issue = True
                             project_summary[proj_label]["Spiking"] += 1
                             if is_in_scope:
-                                spiking_rows.append({"Project": proj_label, "Location": str(r['Location']), "Node": str(r['NodeNum']), "Position": pos_lbl, "Last Seen": last_seen_str, "Max Δ Temp": f"{convert_t(spike_val):.1f}{unit_label}", "Spike Count (24h)": f"{spike_count}x in {hours_with_data}h"})
+                                spiking_rows.append({
+                                    "Project": proj_label, 
+                                    "Location": str(r['Location']), 
+                                    "Node": str(r['NodeNum']), 
+                                    "Position": pos_lbl, 
+                                    "Last Seen": last_seen_str, 
+                                    "Max Δ Temp": f"{convert_t(spike_val):.1f}{unit_label}", 
+                                    "Spike Count (24h)": f"{spike_count}x in {hours_with_data}h"
+                                })
                         
                         if not node_has_issue: project_summary[proj_label]["Working Fine"] += 1
-
                     # UI RENDER
                     st.markdown("#### 📊 Fleet Health Summary")
                     sum_df_rows = [{"Project": p, **stats} for p, stats in project_summary.items()]
@@ -863,29 +909,16 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 st.error(f"Alert Parser Error: {e}")
 
     # =========================================================================
-    # TAB 4: BAD ACTOR & RELIABILITY REPORT
+    # TAB 4: GLOBAL RELIABILITY & DRILL-DOWN OVERVIEWS
     # =========================================================================
     with tab_bad_actors:
-        st.subheader("🚨 Global Reliability & Bad Actor Report")
-        st.write("Isolates sensors with chronic connectivity drops, erratic data spiking, or dead batteries.")
+        st.subheader("🚨 Global Network Reliability Overview")
+        st.write("Complete node registry with drill-down overviews by location/pipe.")
         
         if 'alert_df' not in locals() or alert_df.empty:
             st.info("No network data available to evaluate.")
         else:
-            # 1. Define Bad Actor Criteria
-            #    - Reliability under 90% (missing >2 hours of data a day)
-            #    - OR Spike Count >= 2 (erratic sensor/bad wire)
-            #    - OR Latency > 6 hours
-            
-            now_utc = pd.Timestamp.now(tz='UTC')
-            
-            def calculate_latency(ts):
-                if pd.isnull(ts): return 999.0
-                ts_aware = ts if ts.tzinfo else ts.tz_localize('UTC')
-                return (now_utc - ts_aware).total_seconds() / 3600.0
-
             perf_df = alert_df.copy()
-            perf_df['Latency_Hours'] = perf_df['last_seen_ts'].apply(calculate_latency)
             
             # Filter for in-scope project
             if selected_project != "All Projects":
@@ -894,73 +927,47 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             if perf_df.empty:
                 st.success(f"No active hardware found for {selected_project}.")
             else:
-                bad_actors = perf_df[
-                    (perf_df['Signal_Reliability_Pct'] < 90.0) | 
-                    (perf_df['spike_count_24h'] >= 2) |
-                    (perf_df['Latency_Hours'] > 6.0)
-                ].copy()
-
+                # Global Fleet Metrics
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Total Active Sensors", len(perf_df))
-                c2.metric("Identified Bad Actors", len(bad_actors))
                 
                 avg_fleet_rel = perf_df['Signal_Reliability_Pct'].mean()
-                c3.metric("Global Fleet Reliability", f"{avg_fleet_rel:.1f}%")
+                c2.metric("Global Fleet Reliability", f"{avg_fleet_rel:.1f}%")
+                c3.metric("Locations Monitored", perf_df['Location'].nunique())
                 
                 st.divider()
-
-                if bad_actors.empty:
-                    st.success("✅ All sensors are operating within optimal reliability parameters.")
-                else:
-                    # Categorize the exact failure reason
-                    def assign_fault(row):
-                        faults = []
-                        if row['Latency_Hours'] > 24: faults.append("OFFLINE")
-                        elif row['Signal_Reliability_Pct'] < 90.0: faults.append("DROPPING PACKETS")
-                        
-                        if row['spike_count_24h'] >= 2: faults.append("ERRATIC DATA")
-                        
-                        return " + ".join(faults) if faults else "UNKNOWN"
-
-                    bad_actors['Fault_Type'] = bad_actors.apply(assign_fault, axis=1)
+                
+                # Sort completely by Location to create the drill-downs
+                locations = sorted(perf_df['Location'].dropna().unique().tolist())
+                
+                st.markdown("#### 📍 Drill-Down by Location / Temp Pipe")
+                
+                # Setup display columns
+                display_cols = ['NodeNum', 'Depth', 'Bank', 'Signal_Reliability_Pct', 'latest_rssi', 'avg_rssi_24h', 'spike_count_24h']
+                
+                for loc in locations:
+                    # Filter to location and sort worst reliability to the top of each pipe
+                    loc_df = perf_df[perf_df['Location'] == loc].sort_values(by='Signal_Reliability_Pct', ascending=True)
+                    loc_avg_rel = loc_df['Signal_Reliability_Pct'].mean()
                     
-                    # Sort worst offenders to the top (Lowest reliability, highest spikes)
-                    bad_actors = bad_actors.sort_values(
-                        by=['Signal_Reliability_Pct', 'spike_count_24h'], 
-                        ascending=[True, False]
-                    )
-
-                    # Format for display
-                    display_cols = ['Project', 'Location', 'NodeNum', 'Fault_Type', 'Signal_Reliability_Pct', 'checkin_frequency_24h', 'latest_rssi', 'avg_rssi_24h', 'spike_count_24h']
-                    
-                    st.markdown("#### 📉 Underperforming Nodes")
-                    st.dataframe(
-                        bad_actors[display_cols].style.format({
-                            "Signal_Reliability_Pct": "{:.1f}%",
-                            "checkin_frequency_24h": "{} pings",
-                            "latest_rssi": "{:.0f} dBm",
-                            "avg_rssi_24h": "{:.0f} dBm",
-                            "spike_count_24h": "{} spikes"
-                        }).background_gradient(subset=['Signal_Reliability_Pct'], cmap='Reds_r', vmin=0, vmax=100)
-                          .background_gradient(subset=['avg_rssi_24h'], cmap='RdYlGn', vmin=-100, vmax=-50),
-                        use_container_width=True, 
-                        hide_index=True,
-                        column_config={
-                            "NodeNum": "Node ID",
-                            "Fault_Type": "Primary Failure",
-                            "Signal_Reliability_Pct": "Reliability Score",
-                            "checkin_frequency_24h": "24h Check-ins",
-                            "latest_rssi": "Current RSSI",
-                            "avg_rssi_24h": "24h Avg RSSI",
-                            "spike_count_24h": "Erratic Spikes"
-                        }
-                    )
-                    # Add safe-zone lines
-                    fig_health.add_vline(x=90, line_dash="dot", line_color="green", annotation_text="90% Reliability")
-                    fig_health.update_layout(plot_bgcolor='white', margin=dict(t=40, b=0, l=0, r=0))
-                    
-                    # Invert Y axis so 0 spikes (good) is at the top, pushing Bad Actors to the bottom left
-                    fig_health.update_yaxes(autorange="reversed", showgrid=True, gridcolor='Gainsboro')
-                    fig_health.update_xaxes(showgrid=True, gridcolor='Gainsboro', range=[-5, 105])
-                    
-                    st.plotly_chart(fig_health, use_container_width=True)
+                    # Create an expandable drill-down per pipe
+                    with st.expander(f"Location: {loc}  |  Sensors: {len(loc_df)}  |  Average Reliability: {loc_avg_rel:.1f}%"):
+                        st.dataframe(
+                            loc_df[display_cols].style.format({
+                                "Signal_Reliability_Pct": "{:.1f}%",
+                                "latest_rssi": "{:.0f} dBm",
+                                "avg_rssi_24h": "{:.0f} dBm",
+                                "spike_count_24h": "{}"
+                            }),
+                            use_container_width=True, 
+                            hide_index=True,
+                            column_config={
+                                "NodeNum": "Node ID",
+                                "Depth": "Depth",
+                                "Bank": "Bank",
+                                "Signal_Reliability_Pct": "Reliability Score",
+                                "latest_rssi": "Current RSSI",
+                                "avg_rssi_24h": "24h Avg RSSI",
+                                "spike_count_24h": "Erratic Spikes (24h)"
+                            }
+                        )
