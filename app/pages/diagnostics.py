@@ -305,7 +305,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     node_history['timestamp'] = node_history['timestamp'].dt.tz_localize('UTC')
                 node_history['timestamp'] = node_history['timestamp'].dt.tz_convert(display_tz)
 
-                # --- FIX: Safe Date Parsing & Overall Field Reliability (Pandas Engine) ---
+                # --- FIX: Safe Date Parsing, Field Reliability & RSSI (Pandas Engine) ---
                 target_reg = reg_df[reg_df['NodeNum'] == target_node].copy()
                 target_reg['Start_Date_DT'] = pd.to_datetime(target_reg['Start_Date'], errors='coerce')
                 target_reg['End_Date_DT'] = pd.to_datetime(target_reg['End_Date'], errors='coerce')
@@ -313,17 +313,20 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 # Sort newest assignments to the top
                 target_reg = target_reg.sort_values(by='Start_Date_DT', ascending=False)
 
-                # Fetch ONLY the distinct ping hours for this node to avoid BigQuery date formatting errors
+                # Fetch ONLY the distinct ping hours AND the average RSSI for that hour
                 ping_q = f"""
-                    SELECT DISTINCT TIMESTAMP_TRUNC(timestamp, HOUR) as ping_hour
+                    SELECT 
+                        TIMESTAMP_TRUNC(timestamp, HOUR) as ping_hour,
+                        AVG(rssi) as hourly_rssi
                     FROM `{MASTER_VIEW}`
                     WHERE NodeNum = @target_node
+                    GROUP BY TIMESTAMP_TRUNC(timestamp, HOUR)
                 """
                 job_config_ping = bigquery.QueryJobConfig(
                     query_parameters=[bigquery.ScalarQueryParameter("target_node", "STRING", target_node)]
                 )
                 
-                with st.spinner("Calculating overall and project reliability scores..."):
+                with st.spinner("Calculating overall reliability and RSSI scores..."):
                     try:
                         ping_df = client.query(ping_q, job_config=job_config_ping).to_dataframe()
                         if not ping_df.empty:
@@ -334,6 +337,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     overall_active_hrs = 0
                     overall_total_hrs = 0
                     target_reg['Project Reliability'] = 0.0
+                    target_reg['Avg RSSI'] = pd.NA
                     
                     now_utc = pd.Timestamp.now(tz='UTC')
 
@@ -357,16 +361,19 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                         # Calculate total expected hours in this assignment window
                         total_assignment_hours = max(1.0, (calc_end_ts - start_ts).total_seconds() / 3600.0)
 
-                        # Count actual pings within the bounds
+                        # Count actual pings within the bounds and average the RSSI
                         if not ping_df.empty:
                             pings_in_window = ping_df[(ping_df['ping_hour'] >= start_ts) & (ping_df['ping_hour'] <= end_ts)]
                             active_hrs = len(pings_in_window)
+                            avg_rssi = pings_in_window['hourly_rssi'].mean()
                         else:
                             active_hrs = 0
+                            avg_rssi = pd.NA
                             
-                        # Assign row reliability
+                        # Assign row reliability and RSSI
                         rel_score = (active_hrs / total_assignment_hours) * 100.0
                         target_reg.at[idx, 'Project Reliability'] = min(100.0, rel_score)
+                        target_reg.at[idx, 'Avg RSSI'] = avg_rssi
                         
                         # Accumulate overall score if NOT an office/desk assignment
                         proj_name = str(row['Project']).strip().lower()
@@ -406,7 +413,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 target_reg['End Date'] = target_reg['End_Date_DT'].dt.strftime('%m/%d/%Y %H:%M').fillna("Active")
                 target_reg['Project Reliability'] = target_reg['Project Reliability'].fillna(0).apply(lambda x: f"{x:.1f}%")
                 
-                disp_placements = target_reg[['Project', 'Location', 'Position', 'Start Date', 'End Date', 'Project Reliability', 'SensorStatus']]
+                # Format the new RSSI column
+                target_reg['Avg RSSI'] = target_reg['Avg RSSI'].apply(lambda x: f"{x:.0f} dBm" if pd.notnull(x) else "-")
+                
+                # Add Avg RSSI to the display columns
+                disp_placements = target_reg[['Project', 'Location', 'Position', 'Start Date', 'End Date', 'Project Reliability', 'Avg RSSI', 'SensorStatus']]
                 st.dataframe(disp_placements, use_container_width=True, hide_index=True)
 
                 # ==========================================
