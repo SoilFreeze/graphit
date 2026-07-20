@@ -281,7 +281,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             
             # Master read query pulling localized node history down
             node_q = f"""
-                SELECT timestamp, temperature, Location, Bank, Depth, Project, SensorStatus
+                SELECT timestamp, temperature, rssi, Location, Bank, Depth, Project, SensorStatus
                 FROM `{MASTER_VIEW}`
                 WHERE NodeNum = @target_node
                   AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
@@ -755,7 +755,7 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 FROM MappedNodes WHERE rn = 1 AND (FullProjectID IS NOT NULL OR UPPER(RawProject) LIKE '%OFFICE%')
             ),
             NodeTimelineHistory AS (
-                SELECT m.NodeNum, m.temperature, m.timestamp,
+                SELECT m.NodeNum, m.temperature, m.rssi, m.timestamp,
                 LAG(m.temperature) OVER (PARTITION BY m.NodeNum ORDER BY m.timestamp ASC) as last_temp_val
                 FROM `{MASTER_VIEW}` m WHERE m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
             ),
@@ -764,9 +764,11 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                 ARRAY_AGG(h.temperature ORDER BY h.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
                 MAX(CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN ABS(h.temperature - h.last_temp_val) ELSE 0 END) as max_single_spike_24h,
                 
-                -- NEW: Count exact check-ins
-                COUNT(CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN h.timestamp END) as total_pings_24h,
+                -- NEW RSSI COLUMNS
+                ARRAY_AGG(h.rssi ORDER BY h.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_rssi,
+                AVG(CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN h.rssi END) as avg_rssi_24h,
                 
+                COUNT(CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN h.timestamp END) as total_pings_24h,
                 COUNT(DISTINCT CASE WHEN h.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(h.timestamp, HOUR) END) as hours_with_data_24h
                 FROM NodeTimelineHistory h GROUP BY h.NodeNum
             ),
@@ -776,12 +778,10 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
             )
             SELECT r.FinalProjectLabel as Project, r.NodeNum, r.Location, r.Bank, r.Depth, r.PipeType,
             a.last_seen_ts, a.latest_temp, a.max_single_spike_24h, 
+            a.latest_rssi, a.avg_rssi_24h,
             COALESCE(a.hours_with_data_24h, 0) as hours_with_data_24h,
             COALESCE(a.total_pings_24h, 0) as checkin_frequency_24h,
-            
-            -- NEW: Calculate Reliability Score (Assuming 1 ping per hour minimum = 24 expected)
             ROUND((COALESCE(a.hours_with_data_24h, 0) / 24.0) * 100, 1) as Signal_Reliability_Pct,
-            
             COALESCE(s.spike_count_24h, 0) as spike_count_24h
             FROM RegisteredNodes r
             LEFT JOIN NodeAggregates a ON r.NodeNum = a.NodeNum
@@ -931,15 +931,18 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     )
 
                     # Format for display
-                    display_cols = ['Project', 'Location', 'NodeNum', 'Fault_Type', 'Signal_Reliability_Pct', 'checkin_frequency_24h', 'spike_count_24h']
+                    display_cols = ['Project', 'Location', 'NodeNum', 'Fault_Type', 'Signal_Reliability_Pct', 'checkin_frequency_24h', 'latest_rssi', 'avg_rssi_24h', 'spike_count_24h']
                     
                     st.markdown("#### 📉 Underperforming Nodes")
                     st.dataframe(
                         bad_actors[display_cols].style.format({
                             "Signal_Reliability_Pct": "{:.1f}%",
                             "checkin_frequency_24h": "{} pings",
+                            "latest_rssi": "{:.0f} dBm",
+                            "avg_rssi_24h": "{:.0f} dBm",
                             "spike_count_24h": "{} spikes"
-                        }).background_gradient(subset=['Signal_Reliability_Pct'], cmap='Reds_r', vmin=0, vmax=100),
+                        }).background_gradient(subset=['Signal_Reliability_Pct'], cmap='Reds_r', vmin=0, vmax=100)
+                          .background_gradient(subset=['avg_rssi_24h'], cmap='RdYlGn', vmin=-100, vmax=-50),
                         use_container_width=True, 
                         hide_index=True,
                         column_config={
@@ -947,22 +950,9 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                             "Fault_Type": "Primary Failure",
                             "Signal_Reliability_Pct": "Reliability Score",
                             "checkin_frequency_24h": "24h Check-ins",
+                            "latest_rssi": "Current RSSI",
+                            "avg_rssi_24h": "24h Avg RSSI",
                             "spike_count_24h": "Erratic Spikes"
-                        }
-                    )
-
-                    # Optional: Visual Scatter Plot of Network Health
-                    st.markdown("#### 📡 Network Health Matrix")
-                    fig_health = px.scatter(
-                        perf_df, 
-                        x="Signal_Reliability_Pct", 
-                        y="spike_count_24h",
-                        color="Location",
-                        hover_data=["NodeNum", "Project", "Latency_Hours"],
-                        title="Reliability vs. Data Stability (Top Right = Optimal)",
-                        labels={
-                            "Signal_Reliability_Pct": "Signal Reliability (%)", 
-                            "spike_count_24h": "Erratic Data Spikes (24h)"
                         }
                     )
                     # Add safe-zone lines
