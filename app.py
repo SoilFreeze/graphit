@@ -83,7 +83,7 @@ def get_universal_portal_data(target_job_number):
         SELECT 
             Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status, SensorStatus
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
-        WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
+        WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
           
           -- 🔒 STRICT ALLOWLIST
           AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
@@ -110,12 +110,16 @@ def get_universal_portal_data(target_job_number):
     reg_q = f"""
         SELECT Project, NodeNum, Location, Start_Date, End_Date 
         FROM `{NODE_REGISTRY_TABLE}` 
-        WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
+        WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
     """
     reg_df = client.query(reg_q, job_config=job_config).to_dataframe()
     
     # 3. Process Time Boundaries safely using Pandas
     if not reg_df.empty:
+        # Force Project columns to be strings and strip whitespace to prevent merge failures
+        df['Project'] = df['Project'].astype(str).str.strip()
+        reg_df['Project'] = reg_df['Project'].astype(str).str.strip()
+        
         # Pandas effortlessly absorbs ANY date format coming from Google Sheets
         reg_df['Start_Date'] = pd.to_datetime(reg_df['Start_Date'], errors='coerce', utc=True)
         reg_df['End_Date'] = pd.to_datetime(reg_df['End_Date'], errors='coerce', utc=True)
@@ -601,8 +605,10 @@ def render_client_portal():
     ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
     ambient_data_global = master_df[ambient_mask_master].copy()
 
-    # Isolate data exclusively for the chosen phase
-    full_p_df = master_df[master_df['Project'] == selected_phase].copy()
+    # Isolate data exclusively for the chosen phase (forcing string comparison)
+    master_df['Project'] = master_df['Project'].astype(str).str.strip()
+    target_phase_clean = str(selected_phase).strip()
+    full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
 
     # If the phase doesn't have an ambient sensor physically assigned, inject the global one
     ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
