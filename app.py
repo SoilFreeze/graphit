@@ -592,18 +592,42 @@ def render_client_portal():
     target_phase_clean = str(selected_phase).strip()
     full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
 
-    # 🛠️ SMART ID TRANSLATOR: Registry (Descriptive) -> Telemetry (System ID)
-    # If the dropdown says "2541-Blackjack Phase 1" but sensors report as "2541-1", this connects them.
+    # 🛠️ SMART ID TRANSLATOR v2: Number-Matching Bridge
+    # Connects verbose registry names (e.g. "2541-Blackjack Phase 1") to shorthand sensor IDs (e.g. "2541-1")
     if full_p_df.empty:
-        root_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
-        # Extract the phase number (e.g., "1" from "Phase 1")
-        phase_digits = re.findall(r'\d+', target_phase_clean.split('-')[-1])
-        if phase_digits:
-            target_system_id = f"{root_id}-{phase_digits[-1]}"
-            full_p_df = master_df[master_df['Project'] == target_system_id].copy()
+        # Extract the numeric signature (e.g., gets ['2541', '1'] from the dropdown name)
+        selected_numbers = re.findall(r'\d+', target_phase_clean)
+        
+        available_telemetry_projects = master_df['Project'].dropna().unique()
+        
+        for telemetry_proj in available_telemetry_projects:
+            telemetry_numbers = re.findall(r'\d+', str(telemetry_proj))
             
-            if not full_p_df.empty:
-                selected_phase = target_system_id  # Updates internal phase ID so charts map correctly
+            # If the numeric signatures perfectly match, link them!
+            if selected_numbers and telemetry_numbers and set(selected_numbers) == set(telemetry_numbers):
+                full_p_df = master_df[master_df['Project'] == telemetry_proj].copy()
+                selected_phase = telemetry_proj  # Update internal state so charts graph correctly
+                break
+
+    # --- ☁️ AMBIENT WEATHER SHARING FIX ---
+    ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+    ambient_data_global = master_df[ambient_mask_master].copy()
+    
+    # Safely check if ambient data exists in the current phase before merging
+    if not full_p_df.empty:
+        ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+        if not ambient_data_global.empty and not ambient_mask_phase.any():
+            full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
+            
+    # 🚨 DIAGNOSTIC SAFETY NET 
+    if full_p_df.empty:
+        st.error(f"❌ **Data Mismatch Detected!**")
+        st.warning(f"The dropdown is looking for phase: `{target_phase_clean}`")
+        st.info("But the telemetry database only contains the following Project IDs:")
+        st.write(master_df['Project'].unique())
+        st.stop() # Halts the script so you can see the error clearly
+            
+
 
     # --- ☁️ AMBIENT WEATHER SHARING FIX ---
     ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
