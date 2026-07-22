@@ -58,14 +58,16 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     phase_sql = ""
     if phase_match:
         target_phase = phase_match.group(1)
-        # Safely cast to string and trim to match your v2 schema perfectly
         phase_sql = f"AND TRIM(CAST(m.Phase AS STRING)) = '{target_phase}'"
         st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
 
     # --- NEW FIX: Dynamic Status Filter ---
-    # If the active project is the Office, drop the filter to show ALL sensors
+    # If the active project is the Office, show all test/inventory nodes EXCEPT Archived
     if 'OFFICE' in job_num.upper():
-        status_sql = "" 
+        status_sql = """
+            AND UPPER(COALESCE(CAST(m.SensorStatus AS STRING), '')) != 'ARCHIVED'
+            AND UPPER(COALESCE(CAST(m.Location AS STRING), '')) != 'ARCHIVED'
+        """
     else:
         # Otherwise, only allow active field and diagnostic nodes
         status_sql = "AND UPPER(CAST(m.SensorStatus AS STRING)) IN ('ON PROJECT', 'DIAGNOSTIC')"
