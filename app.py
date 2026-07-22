@@ -556,8 +556,26 @@ def render_client_portal():
         st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
         return
 
-    # --- 🎛️ PHASE SELECTOR UI ---
-    available_phases = sorted(proj_registry['Project'].dropna().unique(), key=natural_sort_key)
+    # --- 🎛️ PHASE SELECTOR UI (BUILT FROM ACTUAL DATA) ---
+    
+    with st.spinner("Synchronizing official records..."):
+        # 1. Fetch data for all phases FIRST so we know exactly what Project IDs exist
+        master_df = get_universal_portal_data(TARGET_JOB_NUMBER)
+
+    if master_df.empty:
+        st.warning("⚠️ No approved data records available yet.")
+        return
+
+    master_df = master_df[(master_df['temperature'] >= -30.0) & (master_df['temperature'] <= 120.0)]
+    master_df = master_df[
+        (~master_df['Location'].str.upper().str.contains('OFFICE')) &
+        (~master_df['Location'].str.upper().str.contains('DESK')) &
+        (~master_df['Location'].str.upper().str.contains('TEST'))
+    ]
+
+    # 2. Build the dropdown exclusively from phases that have physical data attached
+    master_df['Project'] = master_df['Project'].astype(str).str.strip()
+    available_phases = sorted(master_df['Project'].dropna().unique(), key=natural_sort_key)
     
     if len(available_phases) > 1:
         st.sidebar.markdown("### 📂 Project Phase")
@@ -565,11 +583,29 @@ def render_client_portal():
     elif len(available_phases) == 1:
         selected_phase = available_phases[0]
     else:
-        st.error("No valid phases found in the registry.")
+        st.error("No valid phases found in the data.")
         return
 
-    # Isolate metadata strictly for the selected phase
-    phase_row = proj_registry[proj_registry['Project'] == selected_phase]
+    # 3. Isolate data exclusively for the chosen phase
+    target_phase_clean = str(selected_phase).strip()
+    full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
+
+    # --- ☁️ AMBIENT WEATHER SHARING FIX ---
+    ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+    ambient_data_global = master_df[ambient_mask_master].copy()
+    
+    ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+    if not ambient_data_global.empty and not ambient_mask_phase.any():
+        full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
+
+    # 4. Isolate metadata for UI (Fallback gracefully if data naming doesn't perfectly match registry)
+    proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
+    phase_row = proj_registry[proj_registry['Project'] == target_phase_clean]
+    
+    if phase_row.empty:
+        # Fallback: Just grab the first registry entry that shares the root job ID
+        phase_row = proj_registry.iloc[[0]]
+
     primary_meta = phase_row.iloc[0].to_dict()
     display_name = primary_meta.get('ProjectName', selected_phase)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
@@ -581,39 +617,6 @@ def render_client_portal():
         f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
         days_since = (now_local - f_start_date).days
         day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
-
-    with st.spinner(f"Synchronizing official records for {selected_phase}..."):
-        # Fetch data for all phases in the root job
-        master_df = get_universal_portal_data(TARGET_JOB_NUMBER)
-
-    if master_df.empty:
-        st.warning("⚠️ No approved data records available yet.")
-        return
-
-    master_df = master_df[(master_df['temperature'] >= -30.0) & (master_df['temperature'] <= 120.0)]
-
-    # Clean out any trailing office records that managed to bypass subqueries
-    master_df = master_df[
-        (~master_df['Location'].str.upper().str.contains('OFFICE')) &
-        (~master_df['Location'].str.upper().str.contains('DESK')) &
-        (~master_df['Location'].str.upper().str.contains('TEST'))
-    ]
-
-    # --- ☁️ AMBIENT WEATHER SHARING FIX ---
-    # We pull the ambient sensor from the master_df before filtering down to the phase. 
-    # This allows a single weather sensor mapped to Phase 1 to appear on Phase 2's graphs.
-    ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-    ambient_data_global = master_df[ambient_mask_master].copy()
-
-    # Isolate data exclusively for the chosen phase (forcing string comparison)
-    master_df['Project'] = master_df['Project'].astype(str).str.strip()
-    target_phase_clean = str(selected_phase).strip()
-    full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
-
-    # If the phase doesn't have an ambient sensor physically assigned, inject the global one
-    ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-    if not ambient_data_global.empty and not ambient_mask_phase.any():
-        full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
 
     if full_p_df.empty:
         st.warning(f"⚠️ No approved data records available for phase {selected_phase}.")
