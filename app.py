@@ -142,7 +142,7 @@ def get_universal_portal_data(target_job_number):
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
-                           display_tz="UTC", f_start_date=None, curve_id=None, ambient_df=None):
+                           display_tz="UTC", f_start_date=None, curve_id=None, ambient_df=None, target_phase=None):
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
@@ -155,7 +155,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     final_end_view, final_start_view = end_view, start_view
-    proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
     if curve_id and f_start_date:
@@ -165,11 +164,12 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             # 🛡️ Extract just the numbers from the location (e.g., "T1" -> "1")
             digits = re.findall(r'\d+', loc_part)
             loc_digit = digits[0] if digits else loc_part
+            target_phase_str = target_phase if target_phase else TARGET_JOB_NUMBER
             
             target_q = f"""
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{TARGET_JOB_NUMBER}%') 
+                WHERE UPPER(CurveID) LIKE UPPER('%{target_phase_str}%') 
                 -- 🎯 EXACT MATCH: Forces a non-numeric boundary after the number so T1 doesn't match T11
                 AND REGEXP_CONTAINS(UPPER(CurveID), r'(?i)T[P]?0?{loc_digit}([^0-9]|$)')
                 -- 🚫 BRINE EXCLUSION: Database-level block to keep curves off Brine charts
@@ -543,15 +543,31 @@ def render_client_portal():
     client = get_bq_client()
     if client is None: return
 
-    proj_q = f"SELECT * FROM `{PROJECT_REGISTRY_TABLE}` WHERE CAST(Project AS STRING) LIKE '{TARGET_JOB_NUMBER}%'"
+    # 🔥 Fix: Isolate the root job ID rigorously to pull accurate phases.
+    root_job_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
+    proj_q = f"SELECT * FROM `{PROJECT_REGISTRY_TABLE}` WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = '{root_job_id}'"
     proj_registry = client.query(proj_q).to_dataframe()
 
     if proj_registry.empty:
         st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
         return
 
-    primary_meta = proj_registry.iloc[0].to_dict()
-    display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
+    # --- 🎛️ PHASE SELECTOR UI ---
+    available_phases = sorted(proj_registry['Project'].dropna().unique(), key=natural_sort_key)
+    
+    if len(available_phases) > 1:
+        st.sidebar.markdown("### 📂 Project Phase")
+        selected_phase = st.sidebar.selectbox("Select Phase/System:", available_phases)
+    elif len(available_phases) == 1:
+        selected_phase = available_phases[0]
+    else:
+        st.error("No valid phases found in the registry.")
+        return
+
+    # Isolate metadata strictly for the selected phase
+    phase_row = proj_registry[proj_registry['Project'] == selected_phase]
+    primary_meta = phase_row.iloc[0].to_dict()
+    display_name = primary_meta.get('ProjectName', selected_phase)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
@@ -562,22 +578,40 @@ def render_client_portal():
         days_since = (now_local - f_start_date).days
         day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
 
-    with st.spinner("Synchronizing official records..."):
-        # Fetch ALL phases in a single, clean database pull to prevent overlap
-        full_p_df = get_universal_portal_data(TARGET_JOB_NUMBER)
+    with st.spinner(f"Synchronizing official records for {selected_phase}..."):
+        # Fetch data for all phases in the root job
+        master_df = get_universal_portal_data(TARGET_JOB_NUMBER)
 
-    if full_p_df.empty:
+    if master_df.empty:
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
+    master_df = master_df[(master_df['temperature'] >= -30.0) & (master_df['temperature'] <= 120.0)]
 
     # Clean out any trailing office records that managed to bypass subqueries
-    full_p_df = full_p_df[
-        (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
-        (~full_p_df['Location'].str.upper().str.contains('DESK')) &
-        (~full_p_df['Location'].str.upper().str.contains('TEST'))
+    master_df = master_df[
+        (~master_df['Location'].str.upper().str.contains('OFFICE')) &
+        (~master_df['Location'].str.upper().str.contains('DESK')) &
+        (~master_df['Location'].str.upper().str.contains('TEST'))
     ]
+
+    # --- ☁️ AMBIENT WEATHER SHARING FIX ---
+    # We pull the ambient sensor from the master_df before filtering down to the phase. 
+    # This allows a single weather sensor mapped to Phase 1 to appear on Phase 2's graphs.
+    ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+    ambient_data_global = master_df[ambient_mask_master].copy()
+
+    # Isolate data exclusively for the chosen phase
+    full_p_df = master_df[master_df['Project'] == selected_phase].copy()
+
+    # If the phase doesn't have an ambient sensor physically assigned, inject the global one
+    ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+    if not ambient_data_global.empty and not ambient_mask_phase.any():
+        full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
+
+    if full_p_df.empty:
+        st.warning(f"⚠️ No approved data records available for phase {selected_phase}.")
+        return
 
     st.title(f"📊 {display_name}")
     
@@ -599,9 +633,7 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        # ☁️ ISOLATE AMBIENT DATA LOCALLY
-        # Since the ambient sensor is assigned to the current project, it is already in full_p_df.
-        # We slice it out here so we can pass it exclusively to the brine graphs.
+        # ☁️ ISOLATE AMBIENT DATA LOCALLY (now guaranteed to exist if the site has an ambient sensor)
         ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
         ambient_df = full_p_df[ambient_mask].copy()
         
@@ -614,14 +646,16 @@ def render_client_portal():
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
                 
                 matched_project_id = loc_data['Project'].iloc[0]
-                phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
+                
+                # Fetch phase info specifically for this data split
+                current_phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
                 
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 loc_f_start_date = f_start_date
                 
-                if not phase_row.empty:
-                    raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
+                if not current_phase_row.empty:
+                    raw_phase_fd = current_phase_row.iloc[0].get('Date_Freezedown')
                     if pd.notnull(raw_phase_fd):
                         loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
                         loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
@@ -637,7 +671,7 @@ def render_client_portal():
                     any(x in loc_upper for x in ['SUPPLY', 'RETURN', 'BRINE', 'BANK'])
                 )
                 
-                graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
+                graph_curve_id = None if is_brine_pipe else f"{selected_phase}-{loc}"
                 
                 # 🎯 TARGETED INJECTION: Pass ambient_df to Brine graphs, ignore for Temp Pipes
                 target_ambient = ambient_df if is_brine_pipe else None
@@ -652,7 +686,8 @@ def render_client_portal():
                     local_tz, 
                     loc_f_start_date, 
                     graph_curve_id,
-                    target_ambient
+                    target_ambient,
+                    selected_phase # Pass the selected phase so the query filters correctly
                 ), use_container_width=True)
 
     with tabs[2]:
@@ -696,5 +731,6 @@ def render_client_portal():
                         st.error(f"❌ Drawing Not Found: '{filename}'")
         else:
             st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-            # --- EXECUTION ---
+
+# --- EXECUTION ---
 render_client_portal()
