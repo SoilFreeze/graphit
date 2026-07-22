@@ -592,6 +592,19 @@ def render_client_portal():
     target_phase_clean = str(selected_phase).strip()
     full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
 
+    # 🛠️ SMART ID TRANSLATOR: Registry (Descriptive) -> Telemetry (System ID)
+    # If the dropdown says "2541-Blackjack Phase 1" but sensors report as "2541-1", this connects them.
+    if full_p_df.empty:
+        root_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
+        # Extract the phase number (e.g., "1" from "Phase 1")
+        phase_digits = re.findall(r'\d+', target_phase_clean.split('-')[-1])
+        if phase_digits:
+            target_system_id = f"{root_id}-{phase_digits[-1]}"
+            full_p_df = master_df[master_df['Project'] == target_system_id].copy()
+            
+            if not full_p_df.empty:
+                selected_phase = target_system_id  # Updates internal phase ID so charts map correctly
+
     # --- ☁️ AMBIENT WEATHER SHARING FIX ---
     ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
     ambient_data_global = master_df[ambient_mask_master].copy()
