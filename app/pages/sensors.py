@@ -70,8 +70,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             WHERE m.Project LIKE CONCAT(@job_num, '%') 
               {phase_sql}
               AND m.NodeNum IS NOT NULL
-              -- Status is now natively in the view!
-              AND UPPER(CAST(m.SensorStatus AS STRING)) = 'ON PROJECT'
+              -- FIXED: Allow both ON PROJECT and DIAGNOSTIC sensors through
+              AND UPPER(CAST(m.SensorStatus AS STRING)) IN ('ON PROJECT', 'DIAGNOSTIC')
         ),
         GapAnalysis AS (
             SELECT *, LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
