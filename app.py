@@ -592,22 +592,22 @@ def render_client_portal():
     target_phase_clean = str(selected_phase).strip()
     full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
 
-    # 🛠️ SMART ID TRANSLATOR v2: Number-Matching Bridge
-    # Connects verbose registry names (e.g. "2541-Blackjack Phase 1") to shorthand sensor IDs (e.g. "2541-1")
+    # 🛠️ SMART ID TRANSLATOR v3: Base Project Matcher
+    # Connects phase-specific registry names (e.g., "2541-Blackjack Phase 2") 
+    # to the master telemetry ID (e.g., "2541-Blackjack")
     if full_p_df.empty:
-        # Extract the numeric signature (e.g., gets ['2541', '1'] from the dropdown name)
-        selected_numbers = re.findall(r'\d+', target_phase_clean)
-        
-        available_telemetry_projects = master_df['Project'].dropna().unique()
+        available_telemetry_projects = master_df['Project'].astype(str).str.strip().dropna().unique()
         
         for telemetry_proj in available_telemetry_projects:
-            telemetry_numbers = re.findall(r'\d+', str(telemetry_proj))
-            
-            # If the numeric signatures perfectly match, link them!
-            if selected_numbers and telemetry_numbers and set(selected_numbers) == set(telemetry_numbers):
+            # If the telemetry ID is a base string of the dropdown phase (or vice versa), link them!
+            if telemetry_proj in target_phase_clean or target_phase_clean in telemetry_proj:
                 full_p_df = master_df[master_df['Project'] == telemetry_proj].copy()
-                selected_phase = telemetry_proj  # Update internal state so charts graph correctly
                 break
+                
+        # Absolute fallback: just show all data matching the root job number to prevent a blank screen
+        if full_p_df.empty:
+            root_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
+            full_p_df = master_df[master_df['Project'].str.startswith(root_id, na=False)].copy()
 
     # --- ☁️ AMBIENT WEATHER SHARING FIX ---
     ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
