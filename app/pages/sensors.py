@@ -62,6 +62,14 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         phase_sql = f"AND TRIM(CAST(m.Phase AS STRING)) = '{target_phase}'"
         st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
 
+    # --- NEW FIX: Dynamic Status Filter ---
+    # If the active project is the Office, drop the filter to show ALL sensors
+    if 'OFFICE' in job_num.upper():
+        status_sql = "" 
+    else:
+        # Otherwise, only allow active field and diagnostic nodes
+        status_sql = "AND UPPER(CAST(m.SensorStatus AS STRING)) IN ('ON PROJECT', 'DIAGNOSTIC')"
+
     # 2. TELEMETRY & COVERAGE QUERY (Uses updated master_data_view_v2)
     query = f"""
         WITH BaseReporting AS (
@@ -70,8 +78,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
             WHERE m.Project LIKE CONCAT(@job_num, '%') 
               {phase_sql}
               AND m.NodeNum IS NOT NULL
-              -- FIXED: Allow both ON PROJECT and DIAGNOSTIC sensors through
-              AND UPPER(CAST(m.SensorStatus AS STRING)) IN ('ON PROJECT', 'DIAGNOSTIC')
+              {status_sql}
         ),
         GapAnalysis AS (
             SELECT *, LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
