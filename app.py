@@ -573,9 +573,11 @@ def render_client_portal():
         (~master_df['Location'].str.upper().str.contains('TEST'))
     ]
 
-    # 2. Build the dropdown exclusively from phases that have physical data attached
+    # 2. Build the dropdown from the official Project Registry so ALL phases show up
+    proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
     master_df['Project'] = master_df['Project'].astype(str).str.strip()
-    available_phases = sorted(master_df['Project'].dropna().unique(), key=natural_sort_key)
+    
+    available_phases = sorted(proj_registry['Project'].dropna().unique(), key=natural_sort_key)
     
     if len(available_phases) > 1:
         st.sidebar.markdown("### 📂 Project Phase")
