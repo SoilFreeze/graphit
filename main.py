@@ -448,22 +448,33 @@ elif selected_project != "All Projects":
         # TAB 2: YOUR NEW AS-BUILTS VIEWER GOES HERE
         # ---------------------------------------------------------
         with tab2:
-            st.subheader(f"As-Builts: {selected_project}")
+            st.subheader(f"Site As-Builts: {selected_project}")
             
-            # I added a try/except block so your app doesn't crash 
-            # if the file hasn't been uploaded to the folder yet!
-            import base64
+            # 1. Extract just the job number (e.g., gets "2527" from "2527-Elizabeth")
+            job_num = selected_project.split('-')[0].strip()
+            as_builts_dir = "as_builts"
             
-            # Update this path to wherever you put your PDF!
-            file_path = "as_builts/site_plan.pdf" 
-            
-            try:
-                with open(file_path, "rb") as f:
-                    base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
-                st.markdown(pdf_display, unsafe_allow_html=True)
-            except FileNotFoundError:
-                st.info(f"No as-built file found at `{file_path}`. Please add the PDF to view it here.")
+            # 2. Check if the folder exists first
+            if not os.path.exists(as_builts_dir):
+                st.warning(f"Please create an `{as_builts_dir}` folder in your main directory.")
+            else:
+                # 3. Scan the folder for any images starting with the job number
+                found_images = []
+                for file_name in os.listdir(as_builts_dir):
+                    # Check if it starts with the job number AND is an image
+                    if file_name.startswith(job_num) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        found_images.append(os.path.join(as_builts_dir, file_name))
+                
+                # 4. Sort the files so they appear in order (using your existing natural_sort_key function!)
+                found_images = sorted(found_images, key=natural_sort_key)
+                
+                # 5. Display the images or a fallback message
+                if found_images:
+                    for img_path in found_images:
+                        st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
+                        st.markdown("---") # Adds a nice line between multiple images
+                else:
+                    st.info(f"No as-built images found for Job {job_num}. Add them to the `{as_builts_dir}` folder using the naming convention (e.g., {job_num}.jpg).")
 
     elif page == "Depth Charts":
         render_depth_charts(selected_project, unit_label, display_tz)
