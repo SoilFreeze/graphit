@@ -384,58 +384,86 @@ elif selected_project != "All Projects":
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
         
-        # 1. Extract available Systems (Phase is already handled by the sidebar active project)
-        available_systems = sorted(
-            [str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
-            key=natural_sort_key
-        )
+        # 1. DEFINE THE TABS HERE
+        tab1, tab2 = st.tabs(["Telemetry Charts", "Site As-Builts"])
         
-        selected_systems = []
-        
-        # 2. THE FIX: Only show the filter if there are actually multiple systems to choose from!
-        if len(available_systems) > 1:
-            selected_systems = st.multiselect(
-                "⚙️ Filter by System (Leave blank to show all systems):", 
-                options=available_systems, 
-                default=[]  # Defaulting to blank safely passes all data through
+        # ---------------------------------------------------------
+        # TAB 1: ALL YOUR EXISTING CHART LOGIC GOES HERE (Indented)
+        # ---------------------------------------------------------
+        with tab1:
+            # Extract available Systems
+            available_systems = sorted(
+                [str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
+                key=natural_sort_key
             )
             
-        # 3. Slice the data ONLY if the user explicitly picked a system
-        display_data = clean_data.copy()
-        if selected_systems:
-            display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
+            selected_systems = []
             
-        st.divider()
+            # Only show the filter if there are multiple systems
+            if len(available_systems) > 1:
+                selected_systems = st.multiselect(
+                    "⚙️ Filter by System (Leave blank to show all systems):", 
+                    options=available_systems, 
+                    default=[]  
+                )
+                
+            # Slice the data ONLY if the user explicitly picked a system
+            display_data = clean_data.copy()
+            if selected_systems:
+                display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
+                
+            st.divider()
 
-        # 4. Grab only the valid locations
-        unique_locations = display_data['Location'].dropna().unique()
-        valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
-        sorted_locations = sorted(valid_locations, key=natural_sort_key)
+            # Grab only the valid locations
+            unique_locations = display_data['Location'].dropna().unique()
+            valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
+            sorted_locations = sorted(valid_locations, key=natural_sort_key)
 
-        # 5. Automatically loop through those specific locations
-        for loc in sorted_locations:
-            loc_data = display_data[display_data['Location'] == loc]
+            # Automatically loop through those specific locations
+            for loc in sorted_locations:
+                loc_data = display_data[display_data['Location'] == loc]
+                
+                if loc_data.empty:
+                    continue
+
+                fig = build_high_speed_graph(
+                    client=sidebar_client,  
+                    df=loc_data, 
+                    title=f"Thermal Trends: {loc}",
+                    start_view=start_date, 
+                    end_view=end_date, 
+                    active_refs=active_refs,
+                    unit_mode=unit_mode,
+                    unit_label=unit_label,
+                    display_tz=display_tz,
+                    f_start_date=freeze_start_ts, 
+                    curve_id=selected_project
+                )
+                
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.markdown("---")
+
+        # ---------------------------------------------------------
+        # TAB 2: YOUR NEW AS-BUILTS VIEWER GOES HERE
+        # ---------------------------------------------------------
+        with tab2:
+            st.subheader(f"As-Builts: {selected_project}")
             
-            if loc_data.empty:
-                continue
-
-            fig = build_high_speed_graph(
-                client=sidebar_client,  
-                df=loc_data, 
-                title=f"Thermal Trends: {loc}",
-                start_view=start_date, 
-                end_view=end_date, 
-                active_refs=active_refs,
-                unit_mode=unit_mode,
-                unit_label=unit_label,
-                display_tz=display_tz,
-                f_start_date=freeze_start_ts, 
-                curve_id=selected_project
-            )
+            # I added a try/except block so your app doesn't crash 
+            # if the file hasn't been uploaded to the folder yet!
+            import base64
             
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-                st.markdown("---")
+            # Update this path to wherever you put your PDF!
+            file_path = "as_builts/site_plan.pdf" 
+            
+            try:
+                with open(file_path, "rb") as f:
+                    base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
+                st.markdown(pdf_display, unsafe_allow_html=True)
+            except FileNotFoundError:
+                st.info(f"No as-built file found at `{file_path}`. Please add the PDF to view it here.")
 
     elif page == "Depth Charts":
         render_depth_charts(selected_project, unit_label, display_tz)
