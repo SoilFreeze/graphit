@@ -48,10 +48,12 @@ def get_cached_ambient_data(job_num, start_str):
         return pd.DataFrame()
 
 def build_high_speed_graph(client, df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
-                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
+                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None, show_elevation=False):
     """
     Engineering-grade Trend Graph.
     """
+    import plotly.graph_objects as go
+    
     clean_title_lower = str(title).lower().replace("thermal trends:", "").strip()
     
     if any(x in clean_title_lower for x in ['ambient', 'office', 'x-tra', 'xtra']):
@@ -74,6 +76,16 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
 
     is_temp_pipe = any(x in clean_title_lower for x in ['pipe', 'tp', 'depth']) or clean_title_lower.startswith('t')
     
+    # ---------------------------------------------------------
+    # ELEVATION CHECK 
+    # ---------------------------------------------------------
+    has_elevation_data = False
+    if show_elevation and is_temp_pipe:
+        if 'BaseElevation' in plot_df.columns and not plot_df['BaseElevation'].isnull().all():
+            has_elevation_data = True
+        else:
+            st.warning(f"⚠️ No elevation data in database for {title}.")
+
     if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and st.session_state.get('global_show_ref', True):
         try:
             parts = str(curve_id).split('-')
@@ -140,10 +152,28 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         latest_sensor = str(pos_df.iloc[-1]['NodeNum']).strip()
 
         if is_temp_pipe:
-            display_name = f"{pos} ft ({latest_sensor})"
             priority = 1
             try: sort_val = [float(pos)]
             except: sort_val = natural_sort_key(pos)
+            
+            # ---------------------------------------------------------
+            # DYNAMIC ELEVATION LABELS
+            # ---------------------------------------------------------
+            if has_elevation_data:
+                base_elev_series = pos_df['BaseElevation'].dropna()
+                if not base_elev_series.empty:
+                    base_elev = base_elev_series.iloc[0]
+                    try:
+                        # Calculates the absolute elevation
+                        abs_elev = float(base_elev) - float(pos)
+                        display_name = f"Elev: {abs_elev:.1f} ft ({latest_sensor})"
+                    except ValueError:
+                        display_name = f"{pos} ft ({latest_sensor})"
+                else:
+                    display_name = f"{pos} ft ({latest_sensor})"
+            else:
+                display_name = f"{pos} ft ({latest_sensor})"
+                
         else:
             display_name = f"{pos} ({latest_sensor})"
             priority = 0
