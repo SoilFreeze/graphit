@@ -9,7 +9,6 @@ from app.components.charts import build_high_speed_graph
 
 # =============================================================================
 # IMPORTANT: Import your other page functions here based on your file structure
-# Example paths provided below, adjust as needed!
 # =============================================================================
 from app.pages.summary import render_summary_dashboard
 from app.pages.depth import render_depth_charts
@@ -40,16 +39,28 @@ page = st.sidebar.selectbox(
     key="nav_page"
 )
 
-# PROJECT SELECTION
-selected_project = "All Projects"
-project_metadata = None  
+# =============================================================================
+# 3. VISIBILITY CONTROLS (Must be set BEFORE querying projects)
+# =============================================================================
+st.sidebar.header("👁️ Visibility Controls")
 
+# Streamlit tracks these automatically via the 'key' argument
+st.sidebar.checkbox("Show Archived Projects", value=False, key="global_show_archived")
+st.sidebar.checkbox("Show Ambient Temp", value=True, key="global_show_ambient")
+st.sidebar.checkbox("Show Masked Data", value=False, key="global_show_masked")
+st.sidebar.checkbox("Show Bad Data", value=False, key="global_show_baddata")
+
+
+# =============================================================================
+# 4. PROJECT SELECTION
+# =============================================================================
+project_metadata = None  
 sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # Determine the filter based on the toggle
-        status_filter = "" if st.session_state.get('global_show_archived', False) else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
+        # Determine the filter based on the toggle state above
+        status_filter = "" if st.session_state.global_show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1', 'T')"
 
         proj_q = f"""
             SELECT 
@@ -65,20 +76,20 @@ if sidebar_client is not None:
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
-        # Python fix: Strip whitespace and filter out non-values
+        # Clean and strip whitespace to prevent empty strings from showing up
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
         ])
         
+        # Render the selectbox with the native Streamlit key for state management
         selected_project = st.sidebar.selectbox(
             "🎯 Active Project", 
             ["All Projects"] + proj_list, 
-            key="sidebar_proj_picker_global"
+            key="selected_project"
         )
         
-        st.session_state['selected_project'] = selected_project
-        
+        # Load metadata if a specific project is chosen
         if selected_project != "All Projects":
             meta_row = proj_df[proj_df['Project'] == selected_project]
             if not meta_row.empty:
@@ -89,9 +100,35 @@ if sidebar_client is not None:
             
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
+        # FAIL-SAFE: Draw the box even if BigQuery errors out so it doesn't disappear
+        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="selected_project")
+else:
+    # FAIL-SAFE: Draw the box if the client fails to connect
+    selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="selected_project")
+
 
 # =============================================================================
-# CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
+# 5. THEORETICAL CURVES TOGGLE 
+# =============================================================================
+p_meta = st.session_state.get('project_metadata')
+p_status = ""
+
+try:
+    if p_meta is not None:
+        if hasattr(p_meta, 'get'):
+            p_status = str(p_meta.get('ProjectStatus', '')).lower()
+        else:
+            p_status = str(p_meta['ProjectStatus']).lower()
+except Exception:
+    p_status = ""
+
+default_curve = False if 'maintenance' in p_status else True 
+
+st.sidebar.checkbox("Show Theoretical Curves", value=default_curve, key="global_show_ref")
+
+
+# =============================================================================
+# 6. CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
 # =============================================================================
 st.sidebar.subheader("⏱️ Current Data Ages")
 
@@ -152,72 +189,21 @@ if st.sidebar.button("🔄 Refresh Data", width="stretch"):
         time.sleep(0.5)
         st.rerun()
 
-st.sidebar.header("👁️ Visibility Controls")
-
-# 1. Archived Projects Toggle
-st.session_state['global_show_archived'] = st.sidebar.checkbox(
-    "Show Archived Projects", 
-    value=st.session_state.get('global_show_archived', False)
-)
-
-# 2. Ambient Temp Toggle
-st.session_state['global_show_ambient'] = st.sidebar.checkbox(
-    "Show Ambient Temp", 
-    value=st.session_state.get('global_show_ambient', True)
-)
-
-# 3. Theoretical Curve (Auto-toggles based on Project Status!)
-p_meta = st.session_state.get('project_metadata')
-p_status = ""
-
-# Safely extract the status whether p_meta is a dict, Pandas Series, or None
-try:
-    if p_meta is not None:
-        if hasattr(p_meta, 'get'):
-            p_status = str(p_meta.get('ProjectStatus', '')).lower()
-        else:
-            p_status = str(p_meta['ProjectStatus']).lower()
-except Exception:
-    p_status = ""
-
-# Default to False if in maintenance, True otherwise (Freezedown)
-default_curve = False if 'maintenance' in p_status else True 
-
-st.session_state['global_show_ref'] = st.sidebar.checkbox(
-    "Show Theoretical Curves", 
-    value=st.session_state.get('global_show_ref', default_curve)
-)
-
-# 4 & 5. Independent Data Auditing Controls
-st.session_state['global_show_masked'] = st.sidebar.checkbox(
-    "Show Masked Data", 
-    value=st.session_state.get('global_show_masked', False)
-)
-
-st.session_state['global_show_baddata'] = st.sidebar.checkbox(
-    "Show Bad Data", 
-    value=st.session_state.get('global_show_baddata', False)
-)
-
 st.sidebar.divider()
 st.sidebar.subheader("⏳ Timeline Navigation")
 
-# 1. Put the checkbox in the sidebar
 show_full_dataset = st.sidebar.checkbox("🌍 See Full Data (Since Freezedown)", value=False, key="full_data_toggle")
 
 if show_full_dataset:
-    # 2. Dynamically calculate days since Date_Freezedown
     p_meta = st.session_state.get('project_metadata') or {}
     real_f_date = p_meta.get('Date_Freezedown')
     parsed_date = pd.to_datetime(real_f_date, errors='coerce')
     
     if pd.notnull(parsed_date):
-        # Strip timezone if present so we can compare to today
         if parsed_date.tzinfo is not None:
             parsed_date = parsed_date.tz_localize(None)
             
         days_since = (pd.Timestamp.now() - parsed_date).days
-        # Ensure we always pull at least 7 days, and add a 2-day buffer to cover today/tomorrow
         lookback = max(7, days_since + 2) 
         
         st.sidebar.caption(f"Showing ~{lookback} days of data since freezedown.")
@@ -226,7 +212,6 @@ if show_full_dataset:
         st.sidebar.caption("No freezedown date set for this project. Defaulting to 90 days.")
         st.session_state["global_lookback_days"] = 90
 else:
-    # 3. Standard slider for custom windows
     selected_weeks = st.sidebar.slider(
         "Select History Window (Weeks)",
         min_value=1,
@@ -259,7 +244,8 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True
 )
-# 4. MEASUREMENT & UNITS
+
+# 7. MEASUREMENT & UNITS
 st.sidebar.subheader("🌡️ Units")
 unit_mode = st.sidebar.radio(
     "Temperature Scale", 
@@ -273,7 +259,7 @@ st.session_state["unit_label"] = unit_label
 
 st.sidebar.divider()
 
-# 5. TIMEZONE & DISPLAY
+# 8. TIMEZONE & DISPLAY
 st.sidebar.subheader("📱 Display & Time")
 
 default_tz_index = 2 
@@ -297,7 +283,7 @@ st.session_state["display_tz"] = tz_lookup[tz_mode]
 
 st.sidebar.divider()
 
-# 6. REFERENCE LINES (Static Constants)
+# 9. REFERENCE LINES (Static Constants)
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
 
@@ -316,17 +302,13 @@ display_tz = st.session_state.get("display_tz", "UTC")
 # MASTER LAYOUT FRAMEWORK PAGE ROUTER
 # =============================================================================
 
-# Define a sorting helper to ensure proper numerical sequencing (T1, T2, T3... instead of T1, T10, T2)
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
 
-# 1. DEFINE GLOBAL PAGES
 GLOBAL_PAGES = ["Summary", "Data Processing", "Admin Tools"]
 
-# 2. RENDER GLOBAL PAGES (Load regardless of project selection)
 if page in GLOBAL_PAGES:
     if page == "Summary":
-        # Pass None as selected_project if it's "All Projects"
         project_arg = None if selected_project == "All Projects" else selected_project
         render_summary_dashboard(project_arg, unit_label, unit_mode, display_tz)
         
@@ -343,38 +325,31 @@ if page in GLOBAL_PAGES:
                 st.subheader("🔐 Restricted Admin Access")
                 pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
                 if st.button("Unlock Dashboard", width="stretch"):
-                    # THE FIX: Updated the fallback password to exactly "freeze123"
                     if pwd == st.secrets.get("admin_password", "freeze123"):
                         st.session_state['authenticated'] = True
                         st.rerun()
                     else:
                         st.error("Invalid Password. Access Denied.")
 
-# 3. RENDER PROJECT-SPECIFIC PAGES (Only load if a project is selected)
 elif selected_project != "All Projects":
-    # Calculate dates once for project pages
     lookback_days = st.session_state.get("global_lookback_days", 35)
-    end_date = pd.Timestamp.now()  # Kept timezone-naive
+    end_date = pd.Timestamp.now()  
     start_date = end_date - pd.Timedelta(days=lookback_days)
     
-    # --- FIX: Safely parse Date_Freezedown to match timezone-naive format ---
     freeze_start_ts = start_date 
     p_meta = st.session_state.get('project_metadata') or {}
     real_f_date = p_meta.get('Date_Freezedown')
     
     parsed_date = pd.to_datetime(real_f_date, errors='coerce')
     if pd.notnull(parsed_date):
-        # If the database returns it with a timezone, strip it so it matches start_date/end_date
         if parsed_date.tzinfo is not None:
             freeze_start_ts = parsed_date.tz_localize(None)
         else:
             freeze_start_ts = parsed_date
             
-    # Fetch and process the data for the selected project
-    # Pass the checkbox states dynamically so the Cache correctly refreshes!
     raw_data = get_universal_portal_data(
         selected_project, 
-        lookback_days=lookback_days,  # <--- THE FIX: Passing the days to BigQuery!
+        lookback_days=lookback_days, 
         is_summary_page=False,
         show_masked=st.session_state.get('global_show_masked', False),
         show_baddata=st.session_state.get('global_show_baddata', False)
@@ -384,14 +359,9 @@ elif selected_project != "All Projects":
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
         
-        # 1. DEFINE THE TABS HERE
         tab1, tab2 = st.tabs(["Telemetry Charts", "Site As-Builts"])
         
-        # ---------------------------------------------------------
-        # TAB 1: ALL YOUR EXISTING CHART LOGIC GOES HERE (Indented)
-        # ---------------------------------------------------------
         with tab1:
-            # Extract available Systems
             available_systems = sorted(
                 [str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
                 key=natural_sort_key
@@ -399,7 +369,6 @@ elif selected_project != "All Projects":
             
             selected_systems = []
             
-            # Only show the filter if there are multiple systems
             if len(available_systems) > 1:
                 selected_systems = st.multiselect(
                     "⚙️ Filter by System (Leave blank to show all systems):", 
@@ -407,19 +376,16 @@ elif selected_project != "All Projects":
                     default=[]  
                 )
                 
-            # Slice the data ONLY if the user explicitly picked a system
             display_data = clean_data.copy()
             if selected_systems:
                 display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
                 
             st.divider()
 
-            # Grab only the valid locations
             unique_locations = display_data['Location'].dropna().unique()
             valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
             sorted_locations = sorted(valid_locations, key=natural_sort_key)
 
-            # Automatically loop through those specific locations
             for loc in sorted_locations:
                 loc_data = display_data[display_data['Location'] == loc]
                 
@@ -444,35 +410,26 @@ elif selected_project != "All Projects":
                     st.plotly_chart(fig, use_container_width=True)
                     st.markdown("---")
 
-        # ---------------------------------------------------------
-        # TAB 2: YOUR NEW AS-BUILTS VIEWER GOES HERE
-        # ---------------------------------------------------------
         with tab2:
             st.subheader(f"Site As-Builts: {selected_project}")
             
-            # 1. Extract just the job number (e.g., gets "2527" from "2527-Elizabeth")
             job_num = selected_project.split('-')[0].strip()
             as_builts_dir = "as_builts"
             
-            # 2. Check if the folder exists first
             if not os.path.exists(as_builts_dir):
                 st.warning(f"Please create an `{as_builts_dir}` folder in your main directory.")
             else:
-                # 3. Scan the folder for any images starting with the job number
                 found_images = []
                 for file_name in os.listdir(as_builts_dir):
-                    # Check if it starts with the job number AND is an image
                     if file_name.startswith(job_num) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
                         found_images.append(os.path.join(as_builts_dir, file_name))
                 
-                # 4. Sort the files so they appear in order (using your existing natural_sort_key function!)
                 found_images = sorted(found_images, key=natural_sort_key)
                 
-                # 5. Display the images or a fallback message
                 if found_images:
                     for img_path in found_images:
                         st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
-                        st.markdown("---") # Adds a nice line between multiple images
+                        st.markdown("---")
                 else:
                     st.info(f"No as-built images found for Job {job_num}. Add them to the `{as_builts_dir}` folder using the naming convention (e.g., {job_num}.jpg).")
 
@@ -485,6 +442,5 @@ elif selected_project != "All Projects":
     elif page == "Node Diagnostics":
         render_node_diagnostics(selected_project, display_tz, unit_label)
 
-# 4. FALLBACK
 else:
     st.info(f"👈 Please select a specific project from the sidebar to view the **{page}** dashboard.")
