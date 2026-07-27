@@ -64,21 +64,21 @@ if sidebar_client is not None:
               {status_filter}
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
-
+        
         # Python fix: Strip whitespace and filter out non-values
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
         ])
-
+        
         selected_project = st.sidebar.selectbox(
             "🎯 Active Project", 
             ["All Projects"] + proj_list, 
             key="sidebar_proj_picker_global"
         )
-
+        
         st.session_state['selected_project'] = selected_project
-
+        
         if selected_project != "All Projects":
             meta_row = proj_df[proj_df['Project'] == selected_project]
             if not meta_row.empty:
@@ -86,7 +86,7 @@ if sidebar_client is not None:
                 st.session_state['project_metadata'] = project_metadata
         else:
             st.session_state['project_metadata'] = None
-
+            
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
 
@@ -105,7 +105,7 @@ if sidebar_client is not None:
             scope_label = "Last Data"
         else:
             job_num = selected_project.split('-')[0].strip()
-
+            
             phase_sql = ""
             if "Phase 1" in selected_project:
                 phase_sql = " AND Phase = '1' "
@@ -120,27 +120,27 @@ if sidebar_client is not None:
             scope_label = f"Job {job_num} Age"
 
         pulse_df = sidebar_client.query(pulse_q).to_dataframe()
-
+        
         if not pulse_df.empty and pulse_df['last_sync'].iloc[0] is not None and pd.notna(pulse_df['last_sync'].iloc[0]):
             last_sync_str = str(pulse_df['last_sync'].iloc[0])
-
+            
             last_sync_ts = pd.to_datetime(last_sync_str, utc=True)
             now_utc = pd.Timestamp.now(tz='UTC')
             elapsed_mins = int((now_utc - last_sync_ts).total_seconds() / 60)
-
+            
             if elapsed_mins <= 60:
                 pulse_status = f"🟢 **Live** ({elapsed_mins}m ago)"
             elif elapsed_mins <= 180:
                 pulse_status = f"🟠 **Delayed** ({elapsed_mins}m ago)"
             else:
                 pulse_status = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
-
+                
             st.sidebar.markdown(f"**{scope_label}:** {pulse_status}")
             st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
         else:
             st.sidebar.markdown(f"**{scope_label}:** ⚠️ No Recent Sync")
             st.sidebar.write("Raw Sync Data:", pulse_df['last_sync'].iloc[0])
-
+            
     except Exception as pulse_err:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
 
@@ -199,6 +199,7 @@ st.session_state['global_show_baddata'] = st.sidebar.checkbox(
     value=st.session_state.get('global_show_baddata', False)
 )
 
+st.sidebar.divider()
 st.sidebar.subheader("⏳ Timeline Navigation")
 
 # 1. Put the checkbox in the sidebar
@@ -270,6 +271,8 @@ unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 st.session_state["unit_mode"] = unit_mode
 st.session_state["unit_label"] = unit_label
 
+st.sidebar.divider()
+
 # 5. TIMEZONE & DISPLAY
 st.sidebar.subheader("📱 Display & Time")
 
@@ -291,6 +294,8 @@ tz_mode = st.sidebar.selectbox(
 )
 
 st.session_state["display_tz"] = tz_lookup[tz_mode]
+
+st.sidebar.divider()
 
 # 6. REFERENCE LINES (Static Constants)
 st.sidebar.subheader("📏 Reference Lines")
@@ -324,7 +329,7 @@ if page in GLOBAL_PAGES:
         # Pass None as selected_project if it's "All Projects"
         project_arg = None if selected_project == "All Projects" else selected_project
         render_summary_dashboard(project_arg, unit_label, unit_mode, display_tz)
-
+        
     elif page in ["Data Processing", "Admin Tools"]:
         if st.session_state.get('authenticated', False):
             if page == "Data Processing":
@@ -332,6 +337,7 @@ if page in GLOBAL_PAGES:
             elif page == "Admin Tools":
                 render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
         else:
+            st.divider()
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
                 st.subheader("🔐 Restricted Admin Access")
@@ -350,12 +356,12 @@ elif selected_project != "All Projects":
     lookback_days = st.session_state.get("global_lookback_days", 35)
     end_date = pd.Timestamp.now()  # Kept timezone-naive
     start_date = end_date - pd.Timedelta(days=lookback_days)
-
+    
     # --- FIX: Safely parse Date_Freezedown to match timezone-naive format ---
     freeze_start_ts = start_date 
     p_meta = st.session_state.get('project_metadata') or {}
     real_f_date = p_meta.get('Date_Freezedown')
-
+    
     parsed_date = pd.to_datetime(real_f_date, errors='coerce')
     if pd.notnull(parsed_date):
         # If the database returns it with a timezone, strip it so it matches start_date/end_date
@@ -363,7 +369,7 @@ elif selected_project != "All Projects":
             freeze_start_ts = parsed_date.tz_localize(None)
         else:
             freeze_start_ts = parsed_date
-
+            
     # Fetch and process the data for the selected project
     # Pass the checkbox states dynamically so the Cache correctly refreshes!
     raw_data = get_universal_portal_data(
@@ -377,45 +383,49 @@ elif selected_project != "All Projects":
 
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
-
+        
+        # 1. DEFINE THE TABS HERE
         tab1, tab2 = st.tabs(["Telemetry Charts", "Site As-Builts"])
-
+        
+        # ---------------------------------------------------------
+        # TAB 1: ALL YOUR EXISTING CHART LOGIC GOES HERE (Indented)
+        # ---------------------------------------------------------
         with tab1:
-            # 1. Extract available Systems (Phase is already handled by the sidebar active project)
+            # Extract available Systems
             available_systems = sorted(
                 [str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
                 key=natural_sort_key
             )
-    
+            
             selected_systems = []
-    
-            # 2. THE FIX: Only show the filter if there are actually multiple systems to choose from!
+            
+            # Only show the filter if there are multiple systems
             if len(available_systems) > 1:
                 selected_systems = st.multiselect(
                     "⚙️ Filter by System (Leave blank to show all systems):", 
                     options=available_systems, 
-                    default=[]  # Defaulting to blank safely passes all data through
+                    default=[]  
                 )
-    
-            # 3. Slice the data ONLY if the user explicitly picked a system
+                
+            # Slice the data ONLY if the user explicitly picked a system
             display_data = clean_data.copy()
             if selected_systems:
                 display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
-    
+                
             st.divider()
-    
-            # 4. Grab only the valid locations
+
+            # Grab only the valid locations
             unique_locations = display_data['Location'].dropna().unique()
             valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
             sorted_locations = sorted(valid_locations, key=natural_sort_key)
-    
-            # 5. Automatically loop through those specific locations
+
+            # Automatically loop through those specific locations
             for loc in sorted_locations:
                 loc_data = display_data[display_data['Location'] == loc]
-    
+                
                 if loc_data.empty:
                     continue
-    
+
                 fig = build_high_speed_graph(
                     client=sidebar_client,  
                     df=loc_data, 
@@ -429,11 +439,14 @@ elif selected_project != "All Projects":
                     f_start_date=freeze_start_ts, 
                     curve_id=selected_project
                 )
-    
+                
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
                     st.markdown("---")
 
+        # ---------------------------------------------------------
+        # TAB 2: YOUR NEW AS-BUILTS VIEWER GOES HERE
+        # ---------------------------------------------------------
         with tab2:
             st.subheader(f"Site As-Builts: {selected_project}")
             
@@ -452,14 +465,14 @@ elif selected_project != "All Projects":
                     if file_name.startswith(job_num) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
                         found_images.append(os.path.join(as_builts_dir, file_name))
                 
-                # 4. Sort the files so they appear in order
+                # 4. Sort the files so they appear in order (using your existing natural_sort_key function!)
                 found_images = sorted(found_images, key=natural_sort_key)
                 
                 # 5. Display the images or a fallback message
                 if found_images:
                     for img_path in found_images:
                         st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
-                        st.markdown("---") 
+                        st.markdown("---") # Adds a nice line between multiple images
                 else:
                     st.info(f"No as-built images found for Job {job_num}. Add them to the `{as_builts_dir}` folder using the naming convention (e.g., {job_num}.jpg).")
 
