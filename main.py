@@ -165,7 +165,11 @@ st.session_state['global_show_ambient'] = st.sidebar.checkbox(
     "Show Ambient Temp", 
     value=st.session_state.get('global_show_ambient', True)
 )
-
+# Elevation
+st.session_state['global_show_elevation'] = st.sidebar.checkbox(
+    "Show Elevations", 
+    value=st.session_state.get('global_show_elevation', False)
+)
 # 3. Theoretical Curve (Auto-toggles based on Project Status!)
 p_meta = st.session_state.get('project_metadata')
 p_status = ""
@@ -437,7 +441,8 @@ elif selected_project != "All Projects":
                     unit_label=unit_label,
                     display_tz=display_tz,
                     f_start_date=freeze_start_ts, 
-                    curve_id=selected_project
+                    curve_id=selected_project,
+                    show_elevation=st.session_state.get('global_show_elevation', False) # <-- ADDED THIS
                 )
                 
                 if fig:
