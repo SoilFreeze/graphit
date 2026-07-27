@@ -159,14 +159,19 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             # ---------------------------------------------------------
             # DYNAMIC ELEVATION LABELS
             # ---------------------------------------------------------
-            if has_elevation_data:
-                base_elev_series = pos_df['BaseElevation'].dropna()
-                if not base_elev_series.empty:
-                    base_elev = base_elev_series.iloc[0]
+            if has_elevation_data and 'node_elevation' in pos_df.columns:
+                node_elev_series = pos_df['node_elevation'].dropna()
+                
+                if not node_elev_series.empty:
+                    # Pulls the pre-calculated math directly from BigQuery
+                    abs_elev = node_elev_series.iloc[0]
+                    
                     try:
-                        # Calculates the absolute elevation
-                        abs_elev = float(base_elev) - float(pos)
-                        display_name = f"Elev: {abs_elev:.1f} ft ({latest_sensor})"
+                        # If BigQuery returned the raw depth, label it as depth. Otherwise, label as Elev.
+                        if float(abs_elev) == float(pos):
+                            display_name = f"{pos} ft ({latest_sensor})"
+                        else:
+                            display_name = f"Elev: {abs_elev:.1f} ft ({latest_sensor})"
                     except ValueError:
                         display_name = f"{pos} ft ({latest_sensor})"
                 else:
