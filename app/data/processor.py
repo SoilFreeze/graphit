@@ -111,10 +111,13 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
             COALESCE(NULLIF(CAST(v.Reg_Phase AS STRING), ''), m.Phase) as Phase,
             COALESCE(NULLIF(v.Reg_System, ''), m.System) as System,
             m.Hardware,
-            m.approval_status
+            m.approval_status,
+            m.BaseElevation,   -- Added to pull the column into Streamlit
+            m.node_elevation   -- Added to pull the column into Streamlit
         FROM `{config.MASTER_VIEW}` m
         INNER JOIN ProjectAssignments v 
           ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(v.NodeNum AS STRING)))
+          
           AND m.timestamp >= v.active_start
           AND m.timestamp <= v.active_end
           
