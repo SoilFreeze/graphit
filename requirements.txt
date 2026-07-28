@@ -17,3 +17,5 @@ google-cloud-bigquery-storage
 pyarrow
 db-dtypes
 matplotlib
+streamlit-image-coordinates
+Pillow
