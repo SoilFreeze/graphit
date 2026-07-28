@@ -4,8 +4,12 @@ import time
 import re
 import requests
 import numpy as np
+import os
+from PIL import Image
+from streamlit_image_coordinates import streamlit_image_coordinates
 from datetime import datetime, timedelta
 from google.cloud import bigquery
+
 
 # Internal Config & Data connections
 from app.utils.config import (
@@ -597,9 +601,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     except Exception as e: 
         st.error(f"Registry Link Offline: {e}"); return
 
-    # Standardized Navigation Tabs Layout Schema Paths (Registry & Chiller Tabs Removed)
-    tab_admin_sum, tab_bulk_app, tab_recovery, tab_proj_master = st.tabs([
-        "📋 Admin Summary", "⚡ Bulk Approval", "📡 Data Recovery", "⚙️ Project Master"
+    # Standardized Navigation Tabs Layout Schema Paths
+    tab_admin_sum, tab_bulk_app, tab_recovery, tab_proj_master, tab_pipe_mapper = st.tabs([
+        "📋 Admin Summary", "⚡ Bulk Approval", "📡 Data Recovery", "⚙️ Project Master", "🗺️ Pipe Mapper"
     ])
     
     # --- SUB-TAB 1: ADMIN HARDWARE AND DIRECTORY SUMMARY ---
@@ -1009,3 +1013,110 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             )
         except Exception as e:
             st.error(f"Failed to load directory: {e}")
+
+# --- SUB-TAB 5: AS-BUILT PIPE MAPPER ---
+    with tab_pipe_mapper:
+        st.subheader("🗺️ As-Built Pipe Mapper")
+        st.markdown("Select a site plan to log X/Y pixel coordinates for physical locations. Download the CSV when finished to paste into your Google Sheet.")
+        
+        # Initialize session memory (Added a safety check to reset it if it still has the old NodeNum column)
+        if 'mapped_pipes' not in st.session_state or 'Location' not in st.session_state.mapped_pipes.columns:
+            st.session_state.mapped_pipes = pd.DataFrame(columns=['Location', 'Map_X', 'Map_Y'])
+
+        col_map1, col_map2 = st.columns([3, 1])
+        AS_BUILT_DIR = "as_builts" 
+        
+        with col_map2:
+            # 1. Scan the folder for images
+            available_images = []
+            if os.path.exists(AS_BUILT_DIR):
+                available_images = sorted([f for f in os.listdir(AS_BUILT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+            
+            if not available_images:
+                st.error(f"No image files found in the '{AS_BUILT_DIR}' folder.")
+                selected_image = "(None)"
+            else:
+                selected_image = st.selectbox("1. Select As-Built Image:", ["(None)"] + available_images)
+            
+            if selected_image != "(None)":
+                all_projects = ["(None)"] + sorted(full_reg_df['Project'].dropna().unique().tolist())
+                selected_mapper_proj = st.selectbox("2. Link to Project Database:", all_projects)
+                
+                pipe_options = []
+                if selected_mapper_proj != "(None)":
+                    proj_df = full_reg_df[full_reg_df['Project'] == selected_mapper_proj]
+                    # CHANGED: Now pulling unique Locations (T1, T2, etc.) instead of NodeNums
+                    pipe_options = sorted(proj_df['Location'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
+                
+                if not pipe_options:
+                    pipe_name = st.text_input("3. Location Name (Manual Entry):", key="mapper_pipe_input").upper().strip()
+                else:
+                    # Auto-Advancing Queue Logic for Locations
+                    mapped_list = st.session_state.mapped_pipes['Location'].tolist()
+                    unmapped_pipes = [p for p in pipe_options if p not in mapped_list]
+                    
+                    default_idx = 0
+                    if unmapped_pipes:
+                        default_idx = pipe_options.index(unmapped_pipes[0])
+                        
+                    pipe_name = st.selectbox("3. Select Location to Map (Auto-advances):", pipe_options, index=default_idx)
+
+                st.dataframe(st.session_state.mapped_pipes, use_container_width=True, hide_index=True)
+                
+                if not st.session_state.mapped_pipes.empty:
+                    csv = st.session_state.mapped_pipes.to_csv(index=False)
+                    st.download_button("⬇️ Download CSV", data=csv, file_name=f"{selected_image}_coordinates.csv", mime="text/csv", use_container_width=True)
+                    
+                    if st.button("Clear All Data", use_container_width=True):
+                        st.session_state.mapped_pipes = pd.DataFrame(columns=['Location', 'Map_X', 'Map_Y'])
+                        st.session_state.pop('last_click', None) 
+                        st.rerun()
+
+        with col_map1:
+            if selected_image != "(None)":
+                img_path = os.path.join(AS_BUILT_DIR, selected_image)
+                
+                try:
+                    # 1. Open the massive original image
+                    raw_img = Image.open(img_path)
+                    orig_width, orig_height = raw_img.size
+                    
+                    # 2. Calculate a scale factor to shrink it to fit the screen (~900px wide)
+                    MAX_DISPLAY_WIDTH = 900
+                    scale_factor = 1.0
+                    
+                    if orig_width > MAX_DISPLAY_WIDTH:
+                        scale_factor = orig_width / MAX_DISPLAY_WIDTH
+                        new_height = int(orig_height / scale_factor)
+                        display_img = raw_img.resize((MAX_DISPLAY_WIDTH, new_height))
+                    else:
+                        display_img = raw_img
+                    
+                    if pipe_name:
+                        st.info(f"👆 Click on the map to log coordinates for **{pipe_name}**.")
+                    else:
+                        st.warning("⚠️ Enter a Location on the right before clicking!")
+                        
+                    # 3. Render the SHRUNKEN image on the screen
+                    click_data = streamlit_image_coordinates(display_img, key="site_map")
+                    
+                    if click_data is not None and pipe_name:
+                        click_hash = f"{click_data['x']}-{click_data['y']}"
+                        
+                        if st.session_state.get('last_click') != click_hash:
+                            st.session_state['last_click'] = click_hash 
+                            
+                            # 4. Math Magic: Multiply the click by the scale factor to get the TRUE original coordinates!
+                            true_x = int(click_data['x'] * scale_factor)
+                            true_y = int(click_data['y'] * scale_factor)
+                            
+                            if pipe_name in st.session_state.mapped_pipes['Location'].values:
+                                st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['Location'] == pipe_name, ['Map_X', 'Map_Y']] = [true_x, true_y]
+                            else:
+                                new_row = pd.DataFrame({'Location': [pipe_name], 'Map_X': [true_x], 'Map_Y': [true_y]})
+                                st.session_state.mapped_pipes = pd.concat([st.session_state.mapped_pipes, new_row], ignore_index=True)
+                            
+                            st.rerun()
+                            
+                except Exception as e:
+                    st.error(f"Could not load image {selected_image}. Error: {e}")
