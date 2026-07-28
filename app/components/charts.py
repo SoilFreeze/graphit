@@ -4,6 +4,9 @@ import plotly.graph_objects as go
 import re
 import app.utils.config as cfg
 from app.data.processor import get_bq_client 
+import plotly.graph_objects as go
+from PIL import Image
+import os
 
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
@@ -46,7 +49,82 @@ def get_cached_ambient_data(job_num, start_str):
         return client.query(amb_q).to_dataframe()
     except:
         return pd.DataFrame()
+        
+def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_builts"):
+    """
+    Generates a dynamically cropped Plotly map centered on a specific pipe location.
+    Handles multiple images per project based on the Image_Name column.
+    """
+    if df_map is None or df_map.empty or 'Project' not in df_map.columns:
+        return None
+        
+    # 1. Filter the TempPipeLoc dataframe for the specific project and location
+    pipe_data = df_map[(df_map['Project'].astype(str) == str(project_id)) & (df_map['Location'] == location_name)]
+    
+    if pipe_data.empty:
+        return None
+        
+    pipe_x = float(pipe_data.iloc[0]['Map_X'])
+    pipe_y = float(pipe_data.iloc[0]['Map_Y'])
 
+    # 2. Determine which image file to use
+    if not os.path.exists(as_built_dir):
+        return None
+
+    target_filename = None
+    # Check if the Image_Name column exists and has a value for this pipe
+    if 'Image_Name' in pipe_data.columns and pd.notnull(pipe_data.iloc[0]['Image_Name']):
+        target_filename = str(pipe_data.iloc[0]['Image_Name']).strip()
+
+    if target_filename:
+        # Pull the exact image specified in the Google Sheet
+        img_path = os.path.join(as_built_dir, target_filename)
+        if not os.path.exists(img_path):
+            return None 
+    else:
+        # FALLBACK: If no image is specified in the sheet, just grab the first one that matches the ID
+        available_files = [f for f in os.listdir(as_built_dir) if f.startswith(str(project_id)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        if not available_files:
+            return None
+        img_path = os.path.join(as_built_dir, available_files[0])
+        
+    img = Image.open(img_path)
+
+    # 3. Build the Plotly Figure
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=[pipe_x], 
+        y=[pipe_y],
+        mode='markers', 
+        name=location_name,
+        marker=dict(
+            size=27, 
+            color='rgba(0,0,0,0)', 
+            line=dict(width=2, color='red') 
+        ),
+        hoverinfo='none'
+    ))
+
+    fig.update_layout(
+        images=[dict(
+            source=img,
+            xref="x", yref="y",
+            x=0, y=0,  
+            sizex=img.width, sizey=img.height,
+            sizing="stretch",
+            opacity=0.9,
+            layer="below"
+        )],
+        xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_x - 300, pipe_x + 300]),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_y + 300, pipe_y - 300]), 
+        margin=dict(l=0, r=0, t=0, b=0), 
+        showlegend=False,
+        height=400 
+    )
+    
+    return fig
+    
 def build_high_speed_graph(client, df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None, show_elevation=False):
     """
@@ -210,7 +288,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             gap_rows['temperature'] = float('nan')
             s_df = pd.concat([s_df, gap_rows]).sort_values('timestamp')
         
-        # --- THE FIX STARTS HERE ---
+       # --- THE FIX STARTS HERE ---
         # 1. We create a copy of the temperatures for the main line
         clean_y = s_df['temperature'].copy()
         
@@ -232,6 +310,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
             hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
         ))
+        
         
         # 4. Draw the isolated warning markers using the original un-nullified temperature
         if 'approval_status' in s_df.columns:
@@ -344,7 +423,27 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top"),
     )
-    fig.update_xaxes(hoverformat="%b %d, %Y %I:%M %p")                           
+    fig.update_xaxes(hoverformat="%b %d, %Y %I:%M %p")        
+
+    # ---------------------------------------------------------
+    # GROUND ELEVATION LEGEND NOTE
+    # ---------------------------------------------------------
+    if 'BaseElevation' in plot_df.columns:
+        valid_elevs = plot_df['BaseElevation'].dropna()
+        if not valid_elevs.empty:
+            ground_elev_val = valid_elevs.iloc[0]
+            
+            # Add an invisible trace just to display the text in the legend
+            fig.add_trace(go.Scatter(
+                x=[None], 
+                y=[None],
+                mode='markers',
+                marker=dict(color='rgba(0,0,0,0)'),  # Fully transparent
+                name=f"🌍 <b>Ground Elev: {float(ground_elev_val):.1f} ft</b>",
+                showlegend=True,
+                hoverinfo='none'
+            ))
+                               
     return fig
                                
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
