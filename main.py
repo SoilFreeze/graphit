@@ -6,7 +6,7 @@ import re
 from app.utils import config
 from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
 from app.components.charts import build_high_speed_graph
-
+from app.utils.config import PROJECT_ID, DATASET_ID
 # =============================================================================
 # IMPORTANT: Import your other page functions here based on your file structure
 # Example paths provided below, adjust as needed!
@@ -17,6 +17,7 @@ from app.pages.sensors import render_sensor_status
 from app.pages.diagnostics import render_node_diagnostics
 from app.pages.processing import render_data_processing_page
 from app.pages.admin import render_admin_page
+from app.components.charts import build_cropped_site_map
 
 
 # 1. UI SETUP
@@ -192,10 +193,10 @@ st.session_state['global_show_ref'] = st.sidebar.checkbox(
     value=st.session_state.get('global_show_ref', default_curve)
 )
 
-# 4 & 5. Independent Data Auditing Controls
-st.session_state['global_show_masked'] = st.sidebar.checkbox(
-    "Show Masked Data", 
-    value=st.session_state.get('global_show_masked', False)
+# Independent Data Auditing & Visualization Controls
+st.session_state['global_show_map'] = st.sidebar.checkbox(
+    "🗺️ Show As-Built Site Maps", 
+    value=st.session_state.get('global_show_map', True) # Defaults to True so maps show automatically
 )
 
 st.session_state['global_show_baddata'] = st.sidebar.checkbox(
@@ -418,6 +419,20 @@ elif selected_project != "All Projects":
                 
             st.divider()
 
+            # --- NEW: Pull all map coordinates ONCE before the loop for speed ---
+            job_num = str(selected_project).split('-')[0].strip()
+            try:
+                map_query = f"""
+                    SELECT Project, Location, Map_X, Map_Y, Image_Name 
+                    FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
+                    WHERE CAST(Project AS STRING) = '{job_num}'
+                """
+                df_all_locs = sidebar_client.query(map_query).to_dataframe()
+            except Exception as e:
+                df_all_locs = pd.DataFrame()
+                st.error(f"⚠️ BigQuery Table Error: {e}")
+            # ---------------------------------------------------------------------
+
             # Grab only the valid locations
             unique_locations = display_data['Location'].dropna().unique()
             valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
@@ -430,25 +445,71 @@ elif selected_project != "All Projects":
                 if loc_data.empty:
                     continue
 
-                fig = build_high_speed_graph(
-                    client=sidebar_client,  
-                    df=loc_data, 
-                    title=f"Thermal Trends: {loc}",
-                    start_view=start_date, 
-                    end_view=end_date, 
-                    active_refs=active_refs,
-                    unit_mode=unit_mode,
-                    unit_label=unit_label,
-                    display_tz=display_tz,
-                    f_start_date=freeze_start_ts, 
-                    curve_id=selected_project,
-                    show_elevation=st.session_state.get('global_show_elevation', False) # <-- ADDED THIS
-                )
-                
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.markdown("---")
+                # Check if this specific location exists in your TempPipeLoc dataframe
+                has_map = False
+                if not df_all_locs.empty and 'Location' in df_all_locs.columns:
+                    has_map = str(loc) in df_all_locs['Location'].astype(str).values
 
+                # Check if this specific location exists in your TempPipeLoc dataframe
+                has_map = False
+                if not df_all_locs.empty and 'Location' in df_all_locs.columns:
+                    has_map = str(loc) in df_all_locs['Location'].astype(str).values
+
+                # --- UPDATED: Now requires BOTH the coordinates to exist AND the toggle to be ON ---
+                if has_map and st.session_state.get('global_show_map', True):
+                    # 1. SPLIT LAYOUT: For mapped locations when the toggle is ON
+                    col_chart, col_map = st.columns([3, 1])
+
+                    with col_chart:
+                        fig = build_high_speed_graph(
+                            client=sidebar_client,  
+                            df=loc_data, 
+                            title=f"Thermal Trends: {loc}",
+                            start_view=start_date, 
+                            end_view=end_date, 
+                            active_refs=active_refs,
+                            unit_mode=unit_mode,
+                            unit_label=unit_label,
+                            display_tz=display_tz,
+                            f_start_date=freeze_start_ts, 
+                            curve_id=selected_project,
+                            show_elevation=st.session_state.get('global_show_elevation', False) 
+                        )
+                        if fig:
+                            st.plotly_chart(fig, use_container_width=True)
+
+                    with col_map:
+                        site_map_fig = build_cropped_site_map(
+                            project_id=job_num, 
+                            location_name=loc, 
+                            df_map=df_all_locs,
+                            as_built_dir="as_builts"
+                        )
+                        if site_map_fig:
+                            st.plotly_chart(site_map_fig, use_container_width=True)
+                        else:
+                            st.info(f"🗺️ Map image for {job_num} not found in the as_builts folder.")
+                
+                else:
+                    # 2. FULL-WIDTH LAYOUT: Used if the map toggle is OFF, or if coordinates don't exist
+                    fig = build_high_speed_graph(
+                        client=sidebar_client,  
+                        df=loc_data, 
+                        title=f"Thermal Trends: {loc}",
+                        start_view=start_date, 
+                        end_view=end_date, 
+                        active_refs=active_refs,
+                        unit_mode=unit_mode,
+                        unit_label=unit_label,
+                        display_tz=display_tz,
+                        f_start_date=freeze_start_ts, 
+                        curve_id=selected_project,
+                        show_elevation=st.session_state.get('global_show_elevation', False) 
+                    )
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("---")
         # ---------------------------------------------------------
         # TAB 2: YOUR NEW AS-BUILTS VIEWER GOES HERE
         # ---------------------------------------------------------
@@ -480,6 +541,7 @@ elif selected_project != "All Projects":
                         st.markdown("---") # Adds a nice line between multiple images
                 else:
                     st.info(f"No as-built images found for Job {job_num}. Add them to the `{as_builts_dir}` folder using the naming convention (e.g., {job_num}.jpg).")
+
 
     elif page == "Depth Charts":
         render_depth_charts(selected_project, unit_label, display_tz)
