@@ -58,7 +58,8 @@ if sidebar_client is not None:
                 ProjectName, 
                 Timezone, 
                 ProjectStatus, 
-                Date_Freezedown
+                Date_Freezedown,
+                orientation
             FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
@@ -544,7 +545,12 @@ elif selected_project != "All Projects":
 
 
     elif page == "Depth Charts":
-        render_depth_charts(selected_project, unit_label, display_tz)
+        # Extract the orientation from the fetched metadata (default to vertical)
+        p_orientation = "vertical"
+        if project_metadata and pd.notnull(project_metadata.get("orientation")):
+            p_orientation = project_metadata.get("orientation")
+            
+        render_depth_charts(selected_project, unit_label, display_tz, orientation=p_orientation)
 
     elif page == "Sensor Status":
         render_sensor_status(sidebar_client, selected_project, unit_label, unit_mode, display_tz)
