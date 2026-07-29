@@ -11,24 +11,56 @@ from app.pages.admin import natural_sort_key
 #########################
 # Page 3 - Depth Charts #
 #########################
-def render_depth_charts(selected_project, unit_label, display_tz):
+def render_depth_charts(selected_project, unit_label, display_tz, orientation="vertical"):
+    is_horizontal = str(orientation).strip().lower() == "horizontal"
+    chart_type_label = "Distance" if is_horizontal else "Depth"
     """
     Vertical Temperature Profiles.
     Maps arrays dynamically based on native view Depth allocations.
     """
-    st.header(f"📏 Depth Profile Analysis: {selected_project}")
+    st.header(f"📏 {chart_type_label} Profile Analysis: {selected_project}")
     
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view depth profiles.")
+        st.info(f"💡 Please select a specific project in the sidebar to view {chart_type_label.lower()} profiles.")
         return
 
-    # THE FIX: Stop using a local slider. Read the global one from the sidebar.
-    lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
-    st.sidebar.caption(f"📏 Depth Charts using Global {lookback_weeks}-week window.")
+    # --- FIX: SEPARATE CHART DISPLAY WINDOW FROM DATA FETCH WINDOW ---
     
-    with st.spinner("Fetching historical telemetry..."):
-        p_df = get_universal_portal_data(selected_project)
+    # 1. Read the slider to determine how many lines to draw on the chart
+    lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
+    st.sidebar.caption(f"📏 {chart_type_label} Charts displaying the last {lookback_weeks} weeks.")
+    
+    # 2. Calculate the exact days back to Freezedown to ensure we capture the True Baseline
+    p_meta = st.session_state.get('project_metadata') or {}
+    real_f_date = p_meta.get('Date_Freezedown')
+    now_utc = pd.Timestamp.now(tz='UTC')
+    
+    # The minimum data we need to fetch is whatever the slider is set to
+    fetch_days = lookback_weeks * 7 
+    
+    if pd.notnull(real_f_date):
+        parsed_f_date = pd.to_datetime(real_f_date)
+        if parsed_f_date.tzinfo is None:
+            parsed_f_date = parsed_f_date.tz_localize('UTC')
         
+        days_since_freeze = (now_utc - parsed_f_date).days
+        # If freezedown was 200 days ago, force BigQuery to fetch 200 days of data
+        if days_since_freeze > fetch_days:
+            fetch_days = days_since_freeze + 2
+
+    with st.spinner("Fetching historical telemetry..."):
+        # 3. Pass fetch_days into the portal function so it doesn't default to a small window
+        try:
+            p_df = get_universal_portal_data(
+                selected_project, 
+                lookback_days=fetch_days,
+                show_masked=st.session_state.get('global_show_masked', False),
+                show_baddata=st.session_state.get('global_show_baddata', False)
+            )
+        except TypeError:
+            # Fallback just in case the processor doesn't accept the new arguments
+            p_df = get_universal_portal_data(selected_project)
+            
     if p_df is None or p_df.empty:
         st.warning("No data found for this project.")
         return
@@ -87,7 +119,7 @@ def render_depth_charts(selected_project, unit_label, display_tz):
     locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
     
     for loc in locations:
-        with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
+        with st.expander(f"📍 Temp vs {chart_type_label} - {loc}", expanded=True):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             
             if loc_data['timestamp'].dt.tz is None:
@@ -147,24 +179,19 @@ def render_depth_charts(selected_project, unit_label, display_tz):
             snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
 
             # --- C. HISTORICAL SNAPSHOTS ---
-            # THE FIX: We must use the 'mondays' list we calculated based on the slider, 
-            # not a fixed iteration of periods.
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
                 
-                # Skip if this date matches our special snapshots
                 if current_loop_date == baseline_date_str or current_loop_date == recent_6am_date_str:
                     continue
                     
-                # Search a 24-hour window around the Monday 6 AM mark
                 window = loc_data[
                     (loc_data['timestamp_local'] >= target_ts - pd.Timedelta(hours=12)) & 
                     (loc_data['timestamp_local'] <= target_ts + pd.Timedelta(hours=12))
                 ]
                 
                 if not window.empty:
-                    # Pick the data point closest to 6 AM in that window
                     snap_week = (
                         window.assign(diff=(window['timestamp_local'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
@@ -175,13 +202,18 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                     temps = snap_week['temperature']
                     if unit_mode == "Celsius": temps = (temps - 32) * 5/9
                     
+                    # DYNAMIC AXES FLIP
+                    x_week = snap_week['Depth_Num'] if is_horizontal else temps
+                    y_week = temps if is_horizontal else snap_week['Depth_Num']
+                    ht_week = f"Date: {current_loop_date}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
+
                     fig.add_trace(go.Scatter(
-                        x=temps, y=snap_week['Depth_Num'], 
+                        x=x_week, y=y_week, 
                         mode='lines+markers', 
                         name=current_loop_date,
                         line=dict(shape='spline', smoothing=1.1, width=1.5),
                         marker=dict(size=4),
-                        hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                        hovertemplate=ht_week
                     ))
 
             # --- D. INJECT THE MOST RECENT LINE ---
@@ -189,13 +221,18 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 recent_temps = snap_recent['temperature']
                 if unit_mode == "Celsius": recent_temps = (recent_temps - 32) * 5/9
                 
+                # DYNAMIC AXES FLIP
+                x_rec = snap_recent['Depth_Num'] if is_horizontal else recent_temps
+                y_rec = recent_temps if is_horizontal else snap_recent['Depth_Num']
+                ht_rec = f"Most Recent: %{{text}}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
+
                 fig.add_trace(go.Scatter(
-                    x=recent_temps, y=snap_recent['Depth_Num'],
+                    x=x_rec, y=y_rec,
                     mode='lines+markers',
                     name=f'<b>Most Recent ({recent_6am_date_str} 6AM*)</b>',
                     line=dict(color='#ff7f0e', width=3.5, shape='spline', smoothing=1.1),
                     marker=dict(size=6, color='#ff7f0e'),
-                    hovertemplate="Most Recent: %{text}<br>Depth: %{y}ft<br>Temp: %{x:.1f}" + unit_label + "<extra></extra>",
+                    hovertemplate=ht_rec,
                     text=snap_recent['timestamp_local'].dt.strftime('%b %d, %H:%M')
                 ))
 
@@ -204,38 +241,51 @@ def render_depth_charts(selected_project, unit_label, display_tz):
                 b_temps = snap_base['temperature']
                 if unit_mode == "Celsius": b_temps = (b_temps - 32) * 5/9
                 
+                # DYNAMIC AXES FLIP
+                x_base = snap_base['Depth_Num'] if is_horizontal else b_temps
+                y_base = b_temps if is_horizontal else snap_base['Depth_Num']
+                ht_base = f"Baseline: {baseline_date_str}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
+
                 fig.add_trace(go.Scatter(
-                    x=b_temps, y=snap_base['Depth_Num'], 
+                    x=x_base, y=y_base, 
                     mode='lines+markers', 
                     name=f'<b>Baseline ({baseline_date_str})</b>',
                     line=dict(color='black', width=3, dash='dash'),
                     marker=dict(size=5, color='black'),
-                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                    hovertemplate=ht_base
                 ))
 
-            fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
+            # FLIP THRESHOLD LINE
+            if is_horizontal:
+                fig.add_hline(y=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
+            else:
+                fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
-            # THE FIX 2: Added explicit padding margins (l, r, t, b) so the right mirror border isn't cut off
+            # DYNAMIC LAYOUT DICTIONARIES
+            dist_axis = dict(
+                title=f"{chart_type_label} (ft)", 
+                range=[0, y_limit] if is_horizontal else [y_limit, 0], 
+                dtick=10,
+                minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+                gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True
+            )
+            temp_axis = dict(
+                title=f"Temperature ({unit_label})", 
+                range=[-20, 80], dtick=10,
+                minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+                gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True
+            )
+
             fig.update_layout(
-                title=f"<b>Temp vs Depth - {loc}</b>",
+                title=f"<b>Temp vs {chart_type_label} - {loc}</b>",
                 plot_bgcolor='white', 
                 height=800,
                 margin=dict(l=60, r=40, t=80, b=80), 
-                xaxis=dict(
-                    title=f"Temperature ({unit_label})", 
-                    range=[-20, 80], dtick=10,
-                    minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                    gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True
-                ),
-                yaxis=dict(
-                    title="Depth (ft)", 
-                    range=[y_limit, 0], dtick=10,
-                    minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                    gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True
-                ),
+                xaxis=dist_axis if is_horizontal else temp_axis,
+                yaxis=temp_axis if is_horizontal else dist_axis,
                 legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
             )
             
