@@ -436,20 +436,19 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
     if st.checkbox("I authorize updating these data markers to the target parameters specified.", key="confirm_blk_mgmt"):
         if st.button(f"🚀 Step 2: Execute Status Override to {new_status}", key="exec_blk_mgmt_btn", use_container_width=True):
             
-            # We explicitly write every status into the table so the system registers it
+            # We explicitly write every status into the table so the system registers it.
+            # FIX: Removed the HOUR grouping so we match on exact, down-to-the-second timestamps.
             sql = f"""
                 MERGE `{target_table}` T
                 USING (
                     SELECT 
                         UPPER(TRIM(CAST(t.NodeNum AS STRING))) as NodeNum, 
-                        TIMESTAMP_TRUNC(t.timestamp, HOUR) as match_hour,
-                        MAX(t.timestamp) as exact_timestamp
+                        t.timestamp as exact_timestamp
                     FROM `{telemetry_table}` t 
                     WHERE {aliased_where}
-                    GROUP BY 1, 2
                 ) S
                 ON UPPER(TRIM(CAST(T.NodeNum AS STRING))) = S.NodeNum 
-                   AND TIMESTAMP_TRUNC(T.timestamp, HOUR) = S.match_hour
+                   AND T.timestamp = S.exact_timestamp
                 WHEN MATCHED THEN
                     UPDATE SET approve = '{new_status}'
                 WHEN NOT MATCHED THEN
@@ -457,13 +456,13 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
                     VALUES (S.NodeNum, S.exact_timestamp, '{new_status}')
             """
             
+            # FIX: Cleaned up the try/except block to stop triggering fake success messages when the query fails.
             try:
                 with st.spinner("Processing database status reclassifications..."):
                     job = client.query(sql)
                     job.result()
 
                 affected_rows = job.num_dml_affected_rows
-                st.warning(f"🚨 DEBUG: BigQuery physically modified {affected_rows} rows.")
                 
                 st.success(f"✅ Reclassification successful! Explicitly stamped '{new_status}' on {affected_rows:,} records.")
                 
@@ -471,20 +470,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
                 run_profile_audit() # Refresh data metrics locally
                 st.balloons()
                 
-                # 2. TEMPORARILY disable the rerun so you can actually read the screen
-                # time.sleep(1.0)
-                # st.rerun()
-                
-            except Exception as e:
-                st.error(f"Execution Error: {e}")
-                st.code(sql, language="sql")
-                
-                st.success(f"✅ Reclassification successful! Explicitly stamped '{new_status}' on {job.num_dml_affected_rows:,} records.")
-                st.cache_data.clear()
-                run_profile_audit() # Refresh data metrics locally
-                st.balloons()
-                time.sleep(1.0)
-                st.rerun()
             except Exception as e:
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
