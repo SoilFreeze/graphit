@@ -419,22 +419,18 @@ def render_node_diagnostics(selected_project, display_tz, unit_label):
                     # Create an expandable drill-down per pipe
                     with st.expander(f"Location: {loc}  |  Sensors: {len(loc_df)}  |  Average Reliability: {loc_avg_rel:.1f}%"):
                         st.dataframe(
-                            loc_df[display_cols].style.format({
-                                "Signal_Reliability_Pct": "{:.1f}%",
-                                "latest_rssi": "{:.0f} dBm",
-                                "avg_rssi_24h": "{:.0f} dBm",
-                                "spike_count_24h": "{}"
-                            }),
+                            loc_df[display_cols],  # FIX: Removed the .style.format() wrapper completely
                             use_container_width=True, 
                             hide_index=True,
                             column_config={
                                 "NodeNum": "Node ID",
                                 "Depth": "Depth",
                                 "Bank": "Bank",
-                                "Signal_Reliability_Pct": "Reliability Score",
-                                "latest_rssi": "Current RSSI",
-                                "avg_rssi_24h": "24h Avg RSSI",
-                                "spike_count_24h": "Erratic Spikes (24h)"
+                                # FIX: Moved all formatting directly into Streamlit's native column configuration
+                                "Signal_Reliability_Pct": st.column_config.NumberColumn("Reliability Score", format="%.1f%%"),
+                                "latest_rssi": st.column_config.NumberColumn("Current RSSI", format="%.0f dBm"),
+                                "avg_rssi_24h": st.column_config.NumberColumn("24h Avg RSSI", format="%.0f dBm"),
+                                "spike_count_24h": st.column_config.NumberColumn("Erratic Spikes (24h)", format="%d")
                             }
                         )
 
