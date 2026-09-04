@@ -118,39 +118,61 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
 
         header_html = "<div style='text-align: right;'><small>Start: Not Set</small></div>"
 
-        # FIX: Calculate historical runtimes for ended projects and days since completion
+        # FIX: Compartmentalized historical runtimes for ended projects
         if is_valid_date(e_date):
             is_ended = True
             e_date_dt = pd.to_datetime(e_date).date()
+            e_date_display = e_date_dt.strftime('%b %d, %Y')
             days_since_ended = max(0, (pd.Timestamp.now(tz=display_tz).date() - e_date_dt).days)
             
             f_str = "Start Freezedown: Not Set<br>Days of Freezedown: 0"
+            m_str = ""
+            total_since_start_str = ""
+            
             if is_valid_date(f_date):
                 f_date_dt = pd.to_datetime(f_date).date()
                 f_date_display = f_date_dt.strftime('%b %d, %Y')
-                # Calculate total run time up until the end date
-                total_freezedown_days = max(0, (e_date_dt - f_date_dt).days)
-                f_str = f"Start Freezedown: {f_date_display}<br>Days of Freezedown: {total_freezedown_days}"
                 
-            m_str = ""
-            if is_valid_date(m_date):
-                m_date_dt = pd.to_datetime(m_date).date()
-                m_date_display = m_date_dt.strftime('%b %d, %Y')
-                # Calculate total maintenance time up until the end date
-                maint_days = max(0, (e_date_dt - m_date_dt).days)
-                m_str = f"Start Maintenance: {m_date_display}<br>Days of Maintenance: {maint_days}<br>"
+                # Total days from start of freezedown to today (includes all three phases)
+                total_days_since_start = max(0, (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days)
+                total_since_start_str = f"Total Days Since Start of Freezedown: {total_days_since_start}"
+                
+                if is_valid_date(m_date):
+                    m_date_dt = pd.to_datetime(m_date).date()
+                    m_date_display = m_date_dt.strftime('%b %d, %Y')
+                    
+                    # Freezedown phase is only up until maintenance starts
+                    days_of_freezedown = max(0, (m_date_dt - f_date_dt).days)
+                    # Maintenance phase is from maintenance start until the freeze ends
+                    maint_days = max(0, (e_date_dt - m_date_dt).days)
+                    
+                    f_str = f"Start Freezedown: {f_date_display}<br>Days of Freezedown: {days_of_freezedown}"
+                    m_str = f"Start Maintenance: {m_date_display}<br>Days of Maintenance: {maint_days}<br>"
+                else:
+                    # If no maintenance date, freezedown phase is up until the end date
+                    days_of_freezedown = max(0, (e_date_dt - f_date_dt).days)
+                    f_str = f"Start Freezedown: {f_date_display}<br>Days of Freezedown: {days_of_freezedown}"
+                    m_str = ""
+            else:
+                if is_valid_date(m_date):
+                    m_date_dt = pd.to_datetime(m_date).date()
+                    m_date_display = m_date_dt.strftime('%b %d, %Y')
+                    maint_days = max(0, (e_date_dt - m_date_dt).days)
+                    m_str = f"Start Maintenance: {m_date_display}<br>Days of Maintenance: {maint_days}<br>"
 
             header_html = f"""
                 <div style='text-align: right; line-height: 1.3;'>
                     🛑 <b style='color: #d9534f;'>Freezedown Ended</b><br>
                     <small style='color: #666;'>
+                        Ended on: {e_date_display}<br>
                         {f_str}<br>
                         {m_str}
-                        Days Since Ended: {days_since_ended}
+                        Days Since Ended: {days_since_ended}<br>
+                        <hr style='margin: 4px 0px; border-top: 1px solid #ddd;'>
+                        <b>{total_since_start_str}</b>
                     </small>
                 </div>
             """
-
         elif is_valid_date(f_date):
             f_date_dt = pd.to_datetime(f_date).date()
             f_date_display = f_date_dt.strftime('%b %d, %Y')
