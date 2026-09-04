@@ -3,7 +3,7 @@ import pandas as pd
 from google.cloud import bigquery
 
 # Import your custom app modules
-from app.utils.config import MASTER_VIEW, PROJECT_ID, DATASET_ID
+from app.utils.config import MASTER_VIEW, PROJECT_ID, DATASET_ID, NODE_REGISTRY_TABLE
 from app.components.charts import build_high_speed_graph
 
 # =============================================================================
@@ -74,7 +74,14 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
 
     # 2. TELEMETRY & COVERAGE QUERY (Uses updated master_data_view_v2)
     query = f"""
-        WITH BaseReporting AS (
+        WITH ActiveNodes AS (
+            -- Create a strict list of nodes currently assigned to this job (no End_Date)
+            SELECT DISTINCT UPPER(TRIM(CAST(NodeNum AS STRING))) as NodeNum
+            FROM `{NODE_REGISTRY_TABLE}`
+            WHERE Project LIKE CONCAT(@job_num, '%')
+              AND (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
+        ),
+        BaseReporting AS (
             SELECT 
                 UPPER(TRIM(CAST(m.NodeNum AS STRING))) as NodeNum, 
                 m.timestamp, 
@@ -83,6 +90,8 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 TRIM(CAST(m.Bank AS STRING)) as Bank, 
                 m.Depth
             FROM `{MASTER_VIEW}` m
+            INNER JOIN ActiveNodes a 
+              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = a.NodeNum
             WHERE m.Project LIKE CONCAT(@job_num, '%') 
               {phase_sql}
               AND m.NodeNum IS NOT NULL
