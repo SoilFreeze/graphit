@@ -26,6 +26,7 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     # --- 1. THE CONTROL LIST: Dynamic based on Sidebar Toggle ---
     status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
 
+    # FIX: Added Date_EndFreeze to the query so we can track finished projects
     proj_q = f"""
         SELECT 
             CAST(Project AS STRING) as Project, 
@@ -33,7 +34,8 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
             ProjectStatus,
             ShowActive,
             Date_Freezedown, 
-            Date_Maintenance 
+            Date_Maintenance,
+            Date_EndFreeze
         FROM `{PROJECT_REGISTRY_TABLE}`
         WHERE UPPER(Project) NOT LIKE '%OFFICE%'
           {status_filter}
@@ -103,7 +105,10 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
         # DATE CALCULATION LOGIC 
         # ====================================================================
         f_date = row.get('Date_Freezedown')
-        m_date = row.get('Date_Maintenance') 
+        m_date = row.get('Date_Maintenance')
+        e_date = row.get('Date_EndFreeze')
+        
+        is_ended = False
 
         def is_valid_date(val):
             if pd.isnull(val): return False
@@ -113,7 +118,27 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
 
         header_html = "<div style='text-align: right;'><small>Start: Not Set</small></div>"
 
-        if is_valid_date(f_date):
+        # FIX: Check for EndFreeze first to override the normal view
+        if is_valid_date(e_date):
+            is_ended = True
+            e_date_dt = pd.to_datetime(e_date).date()
+            e_date_display = e_date_dt.strftime('%b %d, %Y')
+            
+            time_str = ""
+            if is_valid_date(f_date):
+                f_date_dt = pd.to_datetime(f_date).date()
+                total_days = (e_date_dt - f_date_dt).days
+                time_str = f"<br><small style='color: #666;'>Total Freezedown Time: {max(0, total_days)} Days</small>"
+            
+            header_html = f"""
+                <div style='text-align: right; line-height: 1.3;'>
+                    🛑 <b style='color: #d9534f;'>Freezedown Ended</b><br>
+                    <small style='color: #666;'>Ended on: {e_date_display}</small>
+                    {time_str}
+                </div>
+            """
+
+        elif is_valid_date(f_date):
             f_date_dt = pd.to_datetime(f_date).date()
             f_date_display = f_date_dt.strftime('%b %d, %Y')
             
@@ -255,6 +280,11 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                     unsafe_allow_html=True
                 )
                 st.divider() 
+
+                # FIX: Catch ended projects and skip rendering telemetry columns
+                if is_ended:
+                    st.info(f"🛑 Freezedown ended for {p_project}{title_suffix}. No new telemetry is being tracked.")
+                    continue
 
                 if sys_tel.empty:
                     st.info(f"No recent telemetry received for {p_project}{title_suffix}.")
