@@ -75,7 +75,13 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
     # 2. TELEMETRY & COVERAGE QUERY (Uses updated master_data_view_v2)
     query = f"""
         WITH BaseReporting AS (
-            SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
+            SELECT 
+                UPPER(TRIM(CAST(m.NodeNum AS STRING))) as NodeNum, 
+                m.timestamp, 
+                m.temperature, 
+                TRIM(CAST(m.Location AS STRING)) as Location, 
+                TRIM(CAST(m.Bank AS STRING)) as Bank, 
+                m.Depth
             FROM `{MASTER_VIEW}` m
             WHERE m.Project LIKE CONCAT(@job_num, '%') 
               {phase_sql}
@@ -88,7 +94,13 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
         ),
         HistoricalStats AS (
             SELECT 
-                NodeNum, Location, Bank, Depth,
+                NodeNum, 
+                
+                -- Pull the absolute latest metadata for the node so historic data variations don't cause duplicate rows
+                ARRAY_AGG(Location ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as Location,
+                ARRAY_AGG(Bank ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as Bank,
+                ARRAY_AGG(Depth ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] as Depth,
+                
                 MAX(timestamp) AS last_ping,
                 ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
                 AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
@@ -108,7 +120,7 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h,
                 MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d
             FROM GapAnalysis 
-            GROUP BY NodeNum, Location, Bank, Depth
+            GROUP BY NodeNum
         )
         SELECT * FROM HistoricalStats
     """
