@@ -59,13 +59,13 @@ if sidebar_client is not None:
                 Timezone, 
                 ProjectStatus, 
                 Date_Freezedown,
-                orientation,
-                Date_Approved  -- Added approval field
+                orientation
             FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
               {status_filter}
         """
+        
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
         # Python fix: Strip whitespace and filter out non-values
