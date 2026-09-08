@@ -289,7 +289,14 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                     latest_ts = sys_tel['latest_ts'].max()
                     if pd.notnull(latest_ts):
                         now_utc = pd.Timestamp.now(tz='UTC')
-                        elapsed_mins = int((now_utc - latest_ts).total_seconds() / 60)
+                        
+                        # Ensure timestamp is tz-aware (UTC)
+                        if latest_ts.tzinfo is None:
+                            latest_ts_utc = latest_ts.tz_localize('UTC')
+                        else:
+                            latest_ts_utc = latest_ts.tz_convert('UTC')
+                            
+                        elapsed_mins = int((now_utc - latest_ts_utc).total_seconds() / 60)
                         
                         if elapsed_mins <= 60:
                             pulse = f"🟢 **Live** ({elapsed_mins}m ago)"
@@ -298,21 +305,23 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                         else:
                             pulse = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
                             
-                        data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {latest_ts.strftime('%b %d, %H:%M UTC')})*"
+                        # Convert to the user's selected display timezone
+                        local_ts = latest_ts_utc.tz_convert(display_tz)
+                            
+                        data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {latest_ts_utc.strftime('%b %d, %H:%M UTC')})*"
                         
-                        # --- NEW: Format the latest timestamp as the approved date ---
-                        approved_str = f"✅ **Data Last Approved:** {latest_ts.strftime('%b %d, %Y at %H:%M')}"
+                        # Format the approved date in the selected timezone
+                        approved_str = f"✅ **Data Last Approved:** {local_ts.strftime('%b %d, %Y at %H:%M')} ({display_tz})"
                     else:
                         data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
-                        approved_str = "⚠️ **Data Last Approved:** No Valid Data" # <-- Added fallback
+                        approved_str = "⚠️ **Data Last Approved:** No Valid Data"
                 else:
                     active_1h = active_6h = active_24h = 0
                     data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
-                    approved_str = "⚠️ **Data Last Approved:** No Valid Data" # <-- Added fallback
+                    approved_str = "⚠️ **Data Last Approved:** No Valid Data"
                 
                 status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🔴" if active_24h == 0 else "🟠"
                 
-                # --- NEW: Add {approved_str} to the final markdown output ---
                 st.markdown(
                     f"{status_color} **Hardware Status:** `{active_1h}` (1h) | "
                     f"`{active_6h}` (6h) | `{active_24h}` (24h) | "
