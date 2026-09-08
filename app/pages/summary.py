@@ -325,7 +325,14 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                     data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
                     
                 # 2. DATA LAST APPROVED (Validated Data Only)
-                true_approved_ts = appr_dict.get(p_project.strip())
+                true_approved_ts = None
+                if 'appr_df' in locals() and not appr_df.empty:
+                    appr_matches = appr_df[
+                        (appr_df['Project'].astype(str).str.startswith(job_num)) & 
+                        ((appr_df['Phase'] == target_phase) | (target_phase == ""))
+                    ]
+                    true_approved_ts = appr_matches['last_approved'].max()
+
                 if pd.notnull(true_approved_ts):
                     if true_approved_ts.tzinfo is None:
                         true_approved_ts = true_approved_ts.tz_localize('UTC')
