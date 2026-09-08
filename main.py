@@ -401,43 +401,35 @@ elif selected_project != "All Projects":
     # --- NEW: QUERY TRUE LAST APPROVED DATE FROM BIGQUERY ---
     job_num = str(selected_project).split('-')[0].strip()
     
-    # --- NEW: QUERY TRUE LAST APPROVED DATE FROM BIGQUERY ---
-    # 1. Exact match to the Client Portal's filtering logic and exclusions
-    approval_q = f"""
-        SELECT MAX(timestamp) as last_approved
-        FROM `{config.MASTER_VIEW}`
-        WHERE Project = '{selected_project}'
-          AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
-          AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
-    """
+    # --- NEW: CALCULATE TRUE APPROVED DATE FROM FILTERED DATA ---
     try:
-        appr_df = sidebar_client.query(approval_q).to_dataframe()
-        last_approved_ts = appr_df['last_approved'].iloc[0] if not appr_df.empty else None
-        
+        # 1. Filter the already-cleaned dataset for approved data only
+        if 'approval_status' in clean_data.columns:
+            approved_df = clean_data[clean_data['approval_status'].astype(str).str.upper().str.strip() == 'TRUE']
+            last_approved_ts = approved_df['timestamp'].max()
+        else:
+            last_approved_ts = None
+            
         if pd.notnull(last_approved_ts):
-            # Ensure the timestamp is timezone-aware (UTC)
+            # 2. Ensure timezone awareness (UTC)
             if last_approved_ts.tzinfo is None:
                 last_approved_ts = last_approved_ts.tz_localize('UTC')
             else:
                 last_approved_ts = last_approved_ts.tz_convert('UTC')
                 
-            # 2. Match the client portal timezone logic: Pull from registry metadata
+            # 3. Pull target timezone from metadata, matching client portal logic
             p_meta = st.session_state.get('project_metadata') or {}
             project_tz = p_meta.get('Timezone', 'US/Pacific')
             
-            # Convert to local time and extract the abbreviation (e.g., EDT or PDT)
+            # 4. Convert and format
             local_ts = last_approved_ts.tz_convert(project_tz)
             tz_abbr = local_ts.tzname() 
             
-            # Match the client portal 12-hour formatting exactly
             approved_str = f"✅ **Data Last Approved:** `{local_ts.strftime('%B %d, %Y at %I:%M %p')} {tz_abbr}`"
         else:
             approved_str = "⚠️ **Data Last Approved:** `No Approved Data Found`"
     except Exception as e:
-        approved_str = f"⚠️ **Data Last Approved:** `Database Error ({e})`"
+        approved_str = f"⚠️ **Data Last Approved:** `Error calculating date ({e})`"
 
     st.caption(approved_str)
     # --------------------------------------------------------
