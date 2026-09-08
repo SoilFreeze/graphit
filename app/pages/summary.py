@@ -91,6 +91,19 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     if not tel_df.empty:
         tel_df[['Phase', 'System', 'Bank', 'Location']] = tel_df[['Phase', 'System', 'Bank', 'Location']].fillna('')
 
+    # --- 3.5 GET TRUE APPROVED DATES ---
+    appr_q = f"""
+        SELECT CAST(Project AS STRING) as Project, MAX(timestamp) as last_approved
+        FROM `{MASTER_VIEW}`
+        WHERE UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
+        GROUP BY Project
+    """
+    try:
+        appr_df = client.query(appr_q).to_dataframe()
+        appr_dict = dict(zip(appr_df['Project'].str.strip(), appr_df['last_approved']))
+    except Exception as e:
+        appr_dict = {}
+    
     # --- 4. RENDER ENGINE: Iterate over the exact control list ---
     for _, row in active_projs.iterrows():
         p_project = str(row['Project']).strip()
@@ -286,11 +299,10 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                     active_6h = sys_tel[sys_tel['checkins_6h'] > 0]['NodeNum'].nunique()
                     active_24h = sys_tel[sys_tel['checkins_24h'] > 0]['NodeNum'].nunique()
                     
+                    # 1. LIVE DATA PULSE (Raw Data)
                     latest_ts = sys_tel['latest_ts'].max()
                     if pd.notnull(latest_ts):
                         now_utc = pd.Timestamp.now(tz='UTC')
-                        
-                        # Ensure timestamp is tz-aware (UTC)
                         if latest_ts.tzinfo is None:
                             latest_ts_utc = latest_ts.tz_localize('UTC')
                         else:
@@ -305,21 +317,26 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                         else:
                             pulse = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
                             
-                        # Convert to the user's selected display timezone
                         local_ts = latest_ts_utc.tz_convert(display_tz)
-                            
-                        # --- UPDATED: Data Pulse now uses local_ts and display_tz ---
                         data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {local_ts.strftime('%b %d, %H:%M')} {display_tz})*"
-                        
-                        # Format the approved date in the selected timezone
-                        approved_str = f"✅ **Data Last Approved:** {local_ts.strftime('%b %d, %Y at %H:%M')} ({display_tz})"
                     else:
                         data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
-                        approved_str = "⚠️ **Data Last Approved:** No Valid Data"
                 else:
                     active_1h = active_6h = active_24h = 0
                     data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
-                    approved_str = "⚠️ **Data Last Approved:** No Valid Data"
+                    
+                # 2. DATA LAST APPROVED (Validated Data Only)
+                true_approved_ts = appr_dict.get(p_project.strip())
+                if pd.notnull(true_approved_ts):
+                    if true_approved_ts.tzinfo is None:
+                        true_approved_ts = true_approved_ts.tz_localize('UTC')
+                    else:
+                        true_approved_ts = true_approved_ts.tz_convert('UTC')
+                        
+                    local_appr_ts = true_approved_ts.tz_convert(display_tz)
+                    approved_str = f"✅ **Data Last Approved:** {local_appr_ts.strftime('%b %d, %Y at %I:%M %p')} ({display_tz})"
+                else:
+                    approved_str = "⚠️ **Data Last Approved:** `No Approved Data`"
                 
                 status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🔴" if active_24h == 0 else "🟠"
                 
