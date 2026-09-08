@@ -290,7 +290,7 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                 
                 h2.markdown(header_html, unsafe_allow_html=True)
                 
-                st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
+                st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://soilfreeze.streamlit.app/?job={job_num})")
                 
                 # --- HARDWARE & DATA AGE LOGIC ---
                 if not sys_tel.empty:
