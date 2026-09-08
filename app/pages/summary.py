@@ -93,16 +93,15 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
 
     # --- 3.5 GET TRUE APPROVED DATES ---
     appr_q = f"""
-        SELECT CAST(Project AS STRING) as Project, MAX(timestamp) as last_approved
+        SELECT CAST(Project AS STRING) as Project, Phase, MAX(timestamp) as last_approved
         FROM `{MASTER_VIEW}`
         WHERE UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
-        GROUP BY Project
+        GROUP BY Project, Phase
     """
     try:
         appr_df = client.query(appr_q).to_dataframe()
-        appr_dict = dict(zip(appr_df['Project'].str.strip(), appr_df['last_approved']))
     except Exception as e:
-        appr_dict = {}
+        appr_df = pd.DataFrame(columns=['Project', 'Phase', 'last_approved'])
     
     # --- 4. RENDER ENGINE: Iterate over the exact control list ---
     for _, row in active_projs.iterrows():
