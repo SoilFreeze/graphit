@@ -401,26 +401,32 @@ elif selected_project != "All Projects":
     # --- NEW: QUERY TRUE LAST APPROVED DATE FROM BIGQUERY ---
     job_num = str(selected_project).split('-')[0].strip()
     
-    # Check the actual approval column name in master_data_view_v2
+    # 1. Use the exact SQL logic from the client portal
     approval_q = f"""
         SELECT MAX(timestamp) as last_approved
         FROM `{config.MASTER_VIEW}`
-        WHERE Project LIKE '{job_num}%'
-          AND Approved = TRUE 
+        WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = '{job_num}'
+          AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
     """
     try:
         appr_df = sidebar_client.query(approval_q).to_dataframe()
         last_approved_ts = appr_df['last_approved'].iloc[0] if not appr_df.empty else None
         
         if pd.notnull(last_approved_ts):
-            # Ensure the timestamp is timezone-aware and convert to display timezone
+            # Ensure the timestamp is timezone-aware (UTC)
             if last_approved_ts.tzinfo is None:
                 last_approved_ts = last_approved_ts.tz_localize('UTC')
             else:
                 last_approved_ts = last_approved_ts.tz_convert('UTC')
                 
-            local_ts = last_approved_ts.tz_convert(display_tz)
-            approved_str = f"✅ **Data Last Approved:** `{local_ts.strftime('%b %d, %Y at %H:%M')} {display_tz}`"
+            # 2. Match the client portal timezone logic: Pull from registry metadata
+            p_meta = st.session_state.get('project_metadata') or {}
+            project_tz = p_meta.get('Timezone', display_tz) 
+                
+            local_ts = last_approved_ts.tz_convert(project_tz)
+            
+            # Match the client portal 12-hour formatting (e.g. 10:00 AM)
+            approved_str = f"✅ **Data Last Approved:** `{local_ts.strftime('%B %d, %Y at %I:%M %p')} {project_tz}`"
         else:
             approved_str = "⚠️ **Data Last Approved:** `No Approved Data Found`"
     except Exception as e:
