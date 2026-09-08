@@ -389,28 +389,45 @@ elif selected_project != "All Projects":
     clean_data = apply_sanity_filter(raw_data)
 
     # Fetch and process the data for the selected project
-    # Pass the checkbox states dynamically so the Cache correctly refreshes!
     raw_data = get_universal_portal_data(
         selected_project, 
-        lookback_days=lookback_days,  # <--- THE FIX: Passing the days to BigQuery!
+        lookback_days=lookback_days,
         is_summary_page=False,
         show_masked=st.session_state.get('global_show_masked', False),
         show_baddata=st.session_state.get('global_show_baddata', False)
     )
     clean_data = apply_sanity_filter(raw_data)
     
-    # --- NEW: CALCULATE LAST APPROVED DATA DATE ---
-    if not clean_data.empty and 'timestamp' in clean_data.columns:
-        last_approved_ts = clean_data['timestamp'].max()
+    # --- NEW: QUERY TRUE LAST APPROVED DATE FROM BIGQUERY ---
+    job_num = str(selected_project).split('-')[0].strip()
+    
+    # Check the actual approval column name in master_data_view_v2
+    approval_q = f"""
+        SELECT MAX(timestamp) as last_approved
+        FROM `{config.MASTER_VIEW}`
+        WHERE Project LIKE '{job_num}%'
+          AND Approved = TRUE 
+    """
+    try:
+        appr_df = sidebar_client.query(approval_q).to_dataframe()
+        last_approved_ts = appr_df['last_approved'].iloc[0] if not appr_df.empty else None
+        
         if pd.notnull(last_approved_ts):
-            # Formats to something like "Sep 08, 2026 at 14:30"
-            approved_str = pd.to_datetime(last_approved_ts).strftime('%b %d, %Y at %H:%M')
-            st.caption(f"✅ **Data Last Approved:** `{approved_str}`")
+            # Ensure the timestamp is timezone-aware and convert to display timezone
+            if last_approved_ts.tzinfo is None:
+                last_approved_ts = last_approved_ts.tz_localize('UTC')
+            else:
+                last_approved_ts = last_approved_ts.tz_convert('UTC')
+                
+            local_ts = last_approved_ts.tz_convert(display_tz)
+            approved_str = f"✅ **Data Last Approved:** `{local_ts.strftime('%b %d, %Y at %H:%M')} {display_tz}`"
         else:
-            st.caption("⚠️ **Data Last Approved:** `No Valid Timestamps Found`")
-    else:
-        st.caption("⚠️ **Data Last Approved:** `No Data Available`")
-    # ----------------------------------------------
+            approved_str = "⚠️ **Data Last Approved:** `No Approved Data Found`"
+    except Exception as e:
+        approved_str = f"⚠️ **Data Last Approved:** `Database Error ({e})`"
+
+    st.caption(approved_str)
+    # --------------------------------------------------------
 
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
