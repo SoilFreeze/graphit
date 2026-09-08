@@ -401,12 +401,17 @@ elif selected_project != "All Projects":
     # --- NEW: QUERY TRUE LAST APPROVED DATE FROM BIGQUERY ---
     job_num = str(selected_project).split('-')[0].strip()
     
-    # 1. Use the exact SQL logic from the client portal
+    # --- NEW: QUERY TRUE LAST APPROVED DATE FROM BIGQUERY ---
+    # 1. Exact match to the Client Portal's filtering logic and exclusions
     approval_q = f"""
         SELECT MAX(timestamp) as last_approved
         FROM `{config.MASTER_VIEW}`
-        WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = '{job_num}'
+        WHERE Project = '{selected_project}'
           AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
+          AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
     """
     try:
         appr_df = sidebar_client.query(approval_q).to_dataframe()
@@ -421,12 +426,14 @@ elif selected_project != "All Projects":
                 
             # 2. Match the client portal timezone logic: Pull from registry metadata
             p_meta = st.session_state.get('project_metadata') or {}
-            project_tz = p_meta.get('Timezone', display_tz) 
-                
-            local_ts = last_approved_ts.tz_convert(project_tz)
+            project_tz = p_meta.get('Timezone', 'US/Pacific')
             
-            # Match the client portal 12-hour formatting (e.g. 10:00 AM)
-            approved_str = f"✅ **Data Last Approved:** `{local_ts.strftime('%B %d, %Y at %I:%M %p')} {project_tz}`"
+            # Convert to local time and extract the abbreviation (e.g., EDT or PDT)
+            local_ts = last_approved_ts.tz_convert(project_tz)
+            tz_abbr = local_ts.tzname() 
+            
+            # Match the client portal 12-hour formatting exactly
+            approved_str = f"✅ **Data Last Approved:** `{local_ts.strftime('%B %d, %Y at %I:%M %p')} {tz_abbr}`"
         else:
             approved_str = "⚠️ **Data Last Approved:** `No Approved Data Found`"
     except Exception as e:
@@ -434,7 +441,6 @@ elif selected_project != "All Projects":
 
     st.caption(approved_str)
     # --------------------------------------------------------
-
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
         
