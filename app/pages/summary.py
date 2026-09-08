@@ -308,7 +308,8 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                         # Convert to the user's selected display timezone
                         local_ts = latest_ts_utc.tz_convert(display_tz)
                             
-                        data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {latest_ts_utc.strftime('%b %d, %H:%M UTC')})*"
+                        # --- UPDATED: Data Pulse now uses local_ts and display_tz ---
+                        data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {local_ts.strftime('%b %d, %H:%M')} {display_tz})*"
                         
                         # Format the approved date in the selected timezone
                         approved_str = f"✅ **Data Last Approved:** {local_ts.strftime('%b %d, %Y at %H:%M')} ({display_tz})"
