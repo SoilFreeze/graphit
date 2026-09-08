@@ -59,7 +59,8 @@ if sidebar_client is not None:
                 Timezone, 
                 ProjectStatus, 
                 Date_Freezedown,
-                orientation
+                orientation,
+                Date_Approved  -- Added approval field
             FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
@@ -386,6 +387,30 @@ elif selected_project != "All Projects":
         show_baddata=st.session_state.get('global_show_baddata', False)
     )
     clean_data = apply_sanity_filter(raw_data)
+
+    # Fetch and process the data for the selected project
+    # Pass the checkbox states dynamically so the Cache correctly refreshes!
+    raw_data = get_universal_portal_data(
+        selected_project, 
+        lookback_days=lookback_days,  # <--- THE FIX: Passing the days to BigQuery!
+        is_summary_page=False,
+        show_masked=st.session_state.get('global_show_masked', False),
+        show_baddata=st.session_state.get('global_show_baddata', False)
+    )
+    clean_data = apply_sanity_filter(raw_data)
+    
+    # --- NEW: CALCULATE LAST APPROVED DATA DATE ---
+    if not clean_data.empty and 'timestamp' in clean_data.columns:
+        last_approved_ts = clean_data['timestamp'].max()
+        if pd.notnull(last_approved_ts):
+            # Formats to something like "Sep 08, 2026 at 14:30"
+            approved_str = pd.to_datetime(last_approved_ts).strftime('%b %d, %Y at %H:%M')
+            st.caption(f"✅ **Data Last Approved:** `{approved_str}`")
+        else:
+            st.caption("⚠️ **Data Last Approved:** `No Valid Timestamps Found`")
+    else:
+        st.caption("⚠️ **Data Last Approved:** `No Data Available`")
+    # ----------------------------------------------
 
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
