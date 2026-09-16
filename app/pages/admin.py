@@ -772,15 +772,28 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- SUB-TAB 4: SYSTEM ARCHIVAL HUB ---
     with tab_archive:
         st.subheader("🗄️ System Archival Hub")
-        st.markdown("Securely copy closed-out hardware assignments to cold storage **before** manually deleting them from your Google Sheet.")
+        st.markdown("1. Sync Sheet ➡️ 2. Backup Closed Nodes ➡️ 3. Archive Raw Data")
         
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         
-        # BUTTON 1: ARCHIVE REGISTRY
+        # BUTTON 1: SYNC REGISTRY
         with c1:
-            if st.button("📦 Backup Closed Registry Rows", use_container_width=True):
+            if st.button("🔄 1. Sync Sheet to BigQuery", use_container_width=True):
+                with st.spinner("Pulling latest data from Google Sheets..."):
+                    sync_sql = f"""
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.node_registry_synced` AS 
+                        SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`;
+                    """
+                    try:
+                        client.query(sync_sql).result()
+                        st.success("✅ Registry synced successfully!")
+                    except Exception as e:
+                        st.error(f"Sync failed: {e}")
+
+        # BUTTON 2: BACKUP CLOSED ROWS
+        with c2:
+            if st.button("📦 2. Backup Closed Registry", use_container_width=True):
                 with st.spinner("Processing registry backup..."):
-                    # 1. Audit Before
                     before_count = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`").to_dataframe().iloc[0, 0]
                     
                     archive_reg_sql = f"""
@@ -796,18 +809,16 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     """
                     try:
                         client.query(archive_reg_sql).result()
-                        # 2. Audit After
                         after_count = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`").to_dataframe().iloc[0, 0]
-                        st.success(f"✅ Registry rows safely backed up! (Archive grew from {before_count:,} to {after_count:,} rows)")
+                        st.success(f"✅ Registry backed up! (Grew from {before_count:,} to {after_count:,})")
                     except Exception as e:
-                        st.error(f"Failed to archive registry: {e}")
+                        st.error(f"Registry backup failed: {e}")
 
-        # BUTTON 2: ARCHIVE DATA
-        with c2:
-            cutoff_date = st.date_input("Raw Data Archive Cutoff Date")
-            if st.button("💾 Archive Raw Data", use_container_width=True):
-                with st.spinner("Archiving raw telemetry and calculating metrics..."):
-                    
+        # BUTTON 3: ARCHIVE RAW DATA
+        with c3:
+            cutoff_date = st.date_input("Raw Data Cutoff Date")
+            if st.button("💾 3. Archive Raw Data", use_container_width=True):
+                with st.spinner("Creating backups and archiving telemetry..."):
                     cutoff_str = cutoff_date.strftime('%Y-%m-%d 00:00:00 UTC')
                     
                     # 1. Fetch BEFORE counts
@@ -819,8 +830,22 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     """
                     before_df = client.query(count_sql).to_dataframe().rename(columns={"Count": "Before Archival"})
                     
-                    # 2. Execute the MERGE and DELETE script
+                    # 2. Execute Backups, Merge, and Delete
                     archive_data_sql = f"""
+                        -- Step A: Create Safety Backups
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.master_data_archive_backup_20260811` AS
+                        SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.master_data_archive`;
+                        
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_lord_backup_20260811` AS
+                        SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`;
+                        
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush_backup_20260811` AS
+                        SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`;
+                        
+                        CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.manual_rejections_backup_20260811` AS
+                        SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections`;
+
+                        -- Step B: Run Archival Merge
                         DECLARE cutoff_time TIMESTAMP;
                         SET cutoff_time = TIMESTAMP('{cutoff_str}');
 
@@ -907,22 +932,22 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                           INSERT (timestamp, NodeNum, temperature, rssi, approval_status, Project, Phase, System, Location, Bank, Depth, SensorStatus)
                           VALUES (source.timestamp, source.NodeNum, source.temperature, source.rssi, source.approval_status, source.Project, source.Phase, source.System, source.Location, source.Bank, source.Depth, source.SensorStatus);
                         
+                        -- Step C: Clear Active Tables
                         DELETE FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE timestamp < cutoff_time;
                         DELETE FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE timestamp < cutoff_time;
                         DELETE FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections` WHERE timestamp < cutoff_time;
                     """
                     try:
-                        # Execute the archival script
                         client.query(archive_data_sql).result()
                         
                         # 3. Fetch AFTER counts
                         after_df = client.query(count_sql).to_dataframe().rename(columns={"Count": "After Archival"})
                         
-                        # 4. Merge and display the audit matrix
+                        # 4. Show Audit Matrix
                         audit_df = pd.merge(before_df, after_df, on="Table")
                         audit_df["Net Change"] = audit_df["After Archival"] - audit_df["Before Archival"]
                         
-                        st.success("✅ Raw data successfully archived and purged from active tables.")
+                        st.success("✅ Backups created, raw data archived, and active tables purged.")
                         st.write("### 📊 Archival Impact Audit")
                         st.dataframe(audit_df, hide_index=True, use_container_width=True)
                         
