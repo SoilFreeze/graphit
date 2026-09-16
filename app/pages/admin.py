@@ -772,29 +772,50 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
     # --- SUB-TAB 4: SYSTEM ARCHIVAL HUB ---
     with tab_archive:
         st.subheader("🗄️ System Archival Hub")
-        st.markdown("1. Sync Sheet ➡️ 2. Backup Closed Nodes ➡️ 3. Archive Raw Data")
+        st.write("Follow these three steps in order to safely move closed deployments and old telemetry into cold storage.")
+        st.divider()
         
-        c1, c2, c3 = st.columns(3)
+        # ==========================================
+        # STEP 1: SYNC REGISTRY
+        # ==========================================
+        st.markdown("### Step 1: Sync Google Sheet")
+        st.info("💡 **What this does:** Pulls the latest edits from your Google Sheet into BigQuery so the archival scripts have an accurate map.")
         
-        # BUTTON 1: SYNC REGISTRY
-        with c1:
-            if st.button("🔄 1. Sync Sheet to BigQuery", use_container_width=True):
-                with st.spinner("Pulling latest data from Google Sheets..."):
+        if st.button("🔄 1. Sync Sheet to BigQuery", use_container_width=True):
+            with st.spinner("Pulling latest data from Google Sheets..."):
+                try:
+                    # Get Before Count (Catch error if table doesn't exist yet)
+                    try:
+                        b_sync = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_synced`").to_dataframe().iloc[0, 0]
+                    except:
+                        b_sync = 0
+                        
                     sync_sql = f"""
                         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.node_registry_synced` AS 
                         SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.node_registry`;
                     """
-                    try:
-                        client.query(sync_sql).result()
-                        st.success("✅ Registry synced successfully!")
-                    except Exception as e:
-                        st.error(f"Sync failed: {e}")
+                    client.query(sync_sql).result()
+                    
+                    # Get After Count
+                    a_sync = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_synced`").to_dataframe().iloc[0, 0]
+                    
+                    st.success("✅ Registry synced successfully!")
+                    st.metric("Synced Registry Rows", f"{a_sync:,}", delta=f"{a_sync - b_sync:,} rows")
+                except Exception as e:
+                    st.error(f"Sync failed: {e}")
 
-        # BUTTON 2: BACKUP CLOSED ROWS
-        with c2:
-            if st.button("📦 2. Backup Closed Registry", use_container_width=True):
-                with st.spinner("Processing registry backup..."):
-                    before_count = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`").to_dataframe().iloc[0, 0]
+        st.divider()
+
+        # ==========================================
+        # STEP 2: BACKUP CLOSED ROWS
+        # ==========================================
+        st.markdown("### Step 2: Backup Closed Registry Rows")
+        st.info("💡 **What this does:** Finds sensors marked 'Archived' or 'Dead' with an End Date and permanently saves their history. **Run this BEFORE you manually delete rows from your Google Sheet.**")
+        
+        if st.button("📦 2. Backup Closed Registry", use_container_width=True):
+            with st.spinner("Processing registry backup..."):
+                try:
+                    b_reg = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`").to_dataframe().iloc[0, 0]
                     
                     archive_reg_sql = f"""
                         INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`
@@ -807,20 +828,30 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                               WHERE a.NodeNum = v.NodeNum AND a.Start_Date = v.Start_Date
                           );
                     """
-                    try:
-                        client.query(archive_reg_sql).result()
-                        after_count = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`").to_dataframe().iloc[0, 0]
-                        st.success(f"✅ Registry backed up! (Grew from {before_count:,} to {after_count:,})")
-                    except Exception as e:
-                        st.error(f"Registry backup failed: {e}")
-
-        # BUTTON 3: ARCHIVE RAW DATA
-        with c3:
-            cutoff_date = st.date_input("Raw Data Cutoff Date")
-            if st.button("💾 3. Archive Raw Data", use_container_width=True):
-                with st.spinner("Creating backups and archiving telemetry..."):
-                    cutoff_str = cutoff_date.strftime('%Y-%m-%d 00:00:00 UTC')
+                    client.query(archive_reg_sql).result()
                     
+                    a_reg = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`").to_dataframe().iloc[0, 0]
+                    
+                    st.success("✅ Registry backed up safely! You may now delete those rows from your Google Sheet.")
+                    st.metric("Archive Registry Rows", f"{a_reg:,}", delta=f"{a_reg - b_reg:,} new rows added")
+                except Exception as e:
+                    st.error(f"Registry backup failed: {e}")
+
+        st.divider()
+
+        # ==========================================
+        # STEP 3: ARCHIVE RAW DATA
+        # ==========================================
+        st.markdown("### Step 3: Archive Raw Data")
+        st.info("💡 **What this does:** First creates full safety backups of all tables. Then it attaches coordinates to old temperature logs, moves them to the permanent archive, and deletes them from active tables to keep the app fast.")
+        
+        cutoff_date = st.date_input("Select the Cutoff Date (Data older than this will be archived):")
+        
+        if st.button("💾 3. Create Backups & Archive Data", use_container_width=True):
+            with st.spinner("Running backups and migrating telemetry... This may take a minute."):
+                cutoff_str = cutoff_date.strftime('%Y-%m-%d 00:00:00 UTC')
+                
+                try:
                     # 1. Fetch BEFORE counts
                     count_sql = f"""
                         SELECT 'Master Archive' as Table, COUNT(*) as Count FROM `{PROJECT_ID}.{DATASET_ID}.master_data_archive`
@@ -937,19 +968,18 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         DELETE FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE timestamp < cutoff_time;
                         DELETE FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections` WHERE timestamp < cutoff_time;
                     """
-                    try:
-                        client.query(archive_data_sql).result()
-                        
-                        # 3. Fetch AFTER counts
-                        after_df = client.query(count_sql).to_dataframe().rename(columns={"Count": "After Archival"})
-                        
-                        # 4. Show Audit Matrix
-                        audit_df = pd.merge(before_df, after_df, on="Table")
-                        audit_df["Net Change"] = audit_df["After Archival"] - audit_df["Before Archival"]
-                        
-                        st.success("✅ Backups created, raw data archived, and active tables purged.")
-                        st.write("### 📊 Archival Impact Audit")
-                        st.dataframe(audit_df, hide_index=True, use_container_width=True)
-                        
-                    except Exception as e:
-                        st.error(f"Execution Failed: {e}")
+                    client.query(archive_data_sql).result()
+                    
+                    # 3. Fetch AFTER counts
+                    after_df = client.query(count_sql).to_dataframe().rename(columns={"Count": "After Archival"})
+                    
+                    # 4. Show Audit Matrix
+                    audit_df = pd.merge(before_df, after_df, on="Table")
+                    audit_df["Net Change"] = audit_df["After Archival"] - audit_df["Before Archival"]
+                    
+                    st.success("✅ Backups created, raw data archived, and active tables purged.")
+                    st.write("### 📊 Archival Impact Audit")
+                    st.dataframe(audit_df, hide_index=True, use_container_width=True)
+                    
+                except Exception as e:
+                    st.error(f"Execution Failed: {e}")
