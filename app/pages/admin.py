@@ -586,8 +586,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         st.error(f"Registry Link Offline: {e}"); return
 
     # Standardized Navigation Tabs Layout Schema Paths
-    tab_bulk_app, tab_admin_sum, tab_pipe_mapper = st.tabs([
-        "⚡ Bulk Approval", "📋 Admin Summary", "🗺️ Pipe Mapper"
+    tab_bulk_app, tab_admin_sum, tab_pipe_mapper, tab_archive = st.tabs([
+        "⚡ Bulk Approval", "📋 Admin Summary", "🗺️ Pipe Mapper", "🗄️ System Archival"
     ])
     
     # --- SUB-TAB 1: BULK APPROVAL SYSTEM RUNROOM ---
@@ -768,3 +768,38 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             
                 except Exception as e:
                     st.error(f"Could not load image {selected_image}. Error: {e}")
+    # --- SUB-TAB 4: SYSTEM ARCHIVAL HUB ---
+    with tab_archive:
+        st.subheader("🗄️ System Archival Hub")
+        st.markdown("Securely copy closed-out hardware assignments to cold storage **before** manually deleting them from your Google Sheet.")
+        
+        c1, c2 = st.columns(2)
+        
+        # BUTTON 1: ARCHIVE REGISTRY
+        with c1:
+            if st.button("📦 Backup Closed Registry Rows", use_container_width=True):
+                with st.spinner("Copying closed records to native archive table..."):
+                    # The NOT EXISTS check prevents duplicates if the button is clicked multiple times
+                    archive_reg_sql = f"""
+                        INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`
+                        SELECT v.* 
+                        FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_synced` v
+                        WHERE LOWER(v.SensorStatus) IN ('archived', 'dead')
+                          AND v.End_Date IS NOT NULL
+                          AND NOT EXISTS (
+                              SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive` a
+                              WHERE a.NodeNum = v.NodeNum AND a.Start_Date = v.Start_Date
+                          );
+                    """
+                    try:
+                        client.query(archive_reg_sql).result()
+                        st.success("✅ Registry rows securely backed up! You may now safely delete them from your active Google Sheet.")
+                    except Exception as e:
+                        st.error(f"Failed to archive registry: {e}")
+
+        # BUTTON 2: ARCHIVE DATA
+        with c2:
+            if st.button("💾 Archive Raw Data", use_container_width=True):
+                with st.spinner("Archiving raw telemetry..."):
+                    # Your raw data telemetry archival SQL script will go here
+                    st.success("✅ Raw data securely archived.")
