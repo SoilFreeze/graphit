@@ -863,6 +863,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     
                     # 2. Execute Backups, Merge, and Delete
                     archive_data_sql = f"""
+                        -- DECLARATIONS MUST BE AT THE VERY TOP
+                        DECLARE cutoff_time TIMESTAMP;
+                        SET cutoff_time = TIMESTAMP('{cutoff_str}');
+
                         -- Step A: Create Safety Backups
                         CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.master_data_archive_backup_20260811` AS
                         SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.master_data_archive`;
@@ -877,9 +881,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                         SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections`;
 
                         -- Step B: Run Archival Merge
-                        DECLARE cutoff_time TIMESTAMP;
-                        SET cutoff_time = TIMESTAMP('{cutoff_str}');
-
                         MERGE `{PROJECT_ID}.{DATASET_ID}.master_data_archive` AS target
                         USING (
                           WITH NewData AS (
