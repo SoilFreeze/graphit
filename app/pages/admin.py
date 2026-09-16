@@ -768,6 +768,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                             
                 except Exception as e:
                     st.error(f"Could not load image {selected_image}. Error: {e}")
+                    
     # --- SUB-TAB 4: SYSTEM ARCHIVAL HUB ---
     with tab_archive:
         st.subheader("🗄️ System Archival Hub")
@@ -779,7 +780,6 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         with c1:
             if st.button("📦 Backup Closed Registry Rows", use_container_width=True):
                 with st.spinner("Copying closed records to native archive table..."):
-                    # The NOT EXISTS check prevents duplicates if the button is clicked multiple times
                     archive_reg_sql = f"""
                         INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`
                         SELECT v.* 
@@ -793,13 +793,12 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     """
                     try:
                         client.query(archive_reg_sql).result()
-                        st.success("✅ Registry rows securely backed up! You may now safely delete them from your active Google Sheet.")
+                        st.success("✅ Registry rows safely backed up! You may now delete them from your Google Sheet.")
                     except Exception as e:
                         st.error(f"Failed to archive registry: {e}")
 
         # BUTTON 2: ARCHIVE DATA
         with c2:
+            cutoff_date = st.date_input("Raw Data Archive Cutoff Date")
             if st.button("💾 Archive Raw Data", use_container_width=True):
-                with st.spinner("Archiving raw telemetry..."):
-                    # Your raw data telemetry archival SQL script will go here
-                    st.success("✅ Raw data securely archived.")
+                st.info("SQL pending cutoff logic.")
