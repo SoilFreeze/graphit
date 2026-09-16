@@ -779,7 +779,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         # BUTTON 1: ARCHIVE REGISTRY
         with c1:
             if st.button("📦 Backup Closed Registry Rows", use_container_width=True):
-                with st.spinner("Copying closed records to native archive table..."):
+                with st.spinner("Processing registry backup..."):
+                    # 1. Audit Before
+                    before_count = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`").to_dataframe().iloc[0, 0]
+                    
                     archive_reg_sql = f"""
                         INSERT INTO `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`
                         SELECT v.* 
@@ -793,7 +796,9 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     """
                     try:
                         client.query(archive_reg_sql).result()
-                        st.success("✅ Registry rows safely backed up! You may now delete them from your Google Sheet.")
+                        # 2. Audit After
+                        after_count = client.query(f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_archive`").to_dataframe().iloc[0, 0]
+                        st.success(f"✅ Registry rows safely backed up! (Archive grew from {before_count:,} to {after_count:,} rows)")
                     except Exception as e:
                         st.error(f"Failed to archive registry: {e}")
 
@@ -801,4 +806,125 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         with c2:
             cutoff_date = st.date_input("Raw Data Archive Cutoff Date")
             if st.button("💾 Archive Raw Data", use_container_width=True):
-                st.info("SQL pending cutoff logic.")
+                with st.spinner("Archiving raw telemetry and calculating metrics..."):
+                    
+                    cutoff_str = cutoff_date.strftime('%Y-%m-%d 00:00:00 UTC')
+                    
+                    # 1. Fetch BEFORE counts
+                    count_sql = f"""
+                        SELECT 'Master Archive' as Table, COUNT(*) as Count FROM `{PROJECT_ID}.{DATASET_ID}.master_data_archive`
+                        UNION ALL SELECT 'Raw SensorPush', COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+                        UNION ALL SELECT 'Raw Lord', COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+                        UNION ALL SELECT 'Manual Rejections', COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections`
+                    """
+                    before_df = client.query(count_sql).to_dataframe().rename(columns={"Count": "Before Archival"})
+                    
+                    # 2. Execute the MERGE and DELETE script
+                    archive_data_sql = f"""
+                        DECLARE cutoff_time TIMESTAMP;
+                        SET cutoff_time = TIMESTAMP('{cutoff_str}');
+
+                        MERGE `{PROJECT_ID}.{DATASET_ID}.master_data_archive` AS target
+                        USING (
+                          WITH NewData AS (
+                              SELECT 
+                                COALESCE(s.timestamp, l.timestamp, m.timestamp) AS timestamp,
+                                COALESCE(s.NodeNum, l.NodeNum, m.NodeNum) AS NodeNum,
+                                COALESCE(s.temperature, l.temperature) AS temperature,
+                                s.rssi AS rssi,
+                                m.approve AS approval_status
+                              FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` s
+                              FULL OUTER JOIN `{PROJECT_ID}.{DATASET_ID}.raw_lord` l 
+                                ON s.NodeNum = l.NodeNum AND s.timestamp = l.timestamp
+                              FULL OUTER JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` m 
+                                ON COALESCE(s.NodeNum, l.NodeNum) = m.NodeNum AND COALESCE(s.timestamp, l.timestamp) = m.timestamp
+                              WHERE COALESCE(s.timestamp, l.timestamp, m.timestamp) < cutoff_time
+                          ),
+                          RegistryMeta AS (
+                            WITH Parsed AS (
+                              SELECT 
+                                NodeNum, Project, Location, Bank, Depth, Phase, System, SensorStatus,
+                                COALESCE(
+                                  SAFE_CAST(Start_Date AS TIMESTAMP),
+                                  SAFE.PARSE_TIMESTAMP('%m/%d/%Y %H:%M:%S', TRIM(Start_Date)),
+                                  SAFE.PARSE_TIMESTAMP('%Y-%m-%d', TRIM(Start_Date))
+                                ) AS parsed_start,
+                                COALESCE(
+                                  SAFE_CAST(End_Date AS TIMESTAMP),
+                                  SAFE.PARSE_TIMESTAMP('%m/%d/%Y %H:%M:%S', TRIM(End_Date)),
+                                  SAFE.PARSE_TIMESTAMP('%Y-%m-%d', TRIM(End_Date))
+                                ) AS parsed_end
+                              FROM `{PROJECT_ID}.{DATASET_ID}.node_registry_synced`
+                            ),
+                            Deduplicated AS (
+                              SELECT *,
+                                COALESCE(parsed_end, TIMESTAMP('2099-01-01 00:00:00 UTC')) AS sort_end
+                              FROM Parsed
+                              QUALIFY ROW_NUMBER() OVER (
+                                PARTITION BY LOWER(TRIM(NodeNum)), parsed_start 
+                                ORDER BY COALESCE(parsed_end, TIMESTAMP('2099-01-01 00:00:00 UTC')) DESC
+                              ) = 1
+                            )
+                            SELECT 
+                              NodeNum, Project, Location, Bank, Depth, Phase, System, SensorStatus,
+                              parsed_start,
+                              LEAST(
+                                sort_end,
+                                COALESCE(
+                                  LEAD(parsed_start) OVER (PARTITION BY LOWER(TRIM(NodeNum)) ORDER BY parsed_start ASC),
+                                  TIMESTAMP('2099-01-01 00:00:00 UTC')
+                                )
+                              ) AS strict_end
+                            FROM Deduplicated
+                          )
+                          
+                          SELECT 
+                            n.timestamp, n.NodeNum, n.temperature, n.rssi, n.approval_status,
+                            r.Project, CAST(r.Phase AS STRING) AS Phase, CAST(r.System AS STRING) AS System,
+                            r.Location, r.Bank, CAST(r.Depth AS STRING) AS Depth, r.SensorStatus
+                          FROM NewData n
+                          LEFT JOIN RegistryMeta r 
+                            ON LOWER(TRIM(n.NodeNum)) = LOWER(TRIM(r.NodeNum))
+                            AND n.timestamp >= r.parsed_start
+                            AND n.timestamp < r.strict_end 
+                        ) AS source
+                        ON target.NodeNum = source.NodeNum AND target.timestamp = source.timestamp
+                        
+                        WHEN MATCHED THEN 
+                          UPDATE SET 
+                            temperature = COALESCE(source.temperature, target.temperature),
+                            rssi = COALESCE(source.rssi, target.rssi),
+                            approval_status = COALESCE(source.approval_status, target.approval_status),
+                            Project = COALESCE(source.Project, target.Project),
+                            Depth = COALESCE(source.Depth, target.Depth),
+                            Bank = COALESCE(source.Bank, target.Bank),
+                            Location = COALESCE(source.Location, target.Location),
+                            Phase = COALESCE(source.Phase, target.Phase),
+                            System = COALESCE(source.System, target.System),
+                            SensorStatus = COALESCE(source.SensorStatus, target.SensorStatus)
+                        
+                        WHEN NOT MATCHED THEN
+                          INSERT (timestamp, NodeNum, temperature, rssi, approval_status, Project, Phase, System, Location, Bank, Depth, SensorStatus)
+                          VALUES (source.timestamp, source.NodeNum, source.temperature, source.rssi, source.approval_status, source.Project, source.Phase, source.System, source.Location, source.Bank, source.Depth, source.SensorStatus);
+                        
+                        DELETE FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` WHERE timestamp < cutoff_time;
+                        DELETE FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` WHERE timestamp < cutoff_time;
+                        DELETE FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections` WHERE timestamp < cutoff_time;
+                    """
+                    try:
+                        # Execute the archival script
+                        client.query(archive_data_sql).result()
+                        
+                        # 3. Fetch AFTER counts
+                        after_df = client.query(count_sql).to_dataframe().rename(columns={"Count": "After Archival"})
+                        
+                        # 4. Merge and display the audit matrix
+                        audit_df = pd.merge(before_df, after_df, on="Table")
+                        audit_df["Net Change"] = audit_df["After Archival"] - audit_df["Before Archival"]
+                        
+                        st.success("✅ Raw data successfully archived and purged from active tables.")
+                        st.write("### 📊 Archival Impact Audit")
+                        st.dataframe(audit_df, hide_index=True, use_container_width=True)
+                        
+                    except Exception as e:
+                        st.error(f"Execution Failed: {e}")
