@@ -110,10 +110,10 @@ if sidebar_client is not None:
             job_num = selected_project.split('-')[0].strip()
             
             phase_sql = ""
-            if "Phase 1" in selected_project:
-                phase_sql = " AND Phase = '1' "
-            elif "Phase 2" in selected_project or "Phase2" in selected_project:
-                phase_sql = " AND Phase = '2' "
+            phase_match = re.search(r'(?i)Phase\s*([A-Za-z0-9]+)', selected_project)
+            if phase_match:
+                target_phase = phase_match.group(1).upper()
+                phase_sql = f" AND UPPER(TRIM(CAST(Phase AS STRING))) = '{target_phase}' "
 
             pulse_q = f"""
                 SELECT FORMAT_TIMESTAMP('%m/%d/%Y %H:%M UTC', MAX(timestamp)) as last_sync
