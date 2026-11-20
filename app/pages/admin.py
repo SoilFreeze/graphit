@@ -34,10 +34,10 @@ def get_project_mask(df, selected_project):
     job_num = str(selected_project).split('-')[0].strip()
     is_job = df['Project'].astype(str).str.startswith(job_num)
     
-    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
+    phase_match = re.search(r'(?i)Phase\s*([A-Za-z0-9]+)', selected_project)
     if phase_match and 'Phase' in df.columns:
-        target_phase = phase_match.group(1)
-        return is_job & (df['Phase'].astype(str).str.strip() == target_phase)
+        target_phase = phase_match.group(1).upper()
+        return is_job & (df['Phase'].astype(str).str.strip().str.upper() == target_phase)
         
     return is_job
 
@@ -104,10 +104,10 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
         job_num = str(selected_project).split('-')[0].strip().upper()
         where_clauses.append(f"UPPER(CAST(t.Project AS STRING)) LIKE '{job_num}%'")
         
-        phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
-        if phase_match:
+        phase_match = re.search(r'(?i)Phase\s*([A-Za-z0-9]+)', selected_project)
+        if phase_match and 'Phase' in df.columns:
             target_phase = phase_match.group(1).upper()
-            where_clauses.append(f"UPPER(TRIM(CAST(t.Phase AS STRING))) = '{target_phase}'")
+            return is_job & (df['Phase'].astype(str).str.strip().str.upper() == target_phase)
     else:
         where_clauses.append("t.Project IS NOT NULL")
 
@@ -543,7 +543,7 @@ def get_cached_fleet_matrix():
           SELECT 
             Project, ProjectName, ProjectStatus, Date_Freezedown,
             TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob,
-            REGEXP_EXTRACT(CAST(Project AS STRING), r'(?i)Phase\\s*(\\d+)') as ProjectPhase
+            REGEXP_EXTRACT(UPPER(CAST(Project AS STRING)), r'PHASE\s*([A-Z0-9]+)') as ProjectPhase
           FROM `{PROJECT_REGISTRY_TABLE}`
           WHERE ShowActive IS TRUE AND UPPER(CAST(Project AS STRING)) NOT LIKE '%OFFICE%'
         ),
