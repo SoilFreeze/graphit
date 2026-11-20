@@ -234,13 +234,13 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
         job_num = p_project.split('-')[0].strip()
         
         target_phase = ""
-        if "Phase 1" in p_project or "Phase1" in p_project: target_phase = "1"
-        elif "Phase 2" in p_project or "Phase2" in p_project: target_phase = "2"
-        elif "Phase 3" in p_project or "Phase3" in p_project: target_phase = "3"
+        phase_match = re.search(r'(?i)Phase\s*([A-Za-z0-9]+)', p_project)
+        if phase_match:
+            target_phase = phase_match.group(1).strip().upper()
 
         pool_matches = pool_df[
             (pool_df['Project'].str.startswith(job_num)) & 
-            ((pool_df['Phase'] == target_phase) | (target_phase == ""))
+            ((pool_df['Phase'].astype(str).str.strip().str.upper() == target_phase) | (target_phase == ""))
         ]
         
         raw_systems = [str(s).strip() for s in pool_matches['System'].unique() if str(s).strip()]
