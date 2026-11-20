@@ -295,7 +295,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         # 2. We identify the bad data and nullify it in the 'clean' line so the line breaks
         if 'approval_status' in s_df.columns:
             s_status = s_df['approval_status'].fillna('TRUE').astype(str).str.replace(' ', '').str.upper().str.strip()
-            bad_data_mask = s_status.isin(['MASKED', 'BADDATA', 'OFFICE'])
+            bad_data_mask = s_status.isin(['BADDATA', 'OFFICE'])
             clean_y.loc[bad_data_mask] = float('nan')
         
         # 3. Draw the main line using the 'clean_y' (which has holes where the masked data is)
