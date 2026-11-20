@@ -248,12 +248,13 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
         if not systems:
             systems = [""] 
 
+        # For tel_matches:
         if tel_df.empty:
             tel_matches = pd.DataFrame(columns=tel_df.columns)
         else:
             tel_matches = tel_df[
                 (tel_df['Project'].str.startswith(job_num)) & 
-                ((tel_df['Phase'] == target_phase) | (target_phase == ""))
+                ((tel_df['Phase'].astype(str).str.strip().str.upper() == target_phase) | (target_phase == ""))
             ]
 
         for sys in systems:
@@ -326,10 +327,11 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                     
                 # 2. DATA LAST APPROVED (Validated Data Only)
                 true_approved_ts = None
+                # And inside the card for appr_matches:
                 if 'appr_df' in locals() and not appr_df.empty:
                     appr_matches = appr_df[
                         (appr_df['Project'].astype(str).str.startswith(job_num)) & 
-                        ((appr_df['Phase'] == target_phase) | (target_phase == ""))
+                        ((appr_df['Phase'].astype(str).str.strip().str.upper() == target_phase) | (target_phase == ""))
                     ]
                     true_approved_ts = appr_matches['last_approved'].max()
 
