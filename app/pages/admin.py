@@ -101,15 +101,15 @@ def build_bulk_approval_where_clause(reg_df, selected_project, target_scope, cur
                 where_clauses.append("t.NodeNum = 'NONE'")
         
         # 2. Handle Job and Phase targeting for the SQL view (FIXED: UPPER() applied)
-        job_num = str(selected_project).split('-')[0].strip().upper()
-        where_clauses.append(f"UPPER(CAST(t.Project AS STRING)) LIKE '{job_num}%'")
-        
-        phase_match = re.search(r'(?i)Phase\s*([A-Za-z0-9]+)', selected_project)
-        if phase_match and 'Phase' in df.columns:
-            target_phase = phase_match.group(1).upper()
-            return is_job & (df['Phase'].astype(str).str.strip().str.upper() == target_phase)
-    else:
-        where_clauses.append("t.Project IS NOT NULL")
+         job_num = str(selected_project).split('-')[0].strip().upper()
+         where_clauses.append(f"UPPER(CAST(t.Project AS STRING)) LIKE '{job_num}%'")
+    
+         phase_match = re.search(r'(?i)Phase\s*([A-Za-z0-9]+)', selected_project)
+         if phase_match:
+             target_phase = phase_match.group(1).upper()
+             where_clauses.append(f"UPPER(TRIM(CAST(t.Phase AS STRING))) = '{target_phase}'")
+     else:
+         where_clauses.append("t.Project IS NOT NULL")
 
     # 3. Handle Timestamps (safely cast to BigQuery TIMESTAMP format)
     start_ts_str = f"{f['s_date'].strftime('%Y-%m-%d')} {f['s_time'].strftime('%H:%M:%S')}"
