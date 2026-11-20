@@ -383,17 +383,7 @@ elif selected_project != "All Projects":
         selected_project, 
         lookback_days=lookback_days,  # <--- THE FIX: Passing the days to BigQuery!
         is_summary_page=False,
-        show_masked=st.session_state.get('global_show_masked', False),
-        show_baddata=st.session_state.get('global_show_baddata', False)
-    )
-    clean_data = apply_sanity_filter(raw_data)
-
-    # Fetch and process the data for the selected project
-    raw_data = get_universal_portal_data(
-        selected_project, 
-        lookback_days=lookback_days,
-        is_summary_page=False,
-        show_masked=st.session_state.get('global_show_masked', False),
+        show_masked=st.session_state.get('global_show_masked', True),
         show_baddata=st.session_state.get('global_show_baddata', False)
     )
     clean_data = apply_sanity_filter(raw_data)
