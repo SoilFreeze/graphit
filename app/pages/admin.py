@@ -40,7 +40,7 @@ def get_project_mask(df, selected_project):
         return is_job & (df['Phase'].astype(str).str.strip().str.upper() == target_phase)
         
     return is_job
-
+    
 ######################
 # Page: Admin Tool Helpers   #
 ######################
