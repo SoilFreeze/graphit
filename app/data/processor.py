@@ -41,10 +41,10 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
     phase_sql = ""
     if not is_summary_page:
         import re
-        phase_match = re.search(r'(?i)Phase\s*(\d+)', str(project_id))
+        phase_match = re.search(r'(?i)Phase\s*([A-Za-z0-9]+)', str(project_id))
         if phase_match:
-            target_phase = phase_match.group(1)
-            phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
+            target_phase = phase_match.group(1).upper()
+            phase_sql = f"AND UPPER(TRIM(CAST(Phase AS STRING))) = '{target_phase}'"
 
     # 1. Safely map exclusions without triggering syntax errors
     exclusions = ["'FALSE'"] 
